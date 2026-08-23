@@ -1099,6 +1099,9 @@ pub(crate) async fn search_results(
             st.core.pursuit.idle_secs as i64,
         );
     }
+    // Read into a local: a lock guard living inside the call expression would
+    // still be held across the await, and a future holding one is not `Send`.
+    let cap = st.core.ranking.read().expect("ranking lock").per_source_cap;
     let (hits, t) = st
         .core
         .search_with(
@@ -1112,7 +1115,7 @@ pub(crate) async fn search_results(
                 include_deprecated: false,
                 include_superseded: false,
             },
-            Some(crate::core::search::MAX_PER_CORPUS),
+            cap,
             // Scoped to the operator, because coalescing folds a keystroke into
             // the query it was an early spelling of, and two people typing at
             // once are not spelling the same thing.
@@ -9872,6 +9875,7 @@ mod tests {
                 pending: crate::auth::oidc::PendingStore::new(),
                 secure_cookies: false,
             }),
+            config_path: std::sync::Arc::new(crate::web::test_support::scratch_config()),
             ask_handoff: Default::default(),
         }
     }

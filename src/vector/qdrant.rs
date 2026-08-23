@@ -1533,12 +1533,26 @@ impl VectorStore for QdrantVectors {
             .collect())
     }
 
+    /// Under the weight this store was connected with, which is the configured
+    /// one until a tuning sweep applies another.
     async fn search(
         &self,
         vector: &[f32],
         sparse: &SparseVector,
         limit: usize,
         filter: &SearchFilter,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_weighted(vector, sparse, limit, filter, self.recency_weight)
+            .await
+    }
+
+    async fn search_weighted(
+        &self,
+        vector: &[f32],
+        sparse: &SparseVector,
+        limit: usize,
+        filter: &SearchFilter,
+        recency_weight: f32,
     ) -> Result<Vec<SearchHit>> {
         let f = build_filter(filter);
 
@@ -1582,7 +1596,7 @@ impl VectorStore for QdrantVectors {
         // Recency and pinning are applied as a final scoring stage over
         // whatever retrieval returned, so they reorder results without
         // changing which ones were retrieved.
-        if self.recency_weight > 0.0 || self.pinned_boost > 0.0 {
+        if recency_weight > 0.0 || self.pinned_boost > 0.0 {
             let mut prefetch = std::mem::replace(&mut body, Value::Null);
             // The payload is fetched once, by the outer stage. Asking the
             // prefetch for it too would carry every candidate's full text
@@ -1595,7 +1609,7 @@ impl VectorStore for QdrantVectors {
                 "query": scoring_formula(
                     now_secs(),
                     self.recency_half_life_days as u64 * SECONDS_PER_DAY,
-                    self.recency_weight,
+                    recency_weight,
                     self.pinned_boost,
                 ),
                 "limit": limit,
@@ -2047,6 +2061,7 @@ mod tests {
             recency_half_life_days: 180,
             pinned_boost: 0.15,
             weak_below: 0.35,
+            per_source_cap: 3,
         })
         .await
         .unwrap();
@@ -2366,6 +2381,7 @@ mod tests {
             recency_half_life_days: 180,
             pinned_boost: 0.15,
             weak_below: 0.35,
+            per_source_cap: 3,
         })
         .await
         .unwrap()

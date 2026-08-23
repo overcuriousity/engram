@@ -39,6 +39,11 @@ recency_half_life_days = 180
 # Extra score for an artifact tagged `pinned`, so a decision you made beats the
 # decay curve.
 pinned_boost = 0.15
+# Chunks one document may contribute to a result list, so a long document
+# cannot fill it. 0 lets one document supply every result. This and
+# recency_weight above are the two knobs the tuning sweep measures, and
+# applying its recommendation rewrites them here — see [feedback.tune].
+per_source_cap = 3
 
 # ── Inference roles ─────────────────────────────────────────────────────────
 # Three independent roles. They may all point at one server, or at three
@@ -422,6 +427,17 @@ retain_days = 0
 # How often retention is enforced. A window measured in days does not need
 # checking more often than this, and the sweep is a single DELETE.
 sweep_hours = 6
+
+# What judged searches are spent on: a background sweep of recency_weight and
+# per_source_cap over every judged pair, which recommends a better setting when
+# it finds one worth the name. See docs/evaluation.md.
+[feedback.tune]
+# Judgements before the first sweep. A floor, not a target: with ten pairs
+# recall@10 moves in ten-point steps, and a sweep under that recommends the
+# quirks of ten queries as confidently as a real improvement.
+min_judgements = 50
+# Further verdicts before the sweep is run again.
+resweep_after = 10
 
 # Links learned from co-retrieval, and a decaying accessibility per artifact.
 # Both are learned from use and neither touches what is stored: the trace is

@@ -76,6 +76,11 @@ encoding_rs = "0.8.35"
 docling = { version = "=1.14.0", default-features = false, features = ["pdf-text"] }
 
 url = "2"
+# Rewriting config.toml in place when a tuning recommendation is applied.
+# `config` reads the file and cannot write it; a serialize-and-overwrite would
+# return the operator's commented file as a machine's, so the edit is made to
+# the parsed document and every byte around it is kept.
+toml_edit = "0.25.13"
 schemars = "1.2.2"
 # Decoding, orientation and the downscaled preview of a captured image. Only
 # the three formats a phone or a browser actually hands over.

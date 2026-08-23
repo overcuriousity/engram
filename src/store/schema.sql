@@ -350,6 +350,40 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   PRIMARY KEY (event_id, rank)
 );
 
+-- ── Tuning sweeps ────────────────────────────────────────────────────────────
+-- One row per background sweep over the judged pairs: what the running
+-- configuration scored, the best the grid found, and whether the gate let that
+-- become a recommendation. A number recorded without the configuration that
+-- produced it cannot be compared against anything, so the settings are stored
+-- beside the figures rather than left to a commit message to remember.
+--
+-- `diff` holds query prefixes and ranks. No artifact text is written here, for
+-- the same reason the harness never prints any.
+CREATE TABLE IF NOT EXISTS eval_runs (
+  id            TEXT PRIMARY KEY,
+  created_at    INTEGER NOT NULL,
+  -- Verdicts given when this ran: what the next sweep measures its distance
+  -- from, so a re-sweep is paced by new judgements rather than by the clock.
+  judged_count  INTEGER NOT NULL,
+  pairs_used    INTEGER NOT NULL,
+  -- Pairs whose artifact is gone. Housekeeping, not a ranking result, and
+  -- counted rather than scored as a miss.
+  pairs_skipped INTEGER NOT NULL,
+  base_params   TEXT NOT NULL,
+  base_recall   REAL NOT NULL,
+  base_mrr      REAL NOT NULL,
+  -- Equal to the baseline when nothing passed the gate, which is what a quiet
+  -- sweep is: recorded, so the silence can be explained.
+  best_params   TEXT NOT NULL,
+  best_recall   REAL NOT NULL,
+  best_mrr      REAL NOT NULL,
+  diff          TEXT NOT NULL,
+  recommended   INTEGER NOT NULL,
+  applied_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_open
+  ON eval_runs(recommended, applied_at, created_at DESC);
+
 -- ── Ask feedback ─────────────────────────────────────────────────────────────
 -- A question asked on the page, the answer it got and the excerpts the model
 -- was shown — so a verdict given later can be scored against exactly what

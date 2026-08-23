@@ -139,7 +139,7 @@ async fn evaluate_retrieval() {
         // scoring only the original would report a retrieval regression that is
         // really a bookkeeping change — and the one number that says whether
         // merging helps would be unreadable exactly when it matters.
-        let satisfies = resolve_expected(&core, expect).await;
+        let satisfies = engram::eval::satisfied_by(&core, expect).await;
         let rank = results
             .iter()
             .position(|r| satisfies.iter().any(|id| id == &r.artifact_id));
@@ -241,7 +241,7 @@ async fn evaluate_ask() {
                 let stored = translated
                     .get(e)
                     .expect("questions.json names an artifact not in artifacts.json");
-                carriers.push(resolve_expected(&core, stored).await);
+                carriers.push(engram::eval::satisfied_by(&core, stored).await);
             }
             let cited: Vec<String> = out
                 .citations
@@ -352,36 +352,6 @@ async fn evaluate_ask() {
     }
     println!();
     vectors.drop_collection().await.unwrap();
-}
-
-/// The artifact ids that satisfy a grade naming `expected`: itself, plus
-/// whatever superseded it.
-///
-/// A graded pair names the artifact that answered the query. When consolidation
-/// merges it into another, or supersedes it in favour of one that plainly
-/// replaced it, the knowledge is in the survivor and search returns that. The
-/// grade is still satisfied; only the id changed.
-///
-/// Bounded rather than trusted to terminate. Chains should not exist — a merge
-/// re-points what it hides, precisely so no reader lands on a hidden winner —
-/// but a harness that hangs on a cycle in the data is worse than one that stops
-/// looking after a few hops.
-async fn resolve_expected(core: &Core, expected: &str) -> Vec<String> {
-    let mut out = vec![expected.to_string()];
-    let mut cursor = expected.to_string();
-    for _ in 0..8 {
-        match core.store.get_artifact(&cursor).await {
-            Ok(c) => match c.superseded_by {
-                Some(next) => {
-                    out.push(next.clone());
-                    cursor = next;
-                }
-                None => break,
-            },
-            Err(_) => break,
-        }
-    }
-    out
 }
 
 /// Load the frozen artifacts and embed them, reporting the id each one was
@@ -547,6 +517,15 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
             engram::core::QUERY_CACHE_CAPACITY,
         ))),
         consolidate: engram::config::ConsolidateConfig::default(),
+        // The harness measures the shipped cap; recency is off because the
+        // fake embedder's ordering is the only thing this asserts against.
+        ranking: Arc::new(std::sync::RwLock::new(
+            engram::core::ranking::RankingParams {
+                recency_weight: 0.0,
+                per_source_cap: Some(engram::core::search::MAX_PER_CORPUS),
+            },
+        )),
+        tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         weak_below: 0.0,
         learn: engram::config::LearnConfig { enabled: false },
         feedback: engram::config::FeedbackConfig::default(),
@@ -616,7 +595,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         .unwrap();
     core.supersede(expect, &merged.id).await.unwrap();
 
-    let satisfies = resolve_expected(&core, expect).await;
+    let satisfies = engram::eval::satisfied_by(&core, expect).await;
     assert!(
         satisfies.contains(&merged.id),
         "a grade against a merged-away artifact no longer resolves: {satisfies:?}"

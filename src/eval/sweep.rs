@@ -1,0 +1,667 @@
+//! The background parameter sweep judgements pay for.
+//!
+//! The cargo harness freezes a corpus because its numbers must be comparable
+//! across months. A recommendation asks a smaller question: what would *these*
+//! pairs score under other settings, right now, against the base as it stands.
+//! Baseline and candidates run in one pass over one index, so nothing needs
+//! freezing and nothing needs re-embedding — the query cache means each
+//! distinct query is embedded once and every candidate re-ranks the same
+//! vectors.
+//!
+//! It reads the live index and only reads it. `Door::Judge` and `mark: false`
+//! are the same discipline the judge page's assign search follows, for the same
+//! reason: a sweep is not someone reading their notes, and its queries are
+//! replayed in full knowledge of their answers.
+
+use crate::core::Core;
+use crate::core::ranking::RankingParams;
+use crate::error::Result;
+use crate::eval::metrics::{mrr, recall_at};
+use crate::store::eval_runs::{DiffRow, NewEvalRun};
+
+/// The `k` in recall@k, and the depth a rank is looked for in. The judge
+/// page's own figure is recall@10; a sweep reporting recall@20 beside it would
+/// be two numbers with one name.
+const LIMIT: usize = 10;
+
+/// The grid's axes. Both are scoring knobs — they reorder what retrieval
+/// already returned — which is what makes a sweep cheap enough to run on a
+/// verdict. The knobs that change the vector geometry (the embedding model and
+/// its templates) cannot be swept at runtime at all, and stay with the cargo
+/// harness.
+const RECENCY: [f32; 5] = [0.0, 0.05, 0.1, 0.15, 0.25];
+const CAPS: [Option<usize>; 4] = [Some(2), Some(3), Some(5), None];
+
+/// Every combination, with the running configuration always among them: it is
+/// the baseline everything else is measured against.
+pub fn grid(current: RankingParams) -> Vec<RankingParams> {
+    let mut out = Vec::with_capacity(RECENCY.len() * CAPS.len() + 1);
+    for &recency_weight in &RECENCY {
+        for &per_source_cap in &CAPS {
+            out.push(RankingParams {
+                recency_weight,
+                per_source_cap,
+            });
+        }
+    }
+    if !out.contains(&current) {
+        out.push(current);
+    }
+    out
+}
+
+/// Whether `cand` placed a pair better than `base` did. A miss loses to any
+/// rank; two misses are equal.
+fn better(cand: Option<usize>, base: Option<usize>) -> bool {
+    match (cand, base) {
+        (Some(c), Some(b)) => c < b,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// The gate, and the reason the whole feature is safe to run automatically.
+///
+/// An aggregate delta can be a single flipped pair wearing a percentage: on
+/// fifty pairs one is two points of recall. Requiring two *net* better pairs
+/// is what a change has to look like before it is worth a person's attention,
+/// and refusing any candidate that costs either aggregate keeps a trade the
+/// operator did not ask for from being presented as an improvement. Ties keep
+/// the current values, always: a knob that moves nothing should keep its
+/// default.
+pub fn recommend(base: &[Option<usize>], cand: &[Option<usize>]) -> bool {
+    let improved = base
+        .iter()
+        .zip(cand)
+        .filter(|(b, c)| better(**c, **b))
+        .count() as i64;
+    let worsened = base
+        .iter()
+        .zip(cand)
+        .filter(|(b, c)| better(**b, **c))
+        .count() as i64;
+    improved - worsened >= 2
+        && recall_at(cand, LIMIT) >= recall_at(base, LIMIT)
+        && mrr(cand) >= mrr(base)
+}
+
+/// How many knobs a candidate moves off the running configuration.
+///
+/// The last tie-break, and the reason it has to exist: `grid` is walked
+/// recency-major from `RECENCY[0] = 0.0`, so among candidates whose rank
+/// vectors are identical — the ordinary case, since most judged pairs carry no
+/// recency signal at all — the lowest index wins, and that index is recency
+/// zero. A cap change would then arrive with "recency 0.05 → 0.00" attached to
+/// it, measured by nothing, and applying it would switch recency weighting off
+/// on the strength of a result about caps. `recommend` already promises a knob
+/// that moves nothing keeps its value; this is that promise held among the
+/// candidates rather than only against the base.
+fn moved(cand: RankingParams, current: RankingParams) -> usize {
+    usize::from(cand.recency_weight != current.recency_weight)
+        + usize::from(cand.per_source_cap != current.per_source_cap)
+}
+
+/// One judged pair, with every id that satisfies it already resolved.
+type Pair = (String, Vec<String>);
+
+/// Where one configuration put the answer to one pair. `None` past `LIMIT`.
+async fn rank_of(core: &Core, pair: &Pair, params: RankingParams) -> Result<Option<usize>> {
+    let (query, satisfies) = pair;
+    let q = crate::core::search::SearchQuery {
+        q: query.clone(),
+        limit: LIMIT,
+        tags: vec![],
+        category: None,
+        // Resurfacing reads `last_seen_at`, and a scored run is not someone
+        // reading their notes.
+        mark: false,
+        include_deprecated: false,
+        include_superseded: false,
+    };
+    let (results, _) = core
+        .search_with_ranking(&q, params, crate::store::feedback::Door::Judge)
+        .await?;
+    Ok(results
+        .iter()
+        .position(|r| satisfies.iter().any(|id| id == &r.artifact_id)))
+}
+
+/// Every pair under every configuration, one row per configuration.
+///
+/// Query-major, and that is the whole point of the function. A pass per
+/// configuration walks the same queries in the same order twenty-one times,
+/// which is the one access pattern an insertion-ordered cache of
+/// `QUERY_CACHE_CAPACITY` entries can never serve: past that many distinct
+/// judged queries the hit rate was zero and every search in the grid embedded
+/// its query again. Asking all twenty-one questions about one query before
+/// moving to the next embeds it once, however many pairs there are.
+async fn ranks_over_grid(
+    core: &Core,
+    pairs: &[Pair],
+    grid: &[RankingParams],
+) -> Result<Vec<Vec<Option<usize>>>> {
+    let mut ranks = vec![Vec::with_capacity(pairs.len()); grid.len()];
+    for pair in pairs {
+        for (row, params) in ranks.iter_mut().zip(grid) {
+            row.push(rank_of(core, pair, *params).await?);
+        }
+    }
+    Ok(ranks)
+}
+
+/// The pairs a sweep can actually replay, and how many it had to leave out.
+async fn pairs_to_replay(core: &Core) -> Result<(Vec<Pair>, i64)> {
+    let mut pairs = Vec::new();
+    let mut skipped = 0;
+    for p in core.store.judged_pairs().await? {
+        // A deleted artifact is housekeeping, not a ranking result. Scored as
+        // a miss it would look like a ranking failure for as long as the pair
+        // exists; raised as an error it would stop every future sweep over one
+        // deletion.
+        match core.store.get_artifact(&p.expect).await {
+            Ok(_) => {
+                let satisfies = crate::eval::satisfied_by(core, &p.expect).await;
+                pairs.push((p.query, satisfies));
+            }
+            Err(crate::error::Error::NotFound) => skipped += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((pairs, skipped))
+}
+
+/// Rank the judged pairs under the whole grid and record what was found.
+///
+/// Runs whatever the thresholds say — `maybe_spawn` is what decides whether it
+/// is due. Callable directly, which is what the tests do.
+pub async fn run_sweep(core: &Core) -> Result<()> {
+    let (pairs, skipped) = pairs_to_replay(core).await?;
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let judged = core.store.feedback_stats().await?.judged;
+    let current = *core.ranking.read().expect("ranking lock");
+
+    let grid = grid(current);
+    let ranks = ranks_over_grid(core, &pairs, &grid).await?;
+    // `grid` always contains the running configuration — that is what makes it
+    // the baseline everything else is measured against.
+    let base_at = grid
+        .iter()
+        .position(|p| *p == current)
+        .expect("the grid carries the running configuration");
+    let base = &ranks[base_at];
+
+    let mut best: Option<usize> = None;
+    for cand in (0..grid.len()).filter(|i| *i != base_at) {
+        if !recommend(base, &ranks[cand]) {
+            continue;
+        }
+        // MRR first, then recall: the gate has already refused anything that
+        // costs either, so this only chooses among improvements. Then the
+        // fewest knobs moved, which is what keeps a candidate the measurements
+        // cannot tell apart from claiming credit for the axis it changed.
+        let beats = best.is_none_or(|b| {
+            let score = |i: usize| (mrr(&ranks[i]), recall_at(&ranks[i], LIMIT));
+            score(cand) > score(b)
+                || (score(cand) == score(b) && moved(grid[cand], current) < moved(grid[b], current))
+        });
+        if beats {
+            best = Some(cand);
+        }
+    }
+
+    let (winner, winning_ranks, recommended) = match best {
+        Some(i) => (grid[i], &ranks[i], true),
+        // A quiet sweep still records itself: without the row a page can only
+        // say nothing, which reads as "no sweep has ever run".
+        None => (current, base, false),
+    };
+    let diff: Vec<DiffRow> = pairs
+        .iter()
+        .zip(base.iter().zip(winning_ranks))
+        .filter(|(_, (b, n))| b != n)
+        .map(|((query, _), (b, n))| DiffRow {
+            // The query names its own row, as it does in the harness's miss
+            // list. No artifact text is written here.
+            query: query.chars().take(48).collect(),
+            base: *b,
+            new: *n,
+        })
+        .collect();
+
+    // An apply can land in the minutes this takes: `Sweeping` keeps two sweeps
+    // apart and nothing else, and `tune_apply` takes the write lock without
+    // asking anyone. The row would name a base that is no longer in force and a
+    // winner measured against it — and being the newest, it would be the
+    // recommendation the page then offers, walking the ranking back off what
+    // the operator just applied. That is the failure "only the newest sweep's
+    // recommendation stands" was written to prevent, arriving by the other
+    // door. A sweep whose baseline moved under it has measured nothing worth
+    // recording; the next verdict pays for one against the settings now running.
+    if *core.ranking.read().expect("ranking lock") != current {
+        tracing::info!("ranking changed while the sweep ran; its results were discarded");
+        return Ok(());
+    }
+
+    core.store
+        .record_eval_run(&NewEvalRun {
+            judged_count: judged,
+            pairs_used: pairs.len() as i64,
+            pairs_skipped: skipped,
+            base: current.into(),
+            base_recall: recall_at(base, LIMIT),
+            base_mrr: mrr(base),
+            best: winner.into(),
+            best_recall: recall_at(winning_ranks, LIMIT),
+            best_mrr: mrr(winning_ranks),
+            diff,
+            recommended,
+        })
+        .await?;
+    Ok(())
+}
+
+/// Run a sweep if the judgements have paid for one.
+///
+/// Called after every verdict, off the request path: the verdict must not wait
+/// on a grid of searches, and a sweep that fails must not fail the verdict.
+pub fn maybe_spawn(core: &Core) {
+    if !core.learn.enabled {
+        return;
+    }
+    let core = core.clone();
+    core.background.clone().spawn(async move {
+        // A run of verdicts is one sweep, not one each.
+        let Some(_claim) = Sweeping::claim(&core) else {
+            return;
+        };
+        if let Err(e) = sweep_if_due(&core).await {
+            tracing::warn!(error = %e, "tuning sweep failed");
+        }
+    });
+}
+
+/// The claim on `core.tuning`, released on the way out whatever happened.
+///
+/// It used to be a `store(false)` at the end of the task, which a panic
+/// skipped: a poisoned `ranking` lock or an unwrap anywhere under the search
+/// path left the flag standing at true, and every later sweep then returned at
+/// the first line for the lifetime of the process — silently, since a sweep
+/// that declines to start says nothing. `Background::spawn` is a bare
+/// `tokio::spawn` and catches nothing on its own.
+struct Sweeping(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Sweeping {
+    fn claim(core: &Core) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        match core.tuning.swap(true, Ordering::SeqCst) {
+            true => None,
+            false => Some(Self(core.tuning.clone())),
+        }
+    }
+}
+
+impl Drop for Sweeping {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+async fn sweep_if_due(core: &Core) -> Result<()> {
+    let tune = &core.feedback.tune;
+    let judged = core.store.feedback_stats().await?.judged;
+    if judged < tune.min_judgements {
+        return Ok(());
+    }
+    // Paced by judgements rather than by the clock: what makes a sweep worth
+    // repeating is new evidence, and nothing else about the base changes what
+    // these two knobs do.
+    if let Some(last) = core.store.latest_eval_run().await?
+        && judged - last.judged_count < tune.resweep_after
+    {
+        return Ok(());
+    }
+    run_sweep(core).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::feedback::{Door, NewEvent, Verdict};
+
+    const QUERY: &str = "the image will not mount";
+
+    /// Two sources of three identical, untitled chunks each, and the order the
+    /// uncapped ranking gives them.
+    ///
+    /// Identical within a source so the three tie and the cap is the only
+    /// thing that can separate them; the order is read back rather than
+    /// assumed, because which source leads is a property of the fake
+    /// embedder's hashes and nothing this is testing.
+    async fn seeded() -> (crate::core::Core, Vec<String>) {
+        let core = crate::core::test_support::test_core().await;
+        for (raw, text) in [("raw one", QUERY), ("raw two", "unrelated words")] {
+            let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
+            let new: Vec<crate::store::artifacts::NewArtifact> = (0..3)
+                .map(|i| crate::store::artifacts::NewArtifact {
+                    ordinal: i,
+                    text: text.to_string(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                })
+                .collect();
+            for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
+                crate::jobs::embed::run(&core, &c.id).await.unwrap();
+            }
+        }
+        // The baseline this sweep is measured against: one source may fill the
+        // whole list, so a cap is the improvement available to be found.
+        core.ranking.write().unwrap().per_source_cap = None;
+        let order = ranks_order(&core).await;
+        (core, order)
+    }
+
+    async fn ranks_order(core: &crate::core::Core) -> Vec<String> {
+        let params = *core.ranking.read().unwrap();
+        let q = crate::core::search::SearchQuery {
+            q: QUERY.into(),
+            limit: LIMIT,
+            tags: vec![],
+            category: None,
+            mark: false,
+            include_deprecated: false,
+            include_superseded: false,
+        };
+        core.search_with_ranking(&q, params, Door::Judge)
+            .await
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.artifact_id)
+            .collect()
+    }
+
+    /// One judged search naming `expect` as its answer.
+    async fn judge(core: &crate::core::Core, expect: &str) {
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    query: QUERY.into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                // Folding off: these are the same query on purpose, and two
+                // pairs are what the gate needs.
+                0,
+            )
+            .await
+            .unwrap();
+        core.store.judge_hit(&id, expect).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_candidate_that_lifts_two_pairs_is_recorded_as_a_recommendation() {
+        let (core, order) = seeded().await;
+        // The second source's first two chunks: buried behind the leading
+        // source uncapped, promoted the moment a cap displaces its tail.
+        judge(&core, &order[3]).await;
+        judge(&core, &order[4]).await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!(run.pairs_used, 2);
+        assert_eq!(run.pairs_skipped, 0);
+        assert!(run.recommended, "a strictly better candidate was refused");
+        assert!(
+            run.best_params.per_source_cap.is_some(),
+            "the improvement here is a cap, and the run must name it"
+        );
+        assert!(run.best_mrr > run.base_mrr);
+        assert_eq!(
+            run.diff.len(),
+            2,
+            "both pairs moved, and the diff is what a person reads"
+        );
+        assert!(
+            run.diff.iter().all(|d| d.new < d.base),
+            "a recommended run's diff must show the pairs climbing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cap_result_does_not_arrive_wearing_a_recency_change() {
+        // The grid is walked recency-major from 0.0, so among candidates whose
+        // rank vectors are identical the lowest index wins — and these pairs
+        // are all the same age, so recency separates nothing. Untie-broken, the
+        // recommendation reads "recency 0.05 → 0.00" beside the cap that
+        // actually earned it, and applying it switches recency weighting off on
+        // the strength of a result about caps.
+        let (core, order) = seeded().await;
+        core.ranking.write().unwrap().recency_weight = 0.05;
+        judge(&core, &order[3]).await;
+        judge(&core, &order[4]).await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert!(run.recommended, "the cap improvement was refused");
+        assert!(
+            run.best_params.per_source_cap.is_some(),
+            "the cap is what this sweep measured"
+        );
+        assert_eq!(
+            run.best_params.recency_weight, 0.05,
+            "the sweep moved a knob nothing it measured had an opinion about"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_with_nothing_better_records_the_silence() {
+        // Pairs already answered at the top of the list. Nothing can lift them
+        // and a cap can only push the second one down, so the gate refuses
+        // everything — and the run is still written, so the page can say so.
+        let (core, order) = seeded().await;
+        judge(&core, &order[0]).await;
+        judge(&core, &order[1]).await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert!(!run.recommended);
+        assert_eq!(run.base_params, run.best_params);
+        assert!(run.diff.is_empty(), "nothing changed, so nothing moved");
+        assert!(core.store.open_recommendation().await.unwrap().is_none());
+    }
+
+    /// An apply landing mid-sweep, at a point the sweep cannot miss.
+    ///
+    /// Wall-clock racing would be the honest shape of this and a coin-toss as a
+    /// test. The reranker runs inside every search in the grid — always after
+    /// the baseline has been snapshotted, never before — so hanging the write
+    /// off the first call puts it exactly where `tune_apply`'s would land, on
+    /// every run.
+    struct ApplyOnFirstSearch(std::sync::Arc<std::sync::RwLock<RankingParams>>);
+
+    #[async_trait::async_trait]
+    impl crate::infer::Reranker for ApplyOnFirstSearch {
+        async fn rerank(
+            &self,
+            _query: &str,
+            docs: &[String],
+            top_n: usize,
+        ) -> Result<Vec<(usize, f32)>> {
+            self.0.write().expect("ranking lock").per_source_cap = Some(2);
+            // Scores descending, so the order search already had comes back
+            // unchanged: this is here to write, not to rank.
+            Ok((0..docs.len().min(top_n))
+                .map(|i| (i, 1.0 - i as f32 / 100.0))
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sweep_whose_baseline_was_applied_out_from_under_it_records_nothing() {
+        // The operator judging is the operator clicking Apply, and a sweep over
+        // real pairs runs for minutes. Recorded anyway, the row would be the
+        // newest — so the page would offer a winner measured against settings
+        // that are no longer running, and taking it would undo the apply that
+        // raced it.
+        let (mut core, order) = seeded().await;
+        judge(&core, &order[3]).await;
+        judge(&core, &order[4]).await;
+        let base = *core.ranking.read().unwrap();
+        core.reranker = Some(std::sync::Arc::new(ApplyOnFirstSearch(
+            core.ranking.clone(),
+        )));
+
+        run_sweep(&core).await.unwrap();
+
+        assert_ne!(
+            base,
+            *core.ranking.read().unwrap(),
+            "the apply never landed"
+        );
+        assert!(
+            core.store.latest_eval_run().await.unwrap().is_none(),
+            "a sweep measured against a baseline that is gone was written down anyway"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_panics_does_not_disable_every_later_one() {
+        // The flag used to be cleared at the end of the task body, which a
+        // panic skipped — a poisoned `ranking` lock, an unwrap anywhere under
+        // the search path — and `Background::spawn` is a bare `tokio::spawn`,
+        // so nothing caught it. Every later sweep then returned at its first
+        // line for the lifetime of the process, and said nothing about it.
+        let core = crate::core::test_support::test_core().await;
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _claim = Sweeping::claim(&core).expect("the first claim is free");
+            panic!("a poisoned lock under the search path");
+        }));
+        std::panic::set_hook(hook);
+
+        assert!(died.is_err());
+        assert!(
+            Sweeping::claim(&core).is_some(),
+            "the claim outlived the panic that dropped it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_whose_artifact_is_gone_is_counted_rather_than_scored() {
+        // Housekeeping, not a ranking result. Scored as a miss it would look
+        // like a ranking failure forever; raised it would stop every later
+        // sweep over one deletion.
+        let (core, order) = seeded().await;
+        judge(&core, &order[3]).await;
+        judge(&core, "deleted-since").await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!((run.pairs_used, run.pairs_skipped), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn verdicts_that_name_no_answer_leave_nothing_to_sweep() {
+        // Gaps and discards count towards the floor but are not pairs. With
+        // only those, there is nothing to rank and no run to record.
+        let (core, _) = seeded().await;
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    query: QUERY.into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store.judge(&id, Verdict::Gap).await.unwrap();
+
+        run_sweep(&core).await.unwrap();
+        assert!(core.store.latest_eval_run().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_sweep_leaves_no_trace_in_what_it_measures() {
+        // It replays queries in full knowledge of their answers. Recorded,
+        // those would be captured searches nobody made, waiting to be judged.
+        let (mut core, order) = seeded().await;
+        core.learn.enabled = true;
+        judge(&core, &order[3]).await;
+        judge(&core, &order[4]).await;
+        let before = core.store.feedback_stats().await.unwrap().captured;
+
+        run_sweep(&core).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store.feedback_stats().await.unwrap().captured,
+            before,
+            "the sweep's own searches became data"
+        );
+    }
+
+    #[test]
+    fn the_gate_needs_two_net_better_pairs_and_no_aggregate_loss() {
+        let base = vec![Some(5), Some(7), None, Some(0)];
+        assert!(
+            recommend(&base, &[Some(1), Some(2), None, Some(0)]),
+            "two pairs climbed and none fell"
+        );
+        assert!(
+            !recommend(&base, &[Some(1), Some(7), None, Some(0)]),
+            "one pair is noise wearing a percentage"
+        );
+        assert!(
+            !recommend(&base, &[Some(1), Some(2), None, None]),
+            "two climbed but one was lost: net one"
+        );
+        assert!(!recommend(&base, &base), "a tie keeps the current values");
+        assert!(
+            !recommend(&base, &[Some(0), Some(0), None, Some(3)]),
+            "two climbed and one fell out of the head: MRR must not pay for it"
+        );
+    }
+
+    #[test]
+    fn the_grid_always_contains_the_configuration_it_is_measured_against() {
+        let shipped = RankingParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        assert!(grid(shipped).contains(&shipped));
+        assert_eq!(grid(shipped).len(), RECENCY.len() * CAPS.len());
+
+        // A hand-set value nobody would have guessed is still the baseline.
+        let odd = RankingParams {
+            recency_weight: 0.07,
+            per_source_cap: Some(4),
+        };
+        assert!(grid(odd).contains(&odd));
+        assert_eq!(grid(odd).len(), RECENCY.len() * CAPS.len() + 1);
+    }
+}

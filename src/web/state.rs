@@ -24,6 +24,12 @@ pub struct AuthContext {
 pub struct AppState {
     pub core: Core,
     pub auth: Arc<AuthContext>,
+    /// The configuration file this server was started with.
+    ///
+    /// Held because applying a tuning recommendation writes it: the running
+    /// parameters and the file have to agree, or a restart would quietly undo
+    /// a change the tuning history says was made.
+    pub config_path: Arc<std::path::PathBuf>,
     /// Questions parked between the POST that creates them and the GET that
     /// streams them.
     ///

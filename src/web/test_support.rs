@@ -17,18 +17,63 @@ pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Ro
             pending: crate::auth::oidc::PendingStore::new(),
             secure_cookies: false,
         }),
+        config_path: std::sync::Arc::new(scratch_config()),
         ask_handoff: Default::default(),
     })
 }
 
+/// A `config.toml` of its own per app under test.
+///
+/// The apply path writes the file the server was started with, so two tests
+/// sharing one would be asserting against whichever ran last. One directory
+/// for the whole test binary, one file per app in it.
+pub(crate) fn scratch_config() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| tempfile::tempdir().expect("scratch config dir"));
+    let path = dir.path().join(format!("{}.toml", crate::store::new_id()));
+    std::fs::write(
+        &path,
+        "# a comment the apply path must not eat\n\
+         [vector]\n\
+         recency_weight = 0.05\n\
+         per_source_cap = 3\n",
+    )
+    .expect("scratch config");
+    path
+}
+
 /// A router over `core` plus a browser session cookie for `user-1`.
 pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
+    let (app, cookie, _) = app_with_state(core).await;
+    (app, cookie)
+}
+
+/// `app_with_cookie`, plus the state behind it — what a test needs when it has
+/// to read something a handler wrote outside the database, such as the
+/// configuration file the apply path rewrites.
+pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::state::AppState) {
     let cid = crate::store::new_id();
     core.store
         .insert_session(&cid, "user-1", None, 3600)
         .await
         .unwrap();
-    (router(core, None), format!("engram_session={cid}"))
+    let state = crate::web::state::AppState {
+        core,
+        auth: std::sync::Arc::new(crate::web::state::AuthContext {
+            mode: crate::config::AuthMode::Local,
+            local: None,
+            oidc: None,
+            pending: crate::auth::oidc::PendingStore::new(),
+            secure_cookies: false,
+        }),
+        config_path: std::sync::Arc::new(scratch_config()),
+        ask_handoff: Default::default(),
+    };
+    (
+        crate::web::router(state.clone()),
+        format!("engram_session={cid}"),
+        state,
+    )
 }
 
 /// A router over `core` plus a bearer token for `user-1`.

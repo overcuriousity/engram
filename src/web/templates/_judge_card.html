@@ -1,3 +1,14 @@
+{# The header, shipped with the card so the figures move as the queue is worked
+   down. Nothing when nothing was judged.
+
+   Only where they are going out of band, which is only from the fragment
+   routes. The page draws both itself, outside `#card`, and including them
+   unconditionally rendered a second `judge-live` and a second `judge-tune`
+   inside it: the whole recommendation twice, and an Apply button whose swap
+   landed on the first copy while the second went on offering what had just
+   been taken. #}
+{% if pulse_oob %}{% include "_judge_pulse.html" %}{% endif %}
+{% if tune_oob %}{% include "_judge_tune.html" %}{% endif %}
 {% match flash %}
 {% when Some with (f) %}
 {# What the last verdict revealed. Loudest where the ranking did worst: a

@@ -20,13 +20,6 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 
-/// Judgements before the first parameter sweep can say anything.
-///
-/// Below this a proposal is noise: half a dozen queries cannot separate a real
-/// improvement from the quirks of half a dozen queries. The tuning plan replaces
-/// this constant with `feedback.tune.min_judgements`.
-pub const FIRST_SWEEP_AT: i64 = 50;
-
 /// Judgements before the miss list is worth opening.
 const MISS_LIST_AT: i64 = 10;
 
@@ -53,6 +46,37 @@ pub struct Card {
     pub choices: Vec<Choice>,
 }
 
+/// The header's live half: what is true right now, and what just moved.
+///
+/// One struct rather than a dozen template fields because it is rendered
+/// twice — once in the page, once out of band beside the next card — and two
+/// copies of the same dozen fields would drift.
+pub struct Pulse {
+    pub judged: i64,
+    /// The judgement count the last sweep ran at, and so where this stretch of
+    /// the bar starts. Zero before the first one.
+    pub floor: i64,
+    /// The judgement count the next sweep runs at.
+    pub target: i64,
+    /// How far along the stretch between the two, not how far along the count.
+    pub pct: i64,
+    /// What that target buys, in the words for a first sweep or a later one.
+    pub label: &'static str,
+    pub recall: String,
+    pub mrr: String,
+    /// `▲ +0.01`, or empty where nothing was judged. What the tick renders on.
+    pub delta: String,
+    /// Verdicts in the last 24 hours. Not "today": the zone that would define
+    /// a midnight belongs to the client, never to the server — see
+    /// `core::context::local_time` — and a window needs no zone at all.
+    pub recent: i64,
+    pub pending: i64,
+    pub hits: i64,
+    pub finds: i64,
+    pub gaps: i64,
+    pub discards: i64,
+}
+
 #[derive(Template)]
 #[template(path = "judge.html")]
 struct JudgeTemplate {
@@ -61,11 +85,15 @@ struct JudgeTemplate {
     /// this page too, so the badge falls as the queue is worked down rather
     /// than standing at whatever it read on arrival.
     judge_pending: Option<i64>,
-    stats: Stats,
-    recall: String,
-    mrr: String,
-    target: i64,
-    progress_pct: i64,
+    /// Always `Some` here. `Option` because the partial is shared with the
+    /// card fragment, where a plain fetch carries none.
+    pulse: Option<Pulse>,
+    /// False on the page itself: it is drawing the header, not replacing one.
+    pulse_oob: bool,
+    /// What the sweeps have to say. Always `Some` here; `Option` because the
+    /// partial is shared with the card fragment and the apply answer.
+    tune: Option<TuneView>,
+    tune_oob: bool,
     misses: Vec<crate::store::feedback::Miss>,
     /// Questions asked and judged, beside the searches. Read from the same
     /// database and moved by every verdict on the ask page.
@@ -84,6 +112,16 @@ struct CardTemplate {
     /// What the judgement just before this one revealed. `None` on a plain
     /// fetch of the next card.
     flash: Option<Flash>,
+    /// The header, shipped beside the card so it moves with the work. `None`
+    /// where nothing was judged: an animation on a plain fetch would be the
+    /// page congratulating itself for a page load.
+    pulse: Option<Pulse>,
+    /// True here: the header this replaces is already on the page.
+    pulse_oob: bool,
+    /// A sweep runs off the request path, so the page that paid for it was
+    /// already sent. The next verdict is the first chance to report one.
+    tune: Option<TuneView>,
+    tune_oob: bool,
 }
 
 pub struct Flash {
@@ -208,6 +246,53 @@ async fn next_pending_card(st: &AppState) -> Result<Option<Card>> {
     }
 }
 
+/// What the header shows, and what — if anything — just moved.
+///
+/// The target is the next sweep rather than a fixed milestone: what a
+/// judgement buys is a measurement, and after the first one the distance is to
+/// the next re-sweep. Read from the last run rather than counted, so the two
+/// always agree about when it is due.
+async fn pulse_of(st: &AppState, stats: &Stats, delta: String) -> Result<Pulse> {
+    let tune = &st.core.feedback.tune;
+    let (floor, label) = match st.core.store.latest_eval_run().await? {
+        None => (0, "until the first sweep"),
+        Some(last) => (last.judged_count, "until the next sweep"),
+    };
+    let target = match floor {
+        0 => tune.min_judgements,
+        n => n + tune.resweep_after,
+    };
+    // A target already passed would draw a bar over 100% and a hint counting
+    // backwards; it happens whenever a sweep is queued but has not run yet.
+    let target = target.max(stats.judged).max(1);
+    // Against the last sweep rather than against zero. Measured from zero the
+    // bar reads the share of all judgements ever given that have been swept —
+    // which after the first sweep is always nearly all of them, so it stood at
+    // 95% and then 96%, and the one visual the header is built around stopped
+    // saying anything.
+    let span = (target - floor).max(1);
+    Ok(Pulse {
+        judged: stats.judged,
+        pct: ((stats.judged - floor).max(0) * 100 / span).min(100),
+        floor,
+        target,
+        label,
+        recall: format!("{:.2}", stats.recall_at_10),
+        mrr: format!("{:.2}", stats.mrr),
+        delta,
+        recent: st
+            .core
+            .store
+            .judged_since(crate::store::now() - 86_400)
+            .await?,
+        pending: stats.pending,
+        hits: stats.hits,
+        finds: stats.finds,
+        gaps: stats.gaps,
+        discards: stats.discards,
+    })
+}
+
 async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     use axum::response::IntoResponse;
     let stats = st.core.store.feedback_stats().await?;
@@ -216,15 +301,13 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     } else {
         vec![]
     };
-    let progress_pct = (stats.judged * 100 / FIRST_SWEEP_AT.max(1)).min(100);
     Ok(HtmlTemplate(JudgeTemplate {
         // Read off the stats already in hand rather than counted again.
         judge_pending: st.core.learn.enabled.then_some(stats.pending),
-        recall: format!("{:.2}", stats.recall_at_10),
-        mrr: format!("{:.2}", stats.mrr),
-        target: FIRST_SWEEP_AT,
-        progress_pct,
-        stats,
+        pulse: Some(pulse_of(&st, &stats, String::new()).await?),
+        pulse_oob: false,
+        tune: Some(tune_view(&st, "").await?),
+        tune_oob: false,
         misses,
         asks: st.core.store.ask_stats().await?,
         card: next_pending_card(&st).await?,
@@ -238,6 +321,10 @@ async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(&st).await?,
         flash: None,
+        pulse: None,
+        pulse_oob: true,
+        tune: None,
+        tune_oob: true,
     })
     .into_response())
 }
@@ -253,7 +340,22 @@ async fn card_after(
     judged: &str,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    let after = st.core.store.feedback_stats().await?.mrr;
+    let stats = st.core.store.feedback_stats().await?;
+    let after = stats.mrr;
+    // A verdict is what buys the next measurement. Off the request path: the
+    // operator must not wait on a grid of searches, and a sweep that fails
+    // must not fail the verdict that paid for it.
+    crate::eval::sweep::maybe_spawn(&st.core);
+    let moved = after - before;
+    // Under half a point the figure on screen does not change, and a tick
+    // pointing at an unchanged number is an animation about nothing.
+    let delta = if moved.abs() < 0.005 {
+        String::new()
+    } else if moved > 0.0 {
+        format!("▲ +{moved:.2}")
+    } else {
+        format!("▼ −{:.2}", moved.abs())
+    };
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(st).await?,
         flash: Some(Flash {
@@ -261,6 +363,10 @@ async fn card_after(
             delta: format!("MRR {before:.2} → {after:.2}"),
             undo: Some(judged.to_string()),
         }),
+        pulse: Some(pulse_of(st, &stats, delta).await?),
+        pulse_oob: true,
+        tune: Some(tune_view(st, "").await?),
+        tune_oob: true,
     })
     .into_response())
 }
@@ -284,6 +390,11 @@ async fn card_again(st: &AppState, event_id: &str, line: &str) -> Result<Respons
             delta: String::new(),
             undo: None,
         }),
+        // Nothing was recorded, so no figure moved.
+        pulse: None,
+        pulse_oob: true,
+        tune: None,
+        tune_oob: true,
     })
     .into_response())
 }
@@ -333,7 +444,17 @@ async fn undo(
         // is a better answer than an error page.
         None => next_pending_card(&st).await?,
     };
-    Ok(HtmlTemplate(CardTemplate { card, flash: None }).into_response())
+    Ok(HtmlTemplate(CardTemplate {
+        card,
+        flash: None,
+        // An undo moves the figures back, and the operator is looking at the
+        // header while it happens.
+        pulse: Some(pulse_of(&st, &st.core.store.feedback_stats().await?, String::new()).await?),
+        pulse_oob: true,
+        tune: None,
+        tune_oob: true,
+    })
+    .into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -536,9 +657,223 @@ async fn assign_results(
     .into_response())
 }
 
+// ── What the sweeps have to say ─────────────────────────────────────────────
+
+/// A recommendation, ready to read and to take.
+pub struct Rec {
+    pub id: String,
+    /// What would change and what it buys, in one line.
+    pub line: String,
+    /// The pairs that move under it. Mandatory, never folded away: an
+    /// aggregate says something moved, and only this says what.
+    pub diff: Vec<String>,
+}
+
+pub struct TuneView {
+    pub rec: Option<Rec>,
+    /// Why there is nothing to offer, when a sweep has run and found nothing.
+    /// Empty before the first sweep, where the honest answer is silence.
+    pub quiet: String,
+    pub applied: Vec<String>,
+    /// What the press just before this one did.
+    pub flash: String,
+}
+
+#[derive(Template)]
+#[template(path = "_judge_tune.html")]
+struct TuneTemplate {
+    tune: Option<TuneView>,
+    tune_oob: bool,
+}
+
+fn cap_str(c: Option<usize>) -> String {
+    c.map_or("none".to_string(), |n| n.to_string())
+}
+
+/// One line naming what changes and what it is worth.
+///
+/// Every figure is read off the run rather than recomputed: a number and the
+/// settings that produced it travel together, which is the whole of what the
+/// `eval_runs` row is for.
+///
+/// "Replayed over N pairs" leads the figures rather than trailing them. They
+/// used to end the line, which put `MRR 0.50 → 0.60` immediately under the
+/// header's own MRR with nothing between them — two numbers of one name, one
+/// read from the ranks the searches actually gave and one from a replay of
+/// those searches through a door that skips priming. Neither is wrong; they
+/// are not the same quantity, and side by side they invited being read as one.
+fn describe(run: &crate::store::eval_runs::EvalRun) -> String {
+    format!(
+        "recency {:.2} → {:.2}, cap {} → {} · replayed over {} pairs: \
+         MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}",
+        run.base_params.recency_weight,
+        run.best_params.recency_weight,
+        cap_str(run.base_params.per_source_cap),
+        cap_str(run.best_params.per_source_cap),
+        run.pairs_used,
+        run.base_mrr,
+        run.best_mrr,
+        run.base_recall,
+        run.best_recall,
+    )
+}
+
+fn rank_str(r: Option<usize>) -> String {
+    r.map_or("not in the first ten".to_string(), |i| {
+        format!("position {}", i + 1)
+    })
+}
+
+async fn tune_view(st: &AppState, flash: &str) -> Result<TuneView> {
+    let rec = st.core.store.open_recommendation().await?.map(|run| Rec {
+        line: describe(&run),
+        diff: run
+            .diff
+            .iter()
+            .map(|d| format!("{} — {} → {}", d.query, rank_str(d.base), rank_str(d.new)))
+            .collect(),
+        id: run.id,
+    });
+    // Only where a sweep has actually run and come back empty. Before the
+    // first one there is nothing to explain, and a line explaining nothing is
+    // one more thing on a page that has enough.
+    let quiet = match (&rec, st.core.store.latest_eval_run().await?) {
+        (None, Some(last)) if !last.recommended => format!(
+            "last sweep {}: no improvement found over {} pairs.",
+            ago(last.created_at),
+            last.pairs_used
+        ),
+        _ => String::new(),
+    };
+    let applied = st
+        .core
+        .store
+        .applied_eval_runs(10)
+        .await?
+        .iter()
+        .map(|r| {
+            format!(
+                "{} — {}",
+                ago(r.applied_at.unwrap_or(r.created_at)),
+                describe(r)
+            )
+        })
+        .collect();
+    Ok(TuneView {
+        rec,
+        quiet,
+        applied,
+        flash: flash.to_string(),
+    })
+}
+
+// ── Taking a recommendation live ────────────────────────────────────────────
+
+/// The tuning block, redrawn, with a line about what just happened.
+async fn tune_fragment(st: &AppState, line: &str) -> Result<Response> {
+    use axum::response::IntoResponse;
+    Ok(HtmlTemplate(TuneTemplate {
+        tune: Some(tune_view(st, line).await?),
+        // Answering the button inside the block itself, which htmx swaps by
+        // target rather than by id.
+        tune_oob: false,
+    })
+    .into_response())
+}
+
+/// Apply the open recommendation: the file first, then the running parameters,
+/// then the stamp.
+///
+/// The order is the guarantee. A hot swap the file does not carry would vanish
+/// on the next restart, leaving the tuning history claiming a change that is no
+/// longer in force — and the file is the one place an operator can read what
+/// their server is doing.
+async fn tune_apply(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(run_id): Path<String>,
+) -> Result<Response> {
+    let Some(run) = st.core.store.eval_run(&run_id).await? else {
+        return Err(crate::error::Error::NotFound);
+    };
+    // A recommendation that was already taken, a run that never was one, or
+    // one a later sweep has since spoken over: all three arrive from a page
+    // left open, and none is a reason to write anything. Asked of the store
+    // rather than of this row, so what the button may take is exactly what the
+    // page may offer.
+    let open = st.core.store.open_recommendation().await?;
+    if open.as_ref().is_none_or(|o| o.id != run.id) {
+        return tune_fragment(
+            &st,
+            "that sweep is not an open recommendation — nothing was changed.",
+        )
+        .await;
+    }
+
+    let params: crate::core::ranking::RankingParams = run.best_params.into();
+    if let Err(e) = crate::config::write_ranking(&st.config_path, &params) {
+        // Said here rather than raised: a read-only config file is an ordinary
+        // thing to find out about, and the operator is looking at the button
+        // they just pressed. Nothing was swapped and nothing was stamped, so
+        // the recommendation stays open and can be applied once the file can
+        // be written.
+        tracing::warn!(error = %e, path = %st.config_path.display(), "config.toml not written");
+        return tune_fragment(
+            &st,
+            "config.toml could not be written, so nothing was applied. \
+             The recommendation is still here.",
+        )
+        .await;
+    }
+    *st.core.ranking.write().expect("ranking lock") = params;
+    // The stamp is what closes the recommendation, so its answer is the one
+    // thing here that must not be dropped. `false` is the second press of the
+    // same button arriving while the first was still in flight: same run, same
+    // parameters, so the file and the running settings say what this press
+    // would have written anyway — but only one press gets to report a change.
+    // An error is worse than either, and raising it would have answered a 500
+    // to a request that did change the file and the parameters: the operator
+    // would have read "nothing happened" about a server that is now running
+    // settings its history does not mention.
+    match st.core.store.mark_eval_run_applied(&run_id).await {
+        // The environment is layered over the file, so where one of these keys
+        // is set the write is real and the restart undoes it. Said now, beside
+        // the button, rather than discovered months later as a history claiming
+        // settings the server stopped running at its last boot.
+        Ok(true) => {
+            let line = match crate::config::ranking_keys_in_env().as_slice() {
+                [] => "applied — the next search runs with these settings.".to_string(),
+                keys => format!(
+                    "applied — the next search runs with these settings, but {} is set in the \
+                     environment and will overrule the file at the next restart.",
+                    keys.join(" and ")
+                ),
+            };
+            tune_fragment(&st, &line).await
+        }
+        Ok(false) => {
+            tune_fragment(
+                &st,
+                "that sweep had already been applied — nothing changed.",
+            )
+            .await
+        }
+        Err(e) => {
+            tracing::error!(error = %e, run = %run_id, "applied run not stamped");
+            tune_fragment(
+                &st,
+                "these settings are live and written to config.toml, but the run could not be \
+                 recorded as applied — it may be offered again.",
+            )
+            .await
+        }
+    }
+}
+
 pub fn judge_router() -> Router<AppState> {
     Router::new()
         .route("/ui/judge", get(page))
+        .route("/ui/judge/tune/{run_id}/apply", post(tune_apply))
         .route("/ui/judge/next", get(next_card))
         .route("/ui/judge/{id}/hit", post(hit))
         .route("/ui/judge/{id}/gap", post(gap))
@@ -579,7 +914,24 @@ mod tests {
         real: usize,
         phantom: &[&str],
     ) -> (axum::Router, String, crate::core::Core, Vec<String>) {
-        let core = crate::core::test_support::test_core().await;
+        // Learning off and the shipped floor: the ordinary judging tests are
+        // never within reach of a sweep and never wait on one.
+        judge_app_tuned(real, phantom, None).await
+    }
+
+    /// `judge_app`, with tuning live and the judgement floor low enough that a
+    /// test can cross it.
+    async fn judge_app_tuned(
+        real: usize,
+        phantom: &[&str],
+        floor: Option<i64>,
+    ) -> (axum::Router, String, crate::core::Core, Vec<String>) {
+        let mut core = crate::core::test_support::test_core().await;
+        if let Some(n) = floor {
+            core.feedback.tune.min_judgements = n;
+            core.learn.enabled = true;
+        }
+        let core = core;
         let src = core
             .store
             .insert_corpus("raw for judging", "web", None)
@@ -1095,6 +1447,475 @@ mod tests {
         let body = body_of(res).await;
         assert!(body.contains("a find"), "the flash did not name it a find");
         assert_eq!(core.store.feedback_stats().await.unwrap().finds, 1);
+    }
+
+    #[tokio::test]
+    async fn a_verdict_past_the_floor_pays_for_a_sweep() {
+        // The loop the whole feature is: a verdict is what buys the next
+        // measurement, so the check rides on the verdict rather than a timer.
+        let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(1)).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        post(
+            &app,
+            &format!("/ui/judge/{}/hit", event.id),
+            &cookie,
+            &format!("artifact_id={}", ids[0]),
+        )
+        .await;
+        core.background.wait_idle().await;
+
+        let run = core.store.latest_eval_run().await.unwrap();
+        assert!(run.is_some(), "the floor was crossed and no sweep ran");
+        assert_eq!(run.unwrap().pairs_used, 1);
+    }
+
+    #[tokio::test]
+    async fn under_the_floor_a_verdict_buys_nothing() {
+        // Below it a sweep would recommend the quirks of a handful of queries
+        // as confidently as a real improvement.
+        let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(50)).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        post(
+            &app,
+            &format!("/ui/judge/{}/hit", event.id),
+            &cookie,
+            &format!("artifact_id={}", ids[0]),
+        )
+        .await;
+        core.background.wait_idle().await;
+
+        assert!(core.store.latest_eval_run().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_second_sweep_waits_for_new_judgements_rather_than_the_clock() {
+        // What makes a re-sweep worth running is new evidence: the same pairs
+        // under the same grid give the same answer, at the cost of a grid of
+        // searches per verdict.
+        let (app, cookie, core, ids) = judge_app_tuned(3, &[], Some(1)).await;
+        for id in ids.iter().take(2) {
+            let event = core.store.next_pending().await.unwrap();
+            let Some(event) = event else { break };
+            post(
+                &app,
+                &format!("/ui/judge/{}/hit", event.id),
+                &cookie,
+                &format!("artifact_id={id}"),
+            )
+            .await;
+            core.background.wait_idle().await;
+        }
+
+        let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM eval_runs")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(runs, 1, "one judgement is not ten");
+    }
+
+    /// An app whose store already holds one recommendation, plus the path to
+    /// the configuration file that app would rewrite.
+    async fn tune_app(
+        recommended: bool,
+    ) -> (
+        axum::Router,
+        String,
+        crate::core::Core,
+        String,
+        std::path::PathBuf,
+    ) {
+        let core = crate::core::test_support::test_core().await;
+        let base = crate::store::eval_runs::RunParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        let best = if recommended {
+            crate::store::eval_runs::RunParams {
+                recency_weight: 0.1,
+                per_source_cap: None,
+            }
+        } else {
+            base
+        };
+        let run = core
+            .store
+            .record_eval_run(&crate::store::eval_runs::NewEvalRun {
+                judged_count: 50,
+                pairs_used: 12,
+                pairs_skipped: 0,
+                base,
+                base_recall: 0.70,
+                base_mrr: 0.50,
+                best,
+                best_recall: 0.80,
+                best_mrr: 0.60,
+                diff: vec![crate::store::eval_runs::DiffRow {
+                    query: "the image will not mount".into(),
+                    base: Some(5),
+                    new: Some(1),
+                }],
+                recommended,
+            })
+            .await
+            .unwrap();
+        let handle = core.clone();
+        let (app, cookie, state) = crate::web::test_support::app_with_state(core).await;
+        let path = state.config_path.as_ref().clone();
+        (app, cookie, handle, run, path)
+    }
+
+    #[tokio::test]
+    async fn applying_writes_the_file_swaps_the_parameters_and_stamps_the_run() {
+        // All three or none: a swap the file does not carry vanishes on
+        // restart, and a stamp without either is a history of things that did
+        // not happen.
+        let (app, cookie, core, run, path) = tune_app(true).await;
+        let status = post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let live = *core.ranking.read().unwrap();
+        assert_eq!(live.recency_weight, 0.1);
+        assert_eq!(live.per_source_cap, None);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("recency_weight = 0.1"), "{written}");
+        assert!(written.contains("per_source_cap = 0"), "{written}");
+        assert!(
+            written.contains("# a comment the apply path must not eat"),
+            "the operator's file came back as a machine's: {written}"
+        );
+
+        assert!(
+            core.store
+                .eval_run(&run)
+                .await
+                .unwrap()
+                .unwrap()
+                .applied_at
+                .is_some()
+        );
+        assert!(core.store.open_recommendation().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_run_that_is_not_an_open_recommendation_changes_nothing() {
+        // Both arrive from a page left open: one was never a recommendation,
+        // the other has already been taken.
+        for second_press in [false, true] {
+            let (app, cookie, core, run, path) = tune_app(second_press).await;
+            let before = std::fs::read_to_string(&path).unwrap();
+            if second_press {
+                assert_eq!(
+                    post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await,
+                    StatusCode::OK
+                );
+            }
+            let live_before = *core.ranking.read().unwrap();
+
+            let status = post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "a stale press is an answer, not a 500"
+            );
+            assert_eq!(*core.ranking.read().unwrap(), live_before);
+            if !second_press {
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_that_does_not_exist_is_a_404() {
+        let (app, cookie, _core, _, _) = tune_app(true).await;
+        assert_eq!(
+            post(&app, "/ui/judge/tune/no-such-run/apply", &cookie, "").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unwritable_config_leaves_the_running_parameters_alone() {
+        // The whole apply or none of it. The recommendation stays open, so it
+        // can be taken once the file can be written.
+        let (app, cookie, core, run, path) = tune_app(true).await;
+        std::fs::remove_file(&path).unwrap();
+        let before = *core.ranking.read().unwrap();
+
+        let status = post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await;
+        assert_eq!(status, StatusCode::OK, "the operator is told, not 500'd");
+
+        assert_eq!(*core.ranking.read().unwrap(), before, "swapped anyway");
+        assert!(
+            core.store
+                .eval_run(&run)
+                .await
+                .unwrap()
+                .unwrap()
+                .applied_at
+                .is_none(),
+            "stamped a change that was never made"
+        );
+        assert!(core.store.open_recommendation().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_header_explains_the_numbers_it_shows() {
+        // They were shown bare: an operator who had not read docs/evaluation.md
+        // was asked to work towards two figures nobody had told them the
+        // meaning of, and towards a target that named no reward.
+        let (app, cookie, _core, _) = judge_app(2, &[]).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("Mean reciprocal rank"), "MRR unexplained");
+        assert!(body.contains("top ten"), "recall@10 unexplained");
+        assert!(
+            body.contains("tries other ranking settings"),
+            "the progress bar must say what it is progress towards"
+        );
+        assert!(body.contains("until the first sweep"));
+        assert!(body.contains("last 24h"), "the day's work is not counted");
+    }
+
+    #[tokio::test]
+    async fn a_verdict_ships_the_header_beside_the_next_card() {
+        // The header lives outside the swapped region, so without this it
+        // stood at whatever it read on arrival while the queue was worked
+        // down — the one figure the work is measured by, frozen.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/judge/{}/hit", event.id))
+                    .method("POST")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("artifact_id={}", ids[0])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+
+        assert!(body.contains(r#"id="judge-live""#), "no header shipped");
+        assert!(body.contains("hx-swap-oob"), "the header would not land");
+        assert!(
+            body.contains("judge-tick"),
+            "the figure that moved must show that it moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_card_fetched_without_a_verdict_animates_nothing() {
+        // Nothing was judged, so nothing moved. An animation here would be the
+        // page congratulating itself for a page load.
+        let (app, cookie, _core, _) = judge_app(2, &[]).await;
+        let body = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(!body.contains("hx-swap-oob"), "{body}");
+        assert!(!body.contains("judge-tick"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_open_recommendation_is_offered_with_the_pairs_that_moved() {
+        let (app, cookie, _core, run, _) = tune_app(true).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains(&format!("/ui/judge/tune/{run}/apply")));
+        assert!(body.contains("recency"), "the line must name what changes");
+        assert!(body.contains("cap"), "both knobs are named");
+        assert!(body.contains("MRR 0.50 → 0.60"), "{body}");
+        assert!(
+            body.contains("what changes"),
+            "the diff is the part that decides it, not an extra"
+        );
+        assert!(
+            body.contains("the image will not mount"),
+            "the moved pair is named by its own query"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_page_draws_one_header_and_one_recommendation() {
+        // Both partials are shipped beside the card a verdict returns, and the
+        // page draws both itself. Included unconditionally they rendered a
+        // second time inside `#card`: the whole recommendation twice, and the
+        // lower Apply button swapping the upper copy — so the one the operator
+        // pressed stayed on screen, still offering what had just been taken.
+        let (app, cookie, _core, _run, _) = tune_app(true).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert_eq!(body.matches(r#"id="judge-live""#).count(), 1, "{body}");
+        assert_eq!(body.matches(r#"id="judge-tune""#).count(), 1, "{body}");
+        assert_eq!(body.matches("/apply").count(), 1, "two Apply buttons");
+    }
+
+    #[tokio::test]
+    async fn the_sweeps_figures_are_named_as_a_replay_rather_than_the_headers() {
+        // The line carries an MRR and a recall@10, and so does the header a few
+        // lines above it. Same names, different measurements: one is the ranks
+        // the searches gave, the other is those searches run again under each
+        // setting. Printed bare they read as one quantity moving.
+        let (app, cookie, _core, _run, _) = tune_app(true).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("replayed over 12 pairs"), "{body}");
+        assert!(body.contains("from the replay"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_bar_counts_from_the_last_sweep_rather_than_from_zero() {
+        // Measured from zero it reads the share of every judgement ever given
+        // that has been swept — which after the first sweep is nearly all of
+        // them. It stood at 95%, then 96%, then 98%, and the one visual the
+        // header is built around stopped conveying anything.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        post(
+            &app,
+            &format!("/ui/judge/{}/hit", event.id),
+            &cookie,
+            &format!("artifact_id={}", ids[0]),
+        )
+        .await;
+        let swept_at = core.store.feedback_stats().await.unwrap().judged;
+        record_run_at(&core, swept_at).await;
+
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(
+            body.contains("width:0%"),
+            "the stretch to the next sweep has not started: {body}"
+        );
+        assert!(
+            body.contains(&format!(r#"aria-valuemin="{swept_at}""#)),
+            "the bar starts where the last sweep did: {body}"
+        );
+
+        // One further verdict is one tenth of the ten the next sweep waits for.
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    query: "a second question entirely".into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store.judge_hit(&id, &ids[0]).await.unwrap();
+
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("width:10%"), "{body}");
+    }
+
+    /// A sweep in the store, recorded as having run at `judged`.
+    async fn record_run_at(core: &crate::core::Core, judged: i64) {
+        let params = crate::store::eval_runs::RunParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        core.store
+            .record_eval_run(&crate::store::eval_runs::NewEvalRun {
+                judged_count: judged,
+                pairs_used: 1,
+                pairs_skipped: 0,
+                base: params,
+                base_recall: 0.70,
+                base_mrr: 0.50,
+                best: params,
+                best_recall: 0.70,
+                best_mrr: 0.50,
+                diff: vec![],
+                recommended: false,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_found_nothing_says_so_rather_than_going_quiet() {
+        // Silence reads as "no sweep has ever run", which is a different fact
+        // and the wrong one.
+        let (app, cookie, _core, _, _) = tune_app(false).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("no improvement found"), "{body}");
+        assert!(!body.contains("/apply"), "nothing to apply was offered");
+    }
+
+    #[tokio::test]
+    async fn before_any_sweep_the_block_says_nothing_at_all() {
+        let (app, cookie, _core, _) = judge_app(2, &[]).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(!body.contains("no improvement found"));
+        assert!(!body.contains("/apply"));
+        assert!(!body.contains("tuning history"));
+    }
+
+    #[tokio::test]
+    async fn an_applied_change_stands_in_the_history_with_its_numbers() {
+        // The provenance rule, made structural: a number without the settings
+        // that produced it cannot be compared against anything.
+        let (app, cookie, _core, run, _) = tune_app(true).await;
+        post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await;
+
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("tuning history"), "{body}");
+        assert!(body.contains("MRR 0.50 → 0.60"), "{body}");
+        assert!(body.contains("cap 3 → none"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn applying_answers_with_the_block_it_replaces() {
+        // htmx swaps `#judge-tune` by id: a reply that is not that block would
+        // leave the recommendation on screen after it was taken.
+        let (app, cookie, _core, run, _) = tune_app(true).await;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/judge/tune/{run}/apply"))
+                    .method("POST")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+        assert!(body.contains(r#"id="judge-tune""#), "{body}");
+        assert!(body.contains("applied"), "{body}");
+        assert!(!body.contains("/apply"), "it is still offering itself");
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_finished_in_the_background_surfaces_on_the_next_verdict() {
+        // It runs off the request path, so the page that paid for it has
+        // already been sent. The next verdict is the first chance to say so.
+        let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(1)).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/judge/{}/hit", event.id))
+                    .method("POST")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("artifact_id={}", ids[0])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+        assert!(
+            body.contains(r#"id="judge-tune""#),
+            "the verdict carried no tuning block: {body}"
+        );
     }
 
     #[tokio::test]

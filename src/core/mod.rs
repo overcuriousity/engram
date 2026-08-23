@@ -7,6 +7,7 @@ pub mod gaps;
 pub mod image;
 pub mod ingest;
 pub mod pdf;
+pub mod ranking;
 pub mod recommend;
 pub mod search;
 pub mod sitting;
@@ -185,6 +186,13 @@ pub struct Core {
     /// `image::MAX_CONCURRENT_DECODES`; shared by every clone, because a
     /// per-clone permit would bound nothing.
     pub decodes: Arc<tokio::sync::Semaphore>,
+    /// The two scoring knobs a tuning sweep may move. Shared by every clone,
+    /// like the background queue: applying a recommendation has to change the
+    /// search the next request runs, not the one this handler holds.
+    pub ranking: Arc<std::sync::RwLock<crate::core::ranking::RankingParams>>,
+    /// Whether a sweep is in flight, so a run of verdicts starts one and not
+    /// one each.
+    pub tuning: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Core {
@@ -240,6 +248,10 @@ impl Core {
             clock: crate::core::context::Clock::System,
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: cfg.consolidate.clone(),
+            ranking: Arc::new(std::sync::RwLock::new(
+                crate::core::ranking::RankingParams::from_vector(&cfg.vector),
+            )),
+            tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             weak_below: cfg.vector.weak_below,
             learn: cfg.learn.clone(),
             feedback: cfg.feedback.clone(),
@@ -416,6 +428,16 @@ pub mod test_support {
             clock: crate::core::context::Clock::System,
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: crate::config::ConsolidateConfig::default(),
+            // The shipped cap, so a test ranks what the binary ranks; recency
+            // off, because the fake embedder's ordering is the only thing a
+            // search test can assert against and an age boost over it is noise.
+            ranking: Arc::new(std::sync::RwLock::new(
+                crate::core::ranking::RankingParams {
+                    recency_weight: 0.0,
+                    per_source_cap: Some(crate::core::search::MAX_PER_CORPUS),
+                },
+            )),
+            tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // The fake embedder's vectors are not a semantic space, so a
             // realistic threshold would mark arbitrary results weak and every
             // search test would be asserting against noise. Tests that care

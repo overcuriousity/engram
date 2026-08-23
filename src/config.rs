@@ -154,6 +154,7 @@ pub struct FeedbackConfig {
     /// `retain_days` is the only thing it enforces: a window measured in days
     /// does not need checking more than a few times a day.
     pub sweep_hours: u64,
+    pub tune: TuneConfig,
 }
 
 impl Default for FeedbackConfig {
@@ -163,6 +164,30 @@ impl Default for FeedbackConfig {
             coalesce_secs: 15,
             retain_days: 0,
             sweep_hours: 6,
+            tune: TuneConfig::default(),
+        }
+    }
+}
+
+/// When judgements are spent on a parameter sweep, and how often.
+///
+/// The floor is statistical rather than cautious: with ten pairs recall@10
+/// moves in ten-point steps, so a sweep under it recommends the quirks of ten
+/// queries with the same confidence as a real improvement. Below
+/// `min_judgements` nothing runs; after that a sweep re-runs once
+/// `resweep_after` further verdicts have been given.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TuneConfig {
+    pub min_judgements: i64,
+    pub resweep_after: i64,
+}
+
+impl Default for TuneConfig {
+    fn default() -> Self {
+        Self {
+            min_judgements: 50,
+            resweep_after: 10,
         }
     }
 }
@@ -625,9 +650,20 @@ pub struct VectorConfig {
     /// labelling off.
     #[serde(default = "default_weak_below")]
     pub weak_below: f32,
+    /// Chunks one document may contribute to a result list. `0` lets a single
+    /// document fill it.
+    ///
+    /// A setting rather than the constant it was, because the tuning sweep
+    /// measures it and applying a recommendation writes it back here — the
+    /// file stays the one place the running configuration can be read.
+    #[serde(default = "default_per_source_cap")]
+    pub per_source_cap: usize,
 }
 fn default_recency_weight() -> f32 {
     0.05
+}
+fn default_per_source_cap() -> usize {
+    crate::core::search::MAX_PER_CORPUS
 }
 fn default_recency_half_life_days() -> u32 {
     180
@@ -1548,6 +1584,116 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+/// Write the two runtime-tunable keys back into the file they came from.
+///
+/// An edit to the parsed document rather than a re-serialisation of the whole
+/// configuration: every comment, every blank line and every key this does not
+/// name comes back byte for byte. A file is where an operator explains their
+/// own choices to themselves, and handing it back as a machine's would cost
+/// more than the setting is worth.
+///
+/// A missing file is refused rather than created. The apply path promises that
+/// memory and disk agree, and a configuration invented by the server is one
+/// nobody wrote.
+pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(std::io::Error::other)?;
+    // Three decimals is the whole resolution the grid has. Widened to f64
+    // verbatim, 0.05 writes as 0.05000000074505806 — the file claiming a
+    // precision the sweep never measured.
+    let weight = (f64::from(p.recency_weight) * 1000.0).round() / 1000.0;
+    doc["vector"]["recency_weight"] = toml_edit::value(weight);
+    doc["vector"]["per_source_cap"] = toml_edit::value(p.per_source_cap.map_or(0, |n| n as i64));
+    write_beside_and_rename(path, &doc.to_string())
+}
+
+/// Whichever of the two swept keys the environment is currently setting.
+///
+/// `load` layers `ENGRAM__*` *after* the file, so an operator who set one of
+/// these where the server starts gets that value back on the next boot whatever
+/// was just written — while the tuning history goes on naming settings that
+/// stopped being in force at the restart. The write is still the right thing to
+/// do and the running server does use the new values; what cannot be promised
+/// is that they survive. Saying so is the whole of what is available from here:
+/// the environment belongs to whoever starts the process, and this is a page
+/// with a button on it, not an installer.
+pub fn ranking_keys_in_env() -> Vec<String> {
+    // Read back rather than assumed, and matched without case, because the
+    // config crate lowercases before it compares and an operator's compose file
+    // is under no obligation to shout.
+    std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .filter(|k| {
+            matches!(
+                k.to_ascii_uppercase().as_str(),
+                "ENGRAM__VECTOR__RECENCY_WEIGHT" | "ENGRAM__VECTOR__PER_SOURCE_CAP"
+            )
+        })
+        .collect()
+}
+
+/// Replace `path` with `body` in one step, or leave it exactly as it was.
+///
+/// `fs::write` truncates and then writes. A crash or a full disk in between
+/// leaves the operator holding a half-written configuration — and since a
+/// configuration that will not parse is refused rather than ignored, a server
+/// that will not start. The file this function exists to preserve byte for
+/// byte would be destroyed by the one failure it is most likely to meet.
+///
+/// The temporary file is a sibling so the rename stays within one filesystem,
+/// and it carries the original's permissions: a config file holding a password
+/// hash or a client secret must not come back world-readable because it was
+/// rewritten.
+/// The temporary file, born with no permissions to spare.
+///
+/// `File::create` opens at `0666 & ~umask` — 0644 on an ordinary host — and
+/// widening it first to narrow it a line later leaves a window in which anyone
+/// on the box may open it. The bytes land after that, but a descriptor is
+/// checked when it is opened and not when it is read, so the window is enough
+/// to walk away with a password hash. The mode is set by the same call that
+/// makes the file, and the copy of the original's permissions still follows:
+/// this decides what the file may never have been, that decides what it ends up
+/// as. Truncating rather than `create_new`, so a `.tmp` left behind by an
+/// earlier crash does not wedge every write after it.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .mode(0o600)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(path)
+}
+
+fn write_beside_and_rename(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+
+    let written = (|| -> std::io::Result<()> {
+        let mut f = create_private(&tmp)?;
+        #[cfg(unix)]
+        f.set_permissions(std::fs::metadata(path)?.permissions())?;
+        f.write_all(body.as_bytes())?;
+        // Before the rename, not after it: a rename that reaches the disk ahead
+        // of the bytes it points at is the same lost file by a slower route.
+        f.sync_all()
+    })();
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+        // Nothing was touched, so the only thing to undo is the temporary file.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
         let mut builder = config::Config::builder();
@@ -2139,6 +2285,123 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 5\n"));
         assert_eq!(Config::load(Some(&p)).unwrap().feedback.candidates, 5);
+    }
+
+    #[test]
+    fn applying_a_recommendation_edits_the_file_and_leaves_the_rest_of_it_alone() {
+        // The file is the operator's, not the server's: a rewrite that dropped
+        // their comments would be a worse answer than refusing to write at all.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            "# the note I left myself\n\
+             [vector]\n\
+             url = \"http://localhost:6333\"   # and this one\n\
+             recency_weight = 0.05\n\
+             pinned_boost = 0.15\n",
+        );
+        let params = crate::core::ranking::RankingParams {
+            recency_weight: 0.1,
+            per_source_cap: None,
+        };
+        write_ranking(&p, &params).unwrap();
+
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("# the note I left myself"), "{out}");
+        assert!(out.contains("# and this one"), "{out}");
+        assert!(out.contains("pinned_boost = 0.15"), "{out}");
+        assert!(out.contains("recency_weight = 0.1"), "{out}");
+        assert!(out.contains("per_source_cap = 0"), "no cap is written as 0");
+    }
+
+    #[test]
+    fn applying_leaves_no_half_written_file_and_no_widened_permissions() {
+        // `fs::write` truncates and then writes. A crash or a full disk in
+        // between left the operator with an empty configuration and a server
+        // that refuses to start on the next boot — the one file this whole
+        // `toml_edit` approach exists to preserve. Written beside and renamed
+        // over, so it is either the old file or the new one.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, "[vector]\nrecency_weight = 0.05\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let params = crate::core::ranking::RankingParams {
+            recency_weight: 0.1,
+            per_source_cap: Some(2),
+        };
+        write_ranking(&p, &params).unwrap();
+
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "a temporary file was left behind: {left:?}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "a file that may hold a password hash came back readable to everyone"
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_that_is_not_there_is_refused_rather_than_invented() {
+        // A server that writes a configuration nobody wrote is a server with
+        // two authors, and the apply path promises the file and memory agree.
+        let dir = tempfile::tempdir().unwrap();
+        let params = crate::core::ranking::RankingParams {
+            recency_weight: 0.1,
+            per_source_cap: Some(2),
+        };
+        assert!(write_ranking(&dir.path().join("absent.toml"), &params).is_err());
+    }
+
+    #[test]
+    fn a_swept_weight_is_written_at_the_grids_resolution() {
+        // f32 to f64 verbatim writes 0.05000000074505806, which is the file
+        // saying a precision the sweep never had.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, "[vector]\nrecency_weight = 0.15\n");
+        write_ranking(
+            &p,
+            &crate::core::ranking::RankingParams {
+                recency_weight: 0.05,
+                per_source_cap: Some(3),
+            },
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("recency_weight = 0.05"), "{out}");
+        assert!(out.contains("per_source_cap = 3"), "{out}");
+    }
+
+    #[test]
+    fn tune_defaults_and_file_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.feedback.tune.min_judgements, 50);
+        assert_eq!(cfg.feedback.tune.resweep_after, 10);
+        assert_eq!(cfg.vector.per_source_cap, 3);
+
+        let tuned = MINIMAL.replace(
+            "collection = \"chunks\"",
+            "collection = \"chunks\"\nper_source_cap = 0",
+        );
+        let p = write(
+            &dir,
+            &format!("{tuned}\n[feedback.tune]\nmin_judgements = 20\nresweep_after = 5\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.feedback.tune.min_judgements, 20);
+        assert_eq!(cfg.feedback.tune.resweep_after, 5);
+        assert_eq!(cfg.vector.per_source_cap, 0);
     }
 
     fn write(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {

@@ -75,7 +75,61 @@
    verdict. It is the measurement, not a score standing in for one. */
 .progress { height: 4px; background: var(--color-bg-active); border-radius: 2px; overflow: hidden; }
 .progress span { display: block; height: 100%; background: var(--color-accent); }
-.misses { max-width: 52rem; margin-bottom: 1.25rem; }
+
+/* The moment after a verdict.
+ *
+ * Only the figures already on the page respond: the MRR lights once, the delta
+ * rises beside it and goes, the bar brightens as it grows. Nothing here reacts
+ * to *which* verdict was given — what is being acknowledged is that the work
+ * moved, never that the ranker was agreed with. The flash line above the card
+ * says what was learned, and it is loudest where the ranking did worst.
+ *
+ * Every rule is one-shot and cheap, and all of it is skipped for anyone who
+ * asked not to be moved. */
+.judge-live { max-width: 52rem; }
+@keyframes judge-tick {
+  0%   { background: transparent; }
+  20%  { background: color-mix(in srgb, var(--color-accent) 28%, transparent); }
+  100% { background: transparent; }
+}
+.judge-tick {
+  animation: judge-tick 0.9s ease-out 1;
+  border-radius: var(--radius-sm);
+  padding: 0 0.2rem; margin: 0 -0.2rem;
+}
+@keyframes judge-delta {
+  0%   { opacity: 0; transform: translateY(0.35rem); }
+  18%  { opacity: 1; transform: none; }
+  70%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+/* `forwards`, so it ends invisible rather than snapping back for the moment
+   before the next swap replaces it. */
+.judge-delta { color: var(--color-accent); animation: judge-delta 2.4s ease-out 1 forwards; }
+@keyframes judge-grow { from { filter: brightness(1.7); } to { filter: none; } }
+.judge-grow { animation: judge-grow 0.7s ease-out 1; }
+@media (prefers-reduced-motion: reduce) {
+  .judge-tick, .judge-delta, .judge-grow { animation: none; }
+  .judge-delta { opacity: 1; }
+}
+/* What the sweeps have to say. Accent-bordered because the recommendation is
+   the only thing on this page that can be acted on; absent entirely — not
+   greyed, not empty — until a sweep has actually run. */
+.judge-tune { max-width: 52rem; margin-bottom: 1rem; }
+.judge-tune-rec {
+  border: 1px solid var(--color-accent); border-radius: var(--radius-sm);
+  padding: 0.5rem 0.75rem;
+}
+.judge-tune-rec > .row { margin-bottom: 0; flex-wrap: wrap; row-gap: 0.375rem; }
+.judge-tune-rec details, .judge-tune-history { margin-top: 0.375rem; }
+.judge-tune summary { cursor: pointer; }
+.judge-tune ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: var(--text-sm); }
+/* A query is whatever someone typed: it wraps rather than setting the width of
+   the page, the same as the miss list below. */
+.judge-tune li { overflow-wrap: anywhere; }
+.judge-tune-history { font-size: var(--text-sm); }
+
+.misses { max-width: 52rem; margin-top: 1.25rem; }
 .misses ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: var(--text-sm); }
 /* A query is whatever someone typed, in a monospace list with no spaces to
    break at. It wraps rather than setting the width of the page. */
