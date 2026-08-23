@@ -411,6 +411,13 @@ pub struct Miss {
     pub rank: Option<i64>,
 }
 
+/// A query and the artifact a person said answered it.
+#[derive(Debug, Clone)]
+pub struct JudgedPair {
+    pub query: String,
+    pub expect: String,
+}
+
 impl Store {
     /// The next event to judge: never-skipped first, newest first within that.
     ///
@@ -663,6 +670,38 @@ impl Store {
             rank: r.get("rank"),
         })
         .collect())
+    }
+
+    /// Every judgement that names an answer: the dataset a tuning sweep
+    /// replays, and the same rows `--export-eval` freezes into `pairs.json`.
+    ///
+    /// Gaps and discards are verdicts but not pairs — neither names an
+    /// artifact, so replaying one would be a query the ranking can only fail.
+    pub async fn judged_pairs(&self) -> Result<Vec<JudgedPair>> {
+        Ok(sqlx::query(
+            "SELECT query, expect_id FROM search_events
+             WHERE verdict = 'hit' AND expect_id IS NOT NULL
+             ORDER BY created_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| JudgedPair {
+            query: r.get("query"),
+            expect: r.get("expect_id"),
+        })
+        .collect())
+    }
+
+    /// Verdicts given since `since`. What the day's counter on the judge page
+    /// reads, so it counts the work done rather than the pairs produced.
+    pub async fn judged_since(&self, since: i64) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT count(*) FROM search_events WHERE judged_at >= ?")
+                .bind(since)
+                .fetch_one(&self.pool)
+                .await?,
+        )
     }
 
     /// Drop captured *unjudged* searches older than the window. `0` keeps them
@@ -1390,6 +1429,34 @@ mod tests {
         assert!((s.recall_at_10 - 1.0).abs() < 1e-9);
         // 1/1 and 1/3, averaged.
         assert!((s.mrr - (1.0 + 1.0 / 3.0) / 2.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn the_judged_pairs_are_the_answers_and_only_the_answers() {
+        // What a sweep replays. A gap and a discard are verdicts, and they
+        // count towards the judgement floor, but neither names an artifact:
+        // replayed as a pair, one would be a query the ranking can only fail.
+        let store = Store::memory().await.unwrap();
+        let hit = seed(&store, "the image will not mount", &["a", "b"]).await;
+        store.judge_hit(&hit, "a").await.unwrap();
+        let gap = seed(&store, "nothing about this", &["c"]).await;
+        store.judge(&gap, Verdict::Gap).await.unwrap();
+        let junk = seed(&store, "asdf", &["d"]).await;
+        store.judge(&junk, Verdict::Discard).await.unwrap();
+        seed(&store, "still waiting", &["e"]).await;
+
+        let pairs = store.judged_pairs().await.unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].query, "the image will not mount");
+        assert_eq!(pairs[0].expect, "a");
+
+        // The day's counter reads verdicts, not pairs: judging is the work
+        // being paced, and a gap is judging.
+        assert_eq!(store.judged_since(0).await.unwrap(), 3);
+        assert_eq!(
+            store.judged_since(crate::store::now() + 60).await.unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
