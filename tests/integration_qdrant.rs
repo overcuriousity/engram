@@ -23,6 +23,7 @@ fn cfg(collection: &str) -> VectorConfig {
         recency_half_life_days: 180,
         pinned_boost: 0.15,
         weak_below: 0.35,
+        per_source_cap: 3,
     }
 }
 

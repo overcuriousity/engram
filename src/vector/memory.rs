@@ -705,6 +705,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_weighted_search_is_the_same_search_where_nothing_weighs_age() {
+        // The default implementation ignores the weight, and this store is
+        // what the tuning sweep's tests rank through: a sweep that silently
+        // scored every candidate identically would still pass its own gate.
+        let v = MemoryVectors::new();
+        v.ensure_collection(3).await.unwrap();
+        v.upsert(vec![
+            point("near", "s1", vec![1.0, 0.0, 0.0], &["a"], "procedure"),
+            point("far", "s1", vec![0.0, 0.0, 1.0], &["a"], "procedure"),
+        ])
+        .await
+        .unwrap();
+
+        let plain = v
+            .search(&[1.0, 0.0, 0.0], &Default::default(), 10, &wide())
+            .await
+            .unwrap();
+        let weighted = v
+            .search_weighted(&[1.0, 0.0, 0.0], &Default::default(), 10, &wide(), 0.9)
+            .await
+            .unwrap();
+        assert_eq!(
+            plain
+                .iter()
+                .map(|h| &h.payload.artifact_id)
+                .collect::<Vec<_>>(),
+            weighted
+                .iter()
+                .map(|h| &h.payload.artifact_id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn limit_is_respected() {
         let v = MemoryVectors::new();
         v.ensure_collection(3).await.unwrap();

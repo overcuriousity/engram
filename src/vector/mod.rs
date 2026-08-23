@@ -269,6 +269,24 @@ pub trait VectorStore: Send + Sync {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>>;
+    /// `search`, with the recency weight chosen per call rather than fixed
+    /// when the store was connected.
+    ///
+    /// The default ignores it and delegates: only a store that applies recency
+    /// at all has anything to vary, and the tuning sweep is the one caller that
+    /// needs to — it ranks the same pairs under several weights in one pass, so
+    /// the knob cannot live in the connection.
+    async fn search_weighted(
+        &self,
+        vector: &[f32],
+        sparse: &sparse::SparseVector,
+        limit: usize,
+        filter: &SearchFilter,
+        recency_weight: f32,
+    ) -> Result<Vec<SearchHit>> {
+        let _ = recency_weight;
+        self.search(vector, sparse, limit, filter).await
+    }
     /// Record that these chunks were just shown. Merged into the stored
     /// payload, never written as a whole one. `last_seen_at` is stamped for
     /// every target; `hit_count` only for the ones marked `counts_as_hit`.
