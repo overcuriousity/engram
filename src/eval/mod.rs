@@ -133,6 +133,36 @@ pub fn load_pairs(dir: &Path) -> Result<Vec<EvalPair>> {
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// The artifact ids that satisfy a grade naming `expected`: itself, plus
+/// whatever superseded it.
+///
+/// A graded pair names the artifact that answered the query. When consolidation
+/// merges it into another, or supersedes it in favour of one that plainly
+/// replaced it, the knowledge is in the survivor and search returns that. The
+/// grade is still satisfied; only the id changed.
+///
+/// Bounded rather than trusted to terminate. Chains should not exist — a merge
+/// re-points what it hides, precisely so no reader lands on a hidden winner —
+/// but a sweep that hangs on a cycle in the data is worse than one that stops
+/// looking after a few hops.
+pub async fn satisfied_by(core: &crate::core::Core, expected: &str) -> Vec<String> {
+    let mut out = vec![expected.to_string()];
+    let mut cursor = expected.to_string();
+    for _ in 0..8 {
+        match core.store.get_artifact(&cursor).await {
+            Ok(c) => match c.superseded_by {
+                Some(next) => {
+                    out.push(next.clone());
+                    cursor = next;
+                }
+                None => break,
+            },
+            Err(_) => break,
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
