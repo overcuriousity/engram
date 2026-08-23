@@ -663,9 +663,11 @@ async fn consolidation(
             .store
             .pairs_by_state(PairState::Superseded, 100)
             .await?,
-        // Judge-proposed discards awaiting the same confirmation, listed for
-        // the same reason: a pair the judge found vacuous is a recommendation
-        // it left behind, and without this key it is in no list here at all.
+        // Discards awaiting confirmation, listed for the same reason. Only ever
+        // rows an older base filed: a vacuous verdict is now carried out where
+        // it is found, so nothing new lands here. Emitted regardless — a client
+        // indexing this key breaks on a response that drops it, and the pairs
+        // already in that state are still waiting on the press.
         "discard_proposals": st
             .core
             .store

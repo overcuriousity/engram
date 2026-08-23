@@ -72,9 +72,17 @@ pub enum PairState {
     /// rows left behind back in the queue.
     Oversized,
     /// The judge found that neither artifact states anything — two containers
-    /// rather than two claims. A recommendation to discard both, and nothing
-    /// more: like `Superseded`, an operator confirms it before anything is
-    /// hidden.
+    /// rather than two claims.
+    ///
+    /// Nothing files this any more. It was a recommendation an operator
+    /// confirmed, which left the one answer that clears a pair of empty
+    /// artifacts waiting on a person holding no more evidence than the judge
+    /// had; `jobs::dedupe::discard_both` now retires both sides where the
+    /// verdict is found and settles the pair `Dismissed`, as an applied
+    /// replacement does. Deprecation is reversible, so the undo is the review.
+    ///
+    /// The variant and everything that renders it stay for the rows an older
+    /// base filed, which are still waiting on that press.
     Vacuous,
 }
 
