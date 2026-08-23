@@ -85,6 +85,22 @@ pub fn recommend(base: &[Option<usize>], cand: &[Option<usize>]) -> bool {
         && mrr(cand) >= mrr(base)
 }
 
+/// How many knobs a candidate moves off the running configuration.
+///
+/// The last tie-break, and the reason it has to exist: `grid` is walked
+/// recency-major from `RECENCY[0] = 0.0`, so among candidates whose rank
+/// vectors are identical — the ordinary case, since most judged pairs carry no
+/// recency signal at all — the lowest index wins, and that index is recency
+/// zero. A cap change would then arrive with "recency 0.05 → 0.00" attached to
+/// it, measured by nothing, and applying it would switch recency weighting off
+/// on the strength of a result about caps. `recommend` already promises a knob
+/// that moves nothing keeps its value; this is that promise held among the
+/// candidates rather than only against the base.
+fn moved(cand: RankingParams, current: RankingParams) -> usize {
+    usize::from(cand.recency_weight != current.recency_weight)
+        + usize::from(cand.per_source_cap != current.per_source_cap)
+}
+
 /// One judged pair, with every id that satisfies it already resolved.
 type Pair = (String, Vec<String>);
 
@@ -181,12 +197,14 @@ pub async fn run_sweep(core: &Core) -> Result<()> {
         if !recommend(base, &ranks[cand]) {
             continue;
         }
-        // MRR first, recall as the tie-break: the gate has already refused
-        // anything that costs either, so this only chooses among improvements.
+        // MRR first, then recall: the gate has already refused anything that
+        // costs either, so this only chooses among improvements. Then the
+        // fewest knobs moved, which is what keeps a candidate the measurements
+        // cannot tell apart from claiming credit for the axis it changed.
         let beats = best.is_none_or(|b| {
-            mrr(&ranks[cand]) > mrr(&ranks[b])
-                || (mrr(&ranks[cand]) == mrr(&ranks[b])
-                    && recall_at(&ranks[cand], LIMIT) > recall_at(&ranks[b], LIMIT))
+            let score = |i: usize| (mrr(&ranks[i]), recall_at(&ranks[i], LIMIT));
+            score(cand) > score(b)
+                || (score(cand) == score(b) && moved(grid[cand], current) < moved(grid[b], current))
         });
         if beats {
             best = Some(cand);
@@ -211,6 +229,20 @@ pub async fn run_sweep(core: &Core) -> Result<()> {
             new: *n,
         })
         .collect();
+
+    // An apply can land in the minutes this takes: `Sweeping` keeps two sweeps
+    // apart and nothing else, and `tune_apply` takes the write lock without
+    // asking anyone. The row would name a base that is no longer in force and a
+    // winner measured against it — and being the newest, it would be the
+    // recommendation the page then offers, walking the ranking back off what
+    // the operator just applied. That is the failure "only the newest sweep's
+    // recommendation stands" was written to prevent, arriving by the other
+    // door. A sweep whose baseline moved under it has measured nothing worth
+    // recording; the next verdict pays for one against the settings now running.
+    if *core.ranking.read().expect("ranking lock") != current {
+        tracing::info!("ranking changed while the sweep ran; its results were discarded");
+        return Ok(());
+    }
 
     core.store
         .record_eval_run(&NewEvalRun {
@@ -409,6 +441,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cap_result_does_not_arrive_wearing_a_recency_change() {
+        // The grid is walked recency-major from 0.0, so among candidates whose
+        // rank vectors are identical the lowest index wins — and these pairs
+        // are all the same age, so recency separates nothing. Untie-broken, the
+        // recommendation reads "recency 0.05 → 0.00" beside the cap that
+        // actually earned it, and applying it switches recency weighting off on
+        // the strength of a result about caps.
+        let (core, order) = seeded().await;
+        core.ranking.write().unwrap().recency_weight = 0.05;
+        judge(&core, &order[3]).await;
+        judge(&core, &order[4]).await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert!(run.recommended, "the cap improvement was refused");
+        assert!(
+            run.best_params.per_source_cap.is_some(),
+            "the cap is what this sweep measured"
+        );
+        assert_eq!(
+            run.best_params.recency_weight, 0.05,
+            "the sweep moved a knob nothing it measured had an opinion about"
+        );
+    }
+
+    #[tokio::test]
     async fn a_sweep_with_nothing_better_records_the_silence() {
         // Pairs already answered at the top of the list. Nothing can lift them
         // and a cap can only push the second one down, so the gate refuses
@@ -424,6 +483,60 @@ mod tests {
         assert_eq!(run.base_params, run.best_params);
         assert!(run.diff.is_empty(), "nothing changed, so nothing moved");
         assert!(core.store.open_recommendation().await.unwrap().is_none());
+    }
+
+    /// An apply landing mid-sweep, at a point the sweep cannot miss.
+    ///
+    /// Wall-clock racing would be the honest shape of this and a coin-toss as a
+    /// test. The reranker runs inside every search in the grid — always after
+    /// the baseline has been snapshotted, never before — so hanging the write
+    /// off the first call puts it exactly where `tune_apply`'s would land, on
+    /// every run.
+    struct ApplyOnFirstSearch(std::sync::Arc<std::sync::RwLock<RankingParams>>);
+
+    #[async_trait::async_trait]
+    impl crate::infer::Reranker for ApplyOnFirstSearch {
+        async fn rerank(
+            &self,
+            _query: &str,
+            docs: &[String],
+            top_n: usize,
+        ) -> Result<Vec<(usize, f32)>> {
+            self.0.write().expect("ranking lock").per_source_cap = Some(2);
+            // Scores descending, so the order search already had comes back
+            // unchanged: this is here to write, not to rank.
+            Ok((0..docs.len().min(top_n))
+                .map(|i| (i, 1.0 - i as f32 / 100.0))
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sweep_whose_baseline_was_applied_out_from_under_it_records_nothing() {
+        // The operator judging is the operator clicking Apply, and a sweep over
+        // real pairs runs for minutes. Recorded anyway, the row would be the
+        // newest — so the page would offer a winner measured against settings
+        // that are no longer running, and taking it would undo the apply that
+        // raced it.
+        let (mut core, order) = seeded().await;
+        judge(&core, &order[3]).await;
+        judge(&core, &order[4]).await;
+        let base = *core.ranking.read().unwrap();
+        core.reranker = Some(std::sync::Arc::new(ApplyOnFirstSearch(
+            core.ranking.clone(),
+        )));
+
+        run_sweep(&core).await.unwrap();
+
+        assert_ne!(
+            base,
+            *core.ranking.read().unwrap(),
+            "the apply never landed"
+        );
+        assert!(
+            core.store.latest_eval_run().await.unwrap().is_none(),
+            "a sweep measured against a baseline that is gone was written down anyway"
+        );
     }
 
     #[tokio::test]

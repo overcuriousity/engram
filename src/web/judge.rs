@@ -836,7 +836,21 @@ async fn tune_apply(
     // would have read "nothing happened" about a server that is now running
     // settings its history does not mention.
     match st.core.store.mark_eval_run_applied(&run_id).await {
-        Ok(true) => tune_fragment(&st, "applied — the next search runs with these settings.").await,
+        // The environment is layered over the file, so where one of these keys
+        // is set the write is real and the restart undoes it. Said now, beside
+        // the button, rather than discovered months later as a history claiming
+        // settings the server stopped running at its last boot.
+        Ok(true) => {
+            let line = match crate::config::ranking_keys_in_env().as_slice() {
+                [] => "applied — the next search runs with these settings.".to_string(),
+                keys => format!(
+                    "applied — the next search runs with these settings, but {} is set in the \
+                     environment and will overrule the file at the next restart.",
+                    keys.join(" and ")
+                ),
+            };
+            tune_fragment(&st, &line).await
+        }
         Ok(false) => {
             tune_fragment(
                 &st,

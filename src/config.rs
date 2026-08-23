@@ -1607,6 +1607,31 @@ pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> st
     write_beside_and_rename(path, &doc.to_string())
 }
 
+/// Whichever of the two swept keys the environment is currently setting.
+///
+/// `load` layers `ENGRAM__*` *after* the file, so an operator who set one of
+/// these where the server starts gets that value back on the next boot whatever
+/// was just written — while the tuning history goes on naming settings that
+/// stopped being in force at the restart. The write is still the right thing to
+/// do and the running server does use the new values; what cannot be promised
+/// is that they survive. Saying so is the whole of what is available from here:
+/// the environment belongs to whoever starts the process, and this is a page
+/// with a button on it, not an installer.
+pub fn ranking_keys_in_env() -> Vec<String> {
+    // Read back rather than assumed, and matched without case, because the
+    // config crate lowercases before it compares and an operator's compose file
+    // is under no obligation to shout.
+    std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .filter(|k| {
+            matches!(
+                k.to_ascii_uppercase().as_str(),
+                "ENGRAM__VECTOR__RECENCY_WEIGHT" | "ENGRAM__VECTOR__PER_SOURCE_CAP"
+            )
+        })
+        .collect()
+}
+
 /// Replace `path` with `body` in one step, or leave it exactly as it was.
 ///
 /// `fs::write` truncates and then writes. A crash or a full disk in between
@@ -1619,6 +1644,33 @@ pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> st
 /// and it carries the original's permissions: a config file holding a password
 /// hash or a client secret must not come back world-readable because it was
 /// rewritten.
+/// The temporary file, born with no permissions to spare.
+///
+/// `File::create` opens at `0666 & ~umask` — 0644 on an ordinary host — and
+/// widening it first to narrow it a line later leaves a window in which anyone
+/// on the box may open it. The bytes land after that, but a descriptor is
+/// checked when it is opened and not when it is read, so the window is enough
+/// to walk away with a password hash. The mode is set by the same call that
+/// makes the file, and the copy of the original's permissions still follows:
+/// this decides what the file may never have been, that decides what it ends up
+/// as. Truncating rather than `create_new`, so a `.tmp` left behind by an
+/// earlier crash does not wedge every write after it.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .mode(0o600)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(path)
+}
+
 fn write_beside_and_rename(path: &Path, body: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -1626,7 +1678,7 @@ fn write_beside_and_rename(path: &Path, body: &str) -> std::io::Result<()> {
     let tmp = path.with_file_name(name);
 
     let written = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = create_private(&tmp)?;
         #[cfg(unix)]
         f.set_permissions(std::fs::metadata(path)?.permissions())?;
         f.write_all(body.as_bytes())?;
