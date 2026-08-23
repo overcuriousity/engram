@@ -16,6 +16,15 @@
       <button class="btn btn-sm" hx-post="/ui/judge/tune/{{ r.id }}/apply"
               hx-target="#judge-tune" hx-swap="outerHTML">Apply</button>
     </p>
+    {# Said once, next to the figures it is about. The line above carries an
+       MRR and a recall@10, and so does the header a few lines up: same names,
+       different measurements — one is the ranks the searches actually gave,
+       the other is those searches run again under each setting, on the door
+       that leaves the association step out. Comparing the two would be reading
+       a difference in method as a difference in result. #}
+    <p class="muted hint">Both figures are from the replay, measured against
+      each other. The header's are from the searches themselves — a different
+      count, not a later one.</p>
     {# Open by choice, not by default: the aggregate is the claim and this is
        the evidence, and the evidence is what a knob change has to be judged
        on. Folded so it does not push the card off the screen. #}

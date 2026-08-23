@@ -22,7 +22,7 @@
     <span class="mono muted">{{ p.recent }} in the last 24h · {{ p.pending }} waiting</span>
   </div>
   <div class="progress" role="progressbar" aria-valuenow="{{ p.judged }}"
-       aria-valuemin="0" aria-valuemax="{{ p.target }}">
+       aria-valuemin="{{ p.floor }}" aria-valuemax="{{ p.target }}">
     <span style="width:{{ p.pct }}%"{% if pulse_oob %} class="judge-grow"{% endif %}></span>
   </div>
   {# What the bar is progress *towards*. It counted to fifty and promised

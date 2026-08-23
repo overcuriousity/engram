@@ -1604,7 +1604,42 @@ pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> st
     let weight = (f64::from(p.recency_weight) * 1000.0).round() / 1000.0;
     doc["vector"]["recency_weight"] = toml_edit::value(weight);
     doc["vector"]["per_source_cap"] = toml_edit::value(p.per_source_cap.map_or(0, |n| n as i64));
-    std::fs::write(path, doc.to_string())
+    write_beside_and_rename(path, &doc.to_string())
+}
+
+/// Replace `path` with `body` in one step, or leave it exactly as it was.
+///
+/// `fs::write` truncates and then writes. A crash or a full disk in between
+/// leaves the operator holding a half-written configuration — and since a
+/// configuration that will not parse is refused rather than ignored, a server
+/// that will not start. The file this function exists to preserve byte for
+/// byte would be destroyed by the one failure it is most likely to meet.
+///
+/// The temporary file is a sibling so the rename stays within one filesystem,
+/// and it carries the original's permissions: a config file holding a password
+/// hash or a client secret must not come back world-readable because it was
+/// rewritten.
+fn write_beside_and_rename(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        #[cfg(unix)]
+        f.set_permissions(std::fs::metadata(path)?.permissions())?;
+        f.write_all(body.as_bytes())?;
+        // Before the rename, not after it: a rename that reaches the disk ahead
+        // of the bytes it points at is the same lost file by a slower route.
+        f.sync_all()
+    })();
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+        // Nothing was touched, so the only thing to undo is the temporary file.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 impl Config {
@@ -2225,6 +2260,42 @@ mod tests {
         assert!(out.contains("pinned_boost = 0.15"), "{out}");
         assert!(out.contains("recency_weight = 0.1"), "{out}");
         assert!(out.contains("per_source_cap = 0"), "no cap is written as 0");
+    }
+
+    #[test]
+    fn applying_leaves_no_half_written_file_and_no_widened_permissions() {
+        // `fs::write` truncates and then writes. A crash or a full disk in
+        // between left the operator with an empty configuration and a server
+        // that refuses to start on the next boot — the one file this whole
+        // `toml_edit` approach exists to preserve. Written beside and renamed
+        // over, so it is either the old file or the new one.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, "[vector]\nrecency_weight = 0.05\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let params = crate::core::ranking::RankingParams {
+            recency_weight: 0.1,
+            per_source_cap: Some(2),
+        };
+        write_ranking(&p, &params).unwrap();
+
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "a temporary file was left behind: {left:?}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "a file that may hold a password hash came back readable to everyone"
+            );
+        }
     }
 
     #[test]

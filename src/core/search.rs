@@ -40,6 +40,18 @@ pub struct SearchQuery {
     pub include_superseded: bool,
 }
 
+/// The gate's claim for one search, held for as long as the search runs.
+///
+/// Two shapes because the two lanes are two different things: a lease is a
+/// count that others yield to, a permit is a turn that waits for them. Held in
+/// one binding so the choice is made once, at the top, and released at the same
+/// place either way.
+/// Both are held and never read: what a lane does, it does on the way out.
+enum Lane<'a> {
+    Interactive(#[allow(dead_code)] crate::infer::gate::InteractiveLease),
+    Background(#[allow(dead_code)] crate::infer::gate::BackgroundPermit<'a>),
+}
+
 /// What a search cost, for the faint line under the rail.
 #[derive(Debug, Clone, Copy)]
 pub struct SearchTiming {
@@ -845,7 +857,8 @@ impl Core {
         origin: impl Into<Origin>,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
         let weight = self.ranking.read().expect("ranking lock").recency_weight;
-        self.search_inner(query, cap, weight, origin.into()).await
+        self.search_inner(query, cap, weight, origin.into(), true)
+            .await
     }
 
     /// `search_with`, with every runtime-tunable knob chosen by the caller.
@@ -854,6 +867,11 @@ impl Core {
     /// the live path are one pipeline rather than two that can drift: a sweep
     /// scoring a subtly different search would recommend settings for a program
     /// nobody runs.
+    ///
+    /// The one thing it does differently is the lane. Nobody is waiting on a
+    /// replay of questions that were already answered, and a sweep is thousands
+    /// of searches: on the interactive lane it holds every background worker off
+    /// for the length of the run.
     pub async fn search_with_ranking(
         &self,
         query: &SearchQuery,
@@ -865,16 +883,20 @@ impl Core {
             params.per_source_cap,
             params.recency_weight,
             origin.into(),
+            false,
         )
         .await
     }
 
+    /// `waited_on` is whether a person is on the other end of this search. It
+    /// chooses the lane and nothing else: the pipeline is the same either way.
     async fn search_inner(
         &self,
         query: &SearchQuery,
         cap: Option<usize>,
         recency_weight: f32,
         origin: Origin,
+        waited_on: bool,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
         let door = origin.door;
         if query.q.trim().is_empty() {
@@ -892,7 +914,16 @@ impl Core {
         // lands, and the query then waits out twenty to seventy seconds of it.
         // `ask` takes one too and holds it across this; the lane is a count, so
         // nesting is what it is built for.
-        let _lane = self.gate.interactive();
+        //
+        // Unless nobody is waiting: a sweep is twenty-one searches per judged
+        // pair and hundreds of pairs, so on this lane it is not a query in
+        // front of a worker but a wall in front of every worker, for as long as
+        // the run lasts. It takes the background turn instead — behind whoever
+        // is actually waiting, and never alongside a generation.
+        let _lane = match waited_on {
+            true => Lane::Interactive(self.gate.interactive()),
+            false => Lane::Background(self.gate.background_light().await),
+        };
 
         let started = std::time::Instant::now();
         // Prefixes repeat constantly inside one search and whole queries repeat

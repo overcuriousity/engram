@@ -53,8 +53,12 @@ pub struct Card {
 /// copies of the same dozen fields would drift.
 pub struct Pulse {
     pub judged: i64,
+    /// The judgement count the last sweep ran at, and so where this stretch of
+    /// the bar starts. Zero before the first one.
+    pub floor: i64,
     /// The judgement count the next sweep runs at.
     pub target: i64,
+    /// How far along the stretch between the two, not how far along the count.
     pub pct: i64,
     /// What that target buys, in the words for a first sweep or a later one.
     pub label: &'static str,
@@ -250,19 +254,27 @@ async fn next_pending_card(st: &AppState) -> Result<Option<Card>> {
 /// always agree about when it is due.
 async fn pulse_of(st: &AppState, stats: &Stats, delta: String) -> Result<Pulse> {
     let tune = &st.core.feedback.tune;
-    let (target, label) = match st.core.store.latest_eval_run().await? {
-        None => (tune.min_judgements, "until the first sweep"),
-        Some(last) => (
-            last.judged_count + tune.resweep_after,
-            "until the next sweep",
-        ),
+    let (floor, label) = match st.core.store.latest_eval_run().await? {
+        None => (0, "until the first sweep"),
+        Some(last) => (last.judged_count, "until the next sweep"),
+    };
+    let target = match floor {
+        0 => tune.min_judgements,
+        n => n + tune.resweep_after,
     };
     // A target already passed would draw a bar over 100% and a hint counting
     // backwards; it happens whenever a sweep is queued but has not run yet.
     let target = target.max(stats.judged).max(1);
+    // Against the last sweep rather than against zero. Measured from zero the
+    // bar reads the share of all judgements ever given that have been swept —
+    // which after the first sweep is always nearly all of them, so it stood at
+    // 95% and then 96%, and the one visual the header is built around stopped
+    // saying anything.
+    let span = (target - floor).max(1);
     Ok(Pulse {
         judged: stats.judged,
-        pct: (stats.judged * 100 / target).min(100),
+        pct: ((stats.judged - floor).max(0) * 100 / span).min(100),
+        floor,
         target,
         label,
         recall: format!("{:.2}", stats.recall_at_10),
@@ -683,19 +695,26 @@ fn cap_str(c: Option<usize>) -> String {
 /// Every figure is read off the run rather than recomputed: a number and the
 /// settings that produced it travel together, which is the whole of what the
 /// `eval_runs` row is for.
+///
+/// "Replayed over N pairs" leads the figures rather than trailing them. They
+/// used to end the line, which put `MRR 0.50 → 0.60` immediately under the
+/// header's own MRR with nothing between them — two numbers of one name, one
+/// read from the ranks the searches actually gave and one from a replay of
+/// those searches through a door that skips priming. Neither is wrong; they
+/// are not the same quantity, and side by side they invited being read as one.
 fn describe(run: &crate::store::eval_runs::EvalRun) -> String {
     format!(
-        "recency {:.2} → {:.2}, cap {} → {} · MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}, \
-         over {} pairs",
+        "recency {:.2} → {:.2}, cap {} → {} · replayed over {} pairs: \
+         MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}",
         run.base_params.recency_weight,
         run.best_params.recency_weight,
         cap_str(run.base_params.per_source_cap),
         cap_str(run.best_params.per_source_cap),
+        run.pairs_used,
         run.base_mrr,
         run.best_mrr,
         run.base_recall,
         run.best_recall,
-        run.pairs_used,
     )
 }
 
@@ -777,9 +796,13 @@ async fn tune_apply(
     let Some(run) = st.core.store.eval_run(&run_id).await? else {
         return Err(crate::error::Error::NotFound);
     };
-    // A recommendation that was already taken, or a run that never was one:
-    // both arrive from a stale page, and neither is a reason to write anything.
-    if !run.recommended || run.applied_at.is_some() {
+    // A recommendation that was already taken, a run that never was one, or
+    // one a later sweep has since spoken over: all three arrive from a page
+    // left open, and none is a reason to write anything. Asked of the store
+    // rather than of this row, so what the button may take is exactly what the
+    // page may offer.
+    let open = st.core.store.open_recommendation().await?;
+    if open.as_ref().is_none_or(|o| o.id != run.id) {
         return tune_fragment(
             &st,
             "that sweep is not an open recommendation — nothing was changed.",
@@ -803,8 +826,34 @@ async fn tune_apply(
         .await;
     }
     *st.core.ranking.write().expect("ranking lock") = params;
-    st.core.store.mark_eval_run_applied(&run_id).await?;
-    tune_fragment(&st, "applied — the next search runs with these settings.").await
+    // The stamp is what closes the recommendation, so its answer is the one
+    // thing here that must not be dropped. `false` is the second press of the
+    // same button arriving while the first was still in flight: same run, same
+    // parameters, so the file and the running settings say what this press
+    // would have written anyway — but only one press gets to report a change.
+    // An error is worse than either, and raising it would have answered a 500
+    // to a request that did change the file and the parameters: the operator
+    // would have read "nothing happened" about a server that is now running
+    // settings its history does not mention.
+    match st.core.store.mark_eval_run_applied(&run_id).await {
+        Ok(true) => tune_fragment(&st, "applied — the next search runs with these settings.").await,
+        Ok(false) => {
+            tune_fragment(
+                &st,
+                "that sweep had already been applied — nothing changed.",
+            )
+            .await
+        }
+        Err(e) => {
+            tracing::error!(error = %e, run = %run_id, "applied run not stamped");
+            tune_fragment(
+                &st,
+                "these settings are live and written to config.toml, but the run could not be \
+                 recorded as applied — it may be offered again.",
+            )
+            .await
+        }
+    }
 }
 
 pub fn judge_router() -> Router<AppState> {
@@ -1669,6 +1718,108 @@ mod tests {
             body.contains("the image will not mount"),
             "the moved pair is named by its own query"
         );
+    }
+
+    #[tokio::test]
+    async fn the_page_draws_one_header_and_one_recommendation() {
+        // Both partials are shipped beside the card a verdict returns, and the
+        // page draws both itself. Included unconditionally they rendered a
+        // second time inside `#card`: the whole recommendation twice, and the
+        // lower Apply button swapping the upper copy — so the one the operator
+        // pressed stayed on screen, still offering what had just been taken.
+        let (app, cookie, _core, _run, _) = tune_app(true).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert_eq!(body.matches(r#"id="judge-live""#).count(), 1, "{body}");
+        assert_eq!(body.matches(r#"id="judge-tune""#).count(), 1, "{body}");
+        assert_eq!(body.matches("/apply").count(), 1, "two Apply buttons");
+    }
+
+    #[tokio::test]
+    async fn the_sweeps_figures_are_named_as_a_replay_rather_than_the_headers() {
+        // The line carries an MRR and a recall@10, and so does the header a few
+        // lines above it. Same names, different measurements: one is the ranks
+        // the searches gave, the other is those searches run again under each
+        // setting. Printed bare they read as one quantity moving.
+        let (app, cookie, _core, _run, _) = tune_app(true).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("replayed over 12 pairs"), "{body}");
+        assert!(body.contains("from the replay"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_bar_counts_from_the_last_sweep_rather_than_from_zero() {
+        // Measured from zero it reads the share of every judgement ever given
+        // that has been swept — which after the first sweep is nearly all of
+        // them. It stood at 95%, then 96%, then 98%, and the one visual the
+        // header is built around stopped conveying anything.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        post(
+            &app,
+            &format!("/ui/judge/{}/hit", event.id),
+            &cookie,
+            &format!("artifact_id={}", ids[0]),
+        )
+        .await;
+        let swept_at = core.store.feedback_stats().await.unwrap().judged;
+        record_run_at(&core, swept_at).await;
+
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(
+            body.contains("width:0%"),
+            "the stretch to the next sweep has not started: {body}"
+        );
+        assert!(
+            body.contains(&format!(r#"aria-valuemin="{swept_at}""#)),
+            "the bar starts where the last sweep did: {body}"
+        );
+
+        // One further verdict is one tenth of the ten the next sweep waits for.
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    query: "a second question entirely".into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store.judge_hit(&id, &ids[0]).await.unwrap();
+
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("width:10%"), "{body}");
+    }
+
+    /// A sweep in the store, recorded as having run at `judged`.
+    async fn record_run_at(core: &crate::core::Core, judged: i64) {
+        let params = crate::store::eval_runs::RunParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        core.store
+            .record_eval_run(&crate::store::eval_runs::NewEvalRun {
+                judged_count: judged,
+                pairs_used: 1,
+                pairs_skipped: 0,
+                base: params,
+                base_recall: 0.70,
+                base_mrr: 0.50,
+                best: params,
+                best_recall: 0.70,
+                best_mrr: 0.50,
+                diff: vec![],
+                recommended: false,
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

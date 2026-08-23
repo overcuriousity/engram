@@ -118,17 +118,18 @@ impl Store {
 
     /// The recommendation waiting for an answer, if there is one.
     ///
-    /// Only the newest: an older recommendation was measured against a
-    /// configuration that may since have changed, and offering two at once
-    /// would invite applying the stale one.
+    /// The latest run, and only if that run is itself an open recommendation.
+    /// Selecting the newest *recommended* row instead left every older one
+    /// alive behind it: a sweep recommends X, a later sweep over more evidence
+    /// recommends Y, the operator applies Y — and X, measured against a
+    /// baseline that is no longer in force and already refused by the newer
+    /// evidence, was offered again on the next render. A sweep is the last
+    /// word on what these pairs say, including when what it says is nothing.
     pub async fn open_recommendation(&self) -> Result<Option<EvalRun>> {
-        let row = sqlx::query(
-            "SELECT * FROM eval_runs WHERE recommended = 1 AND applied_at IS NULL
-             ORDER BY created_at DESC, id DESC LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(hydrate).transpose()
+        Ok(self
+            .latest_eval_run()
+            .await?
+            .filter(|r| r.recommended && r.applied_at.is_none()))
     }
 
     pub async fn eval_run(&self, id: &str) -> Result<Option<EvalRun>> {
@@ -256,6 +257,40 @@ mod tests {
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].best_params.per_source_cap, None);
         assert_eq!(applied[0].diff.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_later_sweep_retires_the_recommendation_before_it() {
+        // The stale one used to outlive the fresh one. A sweep recommends X,
+        // more judgements arrive, a second sweep recommends Y, the operator
+        // takes Y — and X came back on the next render, measured against a
+        // baseline no longer in force and already refused by the newer
+        // evidence. Applying it would have walked the ranking backwards.
+        let store = Store::memory().await.unwrap();
+        let old = store.record_eval_run(&sample(true)).await.unwrap();
+        let new = store.record_eval_run(&sample(true)).await.unwrap();
+        assert_eq!(
+            store.open_recommendation().await.unwrap().map(|r| r.id),
+            Some(new.clone())
+        );
+
+        assert!(store.mark_eval_run_applied(&new).await.unwrap());
+        assert!(
+            store.open_recommendation().await.unwrap().is_none(),
+            "the sweep before the applied one was offered again"
+        );
+        // The row is not rewritten — it recorded what it found, and that stays
+        // true. It is simply no longer the last word.
+        let old = store.eval_run(&old).await.unwrap().unwrap();
+        assert!(old.recommended && old.applied_at.is_none());
+
+        // A sweep that found nothing is just as much the last word: it looked
+        // at the same pairs, over more of them, and refused what the one before
+        // it had offered.
+        let quiet = Store::memory().await.unwrap();
+        quiet.record_eval_run(&sample(true)).await.unwrap();
+        quiet.record_eval_run(&sample(false)).await.unwrap();
+        assert!(quiet.open_recommendation().await.unwrap().is_none());
     }
 
     #[tokio::test]

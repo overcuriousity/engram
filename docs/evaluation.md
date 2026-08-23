@@ -175,6 +175,17 @@ per-source cap over every judged pair, against the live index. It needs no
 export, no frozen corpus and no re-embedding: both knobs only reorder what
 retrieval already returned, so a whole grid is seconds of vector reads. Like
 the assign search, it reads and never records — `Door::Judge`, `mark: false`.
+It asks the whole grid about one query before moving to the next, so each query
+is embedded once however many pairs there are, and it takes the background lane
+rather than the interactive one: nobody is waiting on a replay of questions
+that were already answered, and thousands of searches on the fast lane would
+hold every worker off for the length of the run.
+
+Its two figures are a **replay**, not the header's. The counter at the top of
+`/ui/judge` is recall@10 and MRR over the positions the searches actually gave;
+a sweep's are those searches run again, now, under each setting, through a door
+that leaves priming out. Both are honest and neither substitutes for the other
+— read `MRR 0.50 → 0.60` against itself, never against the number above it.
 
 A candidate is offered only when **at least two pairs are net better and
 neither aggregate is worse**. That floor is the whole safety of running it
@@ -183,11 +194,14 @@ and an aggregate delta alone cannot tell one from a real improvement. Ties keep
 the current values.
 
 The recommendation appears on `/ui/judge` with the pairs that moved, and
-applying it rewrites `config.toml` in place — comments intact — and swaps the
-running parameters in one step. Every sweep is recorded in `eval_runs` with the
-settings that produced it, recommended or not, which is section 4's rule about
-never writing a number without its configuration, made structural rather than
-asked for.
+applying it rewrites `config.toml` — beside the file and renamed over it, so a
+crash mid-write leaves the operator's file as it was — and swaps the running
+parameters in one step. Only the newest sweep's recommendation stands: a later
+sweep looked at the same pairs over more evidence, so whatever it says, it says
+last, including when what it says is nothing. Every sweep is recorded in
+`eval_runs` with the settings that produced it, recommended or not, which is
+section 4's rule about never writing a number without its configuration, made
+structural rather than asked for.
 
 What this does **not** replace: the harness below stays the instrument for
 everything a runtime sweep cannot reach — the embedding model and its
