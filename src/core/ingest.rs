@@ -21,18 +21,25 @@ pub const ORIGIN_WEB: &str = "web";
 /// is the whole of what the keep-this-answer door concedes, and a bare literal
 /// in one handler is not where a distinction that load-bearing should live.
 pub const ORIGIN_ASK: &str = "ask";
-/// Longest note kept. Context, not a document: someone wanting to say more
-/// than this has a paste box.
+/// Longest note spent on a vision call. Context, not a document: the note is
+/// the lead line of the describe prompt, and an unbounded one swamps the
+/// description or overruns the request.
+///
+/// It bounds that copy and nothing else. A note is stored whole — it is an
+/// artifact like any other text, and `jobs::embed` cuts an oversize chunk into
+/// siblings rather than losing the tail of it. Truncating on the way in was a
+/// silent amputation with no receipt anywhere: the operator saw a note go in
+/// and had no way to learn that most of it had not.
 pub const MAX_NOTE_CHARS: usize = 2000;
 
-/// The user's context for a capture, cleaned: trimmed, capped, `None` when
-/// there is nothing in it.
+/// The user's context for a capture, cleaned: trimmed, `None` when there is
+/// nothing in it.
 fn clean_note(note: Option<String>) -> Option<String> {
     let n = note?.trim().to_string();
     if n.is_empty() {
         return None;
     }
-    Some(n.chars().take(MAX_NOTE_CHARS).collect())
+    Some(n)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2354,16 +2361,22 @@ mod tests {
         assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
 
+    /// A note is no longer truncated on the way into storage. It is an
+    /// artifact like any other, and `embed::run_with_limit` splits an oversize
+    /// chunk into siblings — so length is the embedder's problem, not a silent
+    /// amputation at the door.
     #[tokio::test]
-    async fn a_note_is_capped_and_a_blank_one_is_dropped() {
-        let core = crate::core::test_support::test_core().await;
+    async fn a_long_note_is_stored_whole_and_a_blank_one_is_dropped() {
+        let core = test_core().await;
         let long = "x".repeat(MAX_NOTE_CHARS + 50);
         let out = core
-            .ingest_capture(Capture::new("some text", "upload").with_note(Some(long)))
+            .ingest_capture(Capture::new("some text", "upload").with_note(Some(long.clone())))
             .await
             .unwrap();
         let src = core.store.get_corpus(&out.id).await.unwrap();
-        assert_eq!(src.metadata["note"].as_str().unwrap().len(), MAX_NOTE_CHARS);
+        assert_eq!(src.metadata["note"].as_str().unwrap(), long);
+        let all = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert_eq!(all[0].text, long, "the artifact keeps every character");
 
         let out = core
             .ingest_capture(Capture::new("other text", "upload").with_note(Some("   ".into())))
