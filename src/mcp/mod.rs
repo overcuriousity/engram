@@ -264,7 +264,11 @@ fn service_config(
 ) -> rmcp::transport::streamable_http_server::StreamableHttpServerConfig {
     use rmcp::transport::streamable_http_server::StreamableHttpServerConfig;
 
-    let mut hosts = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
+    let mut hosts = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
     if let Some(host) = public_host {
         hosts.push(host);
     }

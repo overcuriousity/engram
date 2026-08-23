@@ -4072,7 +4072,10 @@ mod tests {
             .nth(1)
             .expect("the rail's heading");
         assert!(
-            head.split('>').next().unwrap().contains(r#"aria-live="polite""#),
+            head.split('>')
+                .next()
+                .unwrap()
+                .contains(r#"aria-live="polite""#),
             "a search announces nothing: {head}"
         );
     }

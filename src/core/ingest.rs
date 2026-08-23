@@ -2691,7 +2691,11 @@ mod tests {
         core.reprocess(&out.id, Stage::Extract).await.unwrap();
 
         let all = core.store.artifacts_for_corpus(&out.id).await.unwrap();
-        assert_eq!(all.len(), 1, "the reprocess deleted the operator's own note");
+        assert_eq!(
+            all.len(),
+            1,
+            "the reprocess deleted the operator's own note"
+        );
         assert_eq!(all[0].text, "break clause is p.3");
         assert_eq!(
             core.store
