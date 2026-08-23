@@ -254,6 +254,10 @@ async fn card_after(
 ) -> Result<Response> {
     use axum::response::IntoResponse;
     let after = st.core.store.feedback_stats().await?.mrr;
+    // A verdict is what buys the next measurement. Off the request path: the
+    // operator must not wait on a grid of searches, and a sweep that fails
+    // must not fail the verdict that paid for it.
+    crate::eval::sweep::maybe_spawn(&st.core);
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(st).await?,
         flash: Some(Flash {
@@ -579,7 +583,24 @@ mod tests {
         real: usize,
         phantom: &[&str],
     ) -> (axum::Router, String, crate::core::Core, Vec<String>) {
-        let core = crate::core::test_support::test_core().await;
+        // Learning off and the shipped floor: the ordinary judging tests are
+        // never within reach of a sweep and never wait on one.
+        judge_app_tuned(real, phantom, None).await
+    }
+
+    /// `judge_app`, with tuning live and the judgement floor low enough that a
+    /// test can cross it.
+    async fn judge_app_tuned(
+        real: usize,
+        phantom: &[&str],
+        floor: Option<i64>,
+    ) -> (axum::Router, String, crate::core::Core, Vec<String>) {
+        let mut core = crate::core::test_support::test_core().await;
+        if let Some(n) = floor {
+            core.feedback.tune.min_judgements = n;
+            core.learn.enabled = true;
+        }
+        let core = core;
         let src = core
             .store
             .insert_corpus("raw for judging", "web", None)
@@ -1095,6 +1116,70 @@ mod tests {
         let body = body_of(res).await;
         assert!(body.contains("a find"), "the flash did not name it a find");
         assert_eq!(core.store.feedback_stats().await.unwrap().finds, 1);
+    }
+
+    #[tokio::test]
+    async fn a_verdict_past_the_floor_pays_for_a_sweep() {
+        // The loop the whole feature is: a verdict is what buys the next
+        // measurement, so the check rides on the verdict rather than a timer.
+        let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(1)).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        post(
+            &app,
+            &format!("/ui/judge/{}/hit", event.id),
+            &cookie,
+            &format!("artifact_id={}", ids[0]),
+        )
+        .await;
+        core.background.wait_idle().await;
+
+        let run = core.store.latest_eval_run().await.unwrap();
+        assert!(run.is_some(), "the floor was crossed and no sweep ran");
+        assert_eq!(run.unwrap().pairs_used, 1);
+    }
+
+    #[tokio::test]
+    async fn under_the_floor_a_verdict_buys_nothing() {
+        // Below it a sweep would recommend the quirks of a handful of queries
+        // as confidently as a real improvement.
+        let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(50)).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        post(
+            &app,
+            &format!("/ui/judge/{}/hit", event.id),
+            &cookie,
+            &format!("artifact_id={}", ids[0]),
+        )
+        .await;
+        core.background.wait_idle().await;
+
+        assert!(core.store.latest_eval_run().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_second_sweep_waits_for_new_judgements_rather_than_the_clock() {
+        // What makes a re-sweep worth running is new evidence: the same pairs
+        // under the same grid give the same answer, at the cost of a grid of
+        // searches per verdict.
+        let (app, cookie, core, ids) = judge_app_tuned(3, &[], Some(1)).await;
+        for i in 0..2 {
+            let event = core.store.next_pending().await.unwrap();
+            let Some(event) = event else { break };
+            post(
+                &app,
+                &format!("/ui/judge/{}/hit", event.id),
+                &cookie,
+                &format!("artifact_id={}", ids[i]),
+            )
+            .await;
+            core.background.wait_idle().await;
+        }
+
+        let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM eval_runs")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(runs, 1, "one judgement is not ten");
     }
 
     #[tokio::test]
