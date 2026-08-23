@@ -109,7 +109,7 @@
    anyone reads. Same reasoning as `.qtime { display: none }` on a phone,
    applied to the width rather than to the device: the aside is this narrow on
    a laptop too. */
-@container queue (max-width: 30rem) {
+@container queue (width <= 30rem) {
   .qname { flex: 1 0 100%; }
   .qmeta {
     margin-left: 0; display: flex; flex-wrap: wrap; gap: 0.5rem;
@@ -173,7 +173,7 @@
   display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem;
 }
 .decide-sides p { margin: 0.25rem 0 0; font-size: var(--text-sm); color: var(--color-fg-secondary); }
-@container shell (max-width: 60rem) {
+@container shell (width <= 60rem) {
   .decide-sides { grid-template-columns: 1fr; }
 }
 /* The holes, grouped and named by the sweep. */

@@ -24,6 +24,10 @@
 }
 .judge-option:hover { background: var(--color-bg-hover); }
 .judge-option:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+/* `anywhere`, because a snippet is a slice of whatever was captured: a URL, a
+   hash, a German compound. `minmax(0, 1fr)` above stops such a word widening
+   the column; this is what stops it spilling out of the one it is in. */
+.judge-title { font-weight: 500; overflow-wrap: anywhere; }
 /* Still legible, plainly not choosable: the pool is shown at full length so the
    operator can see what the search returned, and a candidate the benchmark
    cannot hold is greyed rather than dropped. */
@@ -34,10 +38,6 @@
 .judge-option-unusable:hover { background: transparent; }
 .judge-option-unusable .judge-title { font-weight: 400; text-decoration: line-through; }
 .judge-key { font-family: var(--font-mono); color: var(--color-fg-muted); font-size: var(--text-sm); }
-/* `anywhere`, because a snippet is a slice of whatever was captured: a URL, a
-   hash, a German compound. `minmax(0, 1fr)` above stops such a word widening
-   the column; this is what stops it spilling out of the one it is in. */
-.judge-title { font-weight: 500; overflow-wrap: anywhere; }
 .judge-snippet {
   grid-column: 2; color: var(--color-fg-secondary); font-size: var(--text-base);
   overflow-wrap: anywhere;

@@ -23,7 +23,7 @@
    one. A media query here would be off by the shell's own padding, which is
    a narrow band of window widths where the list disappears and nothing on the
    page brings it back — the very bug this block exists to prevent. */
-@container shell (max-width: 60rem) {
+@container shell (width <= 60rem) {
   .back {
     display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
     margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
@@ -33,7 +33,7 @@
   .back:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
 }
 
-@media (max-width: 40rem) {
+@media (width <= 40rem) {
   /* ── No container here ────────────────────────────────────────────────
      `container-type: inline-size` computes to `contain: layout style
      inline-size`, and layout containment makes `.shell` the containing block
@@ -43,11 +43,20 @@
      viewport: it scrolled away with the results, which is the opposite of
      what putting it under the thumb is for.
 
-     Dropping the container costs nothing at this width. Both `@container
-     shell (max-width: 60rem)` blocks are unconditionally true on a screen
-     this narrow, so they are restated below as plain rules; the three
-     `min-width: 60rem`/`90rem` blocks never applied here in the first place.
-     Above 40rem the shell is a container again and the queries do the work.
+     Dropping the container costs nothing at this width. Every `@container
+     shell (width <= 60rem)` block is unconditionally true on a screen this
+     narrow, so all of them are restated below as plain rules — `.regions` from
+     20-layout.css, `.decide-sides` from 43-insights.css, and `.back` at the top
+     of this file. The wide-side blocks, `width > 60rem` and `width >= 60rem`
+     and `>= 90rem`, never applied here in the first place. Above 40rem the
+     shell is a container again and the queries do the work.
+
+     Listed by name rather than counted, because a count is what went wrong:
+     this said "both" while there were three, and the one it did not name was
+     `.decide-sides` — so Housekeeping's two sides sat as two prose columns on a
+     390px screen, the one width at which the query that says otherwise cannot
+     fire. A new `width <= 60rem` block anywhere in the sheet belongs in this
+     list and in the rules below.
 
      `container-type: normal` is on `.shell` below, with the rest of what this
      width does to it. The restated rules sit after `.regions-focus` in source
@@ -57,6 +66,7 @@
   .regions > * { grid-column: 1 / -1; }
   .regions.has-selection .region-rail { display: none; }
   .regions.answering .region-rail { order: 1; }
+  .decide-sides { grid-template-columns: 1fr; }
   .back {
     display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
     margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
@@ -131,7 +141,6 @@
      goes on the first keystroke, like everywhere else, and the bar shrinks back
      to the box and the verbs. */
   .regions-rail-focus-source .region-bar .hint,
-  .regions-rail-focus-source .region-bar .facets,
   .regions-rail-focus-source .region-bar .chips,
   .regions-rail-focus-source .region-bar .facet-label,
   .regions-rail-focus-source .region-bar .keyhint,
@@ -175,8 +184,8 @@
      `.box` belongs in this list above all: it is the one control on the phone
      that is always there and always focused, and it is not a `.textarea` —
      it has a rule of its own, so it was not covered by this one. */
-  .box, .input, .textarea, .select { font-size: 1rem; }
-  .input, .select { height: 44px; }
+  .box, .input, .textarea { font-size: 1rem; }
+  .input { height: 44px; }
 
   /* Targets a thumb can hit. */
   /* :not(:has(span)) — a labelled control still needs room for its word;
@@ -184,7 +193,6 @@
   .btn-icon:not(:has(span)) { width: 44px; height: 44px; }
   .btn-icon:has(span) { height: 44px; }
   .chip > span { padding: 8px 12px; font-size: var(--text-sm); }
-  .facet-row { align-items: center; }
 
   /* No scroller inside a scroller: the page is the only thing that scrolls. */
   .rail, .raw { max-height: none; }

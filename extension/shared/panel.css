@@ -8,19 +8,25 @@
  * which is most of what read as "an extension somebody wrote for engram"
  * rather than as engram.
  *
- * Only the tokens the panel actually names are carried. The rest — elevated
- * and overlay surfaces, the warning and info roles, three shadow steps — has
- * no reader here, and a token nothing reads is a second copy of a decision waiting
- * to fall out of step with the first. */
+ * Only the tokens the panel actually names are carried. The rest — the surfaces,
+ * roles, type steps and the mono face that 350 pixels of one column never asks
+ * for — has no reader here, and a token nothing reads is a second copy of a
+ * decision waiting to fall out of step with the first. The app has since applied
+ * the same rule to itself and dropped its overlay surface, its info role and its
+ * shadow scale, none of which it read either.
+ *
+ * `--fg-disabled` is the one token going the other way: the panel's placeholder
+ * text and its disabled button read it, and the app, which does not, no longer
+ * defines it. The value here is the light palette's, unchanged. */
 
 /* Bundled rather than fetched. The deployment serves these at
  * `/assets/fonts/`, but a panel that reaches for them over the network draws
  * in the fallback face on every cold open, announces to that origin each time
  * the panel is opened, and renders in system-ui entirely when engram is
  * unreachable — which is exactly the moment the panel is being read. */
-@font-face { font-family: "Inter"; font-weight: 400; font-display: swap;
+@font-face { font-family: Inter; font-weight: 400; font-display: swap;
   src: url("inter-400.woff2") format("woff2"); }
-@font-face { font-family: "Inter"; font-weight: 500; font-display: swap;
+@font-face { font-family: Inter; font-weight: 500; font-display: swap;
   src: url("inter-500.woff2") format("woff2"); }
 
 :root {
@@ -31,7 +37,6 @@
   --text-base: 0.875rem;
   --text-md: 0.9375rem;
 
-  --radius-sm: 3px;
   --radius-md: 6px;
 
   --bg-base: #f8f6f1;
