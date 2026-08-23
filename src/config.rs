@@ -1584,6 +1584,29 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+/// Write the two runtime-tunable keys back into the file they came from.
+///
+/// An edit to the parsed document rather than a re-serialisation of the whole
+/// configuration: every comment, every blank line and every key this does not
+/// name comes back byte for byte. A file is where an operator explains their
+/// own choices to themselves, and handing it back as a machine's would cost
+/// more than the setting is worth.
+///
+/// A missing file is refused rather than created. The apply path promises that
+/// memory and disk agree, and a configuration invented by the server is one
+/// nobody wrote.
+pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut doc: toml_edit::DocumentMut = text.parse().map_err(std::io::Error::other)?;
+    // Three decimals is the whole resolution the grid has. Widened to f64
+    // verbatim, 0.05 writes as 0.05000000074505806 — the file claiming a
+    // precision the sweep never measured.
+    let weight = (f64::from(p.recency_weight) * 1000.0).round() / 1000.0;
+    doc["vector"]["recency_weight"] = toml_edit::value(weight);
+    doc["vector"]["per_source_cap"] = toml_edit::value(p.per_source_cap.map_or(0, |n| n as i64));
+    std::fs::write(path, doc.to_string())
+}
+
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
         let mut builder = config::Config::builder();
@@ -2175,6 +2198,64 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 5\n"));
         assert_eq!(Config::load(Some(&p)).unwrap().feedback.candidates, 5);
+    }
+
+    #[test]
+    fn applying_a_recommendation_edits_the_file_and_leaves_the_rest_of_it_alone() {
+        // The file is the operator's, not the server's: a rewrite that dropped
+        // their comments would be a worse answer than refusing to write at all.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            "# the note I left myself\n\
+             [vector]\n\
+             url = \"http://localhost:6333\"   # and this one\n\
+             recency_weight = 0.05\n\
+             pinned_boost = 0.15\n",
+        );
+        let params = crate::core::ranking::RankingParams {
+            recency_weight: 0.1,
+            per_source_cap: None,
+        };
+        write_ranking(&p, &params).unwrap();
+
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("# the note I left myself"), "{out}");
+        assert!(out.contains("# and this one"), "{out}");
+        assert!(out.contains("pinned_boost = 0.15"), "{out}");
+        assert!(out.contains("recency_weight = 0.1"), "{out}");
+        assert!(out.contains("per_source_cap = 0"), "no cap is written as 0");
+    }
+
+    #[test]
+    fn a_config_that_is_not_there_is_refused_rather_than_invented() {
+        // A server that writes a configuration nobody wrote is a server with
+        // two authors, and the apply path promises the file and memory agree.
+        let dir = tempfile::tempdir().unwrap();
+        let params = crate::core::ranking::RankingParams {
+            recency_weight: 0.1,
+            per_source_cap: Some(2),
+        };
+        assert!(write_ranking(&dir.path().join("absent.toml"), &params).is_err());
+    }
+
+    #[test]
+    fn a_swept_weight_is_written_at_the_grids_resolution() {
+        // f32 to f64 verbatim writes 0.05000000074505806, which is the file
+        // saying a precision the sweep never had.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, "[vector]\nrecency_weight = 0.15\n");
+        write_ranking(
+            &p,
+            &crate::core::ranking::RankingParams {
+                recency_weight: 0.05,
+                per_source_cap: Some(3),
+            },
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("recency_weight = 0.05"), "{out}");
+        assert!(out.contains("per_source_cap = 3"), "{out}");
     }
 
     #[test]
