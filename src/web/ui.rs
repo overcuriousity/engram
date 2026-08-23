@@ -9875,6 +9875,7 @@ mod tests {
                 pending: crate::auth::oidc::PendingStore::new(),
                 secure_cookies: false,
             }),
+            config_path: std::sync::Arc::new(crate::web::test_support::scratch_config()),
             ask_handoff: Default::default(),
         }
     }

@@ -540,9 +540,64 @@ async fn assign_results(
     .into_response())
 }
 
+// ── Taking a recommendation live ────────────────────────────────────────────
+
+/// The tuning block, redrawn, with a line about what just happened.
+async fn tune_fragment(st: &AppState, line: &str) -> Result<Response> {
+    use axum::response::IntoResponse;
+    let _ = st;
+    Ok(axum::response::Html(format!("<div id=\"judge-tune\">{line}</div>")).into_response())
+}
+
+/// Apply the open recommendation: the file first, then the running parameters,
+/// then the stamp.
+///
+/// The order is the guarantee. A hot swap the file does not carry would vanish
+/// on the next restart, leaving the tuning history claiming a change that is no
+/// longer in force — and the file is the one place an operator can read what
+/// their server is doing.
+async fn tune_apply(
+    State(st): State<AppState>,
+    _id: Identity,
+    Path(run_id): Path<String>,
+) -> Result<Response> {
+    let Some(run) = st.core.store.eval_run(&run_id).await? else {
+        return Err(crate::error::Error::NotFound);
+    };
+    // A recommendation that was already taken, or a run that never was one:
+    // both arrive from a stale page, and neither is a reason to write anything.
+    if !run.recommended || run.applied_at.is_some() {
+        return tune_fragment(
+            &st,
+            "that sweep is not an open recommendation — nothing was changed.",
+        )
+        .await;
+    }
+
+    let params: crate::core::ranking::RankingParams = run.best_params.into();
+    if let Err(e) = crate::config::write_ranking(&st.config_path, &params) {
+        // Said here rather than raised: a read-only config file is an ordinary
+        // thing to find out about, and the operator is looking at the button
+        // they just pressed. Nothing was swapped and nothing was stamped, so
+        // the recommendation stays open and can be applied once the file can
+        // be written.
+        tracing::warn!(error = %e, path = %st.config_path.display(), "config.toml not written");
+        return tune_fragment(
+            &st,
+            "config.toml could not be written, so nothing was applied. \
+             The recommendation is still here.",
+        )
+        .await;
+    }
+    *st.core.ranking.write().expect("ranking lock") = params;
+    st.core.store.mark_eval_run_applied(&run_id).await?;
+    tune_fragment(&st, "applied — the next search runs with these settings.").await
+}
+
 pub fn judge_router() -> Router<AppState> {
     Router::new()
         .route("/ui/judge", get(page))
+        .route("/ui/judge/tune/{run_id}/apply", post(tune_apply))
         .route("/ui/judge/next", get(next_card))
         .route("/ui/judge/{id}/hit", post(hit))
         .route("/ui/judge/{id}/gap", post(gap))
@@ -1180,6 +1235,152 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(runs, 1, "one judgement is not ten");
+    }
+
+    /// An app whose store already holds one recommendation, plus the path to
+    /// the configuration file that app would rewrite.
+    async fn tune_app(
+        recommended: bool,
+    ) -> (
+        axum::Router,
+        String,
+        crate::core::Core,
+        String,
+        std::path::PathBuf,
+    ) {
+        let core = crate::core::test_support::test_core().await;
+        let base = crate::store::eval_runs::RunParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        let best = if recommended {
+            crate::store::eval_runs::RunParams {
+                recency_weight: 0.1,
+                per_source_cap: None,
+            }
+        } else {
+            base
+        };
+        let run = core
+            .store
+            .record_eval_run(&crate::store::eval_runs::NewEvalRun {
+                judged_count: 50,
+                pairs_used: 12,
+                pairs_skipped: 0,
+                base,
+                base_recall: 0.70,
+                base_mrr: 0.50,
+                best,
+                best_recall: 0.80,
+                best_mrr: 0.60,
+                diff: vec![crate::store::eval_runs::DiffRow {
+                    query: "the image will not mount".into(),
+                    base: Some(5),
+                    new: Some(1),
+                }],
+                recommended,
+            })
+            .await
+            .unwrap();
+        let handle = core.clone();
+        let (app, cookie, state) = crate::web::test_support::app_with_state(core).await;
+        let path = state.config_path.as_ref().clone();
+        (app, cookie, handle, run, path)
+    }
+
+    #[tokio::test]
+    async fn applying_writes_the_file_swaps_the_parameters_and_stamps_the_run() {
+        // All three or none: a swap the file does not carry vanishes on
+        // restart, and a stamp without either is a history of things that did
+        // not happen.
+        let (app, cookie, core, run, path) = tune_app(true).await;
+        let status = post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let live = *core.ranking.read().unwrap();
+        assert_eq!(live.recency_weight, 0.1);
+        assert_eq!(live.per_source_cap, None);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("recency_weight = 0.1"), "{written}");
+        assert!(written.contains("per_source_cap = 0"), "{written}");
+        assert!(
+            written.contains("# a comment the apply path must not eat"),
+            "the operator's file came back as a machine's: {written}"
+        );
+
+        assert!(
+            core.store
+                .eval_run(&run)
+                .await
+                .unwrap()
+                .unwrap()
+                .applied_at
+                .is_some()
+        );
+        assert!(core.store.open_recommendation().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_run_that_is_not_an_open_recommendation_changes_nothing() {
+        // Both arrive from a page left open: one was never a recommendation,
+        // the other has already been taken.
+        for second_press in [false, true] {
+            let (app, cookie, core, run, path) = tune_app(second_press).await;
+            let before = std::fs::read_to_string(&path).unwrap();
+            if second_press {
+                assert_eq!(
+                    post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await,
+                    StatusCode::OK
+                );
+            }
+            let live_before = *core.ranking.read().unwrap();
+
+            let status = post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "a stale press is an answer, not a 500"
+            );
+            assert_eq!(*core.ranking.read().unwrap(), live_before);
+            if !second_press {
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_that_does_not_exist_is_a_404() {
+        let (app, cookie, _core, _, _) = tune_app(true).await;
+        assert_eq!(
+            post(&app, "/ui/judge/tune/no-such-run/apply", &cookie, "").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unwritable_config_leaves_the_running_parameters_alone() {
+        // The whole apply or none of it. The recommendation stays open, so it
+        // can be taken once the file can be written.
+        let (app, cookie, core, run, path) = tune_app(true).await;
+        std::fs::remove_file(&path).unwrap();
+        let before = *core.ranking.read().unwrap();
+
+        let status = post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await;
+        assert_eq!(status, StatusCode::OK, "the operator is told, not 500'd");
+
+        assert_eq!(*core.ranking.read().unwrap(), before, "swapped anyway");
+        assert!(
+            core.store
+                .eval_run(&run)
+                .await
+                .unwrap()
+                .unwrap()
+                .applied_at
+                .is_none(),
+            "stamped a change that was never made"
+        );
+        assert!(core.store.open_recommendation().await.unwrap().is_some());
     }
 
     #[tokio::test]

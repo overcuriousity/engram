@@ -257,6 +257,13 @@ async fn main() -> anyhow::Result<()> {
             pending: engram::auth::oidc::PendingStore::new(),
             secure_cookies,
         }),
+        // The path `Config::load` was given, or the name it looks for when it
+        // was given none.
+        config_path: Arc::new(
+            args.config
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("config.toml")),
+        ),
         ask_handoff: Default::default(),
     };
 
