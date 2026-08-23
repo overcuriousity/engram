@@ -73,6 +73,56 @@ pub fn project_3d(vectors: &[Vec<f32>]) -> Vec<[f32; 3]> {
     out
 }
 
+use crate::auth::Identity;
+use crate::error::Result;
+use crate::web::state::AppState;
+use axum::Json;
+use axum::extract::State;
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub struct SampleResponse {
+    pub points: Vec<[f32; 3]>,
+    pub count: usize,
+    /// The client caches a snapshot for this long; carried in the response
+    /// so the config value never needs a second door.
+    pub refresh_secs: u64,
+}
+
+/// The backdrop's one door. A failure answers an empty cloud rather than an
+/// error: the picture is decorative, and a decoration must never take a page
+/// down with it.
+pub async fn sample(
+    State(st): State<AppState>,
+    _id: Identity,
+) -> Result<Json<SampleResponse>> {
+    let cfg = &st.core.ui.background;
+    let empty = || {
+        Json(SampleResponse {
+            points: vec![],
+            count: 0,
+            refresh_secs: cfg.refresh_secs,
+        })
+    };
+    if !cfg.enabled {
+        return Ok(empty());
+    }
+    let sampled = match st.core.vectors.sample(cfg.sample_size).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "vector background sample failed");
+            return Ok(empty());
+        }
+    };
+    let vectors: Vec<Vec<f32>> = sampled.into_iter().map(|(_, v)| v).collect();
+    let points = project_3d(&vectors);
+    Ok(Json(SampleResponse {
+        count: points.len(),
+        points,
+        refresh_secs: cfg.refresh_secs,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
