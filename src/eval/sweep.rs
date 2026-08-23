@@ -253,6 +253,198 @@ async fn sweep_if_due(core: &Core) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::feedback::{Door, NewEvent, Verdict};
+
+    const QUERY: &str = "the image will not mount";
+
+    /// Two sources of three identical, untitled chunks each, and the order the
+    /// uncapped ranking gives them.
+    ///
+    /// Identical within a source so the three tie and the cap is the only
+    /// thing that can separate them; the order is read back rather than
+    /// assumed, because which source leads is a property of the fake
+    /// embedder's hashes and nothing this is testing.
+    async fn seeded() -> (crate::core::Core, Vec<String>) {
+        let core = crate::core::test_support::test_core().await;
+        for (raw, text) in [("raw one", QUERY), ("raw two", "unrelated words")] {
+            let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
+            let new: Vec<crate::store::artifacts::NewArtifact> = (0..3)
+                .map(|i| crate::store::artifacts::NewArtifact {
+                    ordinal: i,
+                    text: text.to_string(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                })
+                .collect();
+            for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
+                crate::jobs::embed::run(&core, &c.id).await.unwrap();
+            }
+        }
+        // The baseline this sweep is measured against: one source may fill the
+        // whole list, so a cap is the improvement available to be found.
+        core.ranking.write().unwrap().per_source_cap = None;
+        let order = ranks_order(&core).await;
+        (core, order)
+    }
+
+    async fn ranks_order(core: &crate::core::Core) -> Vec<String> {
+        let params = *core.ranking.read().unwrap();
+        let q = crate::core::search::SearchQuery {
+            q: QUERY.into(),
+            limit: LIMIT,
+            tags: vec![],
+            category: None,
+            mark: false,
+            include_deprecated: false,
+            include_superseded: false,
+        };
+        core.search_with_ranking(&q, params, Door::Judge)
+            .await
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|r| r.artifact_id)
+            .collect()
+    }
+
+    /// One judged search naming `expect` as its answer.
+    async fn judge(core: &crate::core::Core, expect: &str) {
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    query: QUERY.into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                // Folding off: these are the same query on purpose, and two
+                // pairs are what the gate needs.
+                0,
+            )
+            .await
+            .unwrap();
+        core.store.judge_hit(&id, expect).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_candidate_that_lifts_two_pairs_is_recorded_as_a_recommendation() {
+        let (core, order) = seeded().await;
+        // The second source's first two chunks: buried behind the leading
+        // source uncapped, promoted the moment a cap displaces its tail.
+        judge(&core, &order[3]).await;
+        judge(&core, &order[4]).await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!(run.pairs_used, 2);
+        assert_eq!(run.pairs_skipped, 0);
+        assert!(run.recommended, "a strictly better candidate was refused");
+        assert!(
+            run.best_params.per_source_cap.is_some(),
+            "the improvement here is a cap, and the run must name it"
+        );
+        assert!(run.best_mrr > run.base_mrr);
+        assert_eq!(
+            run.diff.len(),
+            2,
+            "both pairs moved, and the diff is what a person reads"
+        );
+        assert!(
+            run.diff.iter().all(|d| d.new < d.base),
+            "a recommended run's diff must show the pairs climbing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_with_nothing_better_records_the_silence() {
+        // Pairs already answered at the top of the list. Nothing can lift them
+        // and a cap can only push the second one down, so the gate refuses
+        // everything — and the run is still written, so the page can say so.
+        let (core, order) = seeded().await;
+        judge(&core, &order[0]).await;
+        judge(&core, &order[1]).await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert!(!run.recommended);
+        assert_eq!(run.base_params, run.best_params);
+        assert!(run.diff.is_empty(), "nothing changed, so nothing moved");
+        assert!(core.store.open_recommendation().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pair_whose_artifact_is_gone_is_counted_rather_than_scored() {
+        // Housekeeping, not a ranking result. Scored as a miss it would look
+        // like a ranking failure forever; raised it would stop every later
+        // sweep over one deletion.
+        let (core, order) = seeded().await;
+        judge(&core, &order[3]).await;
+        judge(&core, "deleted-since").await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!((run.pairs_used, run.pairs_skipped), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn verdicts_that_name_no_answer_leave_nothing_to_sweep() {
+        // Gaps and discards count towards the floor but are not pairs. With
+        // only those, there is nothing to rank and no run to record.
+        let (core, _) = seeded().await;
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    query: QUERY.into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store.judge(&id, Verdict::Gap).await.unwrap();
+
+        run_sweep(&core).await.unwrap();
+        assert!(core.store.latest_eval_run().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_sweep_leaves_no_trace_in_what_it_measures() {
+        // It replays queries in full knowledge of their answers. Recorded,
+        // those would be captured searches nobody made, waiting to be judged.
+        let (mut core, order) = seeded().await;
+        core.learn.enabled = true;
+        judge(&core, &order[3]).await;
+        judge(&core, &order[4]).await;
+        let before = core.store.feedback_stats().await.unwrap().captured;
+
+        run_sweep(&core).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(
+            core.store.feedback_stats().await.unwrap().captured,
+            before,
+            "the sweep's own searches became data"
+        );
+    }
 
     #[test]
     fn the_gate_needs_two_net_better_pairs_and_no_aggregate_loss() {
