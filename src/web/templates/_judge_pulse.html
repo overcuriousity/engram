@@ -1,40 +1,63 @@
-{# The header's live half, rendered twice: once by the page, once beside the
-   card a verdict returns. Out of band the second time, because the header sits
-   outside the swapped region and would otherwise stand at whatever it read on
-   arrival while the queue was worked down.
+{# The live figures, now inside the card rather than above it.
 
-   Nothing here reacts to *which* verdict was given. What animates is progress
+   They used to be a block of their own at the top of the page, swapped out of
+   band on every verdict. That cost the top third of the screen before a single
+   candidate was readable, and it needed the out-of-band machinery only because
+   it sat outside the region a verdict replaces. Inside the card there is one
+   copy, swapped with everything else, and no `hx-swap-oob` left to keep in
+   step.
+
+   Nothing here reacts to *which* verdict was given. What moves is progress
    towards the next sweep — the work — never agreement with the ranker. The
    flash line above the card is where a judgement is spoken about, and its
    loudness runs the other way on purpose. #}
 {% if let Some(p) = pulse %}
-<div id="judge-live" class="judge-live"{% if pulse_oob %} hx-swap-oob="true"{% endif %}>
-  <div class="row">
-    <span class="mono">{{ p.judged }} judged</span>
-    <span class="spacer"></span>
-    {# The two figures carried no explanation at all: an operator who had not
-       read docs/evaluation.md was working towards numbers nobody had named. #}
-    <span class="mono" title="Of the answers you have confirmed, the share the ranking put in its top ten.">recall@10 {{ p.recall }}</span>
-    <span class="mono{% if !p.delta.is_empty() %} judge-tick{% endif %}"
-          title="Mean reciprocal rank: 1.00 means every confirmed answer came first. An answer search never returned counts as zero.">MRR {{ p.mrr }}</span>
-    {% if !p.delta.is_empty() %}<span class="mono judge-delta">{{ p.delta }}</span>{% endif %}
-    <span class="spacer"></span>
-    <span class="mono muted">{{ p.recent }} in the last 24h · {{ p.pending }} waiting</span>
-  </div>
-  <div class="progress" role="progressbar" aria-valuenow="{{ p.judged }}"
+<div id="judge-live" class="judge-live">
+  {# The bar is an object with a height, not the edge of one.
+
+     `--from` and `--to` are what let it move at all on a server-rendered swap:
+     the element that arrives is a new one, with no previous width to transition
+     away from, so the previous width is sent alongside the current one and the
+     fill is animated between the two. The pale trail goes straight to `--to`,
+     so for the length of the fill's delay the ground just won reads as area
+     rather than as a different endpoint. The notches are what make it a
+     distance instead of a percentage. #}
+  <div class="judge-xp{% if !p.delta.is_empty() %} judge-xp-moved{% endif %}"
+       style="--from:{{ p.pct_prev }}%;--to:{{ p.pct }}%"
+       role="progressbar" aria-valuenow="{{ p.judged }}"
        aria-valuemin="{{ p.floor }}" aria-valuemax="{{ p.target }}">
-    <span style="width:{{ p.pct }}%"{% if pulse_oob %} class="judge-grow"{% endif %}></span>
+    <span class="judge-xp-trail"></span>
+    <span class="judge-xp-fill"></span>
+    <span class="judge-xp-notches"></span>
+    <span class="judge-xp-sheen"></span>
   </div>
-  {# What the bar is progress *towards*. It counted to fifty and promised
+  <p class="judge-xp-read mono">
+    <b>{{ p.judged }}</b> / {{ p.target }} {{ p.label }}
+  </p>
+  {# Said in full only while it has never happened. After the first sweep the
+     operator has seen what one produces — a recommendation on this very page —
+     and a sentence explaining it every time is a sentence between them and the
+     candidates. Before it, nobody has: the bar counted to fifty and promised
      nothing, so reaching it looked like nothing happening. #}
-  <p class="muted hint">{{ p.judged }} / {{ p.target }} {{ p.label }} — a sweep
-    tries other ranking settings over everything you have judged, and offers
-    the ones that score better.</p>
-  <p class="muted mono">
+  {% if p.floor == 0 %}
+  <p class="muted hint">A sweep tries other ranking settings over everything you
+    have judged, and offers the ones that score better.</p>
+  {% endif %}
+  {# The two figures carried no explanation at all: an operator who had not read
+     docs/evaluation.md was working towards numbers nobody had named. #}
+  <p class="judge-figures mono muted">
+    <span title="Of the answers you have confirmed, the share the ranking put in its top ten.">recall@10 {{ p.recall }}</span>
+    ·
+    <span class="{% if !p.delta.is_empty() %}judge-tick{% endif %}"
+          title="Mean reciprocal rank: 1.00 means every confirmed answer came first. An answer search never returned counts as zero.">MRR {{ p.mrr }}</span>
+    {% if !p.delta.is_empty() %}<span class="judge-delta">{{ p.delta }}</span>{% endif %}
+    ·
     <span title="A confirmed answer that search had returned.">{{ p.hits }} hits</span> ·
     <span title="A confirmed answer search never returned. The only evidence that ranking, rather than the base, was at fault.">{{ p.finds }} finds</span> ·
     <span title="Nothing in the base could have answered it.">{{ p.gaps }} gaps</span> ·
-    <span title="Not a real search.">{{ p.discards }} discarded</span>
+    <span title="Not a real search.">{{ p.discards }} discarded</span> ·
+    <span>{{ p.recent }} in the last 24h</span> ·
+    <span>{{ p.pending }} waiting</span>
   </p>
 </div>
 {% endif %}

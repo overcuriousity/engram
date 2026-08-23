@@ -1,95 +1,145 @@
 /* Judging. */
 
-/* ── Judging ─────────────────────────────────────────────────────────────── */
+/* ── The working surface ─────────────────────────────────────────────────────
+   One card, and it holds everything a judgement needs: the query, the figures
+   the judgement moves, the pool, and the three ways out. Nothing above it
+   except what a sweep has to offer, and nothing inside it scrolls except the
+   pool.
 
-/* One card at a time, wide enough to read a snippet without every line
-   wrapping. The options are buttons rather than links: they act, they do not
-   navigate. */
-.judge-header { max-width: 52rem; margin-bottom: 1.25rem; }
-/* Four figures and a spacer between them do not fit across a phone. They wrap
+   That last part is the whole arrangement. The figures used to be a block of
+   their own at the top of the page — a third of the screen of readout before
+   the first candidate — and under them sat twenty candidates at four lines
+   each, with the ways out of the question below all of them. The bar was three
+   pixels of a header nobody had to look at. Now the pool is the only thing with
+   a scrollbar, and it is bounded, so the question and its answers are always on
+   screen together. */
+
+/* ── The deck ───────────────────────────────────────────────────────────────
+   Two sheets behind the card, so a queue of fourteen is a depth and not only a
+   number. They are what moves forward when a card leaves: htmx holds the
+   outgoing content in the document for the length of the swap delay and marks
+   the target `htmx-swapping`, which is long enough for both to transition. */
+.judge-deck { position: relative; }
+.judge-ghost {
+  position: absolute; inset: 0; border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle); background: var(--color-bg-surface);
+  transform-origin: 50% 100%;
+  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 260ms;
+}
+.judge-ghost-2 { transform: translateY(-13px) scale(0.976); opacity: 0.45; }
+.judge-ghost-1 { transform: translateY(-6.5px) scale(0.988); opacity: 0.72; }
+#card.htmx-swapping .judge-ghost-2 { transform: translateY(-6.5px) scale(0.988); opacity: 0.72; }
+#card.htmx-swapping .judge-ghost-1 { transform: none; opacity: 1; }
+
+.judge-card {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-bg-elevated); overflow: hidden;
+  transform-origin: 50% 130%;
+  transition: transform 220ms cubic-bezier(0.55, 0, 0.9, 0.4), opacity 190ms;
+}
+/* Away, and always in the same direction. A card that flew left for one answer
+   and right for another would be saying something about the answer, and this
+   card's whole discipline is that the interface says nothing about the answer
+   until after it is given. Down carries no verdict. */
+#card.htmx-swapping .judge-card {
+  transform: translateY(2.4rem) scale(0.94) rotate(0.45deg); opacity: 0;
+}
+@keyframes judge-enter {
+  from { transform: translateY(-9px) scale(0.985); opacity: 0.45; }
+  to { transform: none; opacity: 1; }
+}
+/* Only on a card a verdict brought in. On a plain fetch it would be the page
+   animating its own load. */
+.judge-card-enter { animation: judge-enter 300ms cubic-bezier(0.22, 1, 0.36, 1) 1; }
+
+.judge-head { padding: 0.85rem 1.1rem 0.7rem; }
+.judge-meta { font-size: var(--text-xs); margin: 0; }
+.judge-query { font-size: var(--text-xl); font-weight: 500; margin: 0.25rem 0 0.8rem; line-height: 1.25; }
+.judge-ask { margin: 0.8rem 0 0; }
+.judge-ask .mono { font-size: var(--text-xs); color: var(--color-fg-muted); }
+
+/* ── The bar ─────────────────────────────────────────────────────────────────
+   An object with a height, under the query, where the work is.
+
+   Three things move on it, and all three are borrowed from the bars games put
+   experience and health in — for the reason those bars are built that way: a
+   quantity that only ever changes its endpoint is hard to notice changing at
+   all.
+
+   · The pale trail goes straight to the new value while the solid fill follows
+     late, so the ground just won reads as area rather than as a number that is
+     now different.
+   · The fill overshoots slightly and settles, so it arrives rather than stops.
+   · A sheen crosses once.
+
+   None of it responds to *what* was judged — only to the fact that something
+   was, which is `Pulse::delta` being non-empty. A bar that celebrated
+   confirmations would be teaching agreement with the ranker it exists to
+   measure, and the flash line above the card already says the informative
+   thing, quietly, in the opposite direction. */
+.judge-live { margin: 0; }
+.judge-xp {
+  position: relative; height: 14px; border-radius: 7px;
+  background: var(--color-bg-active); border: 1px solid var(--color-border-subtle);
+  overflow: hidden;
+}
+.judge-xp > span { position: absolute; inset: 0; border-radius: 7px; }
+.judge-xp-trail { width: var(--to); background: var(--color-accent-muted); }
+.judge-xp-fill {
+  width: var(--to);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-accent) 82%, white) 0%,
+    var(--color-accent) 55%,
+    color-mix(in srgb, var(--color-accent) 84%, black) 100%);
+}
+/* Notches, so the bar is a distance rather than a percentage: ten of them,
+   because the two counts it spans are always round numbers of judgements. */
+.judge-xp-notches {
+  pointer-events: none; opacity: 0.45;
+  background-image: repeating-linear-gradient(
+    90deg, transparent 0 calc(10% - 1px), var(--color-bg-base) calc(10% - 1px) 10%);
+}
+.judge-xp-sheen { pointer-events: none; transform: translateX(-110%); }
+
+@keyframes judge-xp-fill { from { width: var(--from); } to { width: var(--to); } }
+@keyframes judge-xp-sheen { to { transform: translateX(110%); } }
+@keyframes judge-xp-pulse {
+  0% { box-shadow: 0 0 0 0 var(--color-accent-muted); }
+  35% { box-shadow: 0 0 0 5px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+/* `backwards`, so the fill holds where it started for the length of its delay
+   instead of standing at the new value until the animation begins — which is
+   the delay the trail is visible in, and so the whole effect. */
+.judge-xp-moved .judge-xp-fill {
+  animation: judge-xp-fill 620ms 180ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards;
+}
+.judge-xp-moved .judge-xp-sheen { animation: judge-xp-sheen 850ms 200ms ease-out 1; }
+/* Once, and then still. A bar that pulsed continuously would be asking for
+   attention on a page whose actual work is reading. */
+.judge-xp-moved { animation: judge-xp-pulse 700ms ease-out 1; }
+
+.judge-xp-read { margin: 0.45rem 0 0; font-size: var(--text-base); }
+.judge-xp-read b { font-weight: 500; font-size: var(--text-lg); }
+.judge-live .hint { margin: 0.25rem 0 0; }
+/* Four counts, two figures and a delta do not fit across a phone. They wrap
    rather than run off the side — the row is a readout, and a readout that has
    to be scrolled sideways is not one. */
-.judge-header .row { flex-wrap: wrap; }
-.judge-card { max-width: 52rem; }
-.judge-query { font-size: var(--text-lg); font-weight: 500; margin: 0.25rem 0 0.75rem; }
-.judge-options {
-  list-style: none; margin: 0 0 1rem; padding: 0;
-  display: flex; flex-direction: column; gap: 0.375rem;
+.judge-figures {
+  margin: 0.4rem 0 0; font-size: var(--text-sm);
+  display: flex; flex-wrap: wrap; gap: 0 0.4rem;
 }
-.judge-option {
-  display: grid; grid-template-columns: 1.5rem minmax(0, 1fr); gap: 0.125rem 0.5rem;
-  width: 100%; text-align: left; padding: 0.5rem 0.625rem; cursor: pointer;
-  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm);
-  background: var(--color-bg-elevated); color: inherit; font: inherit;
-}
-.judge-option:hover { background: var(--color-bg-hover); }
-.judge-option:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
-/* `anywhere`, because a snippet is a slice of whatever was captured: a URL, a
-   hash, a German compound. `minmax(0, 1fr)` above stops such a word widening
-   the column; this is what stops it spilling out of the one it is in. */
-.judge-title { font-weight: 500; overflow-wrap: anywhere; }
-/* Still legible, plainly not choosable: the pool is shown at full length so the
-   operator can see what the search returned, and a candidate the benchmark
-   cannot hold is greyed rather than dropped. */
-.judge-option-unusable {
-  cursor: not-allowed; opacity: 0.55; background: transparent;
-  border-style: dashed;
-}
-.judge-option-unusable:hover { background: transparent; }
-.judge-option-unusable .judge-title { font-weight: 400; text-decoration: line-through; }
-.judge-key { font-family: var(--font-mono); color: var(--color-fg-muted); font-size: var(--text-sm); }
-.judge-snippet {
-  grid-column: 2; color: var(--color-fg-secondary); font-size: var(--text-base);
-  overflow-wrap: anywhere;
-}
-/* Reading a candidate before confirming it. Indented under its option and
-   quiet, because the snippet answers most of the time and this is the second
-   question, not the first. Capped and scrollable so a long artifact cannot
-   push the other options off the screen. */
-.judge-peek { margin: 0.125rem 0 0 2.125rem; font-size: var(--text-sm); }
-.judge-peek > summary {
-  cursor: pointer; color: var(--color-fg-muted); padding: 0.125rem 0;
-  width: fit-content;
-}
-.judge-peek > summary:hover { color: var(--color-fg-secondary); }
-/* `overflow`, not `overflow-y`: the capped height was the only thing being
-   thought about, and a wide markdown table or an unwrapped code block inside a
-   peek pushed the page instead of scrolling inside the box that caps it. */
-.judge-full { max-height: 22rem; overflow: auto; margin-top: 0.25rem; }
-.judge-full .md { font-size: var(--text-base); }
-/* Sticky, because the three answers sat below every candidate: twenty-three
-   cards at `feedback.candidates` of twenty, and the way out of the question
-   was a scroll past all of them. The shortcuts always worked from anywhere;
-   the bar is what says so. Its own background, or the cards scroll through
-   it. */
-.judge-outs {
-  position: sticky; bottom: 0; z-index: 1;
-  flex-wrap: wrap; row-gap: 0.375rem;
-  margin-bottom: 0; padding: 0.6rem 0;
-  background: var(--color-bg-base);
-  border-top: 1px solid var(--color-border-subtle);
-}
-.judge-undo { margin-left: 0.5rem; }
+.judge-figures [title] { cursor: help; }
 
-/* Read from the ranks the searches actually gave, so it moves on every
-   verdict. It is the measurement, not a score standing in for one. */
-.progress { height: 4px; background: var(--color-bg-active); border-radius: 2px; overflow: hidden; }
-.progress span { display: block; height: 100%; background: var(--color-accent); }
-
-/* The moment after a verdict.
- *
- * Only the figures already on the page respond: the MRR lights once, the delta
- * rises beside it and goes, the bar brightens as it grows. Nothing here reacts
- * to *which* verdict was given — what is being acknowledged is that the work
- * moved, never that the ranker was agreed with. The flash line above the card
- * says what was learned, and it is loudest where the ranking did worst.
- *
- * Every rule is one-shot and cheap, and all of it is skipped for anyone who
- * asked not to be moved. */
-.judge-live { max-width: 52rem; }
+/* The moment after a verdict, on the two figures themselves: the MRR lights
+   once and the delta rises beside it and goes. Both are one-shot and cheap, and
+   all of it is skipped for anyone who asked not to be moved. */
 @keyframes judge-tick {
-  0%   { background: transparent; }
-  20%  { background: color-mix(in srgb, var(--color-accent) 28%, transparent); }
+  0% { background: transparent; }
+  20% { background: color-mix(in srgb, var(--color-accent) 28%, transparent); }
   100% { background: transparent; }
 }
 .judge-tick {
@@ -98,24 +148,142 @@
   padding: 0 0.2rem; margin: 0 -0.2rem;
 }
 @keyframes judge-delta {
-  0%   { opacity: 0; transform: translateY(0.35rem); }
-  18%  { opacity: 1; transform: none; }
-  70%  { opacity: 1; }
+  0% { opacity: 0; transform: translateY(0.35rem); }
+  18% { opacity: 1; transform: none; }
+  70% { opacity: 1; }
   100% { opacity: 0; }
 }
 /* `forwards`, so it ends invisible rather than snapping back for the moment
    before the next swap replaces it. */
 .judge-delta { color: var(--color-accent); animation: judge-delta 2.4s ease-out 1 forwards; }
-@keyframes judge-grow { from { filter: brightness(1.7); } to { filter: none; } }
-.judge-grow { animation: judge-grow 0.7s ease-out 1; }
-@media (prefers-reduced-motion: reduce) {
-  .judge-tick, .judge-delta, .judge-grow { animation: none; }
-  .judge-delta { opacity: 1; }
+
+/* ── The pool ────────────────────────────────────────────────────────────────
+   Bounded and scrolling, and the only thing on the card that does either. All
+   of it is in there: a shortened pool is what would make a verdict mean
+   something it doesn't, and a scrollbar is not a shortening. What the bound
+   buys is that the question above and the three ways out below are on screen
+   at the same time — which the sticky action bar used to approximate, because
+   the page it sat on was twenty-three cards tall. */
+.judge-pool {
+  flex: 1; min-height: 0; max-height: 56vh; overflow: auto;
+  margin: 0 1.1rem; background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm);
 }
+.judge-options {
+  list-style: none; margin: 0; padding: 0.4rem;
+  display: flex; flex-direction: column; gap: 0.35rem;
+}
+/* Three cells: the option, the handle beside it, and the full text under both.
+   The handle is a grid item rather than the last line of the option because a
+   button inside a button is neither valid nor clickable, and it must never be
+   possible to fire a verdict by reaching for something to read. */
+.judge-options > li {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+}
+.judge-options > li:has(.judge-option:hover),
+.judge-options > li:has(.judge-option:focus-visible) { border-color: var(--color-accent-muted); }
+.judge-option {
+  display: grid; grid-template-columns: 1.6rem minmax(0, 1fr); gap: 0.15rem 0.55rem;
+  width: 100%; text-align: left; padding: 0.6rem 0.3rem 0.6rem 0.7rem;
+  border: 0; border-radius: var(--radius-sm); background: transparent;
+  color: inherit; font: inherit; cursor: pointer;
+}
+.judge-option:hover { background: var(--color-bg-hover); }
+.judge-option:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.judge-key {
+  grid-row: 1 / span 2;
+  font-family: var(--font-mono); color: var(--color-fg-muted); font-size: var(--text-sm);
+}
+/* `anywhere`, because a snippet is a slice of whatever was captured: a URL, a
+   hash, a German compound. `minmax(0, 1fr)` above stops such a word widening
+   the column; this is what stops it spilling out of the one it is in. */
+.judge-title { font-weight: 500; overflow-wrap: anywhere; }
+/* Two lines, which is what the old card gave a snippet as well. The clamp is
+   what makes twenty candidates a predictable height instead of a variable one:
+   the snippet is 140 characters and wraps to two lines or three depending on
+   where the words fall, and a pool that changes height by a third from card to
+   card is one the eye has to re-find its place in every time. */
+.judge-snippet {
+  grid-column: 2; color: var(--color-fg-secondary); font-size: var(--text-base);
+  line-height: 1.5; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+/* Still legible, plainly not choosable: the pool is shown at full length so the
+   operator can see what the search returned, and a candidate the benchmark
+   cannot hold is greyed rather than dropped. */
+.judge-dead { opacity: 0.5; background: transparent; border-style: dashed; }
+.judge-option-unusable { cursor: not-allowed; }
+.judge-option-unusable:hover { background: transparent; }
+.judge-option-unusable .judge-title { font-weight: 400; text-decoration: line-through; }
+
+/* Reading a candidate before confirming it. The handle sits in the row: twenty
+   candidates meant twenty lines that each said "Read it in full" and nothing
+   else, which was the most expensive thing on the old card by a wide margin. */
+.judge-peek { display: flex; }
+.judge-peek > summary {
+  display: flex; align-items: center; justify-content: center;
+  width: 2rem; height: 100%; cursor: pointer; list-style: none;
+  color: var(--color-fg-muted); border-left: 1px solid var(--color-border-subtle);
+}
+.judge-peek > summary::-webkit-details-marker { display: none; }
+.judge-peek > summary::after {
+  content: ""; width: 0.42rem; height: 0.42rem;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: translateY(-0.12rem) rotate(45deg); transition: transform 160ms ease;
+}
+.judge-peek > summary:hover { color: var(--color-fg-primary); background: var(--color-bg-hover); }
+.judge-peek[open] > summary::after { transform: translateY(0.06rem) rotate(-135deg); }
+/* Under both cells rather than inside the disclosure, so it can have the width
+   of the row while the handle keeps its own column. htmx swaps into it by
+   `next`, which is exactly the relationship the grid gives them. */
+.judge-full {
+  grid-column: 1 / -1; display: none;
+  padding: 0.2rem 0.9rem 0.7rem 2.9rem;
+  border-top: 1px solid var(--color-border-subtle);
+  /* `overflow`, not `overflow-y`: the capped height was the only thing being
+     thought about, and a wide markdown table or an unwrapped code block inside
+     a peek pushed the row instead of scrolling inside the box that caps it. */
+  max-height: 18rem; overflow: auto;
+  font-size: var(--text-base); color: var(--color-fg-secondary);
+}
+.judge-options > li:has(> .judge-peek[open]) > .judge-full { display: block; }
+.judge-full .md { font-size: var(--text-base); }
+
+/* Inside the card and after the pool, so they are on screen whatever the pool
+   is scrolled to. They used to be sticky, which was the same intent paid for
+   differently: the page was twenty-three cards tall and the way out of the
+   question was a scroll past all of them. */
+.judge-outs {
+  flex-wrap: wrap; row-gap: 0.375rem;
+  margin: 0.7rem 0 0; padding: 0.55rem 1.1rem;
+  border-top: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+}
+.judge-undo { margin-left: 0.5rem; }
+
+/* ── The line after a verdict ────────────────────────────────────────────────
+   The one place on the page that speaks about the judgement, and the emphasis
+   runs opposite to intuition: the better the ranking did, the quieter the line.
+   A rank-one confirmation teaches almost nothing, and an interface that cheers
+   for it is training its operator to agree with whatever was already on top.
+   The tier is decided in `judge::tier`; this is only what each one weighs. */
+.judge-flash {
+  margin: 0 0 0.7rem; padding: 0.3rem 0 0.3rem 0.75rem;
+  font-size: var(--text-base); color: var(--color-fg-secondary);
+}
+.judge-flash-common { opacity: 0.6; }
+.judge-flash-plain { color: var(--color-fg-secondary); }
+/* A find, or a hit the search had buried. The only accent on the page. */
+.judge-flash-rare { color: var(--color-fg-primary); box-shadow: inset 3px 0 0 var(--color-accent); }
+.judge-flash-gap { color: var(--color-fg-primary); box-shadow: inset 3px 0 0 var(--color-warning); }
+.judge-flash-quiet { color: var(--color-fg-muted); }
+
 /* What the sweeps have to say. Accent-bordered because the recommendation is
    the only thing on this page that can be acted on; absent entirely — not
    greyed, not empty — until a sweep has actually run. */
-.judge-tune { max-width: 52rem; margin-bottom: 1rem; }
+.judge-tune { margin-bottom: 0.9rem; }
 .judge-tune-rec {
   border: 1px solid var(--color-accent); border-radius: var(--radius-sm);
   padding: 0.5rem 0.75rem;
@@ -129,7 +297,10 @@
 .judge-tune li { overflow-wrap: anywhere; }
 .judge-tune-history { font-size: var(--text-sm); }
 
-.misses { max-width: 52rem; margin-top: 1.25rem; }
+/* Below the card: references to fall back on between judgements, not things to
+   read before starting one. */
+.judge-asks { margin: 1rem 0 0; font-size: var(--text-sm); }
+.misses { margin-top: 0.75rem; }
 .misses ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: var(--text-sm); }
 /* A query is whatever someone typed, in a monospace list with no spaces to
    break at. It wraps rather than setting the width of the page. */
@@ -139,8 +310,23 @@
 .exif-all { margin-top: 0.75rem; font-size: var(--text-sm); }
 .exif-all summary { cursor: pointer; }
 .exif-all table { margin-top: 0.5rem; }
-/* The line after a verdict. Quiet by design — its job is to say what was just
-   learned, not to congratulate. */
-.judge-flash { margin: 0 0 1rem; font-size: var(--text-base); color: var(--color-fg-secondary); }
 .judge-assign .input { max-width: 32rem; }
 
+/* Every rule above is one-shot and cheap, and all of it is skipped for anyone
+   who asked not to be moved. The bar still shows where it stands; it simply
+   arrives there. */
+@media (prefers-reduced-motion: reduce) {
+  .judge-ghost, .judge-card, .judge-peek > summary::after { transition: none; }
+  .judge-card-enter, .judge-tick, .judge-delta,
+  .judge-xp-moved, .judge-xp-moved .judge-xp-fill,
+  .judge-xp-moved .judge-xp-sheen { animation: none; }
+  .judge-delta { opacity: 1; }
+  #card.htmx-swapping .judge-card { transform: none; opacity: 1; }
+}
+
+/* On a short window the pool gives back first: the card has a floor of its own
+   in the head and the action row, and 56vh of pool under a 200px head is a card
+   taller than a laptop screen. */
+@media (height <= 800px) {
+  .judge-pool { max-height: 44vh; }
+}

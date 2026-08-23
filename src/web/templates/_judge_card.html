@@ -1,23 +1,22 @@
-{# The header, shipped with the card so the figures move as the queue is worked
-   down. Nothing when nothing was judged.
+{# The tuning strip, shipped with the card so a sweep that finished off the
+   request path is reported at the first opportunity.
 
-   Only where they are going out of band, which is only from the fragment
-   routes. The page draws both itself, outside `#card`, and including them
-   unconditionally rendered a second `judge-live` and a second `judge-tune`
-   inside it: the whole recommendation twice, and an Apply button whose swap
-   landed on the first copy while the second went on offering what had just
-   been taken. #}
-{% if pulse_oob %}{% include "_judge_pulse.html" %}{% endif %}
+   Only where it is going out of band, which is only from the fragment routes.
+   The page draws it itself, outside `#card`, and including it unconditionally
+   rendered a second `judge-tune` inside: the whole recommendation twice, and an
+   Apply button whose swap landed on the first copy while the second went on
+   offering what had just been taken. #}
 {% if tune_oob %}{% include "_judge_tune.html" %}{% endif %}
 {% match flash %}
 {% when Some with (f) %}
 {# What the last verdict revealed. Loudest where the ranking did worst: a
    first-position confirmation is the least informative card of the day, and
-   celebrating it would breed agreement rather than judgement. #}
+   celebrating it would breed agreement rather than judgement. The tier classes
+   are what carry that difference now — see `Flash::tier`. #}
 {# Undo sits on the flash because that is where the operator is already looking
    when they realise the digit was wrong. A mislabelled pair is worse than no
    pair: it is scored against the ranker as though it were true. #}
-<p class="judge-flash">{{ f.line }} <span class="mono muted">{{ f.delta }}</span>
+<p class="judge-flash judge-flash-{{ f.tier }}">{{ f.line }} <span class="mono muted">{{ f.delta }}</span>
   {% if let Some(undo_id) = f.undo %}
   <button class="btn btn-ghost btn-sm judge-undo" hx-post="/ui/judge/{{ undo_id }}/undo"
           hx-target="#card" hx-swap="innerHTML">Undo <kbd>U</kbd></button>
@@ -27,85 +26,126 @@
 {% endmatch %}
 {% match card %}
 {% when Some with (c) %}
-<article class="judge-card" data-judge-id="{{ c.id }}">
-  <p class="muted mono">{{ c.when }} · {{ c.door }}</p>
-  <h2 class="judge-query">{{ c.query }}</h2>
-  <p class="muted hint">Which of these was the one you needed?</p>
-  {# Numbered for the keyboard only. The order is a hash of the event id, so it
-     carries no information about how the search ranked them — seeing that would
-     turn judging into agreeing. #}
-  <ol class="judge-options">
-    {% for o in c.choices %}
-    <li>
-      {# Deprecated and superseded artifacts stay in the pool at full length so
-         the operator sees what the search actually returned, but they are
-         disabled: `hit` would refuse them, and a refusal arriving after the
-         keystroke re-renders an identical card with nothing to show which
-         option was the bad one. Said here instead, before the choice. #}
-      <button class="judge-option{% if !o.usable %} judge-option-unusable{% endif %}"
-              {% if o.usable %}
-              hx-post="/ui/judge/{{ c.id }}/hit"
-              hx-vals='{"artifact_id": "{{ o.artifact_id }}"}'
-              hx-target="#card" hx-swap="innerHTML"
-              {% else %}disabled{% endif %}>
-        {# Only the first nine choosable options carry a number. The shortcut is
-           a single digit and `feedback.candidates` is 20 by default, so a badge
-           on the tenth would advertise a key that does nothing; a badge on a
-           disabled one would advertise a key that refuses. The column stays
-           either way so the titles line up. #}
-        <span class="judge-key">{% if let Some(k) = o.key %}{{ k }}{% endif %}</span>
-        {# No heading where there is no name. A verbatim passage has no title
-           by design, and a list of "Untitled" is a column of a word that says
-           nothing where a name would say something — the same reasoning
-           `render_hit` states for the search rail. The snippet below carries
-           the row. #}
-        {% if !o.title.is_empty() %}<span class="judge-title">{{ o.title }}</span>{% endif %}
-        {% if o.usable %}
-        <span class="judge-snippet">{{ o.snippet }}</span>
-        {% else %}
-        <span class="judge-snippet muted">deprecated or superseded — the benchmark can't hold
-          this one, so it can't be the answer</span>
-        {% endif %}
+{# The deck. Two sheets behind the card make the queue a depth rather than a
+   number, and they are the thing that moves forward when a card leaves — which
+   is why they are drawn here and not by the card: they have to still be in the
+   document while the outgoing card is animating off it. #}
+<div class="judge-deck">
+  {% if let Some(p) = pulse %}{% if p.pending > 1 %}
+  <span class="judge-ghost judge-ghost-2" aria-hidden="true"></span>
+  <span class="judge-ghost judge-ghost-1" aria-hidden="true"></span>
+  {% endif %}{% endif %}
+  {# `judge-card-enter` only where a verdict brought this one in. On a plain
+     fetch it would be the page animating its own load. #}
+  <article class="judge-card{% if flash.is_some() %} judge-card-enter{% endif %}"
+           data-judge-id="{{ c.id }}">
+    <div class="judge-head">
+      <p class="judge-meta mono muted">{{ c.when }} · {{ c.door }}</p>
+      <h2 class="judge-query">{{ c.query }}</h2>
+      {% include "_judge_pulse.html" %}
+      <p class="muted hint judge-ask">Which of these was the one you needed?
+        <span class="mono">— {{ c.choices.len() }} candidates, unordered</span></p>
+    </div>
+
+    {# The pool is the only thing on this card that scrolls, and it is bounded
+       so the question and the three ways out of it are always both on screen.
+       The whole pool is in it: shortening the list is what would make a verdict
+       mean something it doesn't, and a scroll inside a box is not a shortening.
+       This is what the sticky action bar used to work around — twenty-three
+       cards' worth of page, with the way out at the bottom of it. #}
+    <div class="judge-pool">
+      {# Numbered for the keyboard only. The order is a hash of the event id, so
+         it carries no information about how the search ranked them — seeing
+         that would turn judging into agreeing. #}
+      <ol class="judge-options">
+        {% for o in c.choices %}
+        {# Deprecated and superseded artifacts stay in the pool at full length so
+           the operator sees what the search actually returned, but they are
+           disabled: `hit` would refuse them, and a refusal arriving after the
+           keystroke re-renders an identical card with nothing to show which
+           option was the bad one. Said here instead, before the choice. #}
+        <li{% if !o.usable %} class="judge-dead"{% endif %}>
+          <button class="judge-option{% if !o.usable %} judge-option-unusable{% endif %}"
+                  {% if o.usable %}
+                  hx-post="/ui/judge/{{ c.id }}/hit"
+                  hx-vals='{"artifact_id": "{{ o.artifact_id }}"}'
+                  hx-target="#card" hx-swap="innerHTML swap:220ms"
+                  {% else %}disabled{% endif %}>
+            {# Only the first nine choosable options carry a number. The shortcut
+               is a single digit and `feedback.candidates` is 20 by default, so a
+               badge on the tenth would advertise a key that does nothing; a badge
+               on a disabled one would advertise a key that refuses. The column
+               stays either way so the titles line up. #}
+            <span class="judge-key">{% if let Some(k) = o.key %}{{ k }}{% endif %}</span>
+            {# No heading where there is no name. A verbatim passage has no title
+               by design, and a list of "Untitled" is a column of a word that says
+               nothing where a name would say something — the same reasoning
+               `render_hit` states for the search rail. The snippet below carries
+               the row. #}
+            {% if !o.title.is_empty() %}<span class="judge-title">{{ o.title }}</span>{% endif %}
+            {% if o.usable %}
+            <span class="judge-snippet">{{ o.snippet }}</span>
+            {% else %}
+            <span class="judge-snippet muted">deprecated or superseded — the benchmark can't hold
+              this one, so it can't be the answer</span>
+            {% endif %}
+          </button>
+          {% if o.usable %}
+          {# A hundred and forty characters is enough to recognise an artifact and
+             not enough to be sure of one, and the click after it is a line in the
+             dataset. Fetched on first open and kept: reading two candidates and
+             comparing them is exactly the case this exists for.
+
+             The handle sits in the row instead of on a line of its own beneath
+             it. Twenty candidates meant twenty "Read it in full" lines, which was
+             the single most expensive thing on the old card — a whole row each,
+             to say the same six words twenty times.
+
+             Outside the option rather than inside it — a button within a button
+             is neither valid nor clickable — so opening this can never fire a
+             verdict. The text lands in the sibling below rather than inside the
+             disclosure, so it can span the row while the handle stays in its
+             column. #}
+          <details class="judge-peek" hx-get="/ui/judge/read/{{ o.artifact_id }}"
+                   hx-trigger="toggle once" hx-target="next .judge-full"
+                   hx-swap="innerHTML">
+            <summary title="Read it in full" aria-label="Read it in full"></summary>
+          </details>
+          <div class="judge-full"><span class="muted">loading…</span></div>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+    </div>
+
+    {# `data-key` is what the shortcut binds to. By position it bound to whatever
+       button happened to sit at that index, and the assign screen's row is a
+       different row: N there was an immediate gap verdict. #}
+    <div class="row judge-outs">
+      {# Not a verdict yet: it opens the search for what should have answered.
+         Only if nothing there fits does it become a gap. #}
+      <button class="btn btn-ghost btn-sm" data-key="n"
+              hx-get="/ui/judge/{{ c.id }}/assign"
+              hx-target="#card" hx-swap="innerHTML">
+        None of these <kbd>N</kbd>
       </button>
-      {# A hundred and forty characters is enough to recognise an artifact and
-         not enough to be sure of one, and the click after it is a line in the
-         dataset. Fetched on first open and kept: reading two candidates and
-         comparing them is exactly the case this exists for. Outside the
-         option rather than inside it — a button within a button is neither
-         valid nor clickable — so opening this can never fire a verdict. #}
-      <details class="judge-peek" hx-get="/ui/judge/read/{{ o.artifact_id }}"
-               hx-trigger="toggle once" hx-target="find .judge-full"
-               hx-swap="innerHTML">
-        <summary>Read it in full</summary>
-        <div class="judge-full"><span class="muted">loading…</span></div>
-      </details>
-    </li>
-    {% endfor %}
-  </ol>
-  {# `data-key` is what the shortcut binds to. By position it bound to whatever
-     button happened to sit at that index, and the assign screen's row is a
-     different row: N there was an immediate gap verdict. #}
-  <div class="row judge-outs">
-    {# Not a verdict yet: it opens the search for what should have answered.
-       Only if nothing there fits does it become a gap. #}
-    <button class="btn btn-ghost btn-sm" data-key="n"
-            hx-get="/ui/judge/{{ c.id }}/assign"
-            hx-target="#card" hx-swap="innerHTML">
-      None of these <kbd>N</kbd>
-    </button>
-    <button class="btn btn-ghost btn-sm" data-key="s"
-            hx-post="/ui/judge/{{ c.id }}/skip"
-            hx-target="#card" hx-swap="innerHTML">
-      Can't remember <kbd>S</kbd>
-    </button>
-    <span class="spacer"></span>
-    <button class="btn btn-ghost btn-sm" data-key="x"
-            hx-post="/ui/judge/{{ c.id }}/discard"
-            hx-target="#card" hx-swap="innerHTML">
-      Not a real search <kbd>X</kbd>
-    </button>
-  </div>
-</article>
+      <button class="btn btn-ghost btn-sm" data-key="s"
+              hx-post="/ui/judge/{{ c.id }}/skip"
+              hx-target="#card" hx-swap="innerHTML swap:220ms">
+        Can't remember <kbd>S</kbd>
+      </button>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" data-key="x"
+              hx-post="/ui/judge/{{ c.id }}/discard"
+              hx-target="#card" hx-swap="innerHTML swap:220ms">
+        Not a real search <kbd>X</kbd>
+      </button>
+    </div>
+  </article>
+</div>
 {% when None %}
+{# The figures outlive the queue: what has been judged is still worth reading
+   when there is nothing left to judge. #}
+{% include "_judge_pulse.html" %}
 <p class="muted">Nothing to judge. <a href="/ui/search">Back to search.</a></p>
 {% endmatch %}
