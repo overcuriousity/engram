@@ -245,19 +245,31 @@
     }
 
     // One act in flight. From the press of Ask until the answer lands, the box
-    // and both verbs are disabled and only Stop is live.
+    // is read-only, both verbs are disabled and only Stop is live.
     //
-    // Disabling the box is what disables search-while-type: a disabled input
-    // fires no `keyup`, so the form's `hx-trigger` goes quiet on its own —
-    // there is no second mechanism and no flag to keep in sync with this one.
+    // Read-only rather than disabled, which is what it was. `disabled` is the
+    // one state that also makes text unselectable and hands focus back to the
+    // body, so the question being answered could not be copied out of the box
+    // holding it — while the CSS went to the trouble of keeping that text
+    // legible, on the grounds that a box someone is waiting on is still a box
+    // someone is reading. Read-only keeps the caret, the selection and the
+    // focus, and silences search-while-type just as completely: nothing can be
+    // typed or pasted into it, so no `input` is fired and the form's
+    // `hx-trigger` goes quiet on its own — there is no second mechanism and no
+    // flag to keep in sync with this one.
+    //
+    // The one thing `disabled` did that this does not is drop `q` from the
+    // serialization. That was never what kept a stray request honest anyway;
+    // `configRequest` below is, and it cancels every request this form makes
+    // while the ask owns it.
     //
     // The re-enable lives in `stop()` and nowhere else, because every exit
     // already runs through it: the answer completing, the Stop button, and the
     // transport error that `fail()` funnels into it. That last one is the
     // reason it cannot live on the `done` handler — a dropped connection would
-    // leave the box disabled forever, with no way back but a reload.
+    // leave the box read-only forever, with no way back but a reload.
     function setBusy(busy) {
-      box.disabled = busy;
+      box.readOnly = busy;
       form.setAttribute('aria-busy', busy ? 'true' : 'false');
       var vs = form.querySelectorAll('[data-verb]');
       for (var i = 0; i < vs.length; i++) vs[i].disabled = busy;
@@ -284,13 +296,15 @@
       }, 1000);
     }
 
-    // No search leaves this form while an ask owns the page. Disabling the
-    // box silences its `keyup`, but not a debounce timer that armed just
-    // before Ask was pressed, and not the "← results" anchor firing
-    // `submit` — and a disabled control serializes nothing, so either one
-    // sent `q` empty and swapped the idle rail over the citations the answer
-    // was being written from. `configRequest` is cancelable and is the one
-    // gate every htmx request from this form passes through.
+    // No search leaves this form while an ask owns the page. A read-only box
+    // fires no `input`, but that silences neither a debounce timer that armed
+    // just before Ask was pressed nor the "← results" anchor firing `submit`,
+    // and either one swapped the idle rail over the citations the answer was
+    // being written from. It matters more since the box stopped being
+    // `disabled`: `q` now serializes while the ask runs, so a request that got
+    // out would search for the question instead of sending it empty — a live
+    // rail either way. `configRequest` is cancelable and is the one gate every
+    // htmx request from this form passes through.
     form.addEventListener('htmx:configRequest', function (e) {
       if (form.getAttribute('aria-busy') === 'true') e.preventDefault();
     });
@@ -835,7 +849,10 @@
       for (var i = 0; i < buttons.length; i++) {
         buttons[i].disabled = buttons[i].getAttribute('data-verb') === 'capture'
           ? !(hasText || hasFile)
-          : !hasText;
+          // A staged file has made the box that file's note. Asking a note is
+          // not a thing to do, and the answer would land beside a file the
+          // question was never about.
+          : (!hasText || hasFile);
       }
     }
 
@@ -846,15 +863,87 @@
     // This is not the box changing shape on its own in the sense the panel
     // rules out: it never becomes a different control, and it never decides
     // what the words in it are for. It only stops hiding them.
+    //
+    // The padding and the border have to be added back, and leaving them out
+    // was worth two pixels of permanent scroll. `.box` is `border-box`, so the
+    // height set here is the outside of the element, while `scrollHeight` is
+    // the inside — content and padding, never the 1px border on each edge. The
+    // box therefore ended two pixels shorter than the text it was measured
+    // from, every time, and with `overflow-y: auto` above it that is a live
+    // scrollbar on a box that has nothing to scroll. The cap is the other half
+    // of the same mistake: ten lines of text plus the padding they sit in, or
+    // the tenth line is the one the padding eats.
     var CAP = 10;
     function grow() {
       box.style.height = 'auto';
-      var line = parseFloat(getComputedStyle(box).lineHeight) || 20;
-      box.style.height = Math.min(box.scrollHeight, line * CAP) + 'px';
+      var css = getComputedStyle(box);
+      var line = parseFloat(css.lineHeight) || 20;
+      var pad = parseFloat(css.paddingTop) + parseFloat(css.paddingBottom);
+      var border = box.offsetHeight - box.clientHeight;
+      box.style.height =
+        Math.min(box.scrollHeight - pad, line * CAP) + pad + border + 'px';
     }
 
     box.addEventListener('input', function () { sync(); grow(); });
-    box.addEventListener(VERB_SYNC, function () { sync(); grow(); });
+    box.addEventListener(VERB_SYNC, function () { sync(); grow(); fitPlaceholder(); });
+
+    // The height is a measurement of wrapped text, and text re-wraps whenever
+    // the box changes width. Bound to `input` alone it was only ever correct
+    // for the width the last keystroke was typed at: narrow the window, or turn
+    // a phone, and a paragraph that grew to four lines is still four lines tall
+    // with six lines in it — clipped, scrolling, and no key coming to fix it.
+    window.addEventListener('resize', grow);
+    // Inter loads with `font-display: swap`, so the first measurement is of the
+    // fallback face and the swap re-wraps everything under a height nothing
+    // will recompute — the box is not typed into before it is read.
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(grow);
+
+    // The two verbs, without a pointer. This is not the box inferring one from
+    // a newline — the rule it is built on and keeps: Enter puts in a line
+    // break here and always will. The chord is a second, deliberate gesture,
+    // the same act as the button and no more ambiguous, and without it the one
+    // hand that reached the box with `/` had no way back out of it.
+    //
+    // Routed through the button rather than the handler behind it, so that
+    // everything the button already knows goes on being true: an empty box or
+    // an ask in flight leaves it disabled, and a disabled verb does nothing
+    // here either. Where the install has no Ask, there is no button and the
+    // unshifted chord is simply not a key.
+    box.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey) return;
+      var verb = form.querySelector(
+        '[data-verb="' + (e.shiftKey ? 'capture' : 'ask') + '"]');
+      if (!verb || verb.disabled) return;
+      e.preventDefault();
+      verb.click();
+    });
+
+    // The long placeholder names all three verbs, which is what the box needs
+    // said and what the phone has no room for: one row at that width clips it
+    // around the thirtieth character, and the hint that would have carried the
+    // rest is `display: none` there. Read off the element rather than branched
+    // on in the template, because app.js is one file for every installation —
+    // the same reason `data-eager` exists below. Bound to the query, not read
+    // once, so a rotation is not a sentence that stays cut in half.
+    var narrow = window.matchMedia('(max-width: 40rem)');
+    var wide = box.placeholder;
+    var short = box.getAttribute('data-placeholder-narrow') || wide;
+    // And a third, for when the box is not a query box at all: a staged file
+    // makes it that file's note. Asked here rather than written from
+    // `stage()`, because this function owns the placeholder and re-runs on
+    // every rotation — set from outside, the note's prompt would survive until
+    // the first turn of the phone and then be replaced by a search hint over
+    // an annotation half typed. Short enough for either width.
+    var NOTE_HINT = 'What is it, why keep it?';
+    function fitPlaceholder() {
+      var stagedEl = document.getElementById('staged');
+      box.placeholder = stagedEl && !stagedEl.hidden
+        ? NOTE_HINT
+        : (narrow.matches ? short : wide);
+    }
+    narrow.addEventListener('change', fitPlaceholder);
+    fitPlaceholder();
+
     sync();
     grow();
   }
@@ -890,18 +979,29 @@
 
     var drop = document.getElementById('drop');
     var picker = drop && drop.querySelector('input[type=file]');
-    var noteBox = document.querySelector('input[name="note"]');
     // Same reason as EAGER: read off the picker the server rendered, which
     // names `image/*` only where `[infer.vision]` is configured.
     var VISION = !!picker && (picker.getAttribute('accept') || '').indexOf('image/*') >= 0;
 
     // ── What is waiting to be sent ────────────────────────────────────────
     // A file arriving is not a capture. It is held here until Capture is
-    // pressed, so the note beside it can be written and the wrong photo can be
-    // removed — on a phone the camera hands the picture back the moment it is
-    // taken, and uploading on arrival meant the operator never got a say.
+    // pressed, so the note can be written into the box above it and the wrong
+    // photo can be removed — on a phone the camera hands the picture back the
+    // moment it is taken, and uploading on arrival meant the operator never
+    // got a say.
     var staged = null, stagedUrl = null;
     var stagedBox = document.getElementById('staged');
+
+    // The box is that file's note while one is staged, and typing an
+    // annotation into a live search box is an embedding call, an activation
+    // bump and a Judge-queue row per phrase — for text nobody asked as a
+    // question. Cancelling the form's own requests rather than rewriting its
+    // `hx-trigger`: the trigger is the template's to say, and this holds
+    // whatever it says. Capture does not go through the form, and Ask is
+    // disabled in `boxVerbs` while a file waits.
+    form.addEventListener('htmx:beforeRequest', function (e) {
+      if (staged) e.preventDefault();
+    });
     var stagedName = document.getElementById('staged-name');
     var stagedThumb = document.getElementById('staged-thumb');
     var stagedClear = document.getElementById('staged-clear');
@@ -928,11 +1028,14 @@
     }
 
     // `restore` is the failed upload coming back: the same file, already
-    // described, and no reason to reach for the note a second time.
-    // Where a capture answers. One press can be two captures — a staged file
-    // and the text above it — and both used to write this node whole: whichever
-    // request landed last wiped the other's line, an upload's error included.
-    // A line each, cleared once per press.
+    // described, and no reason to take the caret off the note a second time.
+    //
+    // Where a capture answers. A press was once two captures — a staged file
+    // and the text above it, which is now that file's note — and both wrote
+    // this node whole: whichever request landed last wiped the other's line,
+    // an upload's error included. A line each, cleared once per press. One
+    // press writes one line now, and the appending swap below is what keeps
+    // that true rather than what makes it necessary.
     function receipt() {
       var host = document.getElementById('capture-result');
       var slot = document.createElement('p');
@@ -973,15 +1076,13 @@
       // paste box and the search box already follow. On a phone this would
       // throw the software keyboard over the thumbnail the operator is
       // checking, which is the picture they just took.
-      if (noteBox && !restore && window.matchMedia('(hover: hover)').matches) {
-        noteBox.focus();
-      }
+      if (!restore && window.matchMedia('(hover: hover)').matches) box.focus();
       // A file over an empty box is still something Capture can act on. See
       // `sync` in boxVerbs, which listens for this.
       box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
     }
 
-    function send(file) {
+    function send(file, note) {
       if (!file) return;
       var isImage = file.type.indexOf('image/') === 0;
       // By name as well as by type: a drop from some file managers carries no
@@ -997,7 +1098,7 @@
       // sends and pressing Capture looked like it had done nothing.
       result.textContent = 'Sending…';
       var payload = new FormData();
-      if (noteBox && noteBox.value.trim()) payload.append('note', noteBox.value.trim());
+      if (note) payload.append('note', note);
       // The fallback name matters: a PDF that arrived unnamed and went up as
       // `paste.txt` would be refused by the very door it belongs to.
       var fallbackName = isImage ? 'photo.jpg' : (isPdf ? 'capture.pdf' : 'paste.txt');
@@ -1026,7 +1127,10 @@
                : 'Captured.')
             : (pair[1].error || 'Upload failed.');
           if (pair[0]) {
-            if (noteBox) noteBox.value = '';
+            // The note went in with the file. The box is a search box again
+            // and holding the words it sent is not that.
+            box.value = '';
+            box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
             refreshRail();
           } else {
             // It never left. Put it back where it was, so the fix is a second
@@ -1155,12 +1259,22 @@
     verb.addEventListener('click', function (e) {
       e.preventDefault();
       clearReceipts();
-      var file = null;
-      if (staged) { file = staged; unstage(); }
-      // Never both in flight. They write the same node, and a failed swap
-      // empties it — so the upload's line is written last, or a text capture
-      // that fails takes the photo's receipt down with it.
-      postText().then(function () { if (file) send(file); });
+      // A staged file is one capture, annotated — never two. The box is read
+      // here, at press time, which is what makes the order the file and the
+      // words arrived in stop mattering: nothing moved when the file was
+      // staged, and nothing moves now but this read.
+      //
+      // `from_ask` needs no guard: `postText` is its only sender, and a staged
+      // file no longer reaches it. A whole model answer turned into a caption
+      // on somebody's PDF is not what that provenance claims.
+      if (staged) {
+        var file = staged;
+        var note = box.value.trim();
+        unstage();
+        send(file, note);
+        return;
+      }
+      postText();
     });
     // A pasted screenshot goes the same way as a dropped one — unless the
     // paste is on its way somewhere that takes text. A clipboard from Sheets,
@@ -1360,8 +1474,10 @@
       // The box is a textarea, and has been since the three pages became one.
       // `select()` because `/` means "start a new query", not "append to the
       // last one" — the same as it always did.
+      // `readOnly` while an ask is in flight, and focusing it then would put a
+      // caret in a box that cannot take the query `/` promised to start.
       var q = document.querySelector('textarea[name="q"]');
-      if (q && !q.disabled) { e.preventDefault(); q.focus(); q.select(); }
+      if (q && !q.readOnly) { e.preventDefault(); q.focus(); q.select(); }
       return;
     }
     if (e.key === 'Escape') {

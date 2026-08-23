@@ -4,13 +4,28 @@
 {% block content %}
 <div class="region-bar">
 {# One form around the box and the chips, so a chip carries the query with it
-   and the query carries the chips. `change` fires for the chips, `keyup` only
+   and the query carries the chips. `change` fires for the chips, `input` only
    for the box: a radio does not need a debounce and the box does. `change` is
    scoped to the chip row because it bubbles, and the box fires its own on blur
    — which is fired by the very click that opens a result, so an unscoped
    `change` replaced the list out from under the pointer and the first click on
    a result did nothing at all. The selector has to be one word: htmx reads
    `from:` up to the first space. `submit` is listed so htmx cancels it.
+
+   `input` rather than `keyup`, and that is the difference between a box that
+   searches and one that only sometimes does. A paste made with the mouse — the
+   context menu, the middle button, the phone's own bubble — fires no key at
+   all, and with `change` scoped away to the chips for the reason above there
+   was nothing left to notice it: the box grew, the verbs lit up, and the rail
+   under a pasted paragraph did not move. On a page whose placeholder ends
+   "paste anything worth keeping", that was the hole. `input` also covers text
+   dropped into the box and an autofill, and like `keyup changed` it stays
+   quiet for a key that changed no text.
+
+   `[!event.isComposing]` because `input` fires for every keystroke inside an
+   IME composition too, and a Japanese or Chinese query would embed each
+   half-formed romaji fragment on the way to the word. The filter waits for the
+   commit, which fires an `input` of its own with the flag already cleared.
 
    120ms rather than 250. A quarter second is a pause you can feel between a
    phrase and its answer, and the query path is the same work either way: one
@@ -31,7 +46,7 @@
 <form id="box-form" hx-get="/ui/search/results" hx-target="#results" hx-swap="innerHTML"
       hx-sync="this:replace"
       hx-trigger="change from:#kind-chips,
-                  keyup changed delay:120ms from:textarea[name=q],
+                  input[!event.isComposing] changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() && open_with.is_empty() %},
                   load{% endif %}"
       hx-params="q,category"
@@ -48,9 +63,24 @@
      The placeholder names all three verbs because the box does all three. A
      query is embedded whole, so a sentence carries more signal than the two
      nouns from it a reader would otherwise type — and the hint below survives
-     the first keystroke, which the placeholder does not. #}
+     the first keystroke, which the placeholder does not.
+
+     `aria-label` as well, because a placeholder is not a name: a screen reader
+     is free to ignore it as one, and it is gone by the second keystroke. The
+     one control this whole page is built around announced itself as an
+     unlabelled text field. Not a visible `<label>`, which the chips above earn
+     because "All" says nothing on its own — here the placeholder is the label,
+     in the place a label would have gone, and a word over the box would only
+     name it twice.
+
+     `data-placeholder-narrow` is the same sentence for a box one row tall on a
+     phone, where the long one is clipped around its thirtieth character — and
+     where the hint below is `display: none`, so that clipped placeholder is the
+     only thing left saying what the box is for. app.js swaps them. #}
   <textarea class="box" name="q" rows="1"
+            aria-label="Search, ask, or capture"
             placeholder="Describe the situation, ask a question, or paste anything worth keeping…"
+            data-placeholder-narrow="Ask, search, or paste to keep…"
             aria-describedby="box-hint">{{ q }}</textarea>
 {# The file, when there is one. It used to be an always-open drop zone and a
      staged box under it — two places for one idea, on a page that grew a row as
@@ -70,22 +100,26 @@
      needed.
 
      The thumbnail is for the camera above all: on a phone the only thing that
-     says which photo this is, is the photo. #}
+     says which photo this is, is the photo.
+
+     The note used to be a second text field, in here. Two boxes on screen and
+     no rule saying which one the words in front of you belonged to: a press
+     with both filled ran two captures, the typing as its own artifact and the
+     file annotated with the other field. A staged file now makes the box above
+     that file's note — one place to type, and the box is read when Capture is
+     pressed, so it does not matter whether the file or the words arrived
+     first. #}
   <div id="staged" class="staged" hidden>
     <img id="staged-thumb" alt="" hidden>
     <span id="staged-name" class="mono" hidden></span>
-    {# Context for the file: a sentence about what it is. Sent with it, then
-       cleared. For an image the vision model reads it too. Inside the staged box
-       because it is about the staged file and nothing else — on its own row it
-       was a permanent empty field on a page that mostly never sees a file. #}
-    <input class="input" type="text" name="note" maxlength="2000"
-           placeholder="Note for the file (optional) — what is it, why keep it?">
     <button class="btn btn-ghost btn-sm" type="button" id="staged-clear">Remove</button>
   </div>
   {# The two verbs that need a button. Typing is the third and needs none: it
      is the trigger on the form above. Both are disabled while the box is
      empty, because neither has anything to act on — except Capture, which a
-     staged file re-arms on its own: the file is something to act on. #}
+     staged file re-arms on its own: the file is something to act on, and Ask,
+     which a staged file disarms: the box is that file's note by then, and a
+     note is not a question to spend a model call on. #}
   <div class="verbs">
     {% if ask_enabled %}
     <button class="btn btn-accent" type="button" data-verb="ask" disabled>Ask</button>
@@ -190,7 +224,9 @@
    a hint that cannot be dismissed is a banner. Hidden until app.js decides
    there is a keyboard to use it with. #}
 <p class="keyhint" hidden>
-  <kbd>/</kbd> box <kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open
+  <kbd>/</kbd> box{% if ask_enabled %} <kbd>Ctrl</kbd><kbd>↵</kbd> ask{% endif %}
+  <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd> keep
+  <kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open
   <kbd>s</kbd> hide source <kbd>r</kbd> reading
   <button type="button" class="btn btn-ghost btn-sm" data-dismiss-hint>Got it</button>
 </p>
@@ -205,8 +241,15 @@
      div *children* (`hx-swap-oob="innerHTML:…"` discards the wrapper), so a
      class on the wrapper never survived a swap and the heading rendered
      without the rule the row is designed around. Hidden while empty, or the
-     rule would hang alone over the rail before anything filled it. #}
-  <div id="rail-head" class="rail-act"></div>
+     rule would hang alone over the rail before anything filled it.
+
+     `aria-live` because the rail is replaced under a box that keeps its focus:
+     twelve results, or none, arriving in silence for anyone who is not looking
+     at the screen. This slot is the only part of the rail that survives every
+     swap — the fragments hand it children — so it is the only stable live
+     region here, and what it already holds is exactly the announcement wanted:
+     "12 results", or "This memory" when the box is emptied. #}
+  <div id="rail-head" class="rail-act" aria-live="polite"></div>
   {# Idle is a state the rail renders, not an absence: with an empty box the
      base introduces itself here (see `_rail_idle.html`), and the same
      fragment comes back from the results endpoint when the box is emptied.
