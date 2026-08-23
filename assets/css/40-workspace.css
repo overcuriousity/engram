@@ -368,15 +368,12 @@ body { overflow-x: hidden; }
   border-bottom: 1px solid var(--color-border-subtle);
 }
 
-/* The name of what is being read stays while it is read. The pane scrolls a
-   long artifact past its own heading, and three screens down there was
-   nothing on the page saying which artifact this was. Its own background, or
-   the text scrolls through it. */
-.pane .card-head {
-  position: sticky; top: 0; z-index: 1;
-  background: var(--color-bg-elevated);
-  padding-top: 0.25rem;
-}
+/* The heading scrolls with the text it names. It was sticky, to keep the name
+   of what is being read on screen while it was read — but a sticky child comes
+   to rest against its scroll container's *content* box, and the card's is one
+   padding in: the header parked 1rem down and the text went on scrolling
+   through the strip above it, past the one thing that was supposed to be
+   standing still. A heading that scrolls away is the honest version. */
 .actions > form + form:last-of-type { margin-left: auto; }
 
 /* The open card keeps one line of itself. The pane beside it holds the text in
