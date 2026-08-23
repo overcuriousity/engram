@@ -1908,9 +1908,11 @@ const PAIR_LIMIT: usize = 5;
 const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
     crate::store::pairs::PairState::Contradiction,
     crate::store::pairs::PairState::Superseded,
-    // A judged recommendation like `Superseded`, and listed for the same
-    // reason: the judge proposing something is not the judge doing it, so the
-    // pair still has to reach the person who presses the button.
+    // Only ever rows an older base filed: a vacuous verdict is now carried
+    // out where it is found (`jobs::dedupe::discard_both`) and its pair
+    // settles `Dismissed`. Still listed, because those rows are a
+    // recommendation nobody has pressed yet, and without this key they are on
+    // no queue at all.
     crate::store::pairs::PairState::Vacuous,
     crate::store::pairs::PairState::Pending,
 ];

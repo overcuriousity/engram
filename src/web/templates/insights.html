@@ -285,6 +285,9 @@
   {% endfor %}
   </tbody>
 </table>
+{% if more_deprecated %}
+<p class="muted">Showing the newest {{ deprecated_cap }} — the rest appear as these are cleared, and each is still at its own link.</p>
+{% endif %}
 {% endif %}
 
 {% if !stale.is_empty() %}

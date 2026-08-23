@@ -455,8 +455,8 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
 ///
 /// Both callers of this — the judge's own `Relation::Vacuous` and the "Discard
 /// both" button — reach it through here rather than each writing the sequence,
-/// because the two orderings below are the whole of what makes it safe and
-/// neither is obvious from the outside.
+/// because the orderings and the one refusal below are the whole of what makes
+/// it safe and none of them is obvious from the outside.
 pub(crate) async fn discard_both(
     core: &Core,
     pair: &ArtifactPair,
@@ -478,12 +478,58 @@ pub(crate) async fn discard_both(
             retire.push(id.clone());
         }
     }
+    // A side that other artifacts are hidden *behind* is not this pass's to
+    // retire. `core.deprecate` refuses a supersession loser and has no rule for
+    // a winner, so retiring one would leave `A -> W` with both ends out of
+    // results: the reader who opens A is sent to an artifact that answers
+    // nothing either, and no page can follow the hop.
+    //
+    // Nothing should reach here. A winner is an artifact a judgement already
+    // preferred to another, and a later call finding that same artifact states
+    // nothing contradicts the earlier one. So it is neither skipped nor
+    // absorbed: the pair goes to a person with the reason on it, and the log
+    // carries the ids, because a rule that fires when it cannot is worth
+    // hearing about rather than working around.
+    for id in &retire {
+        let hidden = core.store.artifacts_superseded_by(id).await?;
+        if !hidden.is_empty() {
+            tracing::warn!(
+                pair = pair.id,
+                winner = %id,
+                hidden = hidden.join(", "),
+                "refused to retire an artifact others are hidden behind"
+            );
+            return settle(
+                core,
+                pair,
+                PairState::Contradiction,
+                Some(
+                    "One of these is the current version of another artifact, so retiring \
+                     both would leave that one pointing at nothing. Resolve by hand.",
+                ),
+            )
+            .await;
+        }
+    }
     // The side effects first and the pair settled after, the ordering the rest
     // of `apply` documents: a failure part-way leaves the pair answerable
     // rather than recorded as answered and never applied.
     for id in &retire {
         core.deprecate(id).await?;
     }
+    // The one line that says this happened. `core.deprecate` logs an id apiece,
+    // byte-identical to an operator pressing the button, and the pair settles
+    // `Dismissed` — a state no queue lists. Without this, two artifacts leaving
+    // results unattended is a thing an operator can find no record of, and the
+    // judge's reason for it sits on a row nothing in the UI reads back.
+    tracing::info!(
+        pair = pair.id,
+        a = %pair.a_id,
+        b = %pair.b_id,
+        retired = retire.len(),
+        detail = detail.unwrap_or("none given"),
+        "retired both sides of a pair that states nothing"
+    );
     // Settled the way an applied replacement settles, and carrying the judge's
     // line rather than dropping it: it is the only record of why both sides
     // were retired, and `set_pair_state` writes `detail` unconditionally, so
@@ -630,6 +676,50 @@ mod tests {
             core.store.get_pair(pid).await.unwrap().state,
             PairState::Dismissed,
             "the pair was left answerable with half of it already gone"
+        );
+    }
+
+    /// The mirror of the case above, and the one `core.deprecate` has no rule
+    /// for: not a side that is hidden, but a side that others are hidden
+    /// *behind*. Retiring it would leave the artifacts pointing at it out of
+    /// results with a winner that is out of results too — the dead end
+    /// `Core::supersede` refuses to create from the other direction.
+    ///
+    /// It should not be reachable: a winner is an artifact some earlier
+    /// judgement preferred, so a later one calling it empty disagrees with
+    /// that. Which is why nothing is retired and nothing is skipped — the pair
+    /// goes to a person, who is the only one who can say which call was wrong.
+    #[tokio::test]
+    async fn discarding_a_pair_refuses_a_side_others_are_hidden_behind() {
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("notes/a.md", [1.0, 0.0]),
+                ("notes/b.md", [0.99, 0.01]),
+                ("ext4 needs a journal to be enabled", [0.2, 0.98]),
+            ],
+        )
+        .await;
+        let pid = queue_pair(&core, &ids[0], &ids[1]).await;
+        core.supersede(&ids[2], &ids[0]).await.unwrap();
+        let pair = core.store.get_pair(pid).await.unwrap();
+
+        discard_both(&core, &pair, Some("each body is its own file path"))
+            .await
+            .unwrap();
+
+        for id in &ids[..2] {
+            assert_eq!(
+                core.store.get_artifact(id).await.unwrap().status,
+                ArtifactStatus::Active,
+                "a side was retired out from under an artifact hidden behind it"
+            );
+        }
+        assert_eq!(
+            core.store.get_pair(pid).await.unwrap().state,
+            PairState::Contradiction,
+            "a discard nothing can carry out was recorded as carried out"
         );
     }
 
@@ -1360,11 +1450,18 @@ mod tests {
     async fn a_context_block_too_big_for_the_window_is_trimmed_not_refused() {
         // Context is reference material, so a window too small to hold it costs
         // the answer some quality — never the answer itself.
+        //
+        // The window is the system prompt plus room for the two members and
+        // the reply, and nothing more: it has to be too small for the source
+        // block and large enough for everything that is not trimmable, so it
+        // moves when `DEDUPE_SYSTEM` does. Left at a number chosen against an
+        // older, shorter prompt, this stopped testing the trim and started
+        // testing the refusal one paragraph later.
         let mut core = test_core().await;
         let judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
         ]));
-        judge.set_context_tokens(1200);
+        judge.set_context_tokens(1600);
         core.judge = Some(judge.clone());
         let long = "verylongsourcetoken ".repeat(400);
         let ids = seed_titled(
