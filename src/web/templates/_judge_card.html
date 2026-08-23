@@ -1,6 +1,7 @@
 {# The header, shipped with the card so the figures move as the queue is worked
    down. Nothing when nothing was judged. #}
 {% include "_judge_pulse.html" %}
+{% include "_judge_tune.html" %}
 {% match flash %}
 {% when Some with (f) %}
 {# What the last verdict revealed. Loudest where the ranking did worst: a

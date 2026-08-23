@@ -1,0 +1,43 @@
+{# What the sweeps have to say, in three states: an offer, an explained
+   silence, or nothing at all.
+
+   Rendered in the page, beside the card a verdict returns (a sweep runs off
+   the request path, so the next verdict is the first chance to report one),
+   and as its own answer to the apply button. #}
+{% if let Some(t) = tune %}
+<div id="judge-tune" class="judge-tune"{% if tune_oob %} hx-swap-oob="true"{% endif %}>
+  {% if !t.flash.is_empty() %}<p class="judge-flash">{{ t.flash }}</p>{% endif %}
+  {% match t.rec %}
+  {% when Some with (r) %}
+  <div class="judge-tune-rec">
+    <p class="row">
+      <span>{{ r.line }}</span>
+      <span class="spacer"></span>
+      <button class="btn btn-sm" hx-post="/ui/judge/tune/{{ r.id }}/apply"
+              hx-target="#judge-tune" hx-swap="outerHTML">Apply</button>
+    </p>
+    {# Open by choice, not by default: the aggregate is the claim and this is
+       the evidence, and the evidence is what a knob change has to be judged
+       on. Folded so it does not push the card off the screen. #}
+    <details>
+      <summary class="muted">what changes</summary>
+      <ul class="mono">
+        {% for d in r.diff %}<li>{{ d }}</li>{% endfor %}
+      </ul>
+    </details>
+  </div>
+  {% when None %}
+  {% if !t.quiet.is_empty() %}<p class="muted hint">{{ t.quiet }}</p>{% endif %}
+  {% endmatch %}
+  {% if !t.applied.is_empty() %}
+  {# Where the numbers behind a change live now. They used to live in a commit
+     message, which is no help to whoever is looking at this page. #}
+  <details class="judge-tune-history">
+    <summary class="muted">tuning history ({{ t.applied.len() }})</summary>
+    <ul class="mono">
+      {% for a in t.applied %}<li>{{ a }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{% endif %}

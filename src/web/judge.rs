@@ -93,6 +93,10 @@ struct JudgeTemplate {
     pulse: Option<Pulse>,
     /// False on the page itself: it is drawing the header, not replacing one.
     pulse_oob: bool,
+    /// What the sweeps have to say. Always `Some` here; `Option` because the
+    /// partial is shared with the card fragment and the apply answer.
+    tune: Option<TuneView>,
+    tune_oob: bool,
     misses: Vec<crate::store::feedback::Miss>,
     /// Questions asked and judged, beside the searches. Read from the same
     /// database and moved by every verdict on the ask page.
@@ -117,6 +121,10 @@ struct CardTemplate {
     pulse: Option<Pulse>,
     /// True here: the header this replaces is already on the page.
     pulse_oob: bool,
+    /// A sweep runs off the request path, so the page that paid for it was
+    /// already sent. The next verdict is the first chance to report one.
+    tune: Option<TuneView>,
+    tune_oob: bool,
 }
 
 pub struct Flash {
@@ -293,6 +301,8 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         judge_pending: st.core.learn.enabled.then_some(stats.pending),
         pulse: Some(pulse_of(&st, &stats, String::new()).await?),
         pulse_oob: false,
+        tune: Some(tune_view(&st, "").await?),
+        tune_oob: false,
         misses,
         asks: st.core.store.ask_stats().await?,
         card: next_pending_card(&st).await?,
@@ -308,6 +318,8 @@ async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response
         flash: None,
         pulse: None,
         pulse_oob: true,
+        tune: None,
+        tune_oob: true,
     })
     .into_response())
 }
@@ -348,6 +360,8 @@ async fn card_after(
         }),
         pulse: Some(pulse_of(st, &stats, delta).await?),
         pulse_oob: true,
+        tune: Some(tune_view(st, "").await?),
+        tune_oob: true,
     })
     .into_response())
 }
@@ -374,6 +388,8 @@ async fn card_again(st: &AppState, event_id: &str, line: &str) -> Result<Respons
         // Nothing was recorded, so no figure moved.
         pulse: None,
         pulse_oob: true,
+        tune: None,
+        tune_oob: true,
     })
     .into_response())
 }
@@ -430,6 +446,8 @@ async fn undo(
         // header while it happens.
         pulse: Some(pulse_of(&st, &st.core.store.feedback_stats().await?, String::new()).await?),
         pulse_oob: true,
+        tune: None,
+        tune_oob: true,
     })
     .into_response())
 }
@@ -634,13 +652,121 @@ async fn assign_results(
     .into_response())
 }
 
+// ── What the sweeps have to say ─────────────────────────────────────────────
+
+/// A recommendation, ready to read and to take.
+pub struct Rec {
+    pub id: String,
+    /// What would change and what it buys, in one line.
+    pub line: String,
+    /// The pairs that move under it. Mandatory, never folded away: an
+    /// aggregate says something moved, and only this says what.
+    pub diff: Vec<String>,
+}
+
+pub struct TuneView {
+    pub rec: Option<Rec>,
+    /// Why there is nothing to offer, when a sweep has run and found nothing.
+    /// Empty before the first sweep, where the honest answer is silence.
+    pub quiet: String,
+    pub applied: Vec<String>,
+    /// What the press just before this one did.
+    pub flash: String,
+}
+
+#[derive(Template)]
+#[template(path = "_judge_tune.html")]
+struct TuneTemplate {
+    tune: Option<TuneView>,
+    tune_oob: bool,
+}
+
+fn cap_str(c: Option<usize>) -> String {
+    c.map_or("none".to_string(), |n| n.to_string())
+}
+
+/// One line naming what changes and what it is worth.
+///
+/// Every figure is read off the run rather than recomputed: a number and the
+/// settings that produced it travel together, which is the whole of what the
+/// `eval_runs` row is for.
+fn describe(run: &crate::store::eval_runs::EvalRun) -> String {
+    format!(
+        "recency {:.2} → {:.2}, cap {} → {} · MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}, \
+         over {} pairs",
+        run.base_params.recency_weight,
+        run.best_params.recency_weight,
+        cap_str(run.base_params.per_source_cap),
+        cap_str(run.best_params.per_source_cap),
+        run.base_mrr,
+        run.best_mrr,
+        run.base_recall,
+        run.best_recall,
+        run.pairs_used,
+    )
+}
+
+fn rank_str(r: Option<usize>) -> String {
+    r.map_or("not in the first ten".to_string(), |i| {
+        format!("position {}", i + 1)
+    })
+}
+
+async fn tune_view(st: &AppState, flash: &str) -> Result<TuneView> {
+    let rec = st.core.store.open_recommendation().await?.map(|run| Rec {
+        line: describe(&run),
+        diff: run
+            .diff
+            .iter()
+            .map(|d| format!("{} — {} → {}", d.query, rank_str(d.base), rank_str(d.new)))
+            .collect(),
+        id: run.id,
+    });
+    // Only where a sweep has actually run and come back empty. Before the
+    // first one there is nothing to explain, and a line explaining nothing is
+    // one more thing on a page that has enough.
+    let quiet = match (&rec, st.core.store.latest_eval_run().await?) {
+        (None, Some(last)) if !last.recommended => format!(
+            "last sweep {}: no improvement found over {} pairs.",
+            ago(last.created_at),
+            last.pairs_used
+        ),
+        _ => String::new(),
+    };
+    let applied = st
+        .core
+        .store
+        .applied_eval_runs(10)
+        .await?
+        .iter()
+        .map(|r| {
+            format!(
+                "{} — {}",
+                ago(r.applied_at.unwrap_or(r.created_at)),
+                describe(r)
+            )
+        })
+        .collect();
+    Ok(TuneView {
+        rec,
+        quiet,
+        applied,
+        flash: flash.to_string(),
+    })
+}
+
 // ── Taking a recommendation live ────────────────────────────────────────────
 
 /// The tuning block, redrawn, with a line about what just happened.
 async fn tune_fragment(st: &AppState, line: &str) -> Result<Response> {
     use axum::response::IntoResponse;
-    let _ = st;
-    Ok(axum::response::Html(format!("<div id=\"judge-tune\">{line}</div>")).into_response())
+    Ok(HtmlTemplate(TuneTemplate {
+        tune: Some(tune_view(st, line).await?),
+        // Answering the button inside the block itself, which htmx swaps by
+        // target rather than by id.
+        tune_oob: false,
+    })
+    .into_response())
 }
 
 /// Apply the open recommendation: the file first, then the running parameters,
@@ -1532,6 +1658,106 @@ mod tests {
         let body = get(&app, "/ui/judge/next", &cookie).await;
         assert!(!body.contains("hx-swap-oob"), "{body}");
         assert!(!body.contains("judge-tick"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_open_recommendation_is_offered_with_the_pairs_that_moved() {
+        let (app, cookie, _core, run, _) = tune_app(true).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains(&format!("/ui/judge/tune/{run}/apply")));
+        assert!(body.contains("recency"), "the line must name what changes");
+        assert!(body.contains("cap"), "both knobs are named");
+        assert!(body.contains("MRR 0.50 → 0.60"), "{body}");
+        assert!(
+            body.contains("what changes"),
+            "the diff is the part that decides it, not an extra"
+        );
+        assert!(
+            body.contains("the image will not mount"),
+            "the moved pair is named by its own query"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_found_nothing_says_so_rather_than_going_quiet() {
+        // Silence reads as "no sweep has ever run", which is a different fact
+        // and the wrong one.
+        let (app, cookie, _core, _, _) = tune_app(false).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("no improvement found"), "{body}");
+        assert!(!body.contains("/apply"), "nothing to apply was offered");
+    }
+
+    #[tokio::test]
+    async fn before_any_sweep_the_block_says_nothing_at_all() {
+        let (app, cookie, _core, _) = judge_app(2, &[]).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(!body.contains("no improvement found"));
+        assert!(!body.contains("/apply"));
+        assert!(!body.contains("tuning history"));
+    }
+
+    #[tokio::test]
+    async fn an_applied_change_stands_in_the_history_with_its_numbers() {
+        // The provenance rule, made structural: a number without the settings
+        // that produced it cannot be compared against anything.
+        let (app, cookie, _core, run, _) = tune_app(true).await;
+        post(&app, &format!("/ui/judge/tune/{run}/apply"), &cookie, "").await;
+
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("tuning history"), "{body}");
+        assert!(body.contains("MRR 0.50 → 0.60"), "{body}");
+        assert!(body.contains("cap 3 → none"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn applying_answers_with_the_block_it_replaces() {
+        // htmx swaps `#judge-tune` by id: a reply that is not that block would
+        // leave the recommendation on screen after it was taken.
+        let (app, cookie, _core, run, _) = tune_app(true).await;
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/judge/tune/{run}/apply"))
+                    .method("POST")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+        assert!(body.contains(r#"id="judge-tune""#), "{body}");
+        assert!(body.contains("applied"), "{body}");
+        assert!(!body.contains("/apply"), "it is still offering itself");
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_finished_in_the_background_surfaces_on_the_next_verdict() {
+        // It runs off the request path, so the page that paid for it has
+        // already been sent. The next verdict is the first chance to say so.
+        let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(1)).await;
+        let event = core.store.next_pending().await.unwrap().unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/judge/{}/hit", event.id))
+                    .method("POST")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("artifact_id={}", ids[0])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+        assert!(
+            body.contains(r#"id="judge-tune""#),
+            "the verdict carried no tuning block: {body}"
+        );
     }
 
     #[tokio::test]
