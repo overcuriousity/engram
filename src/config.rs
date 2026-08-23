@@ -154,6 +154,7 @@ pub struct FeedbackConfig {
     /// `retain_days` is the only thing it enforces: a window measured in days
     /// does not need checking more than a few times a day.
     pub sweep_hours: u64,
+    pub tune: TuneConfig,
 }
 
 impl Default for FeedbackConfig {
@@ -163,6 +164,30 @@ impl Default for FeedbackConfig {
             coalesce_secs: 15,
             retain_days: 0,
             sweep_hours: 6,
+            tune: TuneConfig::default(),
+        }
+    }
+}
+
+/// When judgements are spent on a parameter sweep, and how often.
+///
+/// The floor is statistical rather than cautious: with ten pairs recall@10
+/// moves in ten-point steps, so a sweep under it recommends the quirks of ten
+/// queries with the same confidence as a real improvement. Below
+/// `min_judgements` nothing runs; after that a sweep re-runs once
+/// `resweep_after` further verdicts have been given.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TuneConfig {
+    pub min_judgements: i64,
+    pub resweep_after: i64,
+}
+
+impl Default for TuneConfig {
+    fn default() -> Self {
+        Self {
+            min_judgements: 50,
+            resweep_after: 10,
         }
     }
 }
@@ -625,9 +650,20 @@ pub struct VectorConfig {
     /// labelling off.
     #[serde(default = "default_weak_below")]
     pub weak_below: f32,
+    /// Chunks one document may contribute to a result list. `0` lets a single
+    /// document fill it.
+    ///
+    /// A setting rather than the constant it was, because the tuning sweep
+    /// measures it and applying a recommendation writes it back here — the
+    /// file stays the one place the running configuration can be read.
+    #[serde(default = "default_per_source_cap")]
+    pub per_source_cap: usize,
 }
 fn default_recency_weight() -> f32 {
     0.05
+}
+fn default_per_source_cap() -> usize {
+    crate::core::search::MAX_PER_CORPUS
 }
 fn default_recency_half_life_days() -> u32 {
     180
@@ -2139,6 +2175,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 5\n"));
         assert_eq!(Config::load(Some(&p)).unwrap().feedback.candidates, 5);
+    }
+
+    #[test]
+    fn tune_defaults_and_file_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.feedback.tune.min_judgements, 50);
+        assert_eq!(cfg.feedback.tune.resweep_after, 10);
+        assert_eq!(cfg.vector.per_source_cap, 3);
+
+        let tuned = MINIMAL.replace(
+            "collection = \"chunks\"",
+            "collection = \"chunks\"\nper_source_cap = 0",
+        );
+        let p = write(
+            &dir,
+            &format!("{tuned}\n[feedback.tune]\nmin_judgements = 20\nresweep_after = 5\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.feedback.tune.min_judgements, 20);
+        assert_eq!(cfg.feedback.tune.resweep_after, 5);
+        assert_eq!(cfg.vector.per_source_cap, 0);
     }
 
     fn write(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
