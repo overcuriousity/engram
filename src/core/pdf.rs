@@ -222,6 +222,34 @@ fn is_markdown_structure(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The reachability argument in `.cargo/audit.toml` rests on this file.
+    ///
+    /// Two `quick-xml` advisories are ignored there — RUSTSEC-2026-0194 and
+    /// -0195 — because the vulnerable copy belongs to `calamine`, which docling
+    /// reaches only from its spreadsheet backends, and this application asks
+    /// docling for exactly one format. `from_path` would pick the format from a
+    /// file extension and could therefore select one of those backends; the
+    /// declared `InputFormat::Pdf` cannot.
+    ///
+    /// If this fails, do not adjust it: the two entries in `.cargo/audit.toml`
+    /// have stopped being true and the advisories are live.
+    #[test]
+    fn docling_is_only_ever_asked_for_a_pdf() {
+        let src = include_str!("pdf.rs");
+        let body = &src[..src.find("mod tests").expect("the test module")];
+        assert_eq!(
+            body.matches("InputFormat::").count(),
+            1,
+            "one input format is named, and it decides which docling backends exist for us"
+        );
+        assert!(body.contains("docling::InputFormat::Pdf"), "and it is Pdf");
+        assert!(
+            !body.contains("from_path"),
+            "`from_path` detects the format from the extension, which can select \
+             a spreadsheet backend — see `.cargo/audit.toml`"
+        );
+    }
+
     use super::*;
 
     // Both fixtures were generated, not written by hand:
