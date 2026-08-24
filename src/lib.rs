@@ -12,5 +12,6 @@ pub mod infer;
 pub mod jobs;
 pub mod mcp;
 pub mod store;
+pub mod tenants;
 pub mod vector;
 pub mod web;

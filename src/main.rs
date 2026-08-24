@@ -340,96 +340,10 @@ mod startup_tests {
     use super::*;
     use engram::config::*;
 
-    fn test_config() -> Config {
-        Config {
-            server: ServerConfig {
-                bind: "127.0.0.1:8080".into(),
-                workers: 2,
-            },
-            store: StoreConfig::default(),
-            vector: VectorConfig {
-                url: "http://localhost:6333".into(),
-                collection: "chunks".into(),
-                api_key: None,
-                recency_weight: 0.05,
-                recency_half_life_days: 180,
-                pinned_boost: 0.15,
-                weak_below: 0.35,
-                per_source_cap: 3,
-            },
-            infer: InferConfig {
-                synthesis: engram::config::SynthesisMode::Eager,
-                segment_tokens: engram::config::DEFAULT_SEGMENT_TOKENS,
-                synthesize: Some(SynthesizeRole {
-                    base_url: "http://localhost:8000/v1".into(),
-                    model: "m".into(),
-                    api_key: None,
-                    context_tokens: 32768,
-                    max_output_tokens: 8192,
-                    output_ratio: 1.4,
-                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
-                    reasoning_effort: None,
-                    ceiling_param: None,
-                    structured_output: true,
-                    context_opening_tokens: 200,
-                    context_overlap_tokens: 150,
-                }),
-                embed: EmbedRole {
-                    base_url: "http://localhost:8000/v1".into(),
-                    model: "e".into(),
-                    api_key: None,
-                    dim: 1024,
-                    max_input_tokens: 8192,
-                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
-                    query_template: engram::config::EmbedTemplates::default().query_template,
-                    document_template: engram::config::EmbedTemplates::default().document_template,
-                    document_template_untitled: engram::config::EmbedTemplates::default()
-                        .document_template_untitled,
-                    chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
-                },
-                ask: Some(AskRole {
-                    base_url: "http://localhost:8000/v1".into(),
-                    model: "m".into(),
-                    api_key: None,
-                    context_tokens: 32768,
-                    max_output_tokens: 4096,
-                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
-                    reasoning_effort: None,
-                    ceiling_param: None,
-                    plan: false,
-                    structured_output: true,
-                    plan_endpoint: None,
-                }),
-                rerank: None,
-                vision: None,
-            },
-            auth: AuthConfig {
-                mode: AuthMode::Local,
-                oidc: None,
-                local: Some(LocalConfig {
-                    username: "dev".into(),
-                    password_hash: "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aaaa".into(),
-                }),
-            },
-            consolidate: ConsolidateConfig::default(),
-            learn: LearnConfig::default(),
-            feedback: FeedbackConfig::default(),
-            capture: CaptureConfig::default(),
-            pacing: engram::config::PacingConfig::default(),
-            associate: AssociateConfig::default(),
-            activation: ActivationConfig::default(),
-            promote: engram::config::PromoteConfig::default(),
-            pursuit: engram::config::PursuitConfig::default(),
-            schedule: engram::config::ScheduleConfig::default(),
-            sitting: engram::config::SittingConfig::default(),
-            recommend: engram::config::RecommendConfig::default(),
-            ui: UiConfig::default(),
-        }
-    }
 
     #[test]
     fn oidc_mode_requires_an_oidc_block() {
-        let mut cfg = test_config();
+        let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Oidc;
         cfg.auth.oidc = None;
         assert!(validate_auth(&cfg, false).is_err());
@@ -437,7 +351,7 @@ mod startup_tests {
 
     #[test]
     fn local_mode_requires_a_local_block() {
-        let mut cfg = test_config();
+        let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Local;
         cfg.auth.local = None;
         assert!(validate_auth(&cfg, false).is_err());
@@ -445,7 +359,7 @@ mod startup_tests {
 
     #[test]
     fn local_mode_on_a_public_bind_is_refused() {
-        let mut cfg = test_config();
+        let mut cfg = Config::test_default();
         cfg.server.bind = "0.0.0.0:8080".into();
         assert!(validate_auth(&cfg, false).is_err());
         assert!(
@@ -456,6 +370,6 @@ mod startup_tests {
 
     #[test]
     fn a_valid_local_config_passes() {
-        assert!(validate_auth(&test_config(), false).is_ok());
+        assert!(validate_auth(&Config::test_default(), false).is_ok());
     }
 }
