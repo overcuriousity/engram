@@ -641,8 +641,45 @@ impl Core {
         {
             self.store.mark_source_restored(artifact_id).await?;
         }
+        self.reopen_the_pairs_that_were_waiting_on(artifact_id)
+            .await;
         tracing::info!(artifact_id, "restored a superseded artifact to search");
         Ok(())
+    }
+
+    /// Put the artifact's open questions back on the review queue, now that it
+    /// is answerable again.
+    ///
+    /// Restoring the artifact alone is half an undo. Its open pairs were
+    /// settled `Stale` when it left results, and `record_pair` is
+    /// `INSERT OR IGNORE`, so the sweep re-finds the same two artifacts and
+    /// files nothing. Without this, the contradiction an operator restored the
+    /// artifact to look at is gone for good, and nothing anywhere says it ever
+    /// existed.
+    ///
+    /// Only the settled rows, and that is the whole set. The other thing a
+    /// supersession does to a pair is move it onto the winner, which leaves no
+    /// row between these two artifacts at all — so the similarity sweep's
+    /// `record_pair` files a fresh one the next time it looks, exactly as it
+    /// would for a pair it had never seen. A settled row is the only kind that
+    /// blocks that.
+    ///
+    /// Logged rather than returned, like the follow in `supersede`: the restore
+    /// itself has happened by this point, and reporting failure would tell the
+    /// caller the artifact is still hidden when it is not. What is left behind
+    /// is a `Stale` row, which is what the next restore of either side reopens.
+    async fn reopen_the_pairs_that_were_waiting_on(&self, artifact_id: &str) {
+        match self.store.reopen_stale_pairs(artifact_id).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                pairs = n,
+                artifact_id,
+                "reopened the pairs it had taken with it"
+            ),
+            Err(e) => {
+                tracing::warn!(artifact_id, error = %e, "could not reopen the artifact's pairs")
+            }
+        }
     }
 
     /// Put a promoted window back: its passages active, the artifacts the
@@ -754,6 +791,20 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&loser_id.to_string()))
             .await?;
+        // Every other question about the loser now belongs to the winner. Done
+        // after the artifact is hidden, and its failure is logged rather than
+        // returned: the supersession itself has happened by this point, so
+        // reporting failure would tell `jobs::try_supersede` the artifact
+        // "stays active" when it does not. What is left behind is stale pairs,
+        // which the sweep's repair pass
+        // (`jobs::consolidate::follow_supersessions`) moves on the next tick.
+        match self.store.follow_supersession(loser_id, winner_id).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(pairs = n, winner_id, "moved open pairs onto the winner"),
+            Err(e) => {
+                tracing::warn!(loser_id, winner_id, error = %e, "could not move the loser's open pairs")
+            }
+        }
         tracing::info!(loser_id, winner_id, "superseded an artifact");
         Ok(())
     }
@@ -832,6 +883,7 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
             .await?;
+        self.reopen_the_pairs_that_were_waiting_on(id).await;
         tracing::info!(artifact_id = id, "reactivated an artifact");
         Ok(())
     }

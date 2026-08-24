@@ -849,6 +849,92 @@ mod tests {
         }
     }
 
+    /// `finish` hides each root through `Core::supersede`, which takes the
+    /// root's open questions with it — verdicts included. Without that, the
+    /// contradiction a root carried died with the root, and the disagreement
+    /// only came back if a later sweep happened to re-file the same pair
+    /// against the merge.
+    #[tokio::test]
+    async fn a_merge_takes_its_roots_verdicts_with_it() {
+        use crate::store::pairs::PairState;
+        let mut core = crate::core::test_support::test_core().await;
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"relation":"duplicate","detail":"same claim",
+                "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
+                          "tags":[],"caveats":[]}}"#
+                    .into(),
+            ]),
+        ));
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+                ("Never mount the filesystem before writing.", [0.1, 0.99]),
+            ],
+        )
+        .await;
+        core.store.record_pair(&ids[0], &ids[2], 0.6).await.unwrap();
+        let verdict = core
+            .store
+            .pair_between(&ids[0], &ids[2])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        core.store
+            .set_pair_state(
+                verdict,
+                PairState::Contradiction,
+                Some("mount vs never mount"),
+            )
+            .await
+            .unwrap();
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        let dupe = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        crate::jobs::dedupe::run(&core, &dupe.to_string())
+            .await
+            .unwrap();
+
+        let merged_id = core
+            .store
+            .merged_artifacts(10)
+            .await
+            .unwrap()
+            .first()
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| panic!("no merge was written"));
+        // The roots are hidden once the merge is in the index — `finish` runs
+        // off the back of the embed, not the verdict.
+        crate::jobs::embed::run(&core, &merged_id).await.unwrap();
+
+        let p = core.store.get_pair(verdict).await.unwrap();
+        assert_eq!(
+            p.state,
+            PairState::Contradiction,
+            "the verdict was thrown away"
+        );
+        assert!(
+            p.a_id == merged_id || p.b_id == merged_id,
+            "the verdict still names a root that is out of results"
+        );
+        assert!(
+            p.detail.unwrap_or_default().contains("carried over"),
+            "nothing says the verdict was pronounced over a different artifact"
+        );
+    }
+
     #[tokio::test]
     async fn undoing_a_merge_survives_the_next_sweep() {
         // Restoring the sources alone accomplishes nothing: the sweep re-finds

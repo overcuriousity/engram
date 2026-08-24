@@ -649,10 +649,14 @@ async fn consolidation(
         // Ops puts it at the top: it is the one output here that cost a model
         // call, and an operator reading only `pairs` would conclude there was
         // nothing to look at.
+        // Awaiting review, like the queue on Capture: a client acting on this
+        // report presses the same endpoints an operator does, and those refuse
+        // an artifact that is no longer active. A pair naming one is work that
+        // can only come back `cannot supersede: loser … is superseded`.
         "contradictions": st
             .core
             .store
-            .pairs_by_state(PairState::Contradiction, 100)
+            .pairs_awaiting_review(PairState::Contradiction, 100)
             .await?,
         // Judge-proposed supersedes awaiting an operator's confirmation. Listed
         // for the same reason Ops renders them: without this a pair the judge
@@ -661,7 +665,7 @@ async fn consolidation(
         "supersede_proposals": st
             .core
             .store
-            .pairs_by_state(PairState::Superseded, 100)
+            .pairs_awaiting_review(PairState::Superseded, 100)
             .await?,
         // Discards awaiting confirmation, listed for the same reason. Only ever
         // rows an older base filed: a vacuous verdict is now carried out where
@@ -671,7 +675,7 @@ async fn consolidation(
         "discard_proposals": st
             .core
             .store
-            .pairs_by_state(PairState::Vacuous, 100)
+            .pairs_awaiting_review(PairState::Vacuous, 100)
             .await?,
         // Retired, and permanently empty: `would_merge` was a verdict a person
         // confirmed, every verdict is acted on now, and the migration rewrites
@@ -682,7 +686,7 @@ async fn consolidation(
         "pairs": st
             .core
             .store
-            .pairs_by_state(PairState::Pending, 100)
+            .pairs_awaiting_review(PairState::Pending, 100)
             .await?,
     })))
 }
@@ -1185,6 +1189,66 @@ pub(crate) mod tests {
                 "the report dropped `{key}`: {body}"
             );
         }
+    }
+
+    /// The report is the API's copy of the review queue, and a client acting on
+    /// it presses the same endpoints an operator does. A pair naming an
+    /// artifact that has left results is refused by all of them, so listing it
+    /// hands the client work that can only fail.
+    #[tokio::test]
+    async fn the_consolidation_report_leaves_out_a_pair_nobody_can_act_on() {
+        let (app, token, core) = app_token_and_core().await;
+        let src = core.store.insert_corpus("x", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &["the timeout is 30 seconds", "the timeout is 90 seconds"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| crate::store::artifacts::NewArtifact {
+                        ordinal: i as i64,
+                        text: (*t).to_string(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: None,
+                        caveats: vec![],
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+        let (a, b) = (made[0].id.clone(), made[1].id.clone());
+        core.store.record_pair(&a, &b, 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.store
+            .set_pair_state(
+                pair.id,
+                crate::store::pairs::PairState::Contradiction,
+                Some("30 seconds vs 90"),
+            )
+            .await
+            .unwrap();
+        core.deprecate(&b).await.unwrap();
+
+        let res = app
+            .oneshot(get("/api/v1/consolidation", Some(&token)))
+            .await
+            .unwrap();
+
+        let body = json_of(res).await;
+        assert_eq!(
+            body["contradictions"].as_array().map(|v| v.len()),
+            Some(0),
+            "the report listed a pair whose member is out of results: {body}"
+        );
     }
 
     #[tokio::test]

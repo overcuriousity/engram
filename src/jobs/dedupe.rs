@@ -390,13 +390,31 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .map(|m| m.id.clone())
                 .expect("a pair has two members and only one of them is obsolete");
             // A fresh status, not the snapshot `interpret` saw: an operator can
-            // retire the named side while the unit waits out a backoff.
-            let still_live = match core.store.get_artifact(&obsolete).await {
-                Ok(c) => c.in_results(),
-                Err(Error::NotFound) => false,
-                Err(e) => return Err(e),
+            // retire either side while the unit waits out a backoff.
+            let live = |id: String| async move {
+                match core.store.get_artifact(&id).await {
+                    Ok(c) => Ok(c.in_results()),
+                    Err(Error::NotFound) => Ok(false),
+                    Err(e) => Err(e),
+                }
             };
-            if !still_live {
+            // The survivor, checked for the same reason and for a worse
+            // failure: `Core::supersede` refuses a winner that is not active,
+            // so applying this would return a validation error out of the unit
+            // and retry the same model call under the queue's backoff until the
+            // attempts ran out — never settling the pair and never saying why.
+            // Hiding the loser behind it is not the alternative: the answer
+            // would disappear from results altogether.
+            if !live(winner.clone()).await? {
+                return settle(
+                    core,
+                    &s.pair,
+                    PairState::Dismissed,
+                    Some("the surviving artifact left results before this could be applied"),
+                )
+                .await;
+            }
+            if !live(obsolete.clone()).await? {
                 // Nothing to apply: the named side is already out of results, so
                 // the replacement has in effect already happened.
                 return settle(
@@ -660,7 +678,16 @@ mod tests {
         )
         .await;
         let pid = queue_pair(&core, &ids[0], &ids[1]).await;
-        core.supersede(&ids[0], &ids[2]).await.unwrap();
+        // The row alone, not `Core::supersede`: that path moves the loser's
+        // open pairs onto the winner, so the pair under test would no longer
+        // name a hidden side. What this pins is the settlement holding a pair
+        // that still does — the drift the sweep repairs
+        // (`jobs::consolidate::follow_supersessions`), and the window in which
+        // a neighbouring unit hides a side while this one waits for its answer.
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[2]))
+            .await
+            .unwrap();
         let pair = core.store.get_pair(pid).await.unwrap();
 
         discard_both(&core, &pair, Some("each body is its own file path"))
@@ -784,6 +811,59 @@ mod tests {
                 "a reference document's sections were consolidated into each other"
             );
         }
+    }
+
+    /// The obsolete side is re-read before the verdict is applied; the winner
+    /// was not. A supersession landing on the winner while the unit waited for
+    /// the model — the sweep hiding it, an operator deprecating it — then made
+    /// `Core::supersede` refuse, and the refusal came back as a failing job that
+    /// retried the same call until its attempts ran out, rather than as a pair
+    /// settled with a reason.
+    #[tokio::test]
+    async fn a_replacement_whose_survivor_left_results_settles_rather_than_failing() {
+        let core = test_core().await;
+        let ids = disagreeing(&core).await;
+        let pair_id = queue_pair(&core, &ids[0], &ids[1]).await;
+        let pair = core.store.get_pair(pair_id).await.unwrap();
+        let members = vec![
+            core.store.get_artifact(&pair.a_id).await.unwrap(),
+            core.store.get_artifact(&pair.b_id).await.unwrap(),
+        ];
+        let obsolete = pair.a_id.clone();
+        let winner = pair.b_id.clone();
+        // Hidden after the model was asked and before the verdict is applied.
+        core.deprecate(&winner).await.unwrap();
+
+        apply(
+            &core,
+            Settlement {
+                relation: Relation::Replaced,
+                detail: Some("old flag vs new flag".into()),
+                obsolete: Some(obsolete.clone()),
+                merged: None,
+                members,
+                pair,
+            },
+        )
+        .await
+        .expect("a survivor that left results is a settlement, not a failure");
+
+        assert!(
+            core.store
+                .get_artifact(&obsolete)
+                .await
+                .unwrap()
+                .in_results(),
+            "the loser was hidden behind an artifact that is itself out of results"
+        );
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the pair is still pending, so the same call will be spent again"
+        );
     }
 
     #[tokio::test]

@@ -264,6 +264,30 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         Err(e) => tracing::warn!(error = %e, "could not reopen the pairs the cap refused"),
     }
 
+    // Before anything is judged or hidden: a pair still naming an artifact that
+    // is out of results is a question nobody can answer, and it would otherwise
+    // sit on the review queue until someone pressed a button that fails.
+    match follow_supersessions(core).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(pairs = n, "moved pairs a supersession had left behind"),
+        Err(e) => tracing::warn!(error = %e, "could not move the pairs a supersession left behind"),
+    }
+
+    // And whatever that could not move: a pair one side of which an operator
+    // deprecated, or one whose supersession chain ends somewhere that is out of
+    // results too. The review queue does not show those rows and does not count
+    // them, which also takes away the Dismiss button that would have settled
+    // them — left alone they pile up where nobody can see or reach them.
+    // Reversibly, so restoring the artifact brings the question back
+    // (`Core::reactivate`). After the repair above and never before it: moving
+    // a question onto the artifact that can answer it beats taking it off the
+    // queue.
+    match core.store.stale_unreachable_pairs().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(pairs = n, "took pairs nobody can act on off the queue"),
+        Err(e) => tracing::warn!(error = %e, "could not settle the pairs nobody can act on"),
+    }
+
     let mut out = Outcome::default();
 
     // Group everything near-identical first, and only then decide who wins.
@@ -370,6 +394,27 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         );
     }
     Ok(out)
+}
+
+/// Move every open question about a superseded artifact onto the artifact that
+/// replaced it, for the supersessions that did not do it themselves.
+///
+/// `Core::supersede` does this where the supersession happens
+/// (`Store::follow_supersession`), which is what keeps the review queue correct
+/// between sweeps. This is the repair half of the same rule, for the drift that
+/// path cannot cover: a crash between hiding the artifact and moving its pairs,
+/// the callers that write `set_superseded_by` directly, and the rows filed
+/// before the rule existed.
+///
+/// Bounded per sweep, like every other pass here. The work is finite — each
+/// supersession is repaired once — so a base with a long backlog drains over a
+/// few ticks instead of holding one sweep open.
+async fn follow_supersessions(core: &Core) -> Result<u64> {
+    let mut moved = 0u64;
+    for (loser, winner) in core.store.supersessions_with_open_pairs(200).await? {
+        moved += core.store.follow_supersession(&loser, &winner).await?;
+    }
+    Ok(moved)
 }
 
 /// Decide which pending pairs are worth a model call, and arm one unit each.
@@ -621,6 +666,180 @@ pub(crate) mod tests {
         assert!(
             hits.iter().any(|h| h.payload.artifact_id == ids[0]),
             "the sweep re-hid an artifact an operator had reactivated"
+        );
+    }
+
+    /// The write path moves the loser's open pairs itself, and cannot be the
+    /// only place that does: a crash between the two writes, the paths that
+    /// call `set_superseded_by` directly, and every row filed before that rule
+    /// existed all leave a pair naming an artifact that is out of results. The
+    /// sweep is where that drift is repaired, exactly as it is for lifecycle
+    /// flags.
+    #[tokio::test]
+    async fn the_sweep_moves_a_pair_a_supersession_left_behind() {
+        use crate::store::pairs::PairState;
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 90 seconds", [0.0, 1.0]),
+                ("the timeout is 30s", [0.999, 0.01]),
+            ],
+        )
+        .await;
+        core.store.record_pair(&ids[0], &ids[1], 0.8).await.unwrap();
+        let id = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap()[0]
+            .id;
+        core.store
+            .set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
+            .await
+            .unwrap();
+        // Behind the write path's back, which is what a crash between its two
+        // writes leaves.
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[2]))
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let open = core
+            .store
+            .pairs_by_state(PairState::Contradiction, 10)
+            .await
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert!(
+            open[0].a_id == ids[2] || open[0].b_id == ids[2],
+            "the verdict still names the artifact that is out of results"
+        );
+    }
+
+    /// Undoing a supersession restores the artifact; it used to leave the
+    /// review queue behind. The question the operator restored it to look at
+    /// had been taken off the queue when it went away, and `record_pair`'s
+    /// `INSERT OR IGNORE` means the sweep would never file it again either.
+    #[tokio::test]
+    async fn undoing_a_supersession_puts_the_question_back() {
+        use crate::store::pairs::PairState;
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 30s", [0.999, 0.01]),
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+        let id = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Stale,
+            "the supersession answered it only for as long as it stands"
+        );
+
+        core.unsupersede(&ids[0]).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Pending,
+            "the artifact came back and its question did not"
+        );
+    }
+
+    /// A verdict whose member an operator deprecated is on no queue and in no
+    /// count, which takes away the Dismiss button that would have settled it.
+    /// Pending rows drain through `arm_dedupe`; these had nothing at all, and
+    /// piled up out of sight until somebody happened to restore the artifact.
+    #[tokio::test]
+    async fn the_sweep_takes_a_verdict_nobody_can_act_on_off_the_queue() {
+        use crate::store::pairs::PairState;
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 90 seconds", [0.0, 1.0]),
+            ],
+        )
+        .await;
+        core.store.record_pair(&ids[0], &ids[1], 0.8).await.unwrap();
+        let id = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        core.store
+            .set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
+            .await
+            .unwrap();
+        core.deprecate(&ids[1]).await.unwrap();
+
+        run(&core).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Stale
+        );
+
+        core.reactivate(&ids[1]).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Pending,
+            "deprecation is the reversible way out of results, except in the queue"
+        );
+    }
+
+    /// Hiding an artifact leaves every other question about it unanswerable:
+    /// the review queue kept offering "keep this one" on a pair whose loser was
+    /// already superseded, and the press came back
+    /// `cannot supersede: loser … is superseded`. The merge path has always
+    /// moved those rows onto the artifact that replaced them.
+    #[tokio::test]
+    async fn superseding_an_artifact_moves_its_open_pairs_onto_the_winner() {
+        use crate::store::pairs::PairState;
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 90 seconds", [0.9, 0.4]),
+                ("the timeout is 30s", [0.999, 0.01]),
+            ],
+        )
+        .await;
+        core.store.record_pair(&ids[0], &ids[1], 0.8).await.unwrap();
+
+        core.supersede(&ids[0], &ids[2]).await.unwrap();
+
+        let open = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap();
+        assert_eq!(open.len(), 1, "the pair was dropped instead of moved");
+        assert!(
+            open[0].a_id == ids[2] || open[0].b_id == ids[2],
+            "the pair still names the artifact that was just hidden"
         );
     }
 

@@ -1940,15 +1940,20 @@ const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
 pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
     let mut waiting = 0i64;
     for state in PAIR_STATES {
-        waiting += st.core.store.count_pairs_by_state(state).await?;
+        waiting += st.core.store.count_pairs_awaiting_review(state).await?;
     }
 
     let mut pairs = Vec::new();
     'fill: for state in PAIR_STATES {
+        // Awaiting review, not merely in the state: every button these cards
+        // carry supersedes, deprecates or merges, and all three refuse an
+        // artifact that is not active. A pair one of those has already taken
+        // out of results is work nobody can do, and offering it answered the
+        // press with `cannot supersede: loser … is superseded`.
         for p in st
             .core
             .store
-            .pairs_by_state(state, PAIR_LIMIT as i64)
+            .pairs_awaiting_review(state, PAIR_LIMIT as i64)
             .await?
         {
             let (Ok(a), Ok(b)) = (
@@ -2030,9 +2035,10 @@ pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
         }
     }
 
-    // Counted from the states rather than from the rows, so a pair whose
-    // artifacts have since gone missing — skipped above — is not announced as
-    // something waiting that never appears.
+    // Counted under the listing's own rule, so a pair the queue will not show
+    // is not announced as something waiting that never appears. The rows are
+    // still skipped above for the case the count cannot see: an artifact
+    // deleted between the two queries.
     let more = (waiting - pairs.len() as i64).max(0);
     disambiguate_pair_titles(&mut pairs);
     Ok((pairs, more))
@@ -7394,6 +7400,41 @@ mod tests {
         }
     }
 
+    /// Every button on a pair card ends in a call that refuses an artifact
+    /// which is not active, so a pair naming one is work nobody can do. It was
+    /// still offered, and the press came back with a validation error.
+    #[tokio::test]
+    async fn a_pair_whose_member_left_results_is_not_offered_for_review() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["the timeout is 30 seconds", "the timeout is 90"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.store
+            .set_pair_state(
+                pair.id,
+                crate::store::pairs::PairState::Contradiction,
+                Some("30 seconds vs 90"),
+            )
+            .await
+            .unwrap();
+        core.deprecate(&ids[1]).await.unwrap();
+
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(
+            !html.contains(&format!("/ui/ops/pairs/{}/supersede", pair.id)),
+            "the queue offered a pair whose member is out of results: {html}"
+        );
+        assert!(
+            !html.contains("more waiting"),
+            "the queue counted a pair it will never show: {html}"
+        );
+    }
+
     #[tokio::test]
     async fn capture_lists_a_pending_pair_and_can_dismiss_it() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -7544,7 +7585,17 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        core.supersede(&ids[1], &ids[2]).await.unwrap();
+        // The row alone, not `Core::supersede`: that path now moves the open
+        // pairs of the artifact it hides onto the winner, so the card under
+        // test would name two live artifacts instead. What this pins is the
+        // press holding a card that still names a hidden side — the state the
+        // sweep repairs after a crash between those two writes
+        // (`jobs::consolidate::follow_supersessions`), and the window between a
+        // supersession and the page being reloaded.
+        core.store
+            .set_superseded_by(&ids[1], Some(&ids[2]))
+            .await
+            .unwrap();
 
         let res = app
             .clone()
