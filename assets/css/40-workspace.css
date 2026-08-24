@@ -247,6 +247,19 @@ body { overflow-x: hidden; }
   font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted); flex: 0 0 auto;
 }
+/* The refining pass landed: the reranker confirmed this order. A step quieter
+   than the count it hangs off — it is a footnote to the number, not a second
+   heading — and it fades in with the glide so the word and the movement read
+   as one event. */
+.refined-tick {
+  color: var(--color-fg-faint, var(--color-fg-muted));
+  text-transform: none; letter-spacing: normal;
+  animation: refined-in 300ms ease-out;
+}
+@keyframes refined-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .refined-tick { animation: none; }
+}
 
 /* ── The rail before anything is asked ───────────────────────────────────
    The idle state is designed, not left over: the base introduces itself under

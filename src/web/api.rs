@@ -714,6 +714,9 @@ pub struct SearchParams {
     /// Which client is asking. Only `extension` is honoured; see
     /// `Door::from_client`.
     pub door: Option<String>,
+    /// `false` skips the reranker for this call — the typing opt-out.
+    /// Absent means true: one deliberate question wants the best order.
+    pub rerank: Option<bool>,
 }
 
 async fn search(
@@ -755,6 +758,9 @@ async fn search(
         mark: !typing,
         include_deprecated: q.include_deprecated,
         include_superseded: q.include_superseded,
+        // Deliberate calls want the best order by default; `rerank=false`
+        // is a typing client's opt-out, the same one the web UI takes.
+        rerank: q.rerank.unwrap_or(true),
     };
     // Coalescing folds a keystroke into the query it was an early spelling of,
     // and it folds only within one scope — so a box that types has to say who

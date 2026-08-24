@@ -38,6 +38,20 @@ pub struct SearchQuery {
     /// Include superseded artifacts, excluded by default.
     #[serde(default)]
     pub include_superseded: bool,
+    /// Whether this request wants the reranker consulted, where the scope
+    /// allows it at all (`Core::rerank_apply`).
+    ///
+    /// True by default: an API or MCP call is one deliberate question and
+    /// wants the best order engram can produce. The UI's typing path passes
+    /// false — a keystroke must come back at embedding speed — and asks again
+    /// with true once the operator stops typing, which is the refining pass
+    /// that reorders the rail.
+    #[serde(default = "default_rerank")]
+    pub rerank: bool,
+}
+
+fn default_rerank() -> bool {
+    true
 }
 
 /// The gate's claim for one search, held for as long as the search runs.
@@ -970,9 +984,23 @@ impl Core {
             // the coverage check's question, not a searcher's.
             corpus_id: None,
         };
+        // Whether the reranker runs on *this* search: one is configured, the
+        // scope covers this door, and the query did not opt out. The scope
+        // collapses every door but `Ask` into "search" — the judging view, the
+        // API, MCP and the extension all show the operator a ranked list, and
+        // `apply = ["ask"]` means none of them wait on a rerank call.
+        let reranking = self.reranker.is_some()
+            && query.rerank
+            && match door {
+                Door::Ask => self.rerank_apply.contains(&crate::config::RerankApply::Ask),
+                _ => self
+                    .rerank_apply
+                    .contains(&crate::config::RerankApply::Search),
+            };
+
         // Over-fetch whenever something downstream narrows the list: both the
         // per-source cap and the reranker can only discard what they are given.
-        let candidates = if cap.is_some() || self.reranker.is_some() {
+        let candidates = if cap.is_some() || reranking {
             limit * CANDIDATE_MULTIPLIER
         } else {
             limit
@@ -1037,6 +1065,7 @@ impl Core {
             .collect();
 
         if let Some(reranker) = &self.reranker
+            && reranking
             && !results.is_empty()
         {
             let docs: Vec<String> = results.iter().map(|r| r.text.clone()).collect();
@@ -1335,6 +1364,7 @@ mod tests {
             // The default for these tests is the deliberate search the API and
             // MCP make; the incremental case is exercised explicitly below.
             mark: true,
+            rerank: true,
             include_deprecated: false,
             include_superseded: false,
         }
@@ -1686,6 +1716,58 @@ mod tests {
              could only reorder the answer it was already given",
             reranker.docs_seen(),
             query.limit
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scope_of_ask_keeps_the_reranker_out_of_search() {
+        // `apply = ["ask"]` is the opt-out for search latency: a configured
+        // reranker must then never be consulted on the search path, whatever
+        // the query asks for.
+        let (mut core, reranker) =
+            crate::core::test_support::test_core_counting_reranked_docs().await;
+        core.rerank_apply = vec![crate::config::RerankApply::Ask];
+        seed_from(
+            &core,
+            "one",
+            &[("alpha", "c", &[][..]), ("beta", "c", &[][..])],
+        )
+        .await;
+
+        core.search(&q("anything"), Door::Ui).await.unwrap();
+        assert_eq!(
+            reranker.docs_seen(),
+            0,
+            "the reranker was consulted on a search it is scoped out of"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_incremental_query_skips_the_reranker() {
+        // The typing fast path: a query that says `rerank: false` gets vector
+        // order immediately, and the refining pass asks again with `true`.
+        let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        seed_from(
+            &core,
+            "one",
+            &[("alpha", "c", &[][..]), ("beta", "c", &[][..])],
+        )
+        .await;
+
+        let mut query = q("anything");
+        query.rerank = false;
+        core.search(&query, Door::Ui).await.unwrap();
+        assert_eq!(
+            reranker.docs_seen(),
+            0,
+            "a rerank:false query still reached the reranker"
+        );
+
+        query.rerank = true;
+        core.search(&query, Door::Ui).await.unwrap();
+        assert!(
+            reranker.docs_seen() > 0,
+            "the refining pass must consult the reranker"
         );
     }
 

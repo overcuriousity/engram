@@ -1904,6 +1904,10 @@ mod tests {
                 api_key: None,
                 style,
                 timeout_secs: crate::config::DEFAULT_TIMEOUT_SECS,
+                apply: vec![
+                    crate::config::RerankApply::Ask,
+                    crate::config::RerankApply::Search,
+                ],
             };
             let batch: Vec<String> = (0..docs).map(|i| format!("d{i}")).collect();
             let out = HttpReranker::new(&cfg)

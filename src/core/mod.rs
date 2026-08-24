@@ -79,6 +79,10 @@ pub struct Core {
     pub synthesizer: Option<Arc<dyn Synthesizer>>,
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
+    /// Where the configured reranker is consulted — `[infer.rerank].apply`.
+    /// Meaningless without a reranker; both places when one is configured
+    /// without narrowing.
+    pub rerank_apply: Vec<crate::config::RerankApply>,
     /// `None` when `[infer.ask]` is not configured: no ask page, no ask tool.
     pub completer: Option<Arc<dyn Completer>>,
     /// The model that rules on duplicate pairs. Separate from `completer`
@@ -219,6 +223,12 @@ impl Core {
                 .rerank
                 .as_ref()
                 .map(|r| Arc::new(HttpReranker::new(r)) as Arc<dyn Reranker>),
+            rerank_apply: cfg
+                .infer
+                .rerank
+                .as_ref()
+                .map(|r| r.apply.clone())
+                .unwrap_or_default(),
             completer: cfg
                 .infer
                 .ask
@@ -332,6 +342,18 @@ impl Core {
         self.completer.is_some()
     }
 
+    /// Does a reranker serve the search path? `false` means the UI never fires
+    /// a refining pass and never claims one happened: with no reranker — or
+    /// one scoped to ask alone — a `rerank=true` request answers in vector
+    /// order, and saying "refined" over it would assert a confirmation that
+    /// never took place.
+    pub fn reranks_search(&self) -> bool {
+        self.reranker.is_some()
+            && self
+                .rerank_apply
+                .contains(&crate::config::RerankApply::Search)
+    }
+
     /// Is the area under the search box filled? `false` means the placeholder
     /// is not rendered, the endpoint records nothing, and the sweep does not
     /// run — one question, asked in one place.
@@ -408,6 +430,11 @@ pub mod test_support {
             synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
+            // The shipped default: a configured reranker serves both places.
+            rerank_apply: vec![
+                crate::config::RerankApply::Ask,
+                crate::config::RerankApply::Search,
+            ],
             completer: Some(Arc::new(FakeCompleter::default())),
             judge: Some(Arc::new(FakeCompleter::default())),
             link_judge: Some(Arc::new(FakeCompleter::default())),
@@ -637,6 +664,10 @@ mod tests {
             api_key: None,
             style: crate::config::RerankStyle::Tei,
             timeout_secs: 60,
+            apply: vec![
+                crate::config::RerankApply::Ask,
+                crate::config::RerankApply::Search,
+            ],
         });
         let core = Core::from_config(&cfg, vectors, store);
         assert!(core.reranker.is_some());

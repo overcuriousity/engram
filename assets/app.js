@@ -1308,6 +1308,112 @@
     });
     }
 
+  // ── The refining pass ─────────────────────────────────────────────────────
+  //
+  // Typing gets vector order at embedding speed; the reranker's opinion is
+  // asked for afterwards, once the box has been quiet long enough to mean the
+  // query is settled. The reranked fragment then replaces the list and the
+  // rows glide to their new places, so the reordering reads as a refinement
+  // happening in front of you rather than as the list twitching.
+  //
+  // Armed only by `data-rerank` on the form, which the server renders only
+  // where a reranker actually serves search: without it a second request
+  // could only buy the same order back, and the tick beside the count would
+  // be claiming a confirmation that never took place.
+
+  // Was this swap the refining pass? Read off the request rather than kept in
+  // a flag, so the fast handler below and the driver cannot disagree about
+  // which swap they are looking at.
+  function wasRefine(e) {
+    var cfg = e.detail && e.detail.requestConfig;
+    return !!(cfg && cfg.parameters && cfg.parameters.rerank === 'true');
+  }
+
+  function refinePass() {
+    var form = document.getElementById('box-form');
+    if (!form || form.getAttribute('data-rerank') !== 'true') return;
+    var box = form.querySelector('textarea[name="q"]');
+    if (!box) return;
+    // Long enough past the 120ms debounce to mean "settled", short enough
+    // that the refinement still reads as part of the same answer.
+    var QUIET_MS = 500;
+    var timer = null;
+    // Where each row stood when the refine was fired, keyed by href — taken
+    // just before the request, spent by the animation, and good for exactly
+    // one swap.
+    var from = null;
+
+    function cancel() {
+      if (timer) { clearTimeout(timer); timer = null; }
+    }
+
+    function fire() {
+      timer = null;
+      var q = box.value.trim();
+      // The same two guards the endpoint applies: an empty box is the idle
+      // rail, and a pasted chapter is a capture, not a query.
+      if (!q || q.length > 2000) return;
+      var values = { q: q, rerank: 'true' };
+      var chip = form.querySelector('input[name="category"]:checked');
+      if (chip && chip.value) values.category = chip.value;
+      from = {};
+      document.querySelectorAll('#results .rail-item').forEach(function (el) {
+        from[el.getAttribute('href')] = el.getBoundingClientRect().top;
+      });
+      // `source: form` so this request stands in the form's own sync queue:
+      // a keystroke's search replaces an in-flight refine exactly as it
+      // replaces an older keystroke's search, and the list shown is always
+      // the answer to the last thing typed.
+      htmx.ajax('GET', '/ui/search/results', {
+        source: form, target: '#results', swap: 'innerHTML', values: values
+      });
+    }
+
+    function glide() {
+      var was = from;
+      from = null;
+      if (!was) return;
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      document.querySelectorAll('#results .rail-item').forEach(function (el) {
+        var top = was[el.getAttribute('href')];
+        if (top === undefined) {
+          // A row the fast pass never showed: promoted from the candidate
+          // pool. Nowhere to glide from, so it arrives instead.
+          el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' });
+          return;
+        }
+        var delta = top - el.getBoundingClientRect().top;
+        if (!delta) return;
+        el.animate(
+          [{ transform: 'translateY(' + delta + 'px)' }, { transform: 'none' }],
+          { duration: 300, easing: 'ease-in-out' }
+        );
+      });
+    }
+
+    // A keystroke inside the debounce window: the pending refine belongs to a
+    // query that is no longer what the box says.
+    box.addEventListener('input', cancel);
+    // Any request from the form — a keystroke's search, a chip, the refine
+    // itself — retires the pending timer; the fast swap landing below is what
+    // arms a new one.
+    document.body.addEventListener('htmx:beforeRequest', function (e) {
+      if (e.detail && e.detail.elt === form) cancel();
+    });
+    document.body.addEventListener('htmx:afterSwap', function (e) {
+      if (e.target.id !== 'results') return;
+      if (wasRefine(e)) {
+        glide();
+      } else {
+        // Never re-armed off a refine swap: that loop would turn one settled
+        // query into a rerank call every half second forever.
+        cancel();
+        from = null;
+        timer = setTimeout(fire, QUIET_MS);
+      }
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
     themeToggle();
@@ -1319,6 +1425,7 @@
     railBack();
     captureVerb();
     askDriver();
+    refinePass();
     trackDwell();
     window.addEventListener('pagehide', flushDwell);
     document.addEventListener('visibilitychange', function () {
@@ -1374,7 +1481,12 @@
       // `#results` rather than `#rail`: the list is its own element inside the
       // rail now, so that what a search replaces is the results and not the
       // sitting beside them.
-      if (e.target.id === 'results') {
+      //
+      // Not for the refining pass: it lands over a list the operator may
+      // already be reading, and the whole point of the glide is that the rows
+      // move under a still eye. Resetting the scroll would trade that for a
+      // jump.
+      if (e.target.id === 'results' && !wasRefine(e)) {
         if (ws) ws.classList.remove('has-selection', 'answering');
         // Back to the top of the answer. Nothing moved the scroll on a swap,
         // and the two layouts strand it in different places for the same
