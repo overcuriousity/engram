@@ -1,6 +1,6 @@
 use super::Identity;
 use crate::error::{Error, Result};
-use crate::store::Store;
+use crate::store::control::Control;
 use crate::store::auth::ApiToken;
 use argon2::Argon2;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
@@ -32,7 +32,7 @@ pub fn verify_secret(secret: &str, stored: &str) -> bool {
 /// because the extension mints every one of its tokens under the same name, so
 /// two rows can otherwise be identical in everything a person can read.
 pub async fn mint(
-    store: &Store,
+    control: &Control,
     name: &str,
     subject: &str,
     user_agent: Option<&str>,
@@ -46,7 +46,7 @@ pub async fn mint(
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     );
     let id = crate::store::new_id();
-    let row = store
+    let row = control
         .insert_token(&id, name, &hash_secret(&plaintext)?, subject, user_agent)
         .await?;
     tracing::info!(token_id = %id, name, "api token minted");
@@ -59,13 +59,13 @@ pub async fn mint(
 /// request. With a single-operator install the token count is tiny and that is
 /// acceptable; if it ever grows, add a fast lookup key rather than weakening
 /// the hash.
-pub async fn verify(store: &Store, presented: &str) -> Result<Identity> {
+pub async fn verify(control: &Control, presented: &str) -> Result<Identity> {
     if !presented.starts_with(TOKEN_PREFIX) {
         return Err(Error::Unauthorized);
     }
-    for t in store.active_tokens().await? {
+    for t in control.active_tokens().await? {
         if verify_secret(presented, &t.token_hash) {
-            store.touch_token(&t.id).await?;
+            control.touch_token(&t.id).await?;
             return Ok(Identity {
                 subject: t.subject,
                 email: None,
@@ -77,18 +77,18 @@ pub async fn verify(store: &Store, presented: &str) -> Result<Identity> {
     Err(Error::Unauthorized)
 }
 
-pub async fn revoke(store: &Store, id: &str) -> Result<()> {
-    store.revoke_token(id).await
+pub async fn revoke(control: &Control, id: &str) -> Result<()> {
+    control.revoke_token(id).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Store;
+    use crate::store::control::Control;
 
     #[tokio::test]
     async fn a_minted_token_verifies_once_and_is_never_retrievable() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
 
         assert!(plaintext.starts_with(TOKEN_PREFIX));
@@ -115,7 +115,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_wrong_token_is_unauthorized() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         mint(&s, "laptop", "user-1", None).await.unwrap();
         for bad in [
             "engram_wrongwrongwrongwrongwrongwrongwrongwrong",
@@ -134,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoked_token_stops_working() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
         revoke(&s, &row.id).await.unwrap();
         assert!(matches!(
@@ -145,7 +145,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_tokens_are_distinct() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (_, a) = mint(&s, "one", "user-1", None).await.unwrap();
         let (_, b) = mint(&s, "two", "user-1", None).await.unwrap();
         assert_ne!(a, b);
@@ -155,7 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn verification_records_last_use() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
         assert!(row.last_used_at.is_none());
         verify(&s, &plaintext).await.unwrap();
@@ -166,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn a_token_belonging_to_another_subject_carries_that_subject() {
         // Identity must come from the stored row, never from the request.
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (_, a) = mint(&s, "one", "alice", None).await.unwrap();
         let (_, b) = mint(&s, "two", "bob", None).await.unwrap();
         assert_eq!(verify(&s, &a).await.unwrap().subject, "alice");

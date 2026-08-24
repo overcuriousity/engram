@@ -75,7 +75,7 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
             "requeued jobs left running by a previous process"
         );
     }
-    let purged = core.store.purge_expired_sessions().await?;
+    let purged = core.store.control.purge_expired_sessions().await?;
     if purged > 0 {
         tracing::info!(purged, "removed expired sessions");
     }
@@ -185,7 +185,8 @@ async fn main() -> anyhow::Result<()> {
         // SQLite only. The artifacts are already synthesised and the pairs are
         // already judged, so this costs nothing and needs neither Qdrant nor an
         // inference endpoint to be up.
-        let store = engram::store::Store::connect(&cfg.store).await?;
+        let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
+        let store = engram::store::Store::connect(&cfg.store, control).await?;
         let (artifacts, pairs, questions) = engram::eval::export::export(&store, dir).await?;
         println!(
             "wrote {artifacts} artifacts, {pairs} pairs and {questions} questions to {}",
@@ -203,7 +204,8 @@ async fn main() -> anyhow::Result<()> {
     if args.recompute_coverage {
         // No vector store and no inference: this only reads artifacts and
         // writes one number per corpus, so it must not need either to be up.
-        let store = engram::store::Store::connect(&cfg.store).await?;
+        let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
+        let store = engram::store::Store::connect(&cfg.store, control).await?;
         let core = Core::from_config(
             &cfg,
             Arc::new(engram::vector::memory::MemoryVectors::new()),
@@ -232,7 +234,8 @@ async fn main() -> anyhow::Result<()> {
 
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
-    let store = engram::store::Store::connect(&cfg.store).await?;
+    let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
+    let store = engram::store::Store::connect(&cfg.store, control).await?;
     let vectors: Arc<dyn engram::vector::VectorStore> =
         Arc::new(engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
     let core = Core::from_config(&cfg, vectors, store);
@@ -331,9 +334,7 @@ mod startup_tests {
                 bind: "127.0.0.1:8080".into(),
                 workers: 2,
             },
-            store: StoreConfig {
-                path: "engram.db".into(),
-            },
+            store: StoreConfig::default(),
             vector: VectorConfig {
                 url: "http://localhost:6333".into(),
                 collection: "chunks".into(),

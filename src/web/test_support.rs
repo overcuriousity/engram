@@ -54,6 +54,7 @@ pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
 pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::state::AppState) {
     let cid = crate::store::new_id();
     core.store
+        .control
         .insert_session(&cid, "user-1", None, 3600)
         .await
         .unwrap();
@@ -78,7 +79,7 @@ pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::st
 
 /// A router over `core` plus a bearer token for `user-1`.
 pub async fn app_with_token(core: Core) -> (axum::Router, String) {
-    let (_, token) = crate::auth::tokens::mint(&core.store, "test", "user-1", None)
+    let (_, token) = crate::auth::tokens::mint(&core.store.control, "test", "user-1", None)
         .await
         .unwrap();
     (router(core, None), token)

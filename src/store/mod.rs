@@ -27,6 +27,12 @@ use std::str::FromStr;
 #[derive(Clone)]
 pub struct Store {
     pub pool: sqlx::SqlitePool,
+    /// The instance-wide control database: identity, and the job queue.
+    ///
+    /// Held by every tenant `Store` rather than reached through the registry,
+    /// because the enqueue paths are deep inside capture and have no business
+    /// carrying a second handle down with them.
+    pub control: control::Control,
     /// Held for the length of a capture write. `record_search` reads the
     /// previous event and then writes over it, and the UI fires one of these per
     /// keystroke: two overlapping transactions upgrade from read to write on the
@@ -37,7 +43,7 @@ pub struct Store {
 }
 
 impl Store {
-    pub async fn connect(cfg: &StoreConfig) -> Result<Store> {
+    pub async fn connect(cfg: &StoreConfig, control: control::Control) -> Result<Store> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", cfg.path))
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
             .create_if_missing(true)
@@ -48,11 +54,15 @@ impl Store {
             .busy_timeout(std::time::Duration::from_secs(5));
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(8)
+            // Four rather than eight. A hundred open tenants at eight
+            // connections each is a file-descriptor problem, and no single
+            // tenant needs eight.
+            .max_connections(4)
             .connect_with(opts)
             .await?;
         let store = Store {
             pool,
+            control,
             capture: Default::default(),
         };
         store.migrate().await?;
@@ -197,7 +207,17 @@ impl Store {
     }
 
     /// Fresh in-memory database with the schema applied, for the tests.
+    ///
+    /// Builds its own in-memory control database too, so a test that only
+    /// wants a `Store` does not have to know a control plane exists. This is
+    /// the seam that keeps every existing test compiling.
     pub async fn memory() -> Result<Store> {
+        Store::memory_with(control::Control::memory().await?).await
+    }
+
+    /// The same, over a control database the caller already holds -- for the
+    /// tests that need two tenants sharing one queue.
+    pub async fn memory_with(control: control::Control) -> Result<Store> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
             .foreign_keys(true);
@@ -209,6 +229,7 @@ impl Store {
             .await?;
         let store = Store {
             pool,
+            control,
             capture: Default::default(),
         };
         store.migrate().await?;
@@ -289,6 +310,7 @@ mod tests {
             .unwrap();
         let store = Store {
             pool,
+            control: control::Control::memory().await.unwrap(),
             capture: Default::default(),
         };
         // A base as it was before the column existed: the real schema, with
@@ -379,6 +401,7 @@ mod tests {
         .unwrap();
         let store = Store {
             pool,
+            control: control::Control::memory().await.unwrap(),
             capture: Default::default(),
         };
 
@@ -407,9 +430,12 @@ mod tests {
         let path = dir.join("engram.db");
         let cfg = crate::config::StoreConfig {
             path: path.to_str().unwrap().to_string(),
+            ..Default::default()
         };
 
-        let store = Store::connect(&cfg).await.unwrap();
+        let store = Store::connect(&cfg, control::Control::memory().await.unwrap())
+            .await
+            .unwrap();
         let tables: Vec<(String,)> =
             sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
                 .fetch_all(&store.pool)
@@ -417,7 +443,6 @@ mod tests {
                 .unwrap();
         let names: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
         for expected in [
-            "api_tokens",
             "artifact_pairs",
             "artifacts",
             "corpora",
@@ -425,11 +450,19 @@ mod tests {
             "search_candidates",
             "search_events",
             "segments",
-            "sessions",
         ] {
             assert!(
                 names.contains(&expected),
                 "{expected} is missing: {names:?}"
+            );
+        }
+        // The control plane is not in here. A tenant database holds knowledge
+        // and nothing about who may read it, which is what makes the isolation
+        // structural rather than a filter somebody has to remember to write.
+        for control_side in ["users", "sessions", "api_tokens"] {
+            assert!(
+                !names.contains(&control_side),
+                "{control_side} belongs to the control database: {names:?}"
             );
         }
 
@@ -495,6 +528,7 @@ mod tests {
         .unwrap();
         let store = Store {
             pool,
+            control: control::Control::memory().await.unwrap(),
             capture: Default::default(),
         };
 

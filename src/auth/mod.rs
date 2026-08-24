@@ -69,7 +69,7 @@ impl FromRequestParts<AppState> for Identity {
             .and_then(|v| v.to_str().ok())
             && let Some(token) = bearer(h)
         {
-            return tokens::verify(&state.core.store, &token).await;
+            return tokens::verify(&state.core.store.control, &token).await;
         }
 
         if let Some(h) = parts
@@ -77,12 +77,13 @@ impl FromRequestParts<AppState> for Identity {
             .get(axum::http::header::COOKIE)
             .and_then(|v| v.to_str().ok())
             && let Some(sid) = cookie_value(h, SESSION_COOKIE)
-            && let Some(session) = state.core.store.get_session(&sid).await?
+            && let Some(session) = state.core.store.control.get_session(&sid).await?
         {
             // Sliding expiry: active use keeps the session alive.
             state
                 .core
                 .store
+                .control
                 .extend_session(&sid, SESSION_TTL_SECS)
                 .await?;
             return Ok(Identity {

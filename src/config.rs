@@ -647,8 +647,30 @@ fn default_workers() -> usize {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
 pub struct StoreConfig {
+    /// The single-user database. Read by adoption alone, and meaningless once
+    /// the `users` table is non-empty.
     pub path: String,
+    /// The instance-wide control database: identity, and the job queue.
+    pub control_path: String,
+    /// Where per-tenant databases live, one `{slug}.db` per user.
+    pub dir: String,
+    /// How many tenants may be open at once. An open tenant costs a SQLite
+    /// pool and a background queue; the rest are opened on demand, and
+    /// eviction is transparent because the next request reopens the same file.
+    pub max_open_tenants: usize,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            path: "engram.db".into(),
+            control_path: "engram-control.db".into(),
+            dir: "data/users".into(),
+            max_open_tenants: 32,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

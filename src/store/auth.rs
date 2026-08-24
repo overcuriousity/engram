@@ -1,4 +1,5 @@
-use super::{Store, now};
+use super::control::Control;
+use super::now;
 use crate::error::Result;
 use sqlx::Row;
 
@@ -31,7 +32,7 @@ pub struct Session {
     pub expires_at: i64,
 }
 
-impl Store {
+impl Control {
     pub async fn insert_token(
         &self,
         id: &str,

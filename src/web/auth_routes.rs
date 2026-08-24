@@ -184,6 +184,7 @@ async fn start_session(
     let sid = crate::store::new_id();
     st.core
         .store
+        .control
         .insert_session(
             &sid,
             &identity.subject,
@@ -212,7 +213,7 @@ async fn logout(State(st): State<AppState>, headers: axum::http::HeaderMap) -> R
         && let Some(sid) = cookie_value(h, SESSION_COOKIE)
     {
         // Delete the row, not just the cookie: a copied cookie must stop working.
-        st.core.store.delete_session(&sid).await?;
+        st.core.store.control.delete_session(&sid).await?;
     }
     Ok((
         StatusCode::SEE_OTHER,

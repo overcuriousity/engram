@@ -618,27 +618,3 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
-
--- ── Auth ─────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS sessions (
-  id         TEXT PRIMARY KEY,
-  subject    TEXT NOT NULL,
-  email      TEXT,
-  expires_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
-
-CREATE TABLE IF NOT EXISTS api_tokens (
-  id           TEXT PRIMARY KEY,
-  name         TEXT NOT NULL,
-  token_hash   TEXT NOT NULL,
-  subject      TEXT NOT NULL,
-  created_at   INTEGER NOT NULL,
-  last_used_at INTEGER,
-  revoked_at   INTEGER,
-  -- What asked for the token, as it announced itself. The extension mints
-  -- every one of its tokens under the same name, so without this two rows can
-  -- be identical in everything a person can read.
-  user_agent   TEXT
-);

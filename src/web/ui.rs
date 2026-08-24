@@ -2137,6 +2137,7 @@ async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
     Ok(st
         .core
         .store
+        .control
         .list_tokens()
         .await?
         .into_iter()
@@ -2236,7 +2237,7 @@ async fn mint_token(
         f.name.trim()
     };
     let (_, plaintext) = crate::auth::tokens::mint(
-        &st.core.store,
+        &st.core.store.control,
         name,
         &id.subject,
         headers.get("user-agent").and_then(|v| v.to_str().ok()),
@@ -2251,7 +2252,7 @@ async fn revoke_token_ui(
     _id: Identity,
     Path(tid): Path<String>,
 ) -> Result<Response> {
-    crate::auth::tokens::revoke(&st.core.store, &tid).await?;
+    crate::auth::tokens::revoke(&st.core.store.control, &tid).await?;
     Ok(Redirect::to("/ui/settings").into_response())
 }
 
@@ -7673,7 +7674,7 @@ mod tests {
         // twice — and one of them was the one currently working.
         let (app, cookie, core) = app_session_and_core().await;
         crate::auth::tokens::mint(
-            &core.store,
+            &core.store.control,
             "browser extension",
             "user-1",
             Some("Firefox/141.0"),
@@ -7681,7 +7682,7 @@ mod tests {
         .await
         .unwrap();
         crate::auth::tokens::mint(
-            &core.store,
+            &core.store.control,
             "browser extension",
             "user-1",
             Some("Chrome/152.0"),
@@ -10099,6 +10100,7 @@ mod tests {
         let cid = crate::store::new_id();
         st.core
             .store
+            .control
             .insert_session(&cid, "user-1", None, 3600)
             .await
             .unwrap();

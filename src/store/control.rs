@@ -231,4 +231,31 @@ mod tests {
         assert_eq!(before.created_at, after.created_at);
         assert!(after.last_seen_at >= before.last_seen_at);
     }
+
+    #[tokio::test]
+    async fn a_session_survives_in_the_control_database() {
+        let c = Control::memory().await.unwrap();
+        c.insert_session("sid-1", "sub-1", Some("a@example.org"), 3600)
+            .await
+            .unwrap();
+        let s = c.get_session("sid-1").await.unwrap().expect("session");
+        assert_eq!(s.subject, "sub-1");
+    }
+
+    #[tokio::test]
+    async fn a_tenant_store_carries_the_control_handle() {
+        let store = crate::store::Store::memory().await.unwrap();
+        store.control.provision("sub-1", None).await.unwrap();
+        assert_eq!(store.control.users().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn two_tenant_stores_can_share_one_control_database() {
+        let control = Control::memory().await.unwrap();
+        let a = crate::store::Store::memory_with(control.clone()).await.unwrap();
+        let b = crate::store::Store::memory_with(control.clone()).await.unwrap();
+        a.control.provision("sub-a", None).await.unwrap();
+        b.control.provision("sub-b", None).await.unwrap();
+        assert_eq!(control.users().await.unwrap().len(), 2);
+    }
 }

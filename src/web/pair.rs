@@ -159,7 +159,7 @@ async fn pair_submit(
     // carries the same name, so this is the only thing telling one row from
     // another on the settings page.
     let (_, plaintext) = crate::auth::tokens::mint(
-        &st.core.store,
+        &st.core.store.control,
         "browser extension",
         &id.subject,
         headers.get("user-agent").and_then(|v| v.to_str().ok()),
@@ -311,7 +311,7 @@ mod tests {
         assert!(fragment.contains("state=nonce123"));
         assert!(fragment.contains("origin=https%3A%2F%2Fengram.example"));
 
-        let id = crate::auth::tokens::verify(&core.store, &percent_decode(token))
+        let id = crate::auth::tokens::verify(&core.store.control, &percent_decode(token))
             .await
             .unwrap();
         assert_eq!(id.subject, "user-1");
