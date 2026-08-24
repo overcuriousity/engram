@@ -27,6 +27,46 @@ ignore = [
   #   * engram starts using `private_key_jwt` client authentication, or signs
   #     anything with RSA. Then the advisory becomes live and must be fixed.
   "RUSTSEC-2023-0071",
+
+  # RUSTSEC-2026-0194 — quadratic duplicate-attribute check in `quick-xml`.
+  # RUSTSEC-2026-0195 — unbounded namespace allocation in `quick-xml`'s
+  # `NsReader`.
+  # Both reached via: engram -> docling 1.14.0 -> calamine 0.26.1 -> quick-xml
+  # 0.31.0. Both are CPU/memory exhaustion on a thread parsing untrusted XML.
+  #
+  # Not reachable in this codebase. `quick-xml` appears twice in `Cargo.lock`:
+  # docling's own direct dependency is already 0.41.0, which is the patched
+  # version. The 0.31.0 copy belongs to `calamine`, which docling uses for
+  # exactly three things — its `.xls`, `.xlsx` and `.xlsb` backends
+  # (`src/backend/xls.rs`, `src/backend/xlsx.rs`). Nothing else in docling
+  # names it.
+  #
+  # engram never reaches those backends. `src/core/pdf.rs` is the only place
+  # docling is named at all, and it builds its source with
+  # `SourceDocument::from_bytes(.., docling::InputFormat::Pdf, ..)`.
+  # `from_bytes` stores the format it is handed without detection, and
+  # docling's converter dispatches on `match source.format`, so the
+  # spreadsheet arms are dead for us. Its one content-sniffing path
+  # (`sniff_xml`) applies only to `Md`- and `Xml`-typed sources and can return
+  # only the four XML formats — never a spreadsheet.
+  #
+  # No fix is available short of a fork. docling requires `calamine = "0.26"`,
+  # 0.26.1 is the newest release in that range, and every calamine that moved
+  # to a patched `quick-xml` is a later incompatible major (0.36.1 at the time
+  # of writing). A `[patch.crates-io]` entry would still have to satisfy
+  # `^0.26`, so it would mean maintaining a fork of a spreadsheet reader whose
+  # code this application never executes.
+  #
+  # Re-review if any of the following becomes true:
+  #   * docling ships a release whose `calamine` requirement admits a patched
+  #     `quick-xml`, at which point both entries should be deleted rather than
+  #     carried forward.
+  #   * engram passes docling any `InputFormat` other than `Pdf`, or starts
+  #     using `SourceDocument::from_path`, which picks the format from the
+  #     file extension and can therefore select a spreadsheet backend. Then
+  #     both advisories become live and must be fixed.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
 ]
 
 # Informational advisories still surface in the log. `paste` (via tokenizers) is
