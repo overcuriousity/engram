@@ -1379,9 +1379,9 @@ dependencies = [
 
 [[package]]
 name = "docling"
-version = "1.14.0"
+version = "1.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3053f146264b8e5514eceb8842c5083317ec59e9ea34e286ed87d3d18d973a84"
+checksum = "43c691a22b00526603c6dc7a95279e0fc801ea81b06a9fb0c4c26974c8f32789"
 dependencies = [
  "calamine",
  "csv",
@@ -1404,9 +1404,9 @@ dependencies = [
 
 [[package]]
 name = "docling-core"
-version = "1.14.0"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72d15907ffbd5034fab6de719652ee6c7ca6cce1250d131259e0f55e2cc3da2f"
+checksum = "cba5471ecb0cfe435bd1a951879eb5432d84cbdf4b22570adf04d59056952cd3"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -1414,9 +1414,9 @@ dependencies = [
 
 [[package]]
 name = "docling-pdf"
-version = "1.14.0"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1a30d59cd1e1e07cd4b02102146c412411ac3ddd1f6f94597a35ef7a793d448"
+checksum = "90b77b9068a50df92814b758ce02ed1a1218a7af5b0cda03db9235b5e27bb042"
 dependencies = [
  "docling-core",
  "fast_image_resize",
@@ -4413,9 +4413,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.1.2"
+version = "3.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8dddc5b1924b9a59fba420166160ca2c4663a4e01803e52eda33070f56d63c8"
+checksum = "1a15bc53261a9dc37e105df006e4656c598379a8f9581f8950debb130f27a7cf"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4425,6 +4425,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "indexmap 2.14.0",
  "pastey 0.2.3",
  "pin-project-lite",
  "rand 0.10.2",
@@ -4444,9 +4445,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.1.2"
+version = "3.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6898e24cd16342b59bfa8a53c2c04b9cf62fc8a2cfea57b9c038b09984bfc521"
+checksum = "a85d45508e9b4ba024fe996c2638799635d75b6dd0ba8f32ccf08f8026f0c780"
 dependencies = [
  "darling 0.24.0",
  "proc-macro2",
@@ -6182,9 +6183,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.24.0"
+version = "1.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
