@@ -503,7 +503,7 @@ pub(crate) mod tests {
         let out = run(core).await.unwrap();
         for _ in 0..100 {
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             if !crate::jobs::run_one(core).await.unwrap_or(false) {
@@ -1831,7 +1831,7 @@ pub(crate) mod tests {
         let armed: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM jobs WHERE stage = 'dedupe' AND state = 'pending'",
         )
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(armed, 1);
@@ -1890,7 +1890,7 @@ pub(crate) mod tests {
                 break;
             }
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             assert!(crate::jobs::run_one(&core).await.unwrap(), "queue ran dry");
@@ -1961,7 +1961,7 @@ pub(crate) mod tests {
         );
         let target: String =
             sqlx::query_scalar("SELECT target_id FROM jobs WHERE stage = 'dedupe'")
-                .fetch_one(&core.store.pool)
+                .fetch_one(&core.store.control.pool)
                 .await
                 .unwrap();
         let surviving = core
@@ -2011,14 +2011,14 @@ pub(crate) mod tests {
         run(&core).await.unwrap();
         let first: (String, i64) =
             sqlx::query_as("SELECT target_id, id FROM jobs WHERE stage = 'dedupe'")
-                .fetch_one(&core.store.pool)
+                .fetch_one(&core.store.control.pool)
                 .await
                 .unwrap();
         let later = crate::store::now() + 3600;
         sqlx::query("UPDATE jobs SET attempts = 2, run_after = ? WHERE id = ?")
             .bind(later)
             .bind(first.1)
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
 
@@ -2027,7 +2027,7 @@ pub(crate) mod tests {
         let (attempts, run_after): (i64, i64) =
             sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
                 .bind(first.1)
-                .fetch_one(&core.store.pool)
+                .fetch_one(&core.store.control.pool)
                 .await
                 .unwrap();
         assert_eq!(
@@ -2036,7 +2036,7 @@ pub(crate) mod tests {
             "the sweep wound a queued judge unit back to zero attempts"
         );
         let armed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE stage = 'dedupe'")
-            .fetch_one(&core.store.pool)
+            .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
         assert_eq!(
@@ -2147,7 +2147,7 @@ pub(crate) mod tests {
         sqlx::query("UPDATE jobs SET attempts = ? WHERE target_id = ?")
             .bind(crate::store::jobs::MAX_ATTEMPTS)
             .bind(&m.id)
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
 

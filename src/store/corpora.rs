@@ -313,7 +313,7 @@ impl Store {
             return Ok(Insertion::Existing(existing));
         }
         if let Followup::Queue(stage) = followup {
-            super::jobs::enqueue_with(&mut *tx, stage, "corpus", &src.id).await?;
+            super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", &src.id).await?;
         }
         tx.commit().await?;
         Ok(Insertion::Created(src))
@@ -370,7 +370,7 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         if let Followup::Queue(stage) = followup {
-            super::jobs::enqueue_with(&mut *tx, stage, "corpus", corpus_id).await?;
+            super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", corpus_id).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -589,7 +589,7 @@ impl Store {
         }
         super::attachments::insert_attachment_with(&mut *tx, &attachment.for_corpus(&src.id))
             .await?;
-        super::jobs::enqueue_with(&mut *tx, reading.stage, "corpus", &src.id).await?;
+        super::jobs::enqueue_with(&self.control, &self.subject, reading.stage, "corpus", &src.id).await?;
         tx.commit().await?;
         Ok(Insertion::Created(src))
     }

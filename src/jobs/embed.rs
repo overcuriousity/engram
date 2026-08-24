@@ -1074,7 +1074,7 @@ mod tests {
         sqlx::query_scalar::<_, String>("SELECT state FROM jobs WHERE stage = ? AND target_id = ?")
             .bind(stage.as_str())
             .bind(target)
-            .fetch_optional(&core.store.pool)
+            .fetch_optional(&core.store.control.pool)
             .await
             .unwrap()
     }
@@ -1139,7 +1139,7 @@ mod tests {
         // pending comes back for the next batch.
         sqlx::query("UPDATE jobs SET state = 'done' WHERE stage = 'embed' AND target_id = ?")
             .bind(&src)
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
         rearm_if_more(&core, &src).await.unwrap();
@@ -1711,7 +1711,7 @@ mod tests {
             "SELECT count(*) FROM jobs
               WHERE stage = 'embed' AND target_kind = 'corpus' AND state = 'pending'",
         )
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(
@@ -1742,7 +1742,7 @@ mod tests {
             "SELECT count(*) FROM jobs
               WHERE stage = 'embed' AND target_kind = 'artifact' AND state = 'pending'",
         )
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(armed, 3, "each oversize chunk should have got its own unit");
@@ -2022,7 +2022,7 @@ mod tests {
                 AND state = 'pending'",
         )
         .bind(&ids[1])
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(armed, 1, "the oversize chunk was not given its own unit");

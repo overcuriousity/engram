@@ -38,6 +38,14 @@ struct Args {
     recompute_coverage: bool,
 }
 
+/// The subject the single-user boot path runs as until adoption exists.
+///
+/// Interim, and deliberately not a real identity: Task 8 replaces this whole
+/// path with the control-only boot plus `migrate.adopt_subject`. It is
+/// provisioned on the way past so that the foreign key on `jobs.subject`
+/// holds in the meantime.
+const BOOT_SUBJECT: &str = "single-user";
+
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
     match cfg.auth.mode {
         AuthMode::Oidc => {
@@ -67,6 +75,7 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
 
     let reclaimed = core
         .store
+        .control
         .reclaim_stuck(engram::jobs::STUCK_AFTER_SECS)
         .await?;
     if reclaimed > 0 {
@@ -186,7 +195,8 @@ async fn main() -> anyhow::Result<()> {
         // already judged, so this costs nothing and needs neither Qdrant nor an
         // inference endpoint to be up.
         let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
-        let store = engram::store::Store::connect(&cfg.store, control).await?;
+        control.provision(BOOT_SUBJECT, None).await?;
+        let store = engram::store::Store::connect(&cfg.store, control, BOOT_SUBJECT).await?;
         let (artifacts, pairs, questions) = engram::eval::export::export(&store, dir).await?;
         println!(
             "wrote {artifacts} artifacts, {pairs} pairs and {questions} questions to {}",
@@ -205,7 +215,8 @@ async fn main() -> anyhow::Result<()> {
         // No vector store and no inference: this only reads artifacts and
         // writes one number per corpus, so it must not need either to be up.
         let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
-        let store = engram::store::Store::connect(&cfg.store, control).await?;
+        control.provision(BOOT_SUBJECT, None).await?;
+        let store = engram::store::Store::connect(&cfg.store, control, BOOT_SUBJECT).await?;
         let core = Core::from_config(
             &cfg,
             Arc::new(engram::vector::memory::MemoryVectors::new()),
@@ -235,7 +246,8 @@ async fn main() -> anyhow::Result<()> {
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
     let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
-    let store = engram::store::Store::connect(&cfg.store, control).await?;
+    control.provision(BOOT_SUBJECT, None).await?;
+    let store = engram::store::Store::connect(&cfg.store, control, BOOT_SUBJECT).await?;
     let vectors: Arc<dyn engram::vector::VectorStore> =
         Arc::new(engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
     let core = Core::from_config(&cfg, vectors, store);

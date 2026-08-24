@@ -48,7 +48,7 @@ pub(crate) async fn try_supersede(core: &Core, loser: &str, winner: &str, why: &
 /// Claim and run at most one job. Returns false when the queue is empty, which
 /// is the loop's signal to sleep.
 pub async fn run_one(core: &Core) -> Result<bool> {
-    let Some(job) = core.store.claim_job().await? else {
+    let Some((_subject, job)) = core.store.control.claim_job().await? else {
         return Ok(false);
     };
 
@@ -436,7 +436,7 @@ mod tests {
     async fn pending_run_after(core: &Core, stage: Stage) -> Option<i64> {
         sqlx::query_scalar("SELECT run_after FROM jobs WHERE stage = ? AND state = 'pending'")
             .bind(stage.as_str())
-            .fetch_optional(&core.store.pool)
+            .fetch_optional(&core.store.control.pool)
             .await
             .unwrap()
     }
@@ -503,7 +503,7 @@ mod tests {
         // And exactly one of it: `UNIQUE(stage, target_id)` still does that
         // work, for free and for the same reason it always did.
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE stage = 'associate'")
-            .fetch_one(&core.store.pool)
+            .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
         assert_eq!(n, 1);
@@ -532,7 +532,7 @@ mod tests {
 
         let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
             .bind(id)
-            .fetch_one(&core.store.pool)
+            .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
         assert_eq!(
@@ -657,7 +657,7 @@ mod tests {
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         let delay = |core: &Core| {
-            let pool = core.store.pool.clone();
+            let control_pool = core.store.control.pool.clone();
             let id = out.id.clone();
             async move {
                 sqlx::query_scalar::<_, i64>(
@@ -666,7 +666,7 @@ mod tests {
                 )
                 .bind(crate::store::now())
                 .bind(id)
-                .fetch_one(&pool)
+                .fetch_one(&control_pool)
                 .await
                 .unwrap()
             }
@@ -677,7 +677,7 @@ mod tests {
         let mut gaps = Vec::new();
         for _ in 0..MAX_ATTEMPTS + 3 {
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             let _ = run_one(&core).await;
@@ -764,7 +764,7 @@ mod tests {
         // exercise the attempt budget without sleeping.
         for _ in 0..=MAX_ATTEMPTS {
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             let _ = run_one(&core).await;

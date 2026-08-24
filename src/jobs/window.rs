@@ -335,7 +335,7 @@ async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
         "SELECT attempts FROM jobs WHERE stage = 'segment_window' AND target_id = ?",
     )
     .bind(unit_target(corpus_id, idx))
-    .fetch_optional(&core.store.pool)
+    .fetch_optional(&core.store.control.pool)
     .await?
     .unwrap_or(MAX_ATTEMPTS))
 }

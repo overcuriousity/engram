@@ -33,6 +33,12 @@ pub struct Store {
     /// because the enqueue paths are deep inside capture and have no business
     /// carrying a second handle down with them.
     pub control: control::Control,
+    /// Whose database this is.
+    ///
+    /// Bound into every queue query, and the only place a tenant identity
+    /// appears anywhere below the web layer. The knowledge tables never see
+    /// it: they are already alone in a file of their own.
+    pub subject: String,
     /// Held for the length of a capture write. `record_search` reads the
     /// previous event and then writes over it, and the UI fires one of these per
     /// keystroke: two overlapping transactions upgrade from read to write on the
@@ -43,7 +49,11 @@ pub struct Store {
 }
 
 impl Store {
-    pub async fn connect(cfg: &StoreConfig, control: control::Control) -> Result<Store> {
+    pub async fn connect(
+        cfg: &StoreConfig,
+        control: control::Control,
+        subject: &str,
+    ) -> Result<Store> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", cfg.path))
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
             .create_if_missing(true)
@@ -63,10 +73,23 @@ impl Store {
         let store = Store {
             pool,
             control,
+            subject: subject.to_string(),
             capture: Default::default(),
         };
         store.migrate().await?;
         Ok(store)
+    }
+
+    /// The same database under a different subject.
+    ///
+    /// Used by the registry when it opens a tenant, and by the tests that need
+    /// two of them over one queue. Cheap: a `Store` is two pool handles and a
+    /// string.
+    pub fn for_subject(&self, subject: &str) -> Store {
+        Store {
+            subject: subject.to_string(),
+            ..self.clone()
+        }
     }
 
     /// Bring the database up to the schema this binary expects.
@@ -164,47 +187,9 @@ impl Store {
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
 
-        self.backfill_job_class().await?;
         Ok(())
     }
 
-    /// Put the sweeps in the background class.
-    ///
-    /// `jobs.class` defaults to `0`, which is foreground — the safe direction
-    /// to be wrong in, and the wrong answer for every sweep. Not for a row
-    /// written before the column existed: `migrate` reads the columns before it
-    /// applies the schema and refuses a base without `jobs.class` outright, so
-    /// no such row ever reaches this. What it corrects is a row written by an
-    /// older binary for a stage that was foreground then and is background now
-    /// — pending work outlives an upgrade, and nothing else revisits its class.
-    ///
-    /// It runs on every connect rather than once: it is idempotent by
-    /// construction, since it only ever moves rows that are still `0` *and*
-    /// whose stage says they should not be, which is why
-    /// `applying_the_schema_twice_changes_nothing` still holds.
-    ///
-    /// It cannot tell such a row from one that aged (§4.4) and so undoes an
-    /// ageing across a restart. That costs a moment: the repair ticker's first
-    /// tick fires immediately at boot, the ageing predicate is still satisfied
-    /// by a row that had already aged, and it ages straight back.
-    async fn backfill_job_class(&self) -> Result<()> {
-        let background: Vec<&str> = crate::store::jobs::Stage::ALL
-            .iter()
-            .filter(|s| s.class() == 1)
-            .map(|s| s.as_str())
-            .collect();
-        // The stage names are `&'static str` from our own enum, never anything
-        // a request supplied, so splicing the placeholders is splicing a count.
-        let holes = vec!["?"; background.len()].join(", ");
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE jobs SET class = 1 WHERE class = 0 AND stage IN ({holes})"
-        )));
-        for stage in background {
-            q = q.bind(stage);
-        }
-        q.execute(&self.pool).await?;
-        Ok(())
-    }
 
     /// Fresh in-memory database with the schema applied, for the tests.
     ///
@@ -218,6 +203,7 @@ impl Store {
     /// The same, over a control database the caller already holds -- for the
     /// tests that need two tenants sharing one queue.
     pub async fn memory_with(control: control::Control) -> Result<Store> {
+        control.provision(TEST_SUBJECT, None).await?;
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
             .foreign_keys(true);
@@ -230,6 +216,7 @@ impl Store {
         let store = Store {
             pool,
             control,
+            subject: TEST_SUBJECT.to_string(),
             capture: Default::default(),
         };
         store.migrate().await?;
@@ -276,6 +263,10 @@ fn schema_columns(sql: &str) -> Vec<(String, Vec<String>)> {
     tables
 }
 
+/// The subject every `Store::memory()` runs as, so that the foreign key on
+/// `jobs.subject` is satisfied without every test knowing tenancy exists.
+pub const TEST_SUBJECT: &str = "test-subject";
+
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -311,6 +302,7 @@ mod tests {
         let store = Store {
             pool,
             control: control::Control::memory().await.unwrap(),
+            subject: TEST_SUBJECT.to_string(),
             capture: Default::default(),
         };
         // A base as it was before the column existed: the real schema, with
@@ -384,17 +376,15 @@ mod tests {
             .connect_with(opts)
             .await
             .unwrap();
-        // A `jobs` table as it was before the column existed, and the index the
-        // schema means to replace.
+        // A `segments` table as it was before `no_promote` existed.
         sqlx::raw_sql(
-            "CREATE TABLE jobs (
-               id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL,
-               target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
-               state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
-               run_after INTEGER NOT NULL DEFAULT 0, last_error TEXT,
-               claimed_at INTEGER, created_at INTEGER NOT NULL DEFAULT 0,
-               seq INTEGER NOT NULL DEFAULT 0, UNIQUE(stage, target_id));
-             CREATE INDEX idx_jobs_claim2 ON jobs(state, attempts, seq, id, run_after);",
+            "CREATE TABLE segments (
+               id TEXT PRIMARY KEY, corpus_id TEXT NOT NULL, idx INTEGER NOT NULL,
+               start_line INTEGER NOT NULL, end_line INTEGER NOT NULL,
+               text TEXT NOT NULL DEFAULT '', carry_lines INTEGER NOT NULL DEFAULT 0,
+               state TEXT NOT NULL DEFAULT 'pending',
+               keep_artifacts INTEGER NOT NULL DEFAULT 0,
+               attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);",
         )
         .execute(&pool)
         .await
@@ -402,24 +392,24 @@ mod tests {
         let store = Store {
             pool,
             control: control::Control::memory().await.unwrap(),
+            subject: TEST_SUBJECT.to_string(),
             capture: Default::default(),
         };
 
         let err = store.migrate().await.unwrap_err().to_string();
         assert!(
-            err.contains("older than the schema") && err.contains("jobs.class"),
+            err.contains("older than the schema") && err.contains("segments.no_promote"),
             "the operator has to be told which column is missing, not shown \
              a bare column error from the middle of the file: {err}"
         );
-        let indexes: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'")
+        let tables: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table'")
                 .fetch_all(&store.pool)
                 .await
                 .unwrap();
         assert!(
-            indexes.iter().any(|(n,)| n == "idx_jobs_claim2"),
-            "a refused migration must not have dropped the index the old \
-             binary still claims through: {indexes:?}"
+            tables.len() == 1,
+            "a refused migration must not have applied half the file: {tables:?}"
         );
     }
 
@@ -433,7 +423,7 @@ mod tests {
             ..Default::default()
         };
 
-        let store = Store::connect(&cfg, control::Control::memory().await.unwrap())
+        let store = Store::connect(&cfg, control::Control::memory().await.unwrap(), TEST_SUBJECT)
             .await
             .unwrap();
         let tables: Vec<(String,)> =
@@ -446,7 +436,6 @@ mod tests {
             "artifact_pairs",
             "artifacts",
             "corpora",
-            "jobs",
             "search_candidates",
             "search_events",
             "segments",
@@ -459,7 +448,7 @@ mod tests {
         // The control plane is not in here. A tenant database holds knowledge
         // and nothing about who may read it, which is what makes the isolation
         // structural rather than a filter somebody has to remember to write.
-        for control_side in ["users", "sessions", "api_tokens"] {
+        for control_side in ["users", "sessions", "api_tokens", "jobs"] {
             assert!(
                 !names.contains(&control_side),
                 "{control_side} belongs to the control database: {names:?}"
@@ -529,6 +518,7 @@ mod tests {
         let store = Store {
             pool,
             control: control::Control::memory().await.unwrap(),
+            subject: TEST_SUBJECT.to_string(),
             capture: Default::default(),
         };
 

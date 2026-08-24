@@ -232,19 +232,30 @@ impl Store {
                 AND a.status = 'active'
                 AND a.superseded_by IS NULL
                 AND a.embed_state != 'embedded'
-                AND NOT EXISTS (
-                      SELECT 1 FROM jobs j
-                       WHERE j.stage = 'embed'
-                         AND j.target_id = a.id
-                         AND j.state IN ('pending', 'running')
-                         AND j.attempts < ?)
               LIMIT ?",
         )
-        .bind(crate::store::jobs::MAX_ATTEMPTS)
-        .bind(limit)
+        .bind(limit.saturating_mul(8))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(|r| r.get("id")).collect())
+        // "Stranded" means no embed unit that is still going to get to it. The
+        // queue is a different database now, so the two halves of that question
+        // are asked separately.
+        let candidates: Vec<String> = rows.iter().map(|r| r.get("id")).collect();
+        let armed = self
+            .control
+            .targets_with_jobs(
+                &self.subject,
+                crate::store::jobs::Stage::Embed,
+                &candidates,
+                &["pending", "running"],
+                Some(crate::store::jobs::MAX_ATTEMPTS),
+            )
+            .await?;
+        Ok(candidates
+            .into_iter()
+            .filter(|id| !armed.contains(id))
+            .take(limit.max(0) as usize)
+            .collect())
     }
 
     /// Active merged artifacts, other than `child_id`, every root of which is

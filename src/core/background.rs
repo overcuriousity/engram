@@ -344,7 +344,7 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
     // says so.
     let older_than =
         crate::store::now().saturating_sub(core.schedule.age_after_mins.max(0).saturating_mul(60));
-    match core.store.age_background(older_than, AGE_PER_TICK).await {
+    match core.store.control.age_background(older_than, AGE_PER_TICK).await {
         Ok(n) if n > 0 => tracing::info!(aged = n, "background units have waited long enough"),
         Err(e) => tracing::warn!(error = %e, "could not age the units that have been waiting"),
         _ => {}

@@ -91,8 +91,48 @@ impl Control {
         sqlx::raw_sql(include_str!("control_schema.sql"))
             .execute(&self.pool)
             .await?;
+        self.backfill_job_class().await?;
         Ok(())
     }
+
+    /// Put the sweeps in the background class.
+    ///
+    /// `jobs.class` defaults to `0`, which is foreground — the safe direction
+    /// to be wrong in, and the wrong answer for every sweep. Not for a row
+    /// written before the column existed: `migrate` reads the columns before it
+    /// applies the schema and refuses a base without `jobs.class` outright, so
+    /// no such row ever reaches this. What it corrects is a row written by an
+    /// older binary for a stage that was foreground then and is background now
+    /// — pending work outlives an upgrade, and nothing else revisits its class.
+    ///
+    /// It runs on every connect rather than once: it is idempotent by
+    /// construction, since it only ever moves rows that are still `0` *and*
+    /// whose stage says they should not be, which is why
+    /// `applying_the_schema_twice_changes_nothing` still holds.
+    ///
+    /// It cannot tell such a row from one that aged (§4.4) and so undoes an
+    /// ageing across a restart. That costs a moment: the repair ticker's first
+    /// tick fires immediately at boot, the ageing predicate is still satisfied
+    /// by a row that had already aged, and it ages straight back.
+    async fn backfill_job_class(&self) -> Result<()> {
+        let background: Vec<&str> = crate::store::jobs::Stage::ALL
+            .iter()
+            .filter(|s| s.class() == 1)
+            .map(|s| s.as_str())
+            .collect();
+        // The stage names are `&'static str` from our own enum, never anything
+        // a request supplied, so splicing the placeholders is splicing a count.
+        let holes = vec!["?"; background.len()].join(", ");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE jobs SET class = 1 WHERE class = 0 AND stage IN ({holes})"
+        )));
+        for stage in background {
+            q = q.bind(stage);
+        }
+        q.execute(&self.pool).await?;
+        Ok(())
+    }
+
 
     /// Idempotent by construction. Two concurrent first requests for the same
     /// unseen subject both run this: `INSERT OR IGNORE` means one row, and the
@@ -151,6 +191,69 @@ impl Control {
             .await?
             .rows_affected()
             > 0)
+    }
+
+    /// Which of `targets` this tenant has a job for at `stage`.
+    ///
+    /// The queue lives in a different database from the artifacts now, so the
+    /// four `NOT EXISTS (SELECT 1 FROM jobs ...)` clauses that used to ride
+    /// along with an `artifacts` scan cannot be written as joins any more.
+    /// They become this: the tenant names its candidates, and the queue says
+    /// which of them are spoken for. One extra round trip, and no
+    /// cross-database join to keep working.
+    ///
+    /// `states` empty means any state. `max_attempts` limits the answer to
+    /// rows that still have tries left, which is what separates "something is
+    /// going to do this" from "something gave up on this".
+    pub async fn targets_with_jobs(
+        &self,
+        subject: &str,
+        stage: crate::store::jobs::Stage,
+        targets: &[String],
+        states: &[&str],
+        max_attempts: Option<i64>,
+    ) -> Result<std::collections::HashSet<String>> {
+        if targets.is_empty() {
+            return Ok(Default::default());
+        }
+        // Every placeholder here is a count, never a value: the ids are bound.
+        let holes = vec!["?"; targets.len()].join(", ");
+        let mut sql = format!(
+            "SELECT target_id FROM jobs
+              WHERE subject = ? AND stage = ? AND target_id IN ({holes})"
+        );
+        if !states.is_empty() {
+            let s = vec!["?"; states.len()].join(", ");
+            sql.push_str(&format!(" AND state IN ({s})"));
+        }
+        if max_attempts.is_some() {
+            sql.push_str(" AND attempts < ?");
+        }
+        let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql))
+            .bind(subject)
+            .bind(stage.as_str());
+        for t in targets {
+            q = q.bind(t);
+        }
+        for st in states {
+            q = q.bind(*st);
+        }
+        if let Some(n) = max_attempts {
+            q = q.bind(n);
+        }
+        Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
+    }
+
+    /// How many of this tenant's units at `stage` are still going to run.
+    pub async fn live_count(&self, subject: &str, stage: crate::store::jobs::Stage) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs
+              WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')",
+        )
+        .bind(subject)
+        .bind(stage.as_str())
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Last seen, for `--list-users`. Deliberately not a policy input:
@@ -246,7 +349,10 @@ mod tests {
     async fn a_tenant_store_carries_the_control_handle() {
         let store = crate::store::Store::memory().await.unwrap();
         store.control.provision("sub-1", None).await.unwrap();
-        assert_eq!(store.control.users().await.unwrap().len(), 1);
+        // Two: the one just provisioned, and the test subject every
+        // `Store::memory()` runs as so that `jobs.subject` has something to
+        // point at.
+        assert_eq!(store.control.users().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -256,6 +362,6 @@ mod tests {
         let b = crate::store::Store::memory_with(control.clone()).await.unwrap();
         a.control.provision("sub-a", None).await.unwrap();
         b.control.provision("sub-b", None).await.unwrap();
-        assert_eq!(control.users().await.unwrap().len(), 2);
+        assert_eq!(control.users().await.unwrap().len(), 3);
     }
 }

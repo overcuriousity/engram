@@ -730,18 +730,23 @@ impl Store {
     /// the per-chunk one, and re-arming its batch would only spend another call
     /// discovering the same refusal.
     pub async fn pending_artifacts_are_isolated(&self, corpus_id: &str) -> Result<bool> {
-        let unarmed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM artifacts a
-              WHERE a.corpus_id = ? AND a.embed_state = 'pending'
-                AND NOT EXISTS (
-                  SELECT 1 FROM jobs j
-                   WHERE j.stage = 'embed' AND j.target_id = a.id AND j.state != 'done'
-                )",
+        let pending: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending'",
         )
         .bind(corpus_id)
-        .fetch_one(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(unarmed == 0)
+        let armed = self
+            .control
+            .targets_with_jobs(
+                &self.subject,
+                crate::store::jobs::Stage::Embed,
+                &pending,
+                &["pending", "running", "failed"],
+                None,
+            )
+            .await?;
+        Ok(pending.iter().all(|id| armed.contains(id)))
     }
 
     /// Put every chunk of a source back in the embed queue's path. Re-embedding
@@ -1082,20 +1087,38 @@ impl Store {
     /// backstop for an arming that failed after the embed committed. A row
     /// survives its completion, so "no job at all" is exactly "never asked".
     pub async fn list_unrelated_artifact_ids(&self, limit: usize) -> Result<Vec<String>> {
+        // Over-fetched, then filtered against the queue: the `LIMIT` has to be
+        // applied after the "never related" test, and that test now lives in a
+        // different database. The factor is a guess at how many of the oldest
+        // artifacts already have a relate unit; the caller asks again next
+        // sweep if it came back short.
         let rows = sqlx::query(
             "SELECT a.id FROM artifacts a
               WHERE a.status = 'active' AND a.superseded_by IS NULL
                 AND a.embed_state = 'embedded'
                 AND a.provenance <> 'passage'
-                AND NOT EXISTS (SELECT 1 FROM jobs j
-                                 WHERE j.stage = 'relate' AND j.target_id = a.id)
               ORDER BY a.created_at
               LIMIT ?",
         )
-        .bind(limit as i64)
+        .bind((limit as i64).saturating_mul(8))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+        let candidates: Vec<String> = rows.iter().map(|r| r.get::<String, _>("id")).collect();
+        let armed = self
+            .control
+            .targets_with_jobs(
+                &self.subject,
+                crate::store::jobs::Stage::Relate,
+                &candidates,
+                &[],
+                None,
+            )
+            .await?;
+        Ok(candidates
+            .into_iter()
+            .filter(|id| !armed.contains(id))
+            .take(limit)
+            .collect())
     }
 
     /// Artifacts hidden in favour of a keeper that no longer exists.

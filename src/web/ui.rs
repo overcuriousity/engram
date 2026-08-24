@@ -8294,7 +8294,7 @@ mod tests {
         // the next stage makes of it, at every synthesis setting.
         let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE target_id = ?")
             .bind(&corpus_id)
-            .fetch_one(&core.store.pool)
+            .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
         assert!(queued > 0, "a kept answer was stored but never processed");

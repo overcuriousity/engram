@@ -226,7 +226,7 @@ mod tests {
 
     async fn clear_backoff(core: &Core) {
         sqlx::query("UPDATE jobs SET run_after = 0")
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
     }

@@ -132,7 +132,7 @@ mod tests {
             .unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
         sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
 
@@ -140,7 +140,7 @@ mod tests {
 
         let attempts: Vec<i64> =
             sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
-                .fetch_all(&core.store.pool)
+                .fetch_all(&core.store.control.pool)
                 .await
                 .unwrap();
         assert!(
@@ -164,7 +164,7 @@ mod tests {
 
         // Exactly what the crash leaves: windows, no units.
         sqlx::query("DELETE FROM jobs WHERE stage = 'segment_window'")
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
         core.store
@@ -179,7 +179,7 @@ mod tests {
         let armed: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state = 'pending'",
         )
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(armed as usize, windows, "the old job did not become units");

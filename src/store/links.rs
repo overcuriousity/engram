@@ -887,12 +887,10 @@ impl Store {
             )
             .fetch_one(&self.pool)
             .await?,
-            judge_queue: sqlx::query_scalar(
-                "SELECT COUNT(*) FROM jobs
-                  WHERE stage = 'link_judge' AND state IN ('pending', 'running')",
-            )
-            .fetch_one(&self.pool)
-            .await?,
+            judge_queue: self
+                .control
+                .live_count(&self.subject, crate::store::jobs::Stage::LinkJudge)
+                .await?,
         })
     }
 }

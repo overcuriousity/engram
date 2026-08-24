@@ -1720,7 +1720,7 @@ mod tests {
             .unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
         sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
 
@@ -1729,7 +1729,7 @@ mod tests {
 
         let attempts: Vec<i64> =
             sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
-                .fetch_all(&core.store.pool)
+                .fetch_all(&core.store.control.pool)
                 .await
                 .unwrap();
         assert!(
@@ -1754,7 +1754,7 @@ mod tests {
         let src = core.ingest(&manual("mount"), "web", None).await.unwrap();
         for _ in 0..200 {
             sqlx::query("UPDATE jobs SET run_after = 0 WHERE state = 'pending'")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             if !crate::jobs::run_one(&core).await.unwrap_or(false) {
@@ -2304,7 +2304,7 @@ mod tests {
         let before: (i64, i64) =
             sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
                 .bind(job.id)
-                .fetch_one(&core.store.pool)
+                .fetch_one(&core.store.control.pool)
                 .await
                 .unwrap();
         assert!(before.0 > 0 && before.1 > 0, "the unit is not backing off");
@@ -2313,7 +2313,7 @@ mod tests {
 
         let after: (i64, i64) = sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
             .bind(job.id)
-            .fetch_one(&core.store.pool)
+            .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
         assert_eq!(
