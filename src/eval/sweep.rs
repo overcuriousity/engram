@@ -115,6 +115,9 @@ async fn rank_of(core: &Core, pair: &Pair, params: RankingParams) -> Result<Opti
         // Resurfacing reads `last_seen_at`, and a scored run is not someone
         // reading their notes.
         mark: false,
+        // The sweep measures the pipeline as configured, reranker included;
+        // the scope alone decides whether one runs.
+        rerank: true,
         include_deprecated: false,
         include_superseded: false,
     };
@@ -376,6 +379,7 @@ mod tests {
             mark: false,
             include_deprecated: false,
             include_superseded: false,
+            rerank: true,
         };
         core.search_with_ranking(&q, params, Door::Judge)
             .await

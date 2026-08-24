@@ -124,6 +124,9 @@ async fn evaluate_retrieval() {
             mark: false,
             include_deprecated: false,
             include_superseded: false,
+            // The harness measures the configured pipeline; with no reranker
+            // wired this is inert either way.
+            rerank: true,
         };
         let (results, _) = core
             .search_with(&q, cap, engram::store::feedback::Door::Ui)
@@ -498,6 +501,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         synthesizer: Some(Arc::new(engram::infer::fake::FakeSynthesizer::default())),
         embedder: Arc::new(engram::infer::fake::FakeEmbedder::new(8)),
         reranker: None,
+        rerank_apply: vec![],
         completer: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         link_judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
@@ -560,6 +564,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         mark: false,
         include_deprecated: false,
         include_superseded: false,
+        rerank: true,
     };
     let (results, _) = core
         .search_with(&q, None, engram::store::feedback::Door::Judge)

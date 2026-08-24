@@ -38,6 +38,20 @@ pub struct SearchQuery {
     /// Include superseded artifacts, excluded by default.
     #[serde(default)]
     pub include_superseded: bool,
+    /// Whether this request wants the reranker consulted, where the scope
+    /// allows it at all (`Core::rerank_apply`).
+    ///
+    /// True by default: an API or MCP call is one deliberate question and
+    /// wants the best order engram can produce. The UI's typing path passes
+    /// false — a keystroke must come back at embedding speed — and asks again
+    /// with true once the operator stops typing, which is the refining pass
+    /// that reorders the rail.
+    #[serde(default = "default_rerank")]
+    pub rerank: bool,
+}
+
+fn default_rerank() -> bool {
+    true
 }
 
 /// The gate's claim for one search, held for as long as the search runs.
@@ -57,6 +71,11 @@ enum Lane<'a> {
 pub struct SearchTiming {
     pub embed_ms: u128,
     pub total_ms: u128,
+    /// Whether a rerank call actually ran and came back. The UI's claim
+    /// ("Order confirmed by the reranker") is derived from this and never
+    /// from what the request asked for: a rerank that failed or was skipped
+    /// answered in vector order, and the honest fragment stays silent.
+    pub reranked: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -899,8 +918,23 @@ impl Core {
         waited_on: bool,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
         let door = origin.door;
-        if query.q.trim().is_empty() {
+        let q = query.q.trim();
+        if q.is_empty() {
             return Err(Error::Validation("query is empty".into()));
+        }
+        // The embedder's own ceiling, not the model's nominal context: this is
+        // the same physical batch size `jobs::embed` splits documents under,
+        // and a query is one input the splitter never gets a chance to touch.
+        // Caught here, a paste that is too long to search is a 400 the box can
+        // show beside itself; caught only downstream, it is a 502 from an
+        // endpoint that already rejected it.
+        let rendered = self.embedder.templates().render_query(q);
+        let safe_limit = (self.embedder.max_input_tokens() as f32 * 0.8) as usize;
+        let tokens = self.counter.count(&rendered);
+        if tokens > safe_limit {
+            return Err(Error::Validation(format!(
+                "search text is too long ({tokens} tokens, limit is {safe_limit}) — paste less, or use Capture to store it instead"
+            )));
         }
         let limit = match query.limit {
             0 => DEFAULT_LIMIT,
@@ -929,12 +963,12 @@ impl Core {
         // Prefixes repeat constantly inside one search and whole queries repeat
         // across sessions, so this is the difference between one embedding call
         // per search and one per keystroke.
-        let key = query.q.split_whitespace().collect::<Vec<_>>().join(" ");
+        let key = q.split_whitespace().collect::<Vec<_>>().join(" ");
         let cached = self.query_cache.lock().ok().and_then(|c| c.get(&key));
         let vector = match cached {
             Some(v) => v,
             None => {
-                let v = self.embedder.embed_query(query.q.trim()).await?;
+                let v = self.embedder.embed_query(q).await?;
                 if let Ok(mut c) = self.query_cache.lock() {
                     c.put(key, v.clone());
                 }
@@ -955,9 +989,23 @@ impl Core {
             // the coverage check's question, not a searcher's.
             corpus_id: None,
         };
+        // Whether the reranker runs on *this* search: one is configured, the
+        // scope covers this door, and the query did not opt out. The scope
+        // collapses every door but `Ask` into "search" — the judging view, the
+        // API, MCP and the extension all show the operator a ranked list, and
+        // `apply = ["ask"]` means none of them wait on a rerank call.
+        let reranking = query.rerank
+            && match door {
+                Door::Ask => self.reranks_ask(),
+                // The same predicate that arms the UI's refining pass: written
+                // once, so the form can never advertise a refine this search
+                // would not run.
+                _ => self.reranks_search(),
+            };
+
         // Over-fetch whenever something downstream narrows the list: both the
         // per-source cap and the reranker can only discard what they are given.
-        let candidates = if cap.is_some() || self.reranker.is_some() {
+        let candidates = if cap.is_some() || reranking {
             limit * CANDIDATE_MULTIPLIER
         } else {
             limit
@@ -1021,7 +1069,9 @@ impl Core {
             })
             .collect();
 
+        let mut reranked = false;
         if let Some(reranker) = &self.reranker
+            && reranking
             && !results.is_empty()
         {
             let docs: Vec<String> = results.iter().map(|r| r.text.clone()).collect();
@@ -1038,6 +1088,7 @@ impl Core {
             };
             match reranker.rerank(&query.q, &docs, top_n).await {
                 Ok(order) => {
+                    reranked = true;
                     results = order
                         .into_iter()
                         .filter_map(|(idx, score)| {
@@ -1187,6 +1238,7 @@ impl Core {
             SearchTiming {
                 embed_ms,
                 total_ms: started.elapsed().as_millis(),
+                reranked,
             },
         ))
     }
@@ -1320,6 +1372,7 @@ mod tests {
             // The default for these tests is the deliberate search the API and
             // MCP make; the incremental case is exercised explicitly below.
             mark: true,
+            rerank: true,
             include_deprecated: false,
             include_superseded: false,
         }
@@ -1675,6 +1728,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_scope_of_ask_keeps_the_reranker_out_of_search() {
+        // `apply = ["ask"]` is the opt-out for search latency: a configured
+        // reranker must then never be consulted on the search path, whatever
+        // the query asks for.
+        let (mut core, reranker) =
+            crate::core::test_support::test_core_counting_reranked_docs().await;
+        core.rerank_apply = vec![crate::config::RerankApply::Ask];
+        seed_from(
+            &core,
+            "one",
+            &[("alpha", "c", &[][..]), ("beta", "c", &[][..])],
+        )
+        .await;
+
+        core.search(&q("anything"), Door::Ui).await.unwrap();
+        assert_eq!(
+            reranker.docs_seen(),
+            0,
+            "the reranker was consulted on a search it is scoped out of"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_incremental_query_skips_the_reranker() {
+        // The typing fast path: a query that says `rerank: false` gets vector
+        // order immediately, and the refining pass asks again with `true`.
+        let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        seed_from(
+            &core,
+            "one",
+            &[("alpha", "c", &[][..]), ("beta", "c", &[][..])],
+        )
+        .await;
+
+        let mut query = q("anything");
+        query.rerank = false;
+        core.search(&query, Door::Ui).await.unwrap();
+        assert_eq!(
+            reranker.docs_seen(),
+            0,
+            "a rerank:false query still reached the reranker"
+        );
+
+        query.rerank = true;
+        core.search(&query, Door::Ui).await.unwrap();
+        assert!(
+            reranker.docs_seen() > 0,
+            "the refining pass must consult the reranker"
+        );
+    }
+
+    #[tokio::test]
     async fn one_source_cannot_lead_the_whole_result_list() {
         // A forty-chunk document otherwise crowds out every other source and
         // the top of the list becomes forty near-identical paragraphs.
@@ -1901,6 +2006,21 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_query_too_long_to_embed_is_rejected_before_it_reaches_the_endpoint() {
+        // Pasting more than the embedder can take used to reach `embed_query`
+        // unchecked and come back as whatever the endpoint said — a 502 the
+        // box could not explain. Caught here, it is a plain validation error
+        // instead, and the fake embedder never sees the call.
+        let core = test_core().await;
+        let pasted = "lorem ".repeat(6000);
+        let err = core.search(&q(&pasted), Door::Ui).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Validation(ref m) if m.contains("too long")),
+            "expected a validation error about length, got {err:?}"
         );
     }
 

@@ -1494,6 +1494,229 @@
       .catch(function () { canvas.parentNode.removeChild(canvas); });
   }
 
+  // ── The refining pass ─────────────────────────────────────────────────────
+  //
+  // Typing gets vector order at embedding speed; the reranker's opinion is
+  // asked for afterwards, once the box has been quiet long enough to mean the
+  // query is settled. The reranked fragment then replaces the list and the
+  // rows glide to their new places, so the reordering reads as a refinement
+  // happening in front of you rather than as the list twitching.
+  //
+  // Armed only by `data-rerank` on the form, which the server renders only
+  // where a reranker actually serves search: without it a second request
+  // could only buy the same order back, and the tick beside the count would
+  // be claiming a confirmation that never took place.
+
+  // Was this swap the refining pass? Read off the request rather than kept in
+  // a flag, so the fast handler below and the driver cannot disagree about
+  // which swap they are looking at.
+  function wasRefine(e) {
+    var cfg = e.detail && e.detail.requestConfig;
+    // The pre-filter set: `parameters` is only what survived `hx-params`, so
+    // an allowlist edit there would silently turn every refine swap back into
+    // a typing swap — and the typing branch re-arms the timer, which is the
+    // loop that never stops.
+    var params = cfg && (cfg.unfilteredParameters || cfg.parameters);
+    return !!(params && params.rerank === 'true');
+  }
+
+  // The rail's selected row, recomputed from the URL. Run after any swap that
+  // repaints the list while an artifact is open: the fragment renders every
+  // row `aria-selected="false"`, and the open artifact's highlight must
+  // survive a repaint it had nothing to do with.
+  function markOpenRow() {
+    var open = window.location.pathname;
+    document.querySelectorAll('.rail-item').forEach(function (el) {
+      el.setAttribute('aria-selected', el.getAttribute('href') === open ? 'true' : 'false');
+    });
+  }
+
+  function refinePass() {
+    var form = document.getElementById('box-form');
+    if (!form || form.getAttribute('data-rerank') !== 'true') return;
+    var box = form.querySelector('textarea[name="q"]');
+    if (!box) return;
+    // Long enough past the 120ms debounce to mean "settled", short enough
+    // that the refinement still reads as part of the same answer.
+    var QUIET_MS = 500;
+    var timer = null;
+    // Where each row stood when the refine was fired, keyed by href — taken
+    // just before the request, spent by the animation, and good for exactly
+    // one swap.
+    var from = null;
+    // The last refined answer, kept to be replayed: `key` is the query and
+    // chip it answered, `hrefs` the row set it is valid over, `html` and
+    // `head` the fragment and the count line it painted.
+    var refined = null;
+    // The key of the refine in flight, promoted into `refined` when its swap
+    // lands.
+    var pending = null;
+
+    function cancel() {
+      if (timer) { clearTimeout(timer); timer = null; }
+    }
+
+    // Positions are taken relative to the list itself rather than the
+    // viewport: the rail is its own scroll box on a wide screen and the
+    // window scrolls on a narrow one, and a refine can land seconds after it
+    // fired. Viewport coordinates captured before a scroll would make every
+    // unmoved row lurch by exactly the scroll distance.
+    function resultsTop() {
+      var el = document.getElementById('results');
+      return el ? el.getBoundingClientRect().top : 0;
+    }
+
+    function fire() {
+      timer = null;
+      var q = box.value.trim();
+      // The same two guards the endpoint applies: an empty box is the idle
+      // rail, and a pasted chapter is a capture, not a query.
+      if (!q || q.length > 2000) return;
+      var values = { q: q, rerank: 'true' };
+      var chip = form.querySelector('input[name="category"]:checked');
+      if (chip && chip.value) values.category = chip.value;
+      var rows = document.querySelectorAll('#results .rail-item');
+      // Nothing to refine: the server skips the rerank call over an empty
+      // answer, so the request would buy a guaranteed-identical fragment.
+      if (!rows.length) return;
+      var key = q + '\u0000' + (values.category || '');
+      var origin = resultsTop();
+      var hrefs = [];
+      from = {};
+      rows.forEach(function (el) {
+        var href = el.getAttribute('href');
+        hrefs.push(href);
+        from[href] = el.getBoundingClientRect().top - origin;
+      });
+      // The same query, settled again over the same rows — a type-and-undo,
+      // a chip toggled back. The reranker already answered this exact
+      // question, so its fragment is replayed rather than bought twice.
+      // Replayed only over an identical row set: a capture landing
+      // mid-sitting changes what there is to rank, and a stored answer must
+      // never hide a row the fast pass just showed. Both sides of the
+      // comparison are fast-pass sets — this one and the one captured when
+      // the stored refine fired — sorted into set order, because what is
+      // being asked is "same rows", not "same order".
+      if (refined && refined.key === key && refined.hrefs === hrefs.slice().sort().join('\n')) {
+        var target = document.getElementById('results');
+        if (target) {
+          target.innerHTML = refined.html;
+          var head = document.getElementById('rail-head');
+          if (head && refined.head) head.innerHTML = refined.head;
+          // By hand, so none of the htmx swap machinery ran: the new rows
+          // need their hx- attributes wired, the same enhancements a real
+          // swap gets, and the selection recomputed.
+          htmx.process(target);
+          enhance(target);
+          markOpenRow();
+          trackDwell();
+          glide();
+        }
+        return;
+      }
+      // The row set the refine is answering over is the one on screen *now*:
+      // the reranker reorders (and promotes into) what the fast pass matched,
+      // so its fragment can show rows this list does not. Valid replay is
+      // "same query over the same fast-pass rows", which only this moment
+      // knows — captured here, promoted into `refined` when the swap lands.
+      pending = { key: key, hrefs: hrefs.slice().sort().join('\n') };
+      // `source: form` so this request stands in the form's own sync queue:
+      // a keystroke's search replaces an in-flight refine exactly as it
+      // replaces an older keystroke's search, and the list shown is always
+      // the answer to the last thing typed.
+      htmx.ajax('GET', '/ui/search/results', {
+        source: form, target: '#results', swap: 'innerHTML', values: values
+      });
+    }
+
+    function glide() {
+      var was = from;
+      from = null;
+      if (!was) return;
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      var origin = resultsTop();
+      document.querySelectorAll('#results .rail-item').forEach(function (el) {
+        var top = was[el.getAttribute('href')];
+        if (top === undefined) {
+          // A row the fast pass never showed: promoted from the candidate
+          // pool. Nowhere to glide from, so it arrives instead.
+          el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' });
+          return;
+        }
+        var delta = top - (el.getBoundingClientRect().top - origin);
+        if (!delta) return;
+        el.animate(
+          [{ transform: 'translateY(' + delta + 'px)' }, { transform: 'none' }],
+          { duration: 300, easing: 'ease-in-out' }
+        );
+      });
+    }
+
+    // A keystroke inside the debounce window: the pending refine belongs to a
+    // query that is no longer what the box says. Composition events are
+    // skipped to mirror the form's own trigger filter
+    // (`input[!event.isComposing]`): a browser whose final IME event still
+    // says composing fires no search off it, and a cancel with no request
+    // behind it would leave the pass disarmed on a settled query. The
+    // composition itself disarms once, below, when it starts.
+    box.addEventListener('input', function (e) {
+      if (e.isComposing) return;
+      cancel();
+    });
+    box.addEventListener('compositionstart', cancel);
+    // Any request from the form — a keystroke's search, a chip, the refine
+    // itself — retires the pending timer; the fast swap landing below is what
+    // arms a new one. And any mutation from anywhere — an edit saved in the
+    // detail pane, a deprecate, a delete — retires the stored answer: its
+    // fragment carries titles and snippets as they stood when it was bought,
+    // and a pane-only edit changes those without touching the row set the
+    // replay guard checks.
+    document.body.addEventListener('htmx:beforeRequest', function (e) {
+      if (!e.detail) return;
+      if (e.detail.elt === form) cancel();
+      var cfg = e.detail.requestConfig;
+      if (cfg && cfg.verb && String(cfg.verb).toLowerCase() !== 'get') refined = null;
+    });
+    document.body.addEventListener('htmx:afterSwap', function (e) {
+      if (e.target.id !== 'results') return;
+      if (wasRefine(e)) {
+        // The fragment renders every row unselected, and this swap can land
+        // over a list whose open artifact was clicked during the quiet
+        // window; the highlight must not vanish under a repaint that changed
+        // nothing about what is open.
+        markOpenRow();
+        // Kept to be replayed the next time this exact query settles over
+        // this exact row set — see `fire`. The row set stored is the
+        // fast-pass one `fire` captured, not the fragment's: the reranker
+        // may have promoted rows the fast list never showed, and a replay
+        // guard built from those would miss every time the rerank did
+        // anything at all.
+        var target = document.getElementById('results');
+        if (pending && target) {
+          var head = document.getElementById('rail-head');
+          refined = {
+            key: pending.key,
+            hrefs: pending.hrefs,
+            html: target.innerHTML,
+            head: head ? head.innerHTML : null
+          };
+        }
+        pending = null;
+        glide();
+      } else {
+        // The same repaint hazard as the refine branch: a typing swap also
+        // renders every row unselected, and the open artifact's highlight
+        // must survive it.
+        markOpenRow();
+        // Never re-armed off a refine swap: that loop would turn one settled
+        // query into a rerank call every half second forever.
+        cancel();
+        from = null;
+        timer = setTimeout(fire, QUIET_MS);
+      }
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
     themeToggle();
@@ -1506,6 +1729,7 @@
     railBack();
     captureVerb();
     askDriver();
+    refinePass();
     trackDwell();
     window.addEventListener('pagehide', flushDwell);
     document.addEventListener('visibilitychange', function () {
@@ -1519,6 +1743,13 @@
     // here instead, and it names the page so signing in comes back to it.
     document.body.addEventListener('htmx:responseError', function (e) {
       if (!e.detail || !e.detail.xhr) return;
+      // Not for the refining pass: nobody asked for that request, and the
+      // vector-order list it would improve is already on screen and being
+      // read. A transient failure half a second after the operator stopped
+      // typing must not replace their results with an error box — and an
+      // expired session must not navigate them to a login mid-read; the next
+      // thing they actually do will land here and redirect with intent.
+      if (wasRefine(e)) return;
       if (e.detail.xhr.status === 401) {
         var here = window.location.pathname + window.location.search;
         window.location.assign('/auth/login?go=' + encodeURIComponent(here));
@@ -1534,6 +1765,9 @@
     // reading left is that the base has nothing.
     document.body.addEventListener('htmx:sendError', function (e) {
       if (!e.detail) return;
+      // Same exemption as above: a refine that never reached the server
+      // leaves the list it was refining alone.
+      if (wasRefine(e)) return;
       failedSwap(e.detail.target, null);
     });
     document.body.addEventListener('htmx:afterSwap', function (e) {
@@ -1561,7 +1795,12 @@
       // `#results` rather than `#rail`: the list is its own element inside the
       // rail now, so that what a search replaces is the results and not the
       // sitting beside them.
-      if (e.target.id === 'results') {
+      //
+      // Not for the refining pass: it lands over a list the operator may
+      // already be reading, and the whole point of the glide is that the rows
+      // move under a still eye. Resetting the scroll would trade that for a
+      // jump.
+      if (e.target.id === 'results' && !wasRefine(e)) {
         if (ws) ws.classList.remove('has-selection', 'answering');
         // Back to the top of the answer. Nothing moved the scroll on a swap,
         // and the two layouts strand it in different places for the same
@@ -1606,10 +1845,7 @@
           var el = document.getElementById(id);
           if (el) el.textContent = '';
         });
-        var open = window.location.pathname;
-        document.querySelectorAll('.rail-item').forEach(function (el) {
-          el.setAttribute('aria-selected', el.getAttribute('href') === open ? 'true' : 'false');
-        });
+        markOpenRow();
       }
     });
   });

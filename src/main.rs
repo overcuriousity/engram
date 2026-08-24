@@ -108,6 +108,9 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     embed_recipe_check(core, cfg).await?;
     if let Some(r) = &cfg.infer.rerank {
         engram::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
+        if !r.applies_to(engram::config::RerankApply::Search) {
+            tracing::info!("rerank scoped to ask; search returns vector order");
+        }
     } else {
         tracing::info!("rerank not configured; search returns vector order");
     }

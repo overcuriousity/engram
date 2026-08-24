@@ -1474,6 +1474,32 @@ pub struct RerankRole {
     pub style: RerankStyle,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Where the reranker is consulted. Both places unless narrowed: whoever
+    /// configured the endpoint wants it working, and `apply = ["ask"]` is the
+    /// opt-out for search, where the rerank call is latency a typing operator
+    /// would otherwise wait on.
+    #[serde(default = "default_rerank_apply")]
+    pub apply: Vec<RerankApply>,
+}
+
+impl RerankRole {
+    pub fn applies_to(&self, place: RerankApply) -> bool {
+        self.apply.contains(&place)
+    }
+}
+
+fn default_rerank_apply() -> Vec<RerankApply> {
+    vec![RerankApply::Ask, RerankApply::Search]
+}
+
+/// A place the reranker can be consulted. `Ask` is retrieval behind a
+/// question; `Search` is every ranked list a caller sees directly — the UI
+/// rail, the API, MCP, the extension, and the judging view.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RerankApply {
+    Ask,
+    Search,
 }
 
 /// The vision model that reads a captured image into text. Optional: absent
@@ -2519,6 +2545,28 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert!(
             cfg.infer.rerank.is_none(),
             "rerank must default to disabled"
+        );
+    }
+
+    #[test]
+    fn rerank_applies_everywhere_unless_narrowed() {
+        // A configured reranker is used for both ask and search unless `apply`
+        // names fewer places: whoever set up the endpoint wants it working,
+        // and the narrowing is the opt-out for search's latency.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let rerank = "\n[infer.rerank]\nbase_url = \"http://localhost:8081\"\nmodel = \"bge-reranker-v2-m3\"\nstyle = \"tei\"\n";
+        let p = write(&dir, &format!("{MINIMAL}{rerank}"));
+        let role = Config::load(Some(&p)).unwrap().infer.rerank.unwrap();
+        assert!(role.applies_to(RerankApply::Ask));
+        assert!(role.applies_to(RerankApply::Search));
+
+        let p = write(&dir, &format!("{MINIMAL}{rerank}apply = [\"ask\"]\n"));
+        let role = Config::load(Some(&p)).unwrap().infer.rerank.unwrap();
+        assert!(role.applies_to(RerankApply::Ask));
+        assert!(
+            !role.applies_to(RerankApply::Search),
+            "apply = [\"ask\"] must switch the reranker off for search"
         );
     }
 

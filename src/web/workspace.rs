@@ -75,6 +75,11 @@ struct WorkspaceTemplate {
     /// Whether the image door is open, i.e. `[infer.vision]` is configured.
     /// Off, the control offers text only rather than a picker that fails.
     vision_enabled: bool,
+    /// Whether a reranker serves the search path — `Core::reranks_search`.
+    /// Rendered onto the form as `data-rerank`, which is what arms app.js's
+    /// refining pass: without it no second request fires, ever, because it
+    /// could only buy the same order back.
+    search_reranks: bool,
     /// Whether capture spends a synthesis call per segment, i.e. `eager`.
     ///
     /// At `earned` and `off` it spends none: the text is embedded as written,
@@ -177,6 +182,7 @@ async fn base_template(
         category,
         recommend: st.core.recommends(),
         vision_enabled: st.core.describer.is_some(),
+        search_reranks: st.core.reranks_search(),
         eager: st.core.synthesis == crate::config::SynthesisMode::Eager,
         prefill_ask: String::new(),
         prefill_question: String::new(),
@@ -760,6 +766,75 @@ mod tests {
             verdict_bar: String::new(),
         })
         .unwrap()
+    }
+
+    /// The refining pass is a second request per settled query, and app.js
+    /// decides whether to fire it by reading the form. A box with no search
+    /// reranker must not advertise one: every pause would buy a second search
+    /// that answers in the same order, and the rail would claim "refined" over
+    /// an order nothing confirmed.
+    #[tokio::test]
+    async fn the_form_says_whether_a_refining_pass_is_worth_firing() {
+        let html = workspace("/ui").await;
+        assert!(
+            !html.contains("data-rerank"),
+            "no reranker, so the form must not advertise a refining pass"
+        );
+
+        let (core, _reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(
+            html.contains(r#"data-rerank="true""#),
+            "a reranker serving search is what arms the refining pass"
+        );
+        assert!(
+            html.contains(r#"hx-params="q,category,rerank""#),
+            "hx-params is the allowlist for what rides a search GET; without \
+             `rerank` on it the refining pass's own flag is filtered off the \
+             wire and the server only ever runs the fast path"
+        );
+    }
+
+    /// The refining pass, pinned at the seams that keep it honest: it arms
+    /// only off the form's `data-rerank`, it fires `rerank=true` rather than
+    /// re-running the fast search, and it never schedules itself off its own
+    /// swap — which is the loop that would turn one settled query into a
+    /// rerank call every half second forever.
+    #[test]
+    fn the_refining_pass_is_armed_by_the_form_and_never_by_itself() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("data-rerank"),
+            "the driver reads the form's flag; without it no refine ever fires"
+        );
+        assert!(
+            js.contains("rerank: 'true'"),
+            "the refining request asks for the reranked order by name"
+        );
+        assert!(
+            js.contains("wasRefine"),
+            "a refine swap must be told apart from a typing swap, or the \
+             refine reschedules off its own landing and never stops"
+        );
+        assert!(
+            js.contains("unfilteredParameters"),
+            "wasRefine must read the pre-filter parameter set: `parameters` \
+             is what survived hx-params, so an allowlist edit there would \
+             silently turn every refine swap back into a typing swap — and \
+             the refine reschedules off its own landing forever"
+        );
     }
 
     /// Three destinations, because there are three places. Capture and Ask
