@@ -2003,3 +2003,23 @@ async fn search_reports_a_cosine_alongside_the_fused_rank() {
         near.score
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn a_sample_returns_artifact_ids_with_their_dense_vectors() {
+    let v = fresh("engram_it_sample", 4).await;
+    v.upsert(vec![point("a", "s1", vec![0.1, 0.2, 0.3, 0.4], &[], "c")])
+        .await
+        .unwrap();
+
+    let sample = v.sample(10).await.unwrap();
+    assert_eq!(sample.len(), 1);
+    assert_eq!(sample[0].0, "a");
+    // Upsert normalizes, so the stored vector is the same direction, not the
+    // same numbers.
+    assert!(
+        engram::vector::cosine(&sample[0].1, &[0.1, 0.2, 0.3, 0.4]) > 0.9999,
+        "the sample carries the point's own dense vector"
+    );
+    v.drop_collection().await.unwrap();
+}

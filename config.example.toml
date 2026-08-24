@@ -681,3 +681,15 @@ pdf_max_bytes = 52428800
 # Longest edge of the preview shown to the vision model and in the UI. The
 # original is stored untouched either way.
 image_preview_edge = 2048
+
+[ui.background]
+# The rotating point cloud behind the pages, sampled from the vector store.
+# Purely decorative; off leaves the pages plain.
+enabled = true
+# Vectors sampled per snapshot. Capped at 20000 on read: the number reaches a
+# Qdrant scroll limit and a projection loop at once, and this is a decoration.
+sample_size = 2000
+# Seconds the client keeps a snapshot before fetching another (6 h). Also the
+# `max-age` on the response, so a browser that cannot write local storage still
+# only asks this often. Zero means fetch on every page load.
+refresh_secs = 21600

@@ -167,6 +167,9 @@ pub struct Core {
     /// sweep and on the page-view path, so it lives here rather than being
     /// threaded down.
     pub recommend: crate::config::RecommendConfig,
+    /// The vector background behind the pages. Read by the sample endpoint,
+    /// so it lives here rather than being threaded down.
+    pub ui: crate::config::UiConfig,
     /// Every live sitting, keyed by web session. Shared by every clone of
     /// `Core`, like the background queue — a per-clone map would be a per-clone
     /// working memory, which is no working memory at all.
@@ -273,6 +276,7 @@ impl Core {
             schedule: cfg.schedule.clone(),
             sitting: cfg.sitting.clone(),
             recommend: cfg.recommend.clone(),
+            ui: cfg.ui.clone(),
             sittings: Arc::new(Default::default()),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
@@ -510,6 +514,7 @@ pub mod test_support {
                 enabled: false,
                 ..Default::default()
             },
+            ui: Default::default(),
             sittings: Arc::new(Default::default()),
             // No cooldown: a test that wants pacing builds its
             // own gate, and every other test would otherwise pay for one.

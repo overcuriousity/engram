@@ -1978,6 +1978,46 @@ impl VectorStore for QdrantVectors {
         Ok(hits)
     }
 
+    async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
+        // One scroll page: Qdrant's scroll has no random start, and a slowly
+        // changing first page is fine for a picture that refreshes every few
+        // hours.
+        let page: ScrollResult = self
+            .call(
+                Method::POST,
+                &format!("/collections/{}/points/scroll", self.alias),
+                Some(json!({
+                    "limit": limit,
+                    // Only `artifact_id` is read below; a full payload would
+                    // haul every point's chunk text along for nothing.
+                    "with_payload": ["artifact_id"],
+                    // Named rather than `true`, for the same reason: `true`
+                    // returns every vector on the point, and the `ctx`
+                    // multivector — up to eleven rows of `CTX_DIM` — is
+                    // dropped on the next line. `dense_of` already reads the
+                    // object form.
+                    "with_vector": [DENSE],
+                })),
+            )
+            .await?;
+        Ok(page
+            .points
+            .iter()
+            .filter_map(|p| {
+                // A point without a dense vector or without an `artifact_id`
+                // is not an engram point — dropped, not an error, the same
+                // rule `all_artifact_ids` states in the trait doc.
+                let dense = dense_of(&p.vector)?.as_array()?;
+                let vector: Vec<f32> = dense
+                    .iter()
+                    .map(|x| x.as_f64().map(|f| f as f32))
+                    .collect::<Option<_>>()?;
+                let id = p.payload.get("artifact_id")?.as_str()?.to_string();
+                Some((id, vector))
+            })
+            .collect())
+    }
+
     async fn count(&self) -> Result<u64> {
         self.exact_count(&self.alias).await
     }

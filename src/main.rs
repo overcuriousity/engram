@@ -410,6 +410,7 @@ mod startup_tests {
             schedule: engram::config::ScheduleConfig::default(),
             sitting: engram::config::SittingConfig::default(),
             recommend: engram::config::RecommendConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 

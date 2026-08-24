@@ -1,0 +1,17 @@
+/* The vector background: one fixed canvas behind everything, drawn by
+   app.js from a sampled projection of the store. `pointer-events: none` is
+   not decoration — the canvas covers the viewport, and without it every
+   click would land on the picture. Negative z-index rather than raising the
+   content: `.shell` and the bars keep their own stacking and this file stays
+   the only place that knows the canvas exists. */
+#vec-bg {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: -1;
+  /* Low enough that body text never competes with it; the draw itself also
+     works in low alphas, this is the ceiling. */
+  opacity: 0.72;
+}

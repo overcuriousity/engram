@@ -483,6 +483,19 @@ impl VectorStore for MemoryVectors {
         Ok(())
     }
 
+    async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
+        let r = self.points.read().unwrap();
+        let mut ids: Vec<&String> = r.keys().collect();
+        // Deterministic, so a test never depends on HashMap iteration order —
+        // the same rule `all_artifact_ids` obeys.
+        ids.sort();
+        Ok(ids
+            .into_iter()
+            .take(limit)
+            .map(|id| (id.clone(), r[id].vector.clone()))
+            .collect())
+    }
+
     async fn count(&self) -> Result<u64> {
         Ok(self.points.read().unwrap().len() as u64)
     }
@@ -827,5 +840,28 @@ mod tests {
                 "identical scores produced an unstable ordering"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_sample_returns_ids_with_their_vectors_up_to_the_limit() {
+        let v = MemoryVectors::new();
+        v.upsert(vec![
+            point("a", "s", vec![1.0, 0.0], &[], "c"),
+            point("b", "s", vec![0.0, 1.0], &[], "c"),
+            point("c", "s", vec![1.0, 1.0], &[], "c"),
+        ])
+        .await
+        .unwrap();
+
+        let all = v.sample(10).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(
+            all.iter()
+                .any(|(id, vec)| id == "a" && vec == &vec![1.0, 0.0]),
+            "the sample carries each artifact's own vector: {all:?}"
+        );
+
+        let capped = v.sample(2).await.unwrap();
+        assert_eq!(capped.len(), 2, "the limit is respected");
     }
 }

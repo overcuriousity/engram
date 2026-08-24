@@ -1126,13 +1126,14 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
                 .patch(patch_artifact)
                 .delete(delete_artifact),
         )
+        .route("/vectors/sample", get(crate::web::vbg::sample))
         .route("/status", get(status))
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
 
     use crate::web::test_support::{FilePart, a_png, app_with_token, json_of, multipart};
@@ -1231,6 +1232,97 @@ pub(crate) mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).unwrap()
+    }
+
+    fn bg_point(id: &str, v: Vec<f32>) -> crate::vector::VectorPoint {
+        crate::vector::VectorPoint {
+            vector: v,
+            sparse: Default::default(),
+            payload: crate::vector::VectorPayload {
+                artifact_id: id.into(),
+                corpus_id: "s".into(),
+                text: format!("text of {id}"),
+                title: None,
+                category: None,
+                tags: vec![],
+                created_at: 0,
+                last_seen_at: None,
+                hit_count: None,
+                status: None,
+                last_verified_at: None,
+                superseded_by: None,
+                origin_corpora: vec![],
+                provenance: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn the_background_sample_is_bounded_and_carries_its_refresh() {
+        let (app, token, core) = app_token_and_core().await;
+        core.vectors
+            .upsert(vec![
+                bg_point("a", vec![1.0, 0.0, 0.0]),
+                bg_point("b", vec![0.0, 1.0, 0.0]),
+            ])
+            .await
+            .unwrap();
+
+        let res = app
+            .oneshot(get("/api/v1/vectors/sample", Some(&token)))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        // The header, not the client's `localStorage`, is what actually holds
+        // the fetch budget: a browser that cannot write storage has nothing
+        // else stopping it from re-running the scroll on every page load.
+        let cache = res.headers()[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            cache.starts_with("private, max-age=") && !cache.ends_with("=0"),
+            "the sample must be cacheable by the browser: {cache}"
+        );
+        let body = json_of(res).await;
+        let pts = body["points"].as_array().expect("points is an array");
+        assert_eq!(pts.len(), 2);
+        assert_eq!(body["count"], 2);
+        assert!(body["refresh_secs"].as_u64().unwrap() > 0);
+        for p in pts {
+            let r: f64 = p
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c.as_f64().unwrap().powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!(r <= 1.25 + 1e-3, "point escaped the outlier ceiling: {p}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_store_yields_an_empty_cloud_not_an_error() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(get("/api/v1/vectors/sample", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = json_of(res).await;
+        assert_eq!(body["points"], serde_json::json!([]));
+        assert_eq!(body["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn the_background_sample_needs_auth() {
+        let (app, _token) = app_and_token().await;
+        let res = app
+            .oneshot(get("/api/v1/vectors/sample", None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     fn post_json(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
