@@ -125,20 +125,30 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
 
 /* Until something is opened into it, the pane holds one line of placeholder
    and the rail holds every result — so the rail takes the width the pane is
-   not using. `has-selection` is what the pane gains when an artifact is
-   swapped into it, so its absence is exactly "nothing open yet".
+   not using. `pane-open` is what the pane gains when an artifact is swapped
+   into it, so its absence is exactly "nothing open yet".
    The pane is not filled on arrival instead: opening the top hit would spend
    a read on every search, including the ones the rail already answers.
 
+   `pane-open` rather than `has-selection`, which is the same fact asked for a
+   different reason: narrow reads it as "hide the rail", so a fresh list has to
+   drop it — the results have changed underneath whatever is open, and a phone
+   showing the old artifact over them would be showing the wrong screen. Wide
+   has no such claim to make: what is open is still open, and still needs its
+   width. One class answered both, so the rail refresh a capture fires — the
+   box is empty by then, and an empty box comes back as the idle rail through
+   the same `#results` swap — took the artifact's width away while the artifact
+   was on screen, and left it in a 24rem pane spelling one word per line.
+
    `.answering` is the other thing the pane can hold. An answer is not swapped
-   into `#pane-content` and never gained `has-selection`, so it arrived into
+   into `#pane-content` and never gained `pane-open`, so it arrived into
    whatever was left beside a 40rem rail — the widest the rail is ever allowed
    to be, held there because nothing was open, while an answer was being
    written into the column beside it.
 
    Inside a container query because of what it is: a claim about how to divide
    two columns, which is nonsense where there is only one. Chained rather than
-   `:not(.has-selection, .answering)`: the chain counts both classes and the
+   `:not(.pane-open, .answering)`: the chain counts both classes and the
    list counts one, and the three classes are what outrank the `.regions.reading`
    track list in 40-workspace.css, which is a later file at equal weight. The
    chain also outranks the single class the one-up block below sets
@@ -148,7 +158,7 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    than fought there: the one-up block says what one column is, and this says
    what to do when there are two. */
 @container shell (width > 60rem) {
-  .regions-rail-focus-source:not(.has-selection):not(.answering) {
+  .regions-rail-focus-source:not(.pane-open):not(.answering) {
     grid-template-columns: [rail] minmax(0, 40rem) [focus] minmax(0, 1fr);
   }
 }

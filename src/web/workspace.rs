@@ -1017,12 +1017,12 @@ mod tests {
 
         let css = include_str!("../../assets/css/20-layout.css");
         let idle = css
-            .split_once(":not(.has-selection):not(.answering)")
+            .split_once(":not(.pane-open):not(.answering)")
             .expect("the idle 40rem rail is not held while an answer is being written")
             .0;
         // Bounded to the widths that have two columns. The two chained
         // `:not()`s outrank the single class the one-up block sets its track
-        // list with — chained rather than `:not(.has-selection, .answering)`,
+        // list with — chained rather than `:not(.pane-open, .answering)`,
         // which would count one class and not two — and specificity does not
         // care that the two rules answer different widths: unbounded, this
         // two-column rule won on a narrow screen too, and left the pane beside
@@ -1040,6 +1040,80 @@ mod tests {
         assert!(
             phone.contains(".regions.answering .region-rail { order: 1; }"),
             "including in the block that restates the narrow rules for a phone"
+        );
+    }
+
+    /// One class was answering two questions. Narrow asks "should the rail
+    /// still be on screen", which a fresh list answers yes to — the results
+    /// have changed under whatever is open. Wide asks "does the pane hold
+    /// something that needs its width", which a fresh list does not change at
+    /// all. `has-selection` was both, so a capture — which empties the box, and
+    /// an empty box comes back as the idle rail through the same `#results`
+    /// swap — handed the rail 40rem while an artifact was open beside it, and
+    /// the artifact finished in a 24rem strip setting one word per line.
+    #[test]
+    fn a_fresh_list_shows_the_rail_again_without_taking_the_open_artifact_s_width() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("classList.add('has-selection', 'pane-open')"),
+            "opening an artifact says both things at once"
+        );
+        assert!(
+            js.contains("classList.remove('has-selection', 'answering')"),
+            "and a fresh list takes back the one about the rail"
+        );
+        assert!(
+            !js.contains("classList.remove('has-selection', 'answering', 'pane-open')")
+                && !js.contains("classList.remove('pane-open', 'has-selection'"),
+            "and only that one: the pane still holds what it held"
+        );
+        assert!(
+            js.contains("regions.classList.remove('pane-open')"),
+            "an ask empties the pane, so the pane is no longer open"
+        );
+
+        let css = include_str!("../../assets/css/20-layout.css");
+        assert!(
+            css.contains(":not(.pane-open):not(.answering)"),
+            "the wide rail keys on what the pane holds, not on the narrow rule"
+        );
+        assert!(
+            !css.contains(":not(.has-selection)"),
+            "nothing about width is still asking the narrow question"
+        );
+    }
+
+    /// The split decides its columns from the window, which is the right
+    /// question only where the window *is* the pane. Inside the focus pane its
+    /// width is whatever the rail leaves, and no width of window says what that
+    /// is — so a narrowed pane kept two columns of eleven rem and set German
+    /// compounds one word to the line.
+    #[test]
+    fn the_split_stacks_when_the_pane_it_landed_in_is_too_narrow_for_two() {
+        let css = include_str!("../../assets/css/40-workspace.css");
+        assert!(
+            css.contains(
+                "[data-artifact] { container-type: inline-size; container-name: artifact; }"
+            ),
+            "the fragment's own root is the split's parent in both places it renders"
+        );
+        assert!(
+            css.contains("@container artifact (width <= 36rem) { .split { grid-template-columns: minmax(0, 1fr); } }"),
+            "and below a reading width the two halves stack"
+        );
+        // Two stacked halves that each scroll would be the lockstep pair with
+        // the one thing that makes it a pair removed: scrolling either would
+        // move the other off screen rather than alongside it.
+        let boxes = css
+            .split_once(".split > :first-child {\n    display: flex")
+            .expect("the artifact half is a scroll box where the two are side by side")
+            .0;
+        assert!(
+            boxes
+                .rsplit_once("@container")
+                .is_some_and(|(_, open)| open.trim_start().starts_with("artifact (width > 36rem)")),
+            "the scroll boxes agree with the backstop about what side by side means"
         );
     }
 

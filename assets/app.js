@@ -501,7 +501,13 @@
       // the `[n]` links point into them, so hiding them is the one thing that
       // must not happen here. Narrow puts the rail after the answer instead.
       var regions = document.querySelector('.regions');
-      if (regions) regions.classList.add('answering');
+      // `pane-open` goes with the artifact that was just emptied out of the
+      // pane above: the class is a statement about what `#pane-content` holds,
+      // and what holds the pane now is the answer.
+      if (regions) {
+        regions.classList.remove('pane-open');
+        regions.classList.add('answering');
+      }
       form.classList.add('asking');
       setBusy(true);
       startTicking();
@@ -1876,7 +1882,11 @@
         // An artifact is the act now; the answer that had the pane is cleared
         // just below.
         ws.classList.remove('answering');
-        ws.classList.add('has-selection');
+        // Two facts, told apart: `has-selection` is "a narrow screen should
+        // stop showing the list", which a fresh list undoes below, and
+        // `pane-open` is "the pane holds an artifact", which a fresh list does
+        // not change. See 20-layout.css.
+        ws.classList.add('has-selection', 'pane-open');
       }
       // A fresh list is the answer to a new query or chip, so a narrow screen
       // shows it again rather than leaving the result you opened on screen
@@ -1891,6 +1901,11 @@
       // move under a still eye. Resetting the scroll would trade that for a
       // jump.
       if (e.target.id === 'results' && !wasRefine(e)) {
+        // `pane-open` is deliberately not dropped here: the pane still holds
+        // what it held, and a new list is no reason to take its width away.
+        // Dropping it was how a capture — which empties the box, and an empty
+        // box comes back as the idle rail through this very swap — crushed the
+        // open artifact into the strip left beside a 40rem rail.
         if (ws) ws.classList.remove('has-selection', 'answering');
         // Back to the top of the answer. Nothing moved the scroll on a swap,
         // and the two layouts strand it in different places for the same

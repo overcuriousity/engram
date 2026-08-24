@@ -20,6 +20,23 @@
    one-up. */
 @media (width <= 62rem) { .split { grid-template-columns: 1fr; } }
 
+/* And the backstop the rule above cannot be. That one answers the window,
+   which is the right question for the one-up arrangement — the whole screen is
+   the pane there, so the split's width and the window's are the same fact. It
+   is the wrong question everywhere else: between 62rem and 90rem the split
+   lives inside the focus pane, whose width is whatever the rail leaves, and no
+   width of window says what that is. A pane narrowed to 24rem beside a wide
+   rail kept two columns of eleven rem and set German compounds one word to the
+   line — see the `pane-open` note in 20-layout.css for how it got that narrow.
+   That state is fixed; this is so no future one can spell the same way.
+
+   The container is the fragment's own root, which is the split's parent in
+   both places it renders — the pane, and the standalone artifact page — and is
+   nothing else on any page. 36rem is where the narrower half stops being a
+   column of prose and starts being a column of syllables. */
+[data-artifact] { container-type: inline-size; container-name: artifact; }
+@container artifact (width <= 36rem) { .split { grid-template-columns: minmax(0, 1fr); } }
+
 /* A grid child defaults to `min-width: auto`, which resolves to min-content:
    one unwrappable line of source then widens the column instead of scrolling
    inside `.raw`, and takes the document's width with it. `.pane` had this; its
@@ -212,8 +229,13 @@ body { overflow-x: hidden; }
 /* With the rail at its reading width there is room for the whole excerpt, and
    the two-line clamp is what made a result unreadable without opening it.
    The floor stays: an artifact whose excerpt came back empty still must not
-   collapse the card. */
-.regions-rail-focus-source:not(.has-selection) .rail-snippet {
+   collapse the card.
+
+   `pane-open`, because this is a statement about how wide the rail is and that
+   is what the track list above answers to. `has-selection` is the narrow
+   screen's separate question — see 20-layout.css — and reading the wrong one
+   here unclamped every excerpt in a 22rem rail. */
+.regions-rail-focus-source:not(.pane-open) .rail-snippet {
   -webkit-line-clamp: unset; display: block; overflow: visible;
 }
 
@@ -563,6 +585,13 @@ body { overflow-x: hidden; }
    The floor is what stops a long neighbour list from squeezing the artifact to
    a sliver; past it the column scrolls as a whole. */
 @container shell (width >= 60rem) {
+ /* Nested, because "side by side" is now two conditions rather than one: the
+    shell has to be wide enough for the arrangement, and the pane the split
+    landed in has to be wide enough to hold two columns. The second is what the
+    backstop at the top of this file decides, and these boxes have to agree
+    with it — stacked halves that each scroll are the exact thing the note
+    above rules out. */
+ @container artifact (width > 36rem) {
   .split > :first-child {
     display: flex; flex-direction: column; overflow-y: auto;
     max-height: min(60vh, 45rem);
@@ -587,6 +616,7 @@ body { overflow-x: hidden; }
     display: flex; flex-direction: column; max-height: min(60vh, 45rem);
   }
   .split > :nth-child(2) > .raw { flex: 1; min-height: 0; max-height: none; }
+ }
 }
 
 /* With the source hidden there is nothing left to stay in step with, so the
