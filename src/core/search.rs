@@ -996,10 +996,7 @@ impl Core {
         // `apply = ["ask"]` means none of them wait on a rerank call.
         let reranking = query.rerank
             && match door {
-                Door::Ask => {
-                    self.reranker.is_some()
-                        && self.rerank_apply.contains(&crate::config::RerankApply::Ask)
-                }
+                Door::Ask => self.reranks_ask(),
                 // The same predicate that arms the UI's refining pass: written
                 // once, so the form can never advertise a refine this search
                 // would not run.

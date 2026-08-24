@@ -342,16 +342,26 @@ impl Core {
         self.completer.is_some()
     }
 
+    /// Does a reranker serve `place` at all? One is configured and the scope
+    /// covers it. The one spelling of that question: a guard added here — a
+    /// health check, a kill switch, a new scope — holds for every door.
+    fn reranks(&self, place: crate::config::RerankApply) -> bool {
+        self.reranker.is_some() && self.rerank_apply.contains(&place)
+    }
+
     /// Does a reranker serve the search path? `false` means the UI never fires
     /// a refining pass and never claims one happened: with no reranker — or
     /// one scoped to ask alone — a `rerank=true` request answers in vector
     /// order, and saying "refined" over it would assert a confirmation that
     /// never took place.
     pub fn reranks_search(&self) -> bool {
-        self.reranker.is_some()
-            && self
-                .rerank_apply
-                .contains(&crate::config::RerankApply::Search)
+        self.reranks(crate::config::RerankApply::Search)
+    }
+
+    /// Does a reranker serve the ask path? The retrieval behind an answer is
+    /// ordered by it before the citations are chosen.
+    pub fn reranks_ask(&self) -> bool {
+        self.reranks(crate::config::RerankApply::Ask)
     }
 
     /// Is the area under the search box filled? `false` means the placeholder

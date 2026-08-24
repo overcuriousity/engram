@@ -1407,10 +1407,10 @@
       // question, so its fragment is replayed rather than bought twice.
       // Replayed only over an identical row set: a capture landing
       // mid-sitting changes what there is to rank, and a stored answer must
-      // never hide a row the fast pass just showed.
-      // Sorted, because the two lists hold the same rows in different orders:
-      // the screen shows vector order and the stored answer shows the
-      // reranker's.
+      // never hide a row the fast pass just showed. Both sides of the
+      // comparison are fast-pass sets — this one and the one captured when
+      // the stored refine fired — sorted into set order, because what is
+      // being asked is "same rows", not "same order".
       if (refined && refined.key === key && refined.hrefs === hrefs.slice().sort().join('\n')) {
         var target = document.getElementById('results');
         if (target) {
@@ -1428,7 +1428,12 @@
         }
         return;
       }
-      pending = key;
+      // The row set the refine is answering over is the one on screen *now*:
+      // the reranker reorders (and promotes into) what the fast pass matched,
+      // so its fragment can show rows this list does not. Valid replay is
+      // "same query over the same fast-pass rows", which only this moment
+      // knows — captured here, promoted into `refined` when the swap lands.
+      pending = { key: key, hrefs: hrefs.slice().sort().join('\n') };
       // `source: form` so this request stands in the form's own sync queue:
       // a keystroke's search replaces an in-flight refine exactly as it
       // replaces an older keystroke's search, and the list shown is always
@@ -1462,13 +1467,29 @@
     }
 
     // A keystroke inside the debounce window: the pending refine belongs to a
-    // query that is no longer what the box says.
-    box.addEventListener('input', cancel);
+    // query that is no longer what the box says. Composition events are
+    // skipped to mirror the form's own trigger filter
+    // (`input[!event.isComposing]`): a browser whose final IME event still
+    // says composing fires no search off it, and a cancel with no request
+    // behind it would leave the pass disarmed on a settled query. The
+    // composition itself disarms once, below, when it starts.
+    box.addEventListener('input', function (e) {
+      if (e.isComposing) return;
+      cancel();
+    });
+    box.addEventListener('compositionstart', cancel);
     // Any request from the form — a keystroke's search, a chip, the refine
     // itself — retires the pending timer; the fast swap landing below is what
-    // arms a new one.
+    // arms a new one. And any mutation from anywhere — an edit saved in the
+    // detail pane, a deprecate, a delete — retires the stored answer: its
+    // fragment carries titles and snippets as they stood when it was bought,
+    // and a pane-only edit changes those without touching the row set the
+    // replay guard checks.
     document.body.addEventListener('htmx:beforeRequest', function (e) {
-      if (e.detail && e.detail.elt === form) cancel();
+      if (!e.detail) return;
+      if (e.detail.elt === form) cancel();
+      var cfg = e.detail.requestConfig;
+      if (cfg && cfg.verb && String(cfg.verb).toLowerCase() !== 'get') refined = null;
     });
     document.body.addEventListener('htmx:afterSwap', function (e) {
       if (e.target.id !== 'results') return;
@@ -1479,17 +1500,17 @@
         // nothing about what is open.
         markOpenRow();
         // Kept to be replayed the next time this exact query settles over
-        // this exact row set — see `fire`.
+        // this exact row set — see `fire`. The row set stored is the
+        // fast-pass one `fire` captured, not the fragment's: the reranker
+        // may have promoted rows the fast list never showed, and a replay
+        // guard built from those would miss every time the rerank did
+        // anything at all.
         var target = document.getElementById('results');
         if (pending && target) {
-          var hrefs = [];
-          target.querySelectorAll('.rail-item').forEach(function (r) {
-            hrefs.push(r.getAttribute('href'));
-          });
           var head = document.getElementById('rail-head');
           refined = {
-            key: pending,
-            hrefs: hrefs.sort().join('\n'),
+            key: pending.key,
+            hrefs: pending.hrefs,
             html: target.innerHTML,
             head: head ? head.innerHTML : null
           };
@@ -1497,6 +1518,10 @@
         pending = null;
         glide();
       } else {
+        // The same repaint hazard as the refine branch: a typing swap also
+        // renders every row unselected, and the open artifact's highlight
+        // must survive it.
+        markOpenRow();
         // Never re-armed off a refine swap: that loop would turn one settled
         // query into a rerank call every half second forever.
         cancel();
@@ -1531,6 +1556,13 @@
     // here instead, and it names the page so signing in comes back to it.
     document.body.addEventListener('htmx:responseError', function (e) {
       if (!e.detail || !e.detail.xhr) return;
+      // Not for the refining pass: nobody asked for that request, and the
+      // vector-order list it would improve is already on screen and being
+      // read. A transient failure half a second after the operator stopped
+      // typing must not replace their results with an error box — and an
+      // expired session must not navigate them to a login mid-read; the next
+      // thing they actually do will land here and redirect with intent.
+      if (wasRefine(e)) return;
       if (e.detail.xhr.status === 401) {
         var here = window.location.pathname + window.location.search;
         window.location.assign('/auth/login?go=' + encodeURIComponent(here));
@@ -1546,6 +1578,9 @@
     // reading left is that the base has nothing.
     document.body.addEventListener('htmx:sendError', function (e) {
       if (!e.detail) return;
+      // Same exemption as above: a refine that never reached the server
+      // leaves the list it was refining alone.
+      if (wasRefine(e)) return;
       failedSwap(e.detail.target, null);
     });
     document.body.addEventListener('htmx:afterSwap', function (e) {
