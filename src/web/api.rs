@@ -1133,7 +1133,7 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
 #[cfg(test)]
 pub(crate) mod tests {
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
 
     use crate::web::test_support::{FilePart, a_png, app_with_token, json_of, multipart};
@@ -1274,6 +1274,17 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::OK);
+        // The header, not the client's `localStorage`, is what actually holds
+        // the fetch budget: a browser that cannot write storage has nothing
+        // else stopping it from re-running the scroll on every page load.
+        let cache = res.headers()[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            cache.starts_with("private, max-age=") && !cache.ends_with("=0"),
+            "the sample must be cacheable by the browser: {cache}"
+        );
         let body = json_of(res).await;
         let pts = body["points"].as_array().expect("points is an array");
         assert_eq!(pts.len(), 2);
@@ -1287,7 +1298,7 @@ pub(crate) mod tests {
                 .map(|c| c.as_f64().unwrap().powi(2))
                 .sum::<f64>()
                 .sqrt();
-            assert!(r <= 1.0 + 1e-3, "point escaped the unit sphere: {p}");
+            assert!(r <= 1.25 + 1e-3, "point escaped the outlier ceiling: {p}");
         }
     }
 

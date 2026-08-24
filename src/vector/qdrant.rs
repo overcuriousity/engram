@@ -1991,7 +1991,12 @@ impl VectorStore for QdrantVectors {
                     // Only `artifact_id` is read below; a full payload would
                     // haul every point's chunk text along for nothing.
                     "with_payload": ["artifact_id"],
-                    "with_vector": true,
+                    // Named rather than `true`, for the same reason: `true`
+                    // returns every vector on the point, and the `ctx`
+                    // multivector — up to eleven rows of `CTX_DIM` — is
+                    // dropped on the next line. `dense_of` already reads the
+                    // object form.
+                    "with_vector": [DENSE],
                 })),
             )
             .await?;

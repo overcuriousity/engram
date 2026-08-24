@@ -13,5 +13,5 @@
   z-index: -1;
   /* Low enough that body text never competes with it; the draw itself also
      works in low alphas, this is the ceiling. */
-  opacity: 0.55;
+  opacity: 0.72;
 }

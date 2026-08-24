@@ -856,7 +856,8 @@ mod tests {
         let all = v.sample(10).await.unwrap();
         assert_eq!(all.len(), 3);
         assert!(
-            all.iter().any(|(id, vec)| id == "a" && vec == &vec![1.0, 0.0]),
+            all.iter()
+                .any(|(id, vec)| id == "a" && vec == &vec![1.0, 0.0]),
             "the sample carries each artifact's own vector: {all:?}"
         );
 

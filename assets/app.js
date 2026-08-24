@@ -1315,15 +1315,32 @@
   // loop at all under prefers-reduced-motion, and silence on every failure —
   // a picture of the database may never take the page down with it.
   function vectorBg() {
+    var CACHE_KEY = 'engram.vbg';
+
     // Login and any other page without chrome get no canvas. The topbar is
     // exactly the marker: login empties the nav block.
-    if (!document.querySelector('.topbar')) return;
-
-    var CACHE_KEY = 'engram.vbg';
+    //
+    // It is also where the snapshot is dropped. Every other key this file
+    // writes is a local preference; this one is server data — a projection of
+    // one account's store, good for six hours — and `/auth/logout` clears the
+    // cookie and nothing else. Without this, signing out and signing a second
+    // account in on the same browser redrew the first one's cloud straight
+    // from `localStorage`, with no authorization anywhere on the path.
+    if (!document.querySelector('.topbar')) {
+      try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
+      return;
+    }
     var FPS = 12;
     var SPIN = 0.01 * Math.PI; // rad/s — slow enough to feel geological
     var AXIS_MIN = 6, AXIS_MAX = 14; // seconds on one rotation axis
     var BUCKETS = 8;
+    // Nothing nearer to the camera than this is drawn. The projection divides
+    // by `radius - z`, so a point swinging towards the eye has no bound on how
+    // far off-canvas it lands — which is what turned the axes into streaks
+    // running clean off every edge of the window with no endpoint in sight.
+    // Points are pulled from a bounded cloud and never come close; the axes
+    // are drawn out to their own ends, so they do.
+    var NEAR_Z = 0.55;
 
     var canvas = document.createElement('canvas');
     canvas.id = 'vec-bg';
@@ -1380,22 +1397,49 @@
       var z2 = py * cp + z1 * sp;
       var radius = 2.5;
       var d = radius - z2;
-      if (d < 0.01) return null;
+      // `!(d > 0.01)` rather than `d < 0.01`, so a NaN coordinate fails here
+      // instead of sailing through: every comparison against NaN is false, and
+      // one `null` on the wire or one mangled cache entry used to reach
+      // `buckets[Math.floor(NaN)].push` and throw twelve times a second for
+      // the life of the page.
+      if (!(d > 0.01)) return null;
       var unit = Math.min(W, H) * 0.52;
       var s = (radius * unit) / d;
-      return { sx: x1 * s + W * 0.5, sy: -y2 * s + H * 0.5, depth: z2, s: s, unit: unit };
+      // Centred horizontally, but only on a window that is not much taller
+      // than it is wide. On a portrait screen the page's content sits in the
+      // top third and a cloud centred on the viewport hangs well below all of
+      // it, reading as an object on the page rather than as the ground behind
+      // one. Pulled up towards the content, and never so far that its own top
+      // leaves the window.
+      var cy = Math.max(unit, Math.min(H * 0.5, H * 0.5 - (H - W) * 0.22));
+      var sx = x1 * s + W * 0.5, sy = -y2 * s + cy;
+      if (!isFinite(sx) || !isFinite(sy)) return null;
+      return { sx: sx, sy: sy, depth: z2, s: s, unit: unit };
     }
 
     function drawAxes(c) {
-      var L = 1.25, T = 0.045, TICKS = [-1, -0.5, 0.5, 1];
+      var L = 1.2, T = 0.05, TICKS = [-1, -0.5, 0.5, 1], STEPS = 24;
+
+      // Walked in steps rather than drawn end to end. A straight line in space
+      // is still straight on the canvas, so the subdivision buys nothing for
+      // shape — it buys the ability to stop the stroke exactly where the axis
+      // crosses the near plane, and to resume it on the far side. Drawn as one
+      // segment, an axis with one end near the eye either vanished whole or
+      // stretched into a streak the length of the window.
       function seg(x0, y0, z0, x1, y1, z1) {
-        var a = project(x0, y0, z0), b = project(x1, y1, z1);
-        if (!a || !b) return;
-        ctx.moveTo(a.sx, a.sy);
-        ctx.lineTo(b.sx, b.sy);
+        var open = false;
+        for (var n = 0; n <= STEPS; n++) {
+          var f = n / STEPS;
+          var q = project(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, z0 + (z1 - z0) * f);
+          if (!q || q.depth > NEAR_Z) { open = false; continue; }
+          if (open) ctx.lineTo(q.sx, q.sy);
+          else { ctx.moveTo(q.sx, q.sy); open = true; }
+        }
       }
       ctx.beginPath();
-      ctx.strokeStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',0.18)';
+      // Dimmer than the cloud it frames. These are scaffolding: they say which
+      // way the thing is turning, and nothing else.
+      ctx.strokeStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',0.13)';
       ctx.lineWidth = 1;
       seg(-L, 0, 0, L, 0, 0);
       for (var i = 0; i < TICKS.length; i++) seg(TICKS[i], -T, 0, TICKS[i], T, 0);
@@ -1419,13 +1463,13 @@
         var q = project(points[i][0], points[i][1], points[i][2]);
         if (!q) continue;
         var t = Math.max(0, Math.min(0.9999, (q.depth + 1.15) / 2.3));
-        q.r = Math.max(1.0, (q.s / q.unit) * 2.2);
+        q.r = Math.max(1.1, (q.s / q.unit) * 2.3);
         buckets[Math.floor(t * BUCKETS)].push(q);
       }
       for (var k = 0; k < BUCKETS; k++) {
         if (!buckets[k].length) continue;
         // Dim overall, dimmer far away: the cloud is present, never loud.
-        var alpha = 0.05 + ((k + 0.5) / BUCKETS) * 0.30;
+        var alpha = 0.07 + ((k + 0.5) / BUCKETS) * 0.38;
         ctx.beginPath();
         ctx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + alpha.toFixed(3) + ')';
         for (var j = 0; j < buckets[k].length; j++) {
@@ -1465,31 +1509,77 @@
         resize();
         if (reduced) draw();
       });
-      if (reduced) { draw(); return; } // one still frame, no loop
+      if (reduced) {
+        // One still frame — which then has to be repainted by hand. `ink()` is
+        // re-read every draw, and with the loop off there is no next draw: the
+        // toggle rewrites `data-theme` in place with no reload, so a
+        // reduced-motion reader who switched to dark kept the light theme's
+        // ink on a dark page until they navigated.
+        draw();
+        new MutationObserver(draw).observe(document.documentElement, {
+          attributes: true, attributeFilter: ['data-theme']
+        });
+        var dark = window.matchMedia('(prefers-color-scheme: dark)');
+        // The same flip arriving from the system rather than from the toggle.
+        if (dark.addEventListener) dark.addEventListener('change', function () { draw(); });
+        return;
+      }
       requestAnimationFrame(frame);
+    }
+
+    var DEFAULT_REFRESH = 21600;
+
+    // Everything drawn is read back out of storage a page load later, where
+    // anything at all could be standing in for it. One string in the array and
+    // the draw loop throws on every frame, so the shape is checked once here
+    // rather than trusted three hundred times a second.
+    function usable(pts) {
+      if (!Array.isArray(pts) || !pts.length) return false;
+      for (var i = 0; i < pts.length; i++) {
+        var p = pts[i];
+        if (!Array.isArray(p) || p.length < 3) return false;
+        for (var j = 0; j < 3; j++) {
+          if (typeof p[j] !== 'number' || !isFinite(p[j])) return false;
+        }
+      }
+      return true;
+    }
+
+    function keep(pts, refreshSecs) {
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+          ts: Date.now(), points: pts, refreshSecs: refreshSecs
+        }));
+      } catch (e) {}
     }
 
     var now = Date.now();
     var cached = null;
     try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) {}
-    if (cached && cached.points && cached.points.length && cached.ts &&
-        now - cached.ts < (cached.refreshSecs || 21600) * 1000) {
-      start(cached.points);
-      return;
+    if (cached && cached.ts) {
+      // `typeof`, not `||`: a configured `refresh_secs = 0` means "fetch every
+      // time" — during a reindex, say — and `||` read that as a falsy blank
+      // and substituted six hours, which is the exact opposite of what the
+      // operator asked for.
+      var ttl = typeof cached.refreshSecs === 'number' ? cached.refreshSecs : DEFAULT_REFRESH;
+      if (now - cached.ts < ttl * 1000) {
+        // An empty snapshot is cached like any other. Turning the backdrop off
+        // in the config should stop the requests too, and an empty answer that
+        // was never written back meant a disabled feature still cost one fetch
+        // per page load, for good.
+        if (!usable(cached.points)) { canvas.parentNode.removeChild(canvas); return; }
+        start(cached.points);
+        return;
+      }
     }
     fetch('/api/v1/vectors/sample', { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (!data || !data.points || !data.points.length) {
-          canvas.parentNode.removeChild(canvas);
-          return;
-        }
-        try {
-          localStorage.setItem(CACHE_KEY, JSON.stringify({
-            ts: now, points: data.points, refreshSecs: data.refresh_secs
-          }));
-        } catch (e) {}
-        start(data.points);
+        if (!data) { canvas.parentNode.removeChild(canvas); return; }
+        var pts = usable(data.points) ? data.points : [];
+        keep(pts, data.refresh_secs);
+        if (!pts.length) { canvas.parentNode.removeChild(canvas); return; }
+        start(pts);
       })
       .catch(function () { canvas.parentNode.removeChild(canvas); });
   }

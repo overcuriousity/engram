@@ -1919,6 +1919,21 @@ impl Config {
             );
             self.associate.interval_mins = MAX_INTERVAL_MINS;
         }
+        // The backdrop is a decoration, and every other thing about it is
+        // budgeted — a capped device pixel ratio, a frame ceiling, one fetch
+        // per refresh window. `sample_size` is the one number that reaches
+        // both a Qdrant scroll limit and a `dim × n` projection loop, so a
+        // typo'd extra zero turns a page load into a scroll of the whole
+        // collection with its dense vectors materialized in memory.
+        const MAX_SAMPLE_SIZE: usize = 20_000;
+        if self.ui.background.sample_size > MAX_SAMPLE_SIZE {
+            tracing::warn!(
+                configured = self.ui.background.sample_size,
+                using = MAX_SAMPLE_SIZE,
+                "ui.background.sample_size is far past what a decorative cloud can draw; capping it"
+            );
+            self.ui.background.sample_size = MAX_SAMPLE_SIZE;
+        }
     }
 
     /// Rules that a config can satisfy syntactically and still be wrong.
@@ -2164,7 +2179,10 @@ mod tests {
         // pass with the block deleted, because `#[serde(default)]` fills in the
         // same numbers. See `the_example_config_carries_the_recommend_block`.
         let raw = std::fs::read_to_string("config.example.toml").unwrap();
-        assert!(raw.contains("\n[ui.background]\n"), "the block is documented");
+        assert!(
+            raw.contains("\n[ui.background]\n"),
+            "the block is documented"
+        );
     }
 
     #[test]
@@ -2363,6 +2381,33 @@ mod tests {
         assert_eq!(
             cfg.feedback.candidates,
             crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER
+        );
+    }
+
+    #[test]
+    fn an_oversized_background_sample_is_capped() {
+        // The number reaches a Qdrant scroll limit and a `dim × n` projection
+        // loop at once, for a decoration. An extra zero should not turn a page
+        // load into a scroll of the whole collection with its dense vectors.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[ui.background]\nsample_size = 2000000\n"),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.ui.background.sample_size, 20_000);
+    }
+
+    #[test]
+    fn a_deliberate_background_sample_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[ui.background]\nsample_size = 500\n"),
+        );
+        assert_eq!(
+            Config::load(Some(&p)).unwrap().ui.background.sample_size,
+            500
         );
     }
 
