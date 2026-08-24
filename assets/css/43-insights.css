@@ -195,7 +195,7 @@
 /* The holes, grouped and named by the sweep. */
 .gaps details { margin: 0.25rem 0; }
 .gaps summary { cursor: pointer; }
-.gap li { gap: 0.5rem; align-items: baseline; margin: 0.25rem 0; }
+.gap li { gap: 0.5rem; align-items: baseline; margin: 0.25rem 0; flex-wrap: wrap; }
 
 /* ── What this memory is like ─────────────────────────────────────────────── */
 

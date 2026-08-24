@@ -899,8 +899,23 @@ impl Core {
         waited_on: bool,
     ) -> Result<(Vec<SearchResult>, SearchTiming)> {
         let door = origin.door;
-        if query.q.trim().is_empty() {
+        let q = query.q.trim();
+        if q.is_empty() {
             return Err(Error::Validation("query is empty".into()));
+        }
+        // The embedder's own ceiling, not the model's nominal context: this is
+        // the same physical batch size `jobs::embed` splits documents under,
+        // and a query is one input the splitter never gets a chance to touch.
+        // Caught here, a paste that is too long to search is a 400 the box can
+        // show beside itself; caught only downstream, it is a 502 from an
+        // endpoint that already rejected it.
+        let rendered = self.embedder.templates().render_query(q);
+        let safe_limit = (self.embedder.max_input_tokens() as f32 * 0.8) as usize;
+        let tokens = self.counter.count(&rendered);
+        if tokens > safe_limit {
+            return Err(Error::Validation(format!(
+                "search text is too long ({tokens} tokens, limit is {safe_limit}) — paste less, or use Capture to store it instead"
+            )));
         }
         let limit = match query.limit {
             0 => DEFAULT_LIMIT,
@@ -929,12 +944,12 @@ impl Core {
         // Prefixes repeat constantly inside one search and whole queries repeat
         // across sessions, so this is the difference between one embedding call
         // per search and one per keystroke.
-        let key = query.q.split_whitespace().collect::<Vec<_>>().join(" ");
+        let key = q.split_whitespace().collect::<Vec<_>>().join(" ");
         let cached = self.query_cache.lock().ok().and_then(|c| c.get(&key));
         let vector = match cached {
             Some(v) => v,
             None => {
-                let v = self.embedder.embed_query(query.q.trim()).await?;
+                let v = self.embedder.embed_query(q).await?;
                 if let Ok(mut c) = self.query_cache.lock() {
                     c.put(key, v.clone());
                 }
@@ -1901,6 +1916,21 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_query_too_long_to_embed_is_rejected_before_it_reaches_the_endpoint() {
+        // Pasting more than the embedder can take used to reach `embed_query`
+        // unchecked and come back as whatever the endpoint said — a 502 the
+        // box could not explain. Caught here, it is a plain validation error
+        // instead, and the fake embedder never sees the call.
+        let core = test_core().await;
+        let pasted = "lorem ".repeat(6000);
+        let err = core.search(&q(&pasted), Door::Ui).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Validation(ref m) if m.contains("too long")),
+            "expected a validation error about length, got {err:?}"
         );
     }
 
