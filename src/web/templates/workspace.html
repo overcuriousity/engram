@@ -49,7 +49,7 @@
                   input[!event.isComposing] changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() && open_with.is_empty() %},
                   load{% endif %}"
-      hx-params="q,category"
+      hx-params="q,category,rerank"
       hx-indicator="#search-spinner"{% if search_reranks %} data-rerank="true"{% endif %}>
   {# A textarea from the first keystroke to the last. It grows to a ten-line
      cap and then scrolls inside itself; it never switches element type, and it
@@ -90,8 +90,8 @@
      something is waiting, so the workspace costs nothing to a search.
 
      The file goes multipart to the API endpoint, never with the GET form it
-     happens to sit inside: `hx-params` on the form names `q` and `category`
-     and nothing else rides a search.
+     happens to sit inside: `hx-params` on the form names `q`, `category` and
+     the refining pass's `rerank` flag, and nothing else rides a search.
 
      A photo taken on a phone used to upload the instant the camera handed it
      back: nothing had been pressed and the note underneath was unfillable by

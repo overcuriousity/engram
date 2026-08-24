@@ -71,6 +71,11 @@ enum Lane<'a> {
 pub struct SearchTiming {
     pub embed_ms: u128,
     pub total_ms: u128,
+    /// Whether a rerank call actually ran and came back. The UI's claim
+    /// ("Order confirmed by the reranker") is derived from this and never
+    /// from what the request asked for: a rerank that failed or was skipped
+    /// answered in vector order, and the honest fragment stays silent.
+    pub reranked: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -989,13 +994,16 @@ impl Core {
         // collapses every door but `Ask` into "search" — the judging view, the
         // API, MCP and the extension all show the operator a ranked list, and
         // `apply = ["ask"]` means none of them wait on a rerank call.
-        let reranking = self.reranker.is_some()
-            && query.rerank
+        let reranking = query.rerank
             && match door {
-                Door::Ask => self.rerank_apply.contains(&crate::config::RerankApply::Ask),
-                _ => self
-                    .rerank_apply
-                    .contains(&crate::config::RerankApply::Search),
+                Door::Ask => {
+                    self.reranker.is_some()
+                        && self.rerank_apply.contains(&crate::config::RerankApply::Ask)
+                }
+                // The same predicate that arms the UI's refining pass: written
+                // once, so the form can never advertise a refine this search
+                // would not run.
+                _ => self.reranks_search(),
             };
 
         // Over-fetch whenever something downstream narrows the list: both the
@@ -1064,6 +1072,7 @@ impl Core {
             })
             .collect();
 
+        let mut reranked = false;
         if let Some(reranker) = &self.reranker
             && reranking
             && !results.is_empty()
@@ -1082,6 +1091,7 @@ impl Core {
             };
             match reranker.rerank(&query.q, &docs, top_n).await {
                 Ok(order) => {
+                    reranked = true;
                     results = order
                         .into_iter()
                         .filter_map(|(idx, score)| {
@@ -1231,6 +1241,7 @@ impl Core {
             SearchTiming {
                 embed_ms,
                 total_ms: started.elapsed().as_millis(),
+                reranked,
             },
         ))
     }

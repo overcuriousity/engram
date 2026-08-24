@@ -758,9 +758,11 @@ async fn search(
         mark: !typing,
         include_deprecated: q.include_deprecated,
         include_superseded: q.include_superseded,
-        // Deliberate calls want the best order by default; `rerank=false`
-        // is a typing client's opt-out, the same one the web UI takes.
-        rerank: q.rerank.unwrap_or(true),
+        // Deliberate calls want the best order by default; a typing door
+        // opts out the way the web UI's keystrokes do, and gets its answer
+        // at vector-order speed. An explicit `rerank` still overrides either
+        // way.
+        rerank: q.rerank.unwrap_or(!typing),
     };
     // Coalescing folds a keystroke into the query it was an early spelling of,
     // and it folds only within one scope — so a box that types has to say who
@@ -1807,6 +1809,63 @@ pub(crate) mod tests {
         assert_eq!(
             stamped, 0,
             "typing in the panel must not stamp last_seen_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panel_keystroke_does_not_wait_on_the_reranker() {
+        // The panel is the same search-as-you-type box as the web UI's, and
+        // the comment on `search` says it takes the same opt-outs. The web UI
+        // answers keystrokes in vector order and refines on the pause; a
+        // debounced panel prefix must not pay a synchronous rerank round trip
+        // either.
+        let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "the loop device is what makes this work".into(),
+                    corpus_span: None,
+                    title: Some("loop".into()),
+                    category: Some("reference".into()),
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        for c in &made {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+        let (app, token, _core) = app_from_core(core).await;
+
+        let res = app
+            .clone()
+            .oneshot(get("/api/v1/search?q=loop&door=extension", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            reranker.docs_seen(),
+            0,
+            "a typing door's keystroke must answer in vector order, not wait \
+             on a rerank call"
+        );
+
+        // A deliberate API call is one question asked on purpose, and it
+        // still gets the best order by default.
+        let res = app
+            .oneshot(get("/api/v1/search?q=loop", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            reranker.docs_seen() > 0,
+            "a deliberate API search still reranks by default"
         );
     }
 

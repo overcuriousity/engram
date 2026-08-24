@@ -1162,7 +1162,10 @@ pub(crate) async fn search_results(
         results,
         associated,
         terms,
-        reranked: p.rerank && st.core.reranks_search(),
+        // From the search's outcome, not from the request's intent: a rerank
+        // that failed or was skipped answered in vector order, and the tick
+        // would assert a confirmation that never took place.
+        reranked: t.reranked,
     })
     .into_response();
     // Measured as before, reported where a browser already knows to show it.
@@ -6778,6 +6781,103 @@ mod tests {
         );
     }
 
+    /// The tick's title is "Order confirmed by the reranker", so it has to be
+    /// derived from what the rerank call did — not from what the request asked
+    /// for. A reranker that is configured but down degrades to vector order
+    /// with a warning, and the fragment must degrade its claim with it.
+    #[tokio::test]
+    async fn a_fragment_whose_rerank_failed_never_claims_refinement() {
+        let core = crate::core::test_support::test_core_with_failing_reranker().await;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        app.clone()
+            .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&handle).await.unwrap() {}
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=mounting&rerank=true")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains("result-count"),
+            "the fragment must actually carry results for this test to mean \
+             anything: {html}"
+        );
+        assert!(
+            !html.contains("refined"),
+            "the rerank call failed, so the order is vector order and the \
+             fragment must not claim the reranker confirmed it: {html}"
+        );
+    }
+
+    /// The same claim over nothing: the server skips the rerank call for an
+    /// empty result set, so "0 results · refined" would be a confirmation of
+    /// an order that was never sent anywhere.
+    #[tokio::test]
+    async fn an_empty_result_set_never_claims_refinement() {
+        let (core, _reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        let (app, cookie) = app_with_cookie(core).await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=nothing+matches+this&rerank=true")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            !html.contains("refined"),
+            "no rerank call was made for an empty answer, so nothing was \
+             confirmed: {html}"
+        );
+    }
+
+    /// The positive half, end to end: a working reranker asked for by the
+    /// request is what earns the tick.
+    #[tokio::test]
+    async fn a_rerank_that_actually_ran_earns_the_refined_tick() {
+        let (core, _reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        app.clone()
+            .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&handle).await.unwrap() {}
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=mounting&rerank=true")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains("refined"),
+            "the reranker ran and confirmed the order; the tick is earned: {html}"
+        );
+    }
+
     #[tokio::test]
     async fn rendered_chunk_html_is_sanitized() {
         let (app, cookie) = app_with_session().await;
@@ -8789,10 +8889,11 @@ mod tests {
         );
 
         // The box's own form is a GET that searches on every keystroke. The
-        // staged file sits inside it, so the serialisation is pinned to the two
+        // staged file sits inside it, so the serialisation is pinned to the
         // fields the search actually takes — without this, every keystroke
-        // carries a filename into the query string.
-        assert!(page.contains(r#"hx-params="q,category""#), "{page}");
+        // carries a filename into the query string. `rerank` is on the list
+        // for the refining pass, whose own flag rides this form's GET.
+        assert!(page.contains(r#"hx-params="q,category,rerank""#), "{page}");
     }
 
     #[tokio::test]

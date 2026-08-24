@@ -372,7 +372,7 @@ impl Core {
 pub mod test_support {
     use super::*;
     use crate::infer::fake::{
-        FakeCompleter, FakeDescriber, FakeEmbedder, FakeReranker, FakeSynthesizer,
+        FailingReranker, FakeCompleter, FakeDescriber, FakeEmbedder, FakeReranker, FakeSynthesizer,
     };
     use crate::vector::memory::MemoryVectors;
 
@@ -388,6 +388,16 @@ pub mod test_support {
         let reranker = Arc::new(FakeReranker::default());
         let core = build(Arc::new(FakeSynthesizer::default()), Some(reranker.clone())).await;
         (core, reranker)
+    }
+
+    /// A core whose reranker errors on every call — the endpoint outage or
+    /// cold start a deployment actually sees.
+    pub async fn test_core_with_failing_reranker() -> Core {
+        build(
+            Arc::new(FakeSynthesizer::default()),
+            Some(Arc::new(FailingReranker)),
+        )
+        .await
     }
 
     /// A core plus a handle on its embedder, for asserting how many times the

@@ -1326,7 +1326,23 @@
   // which swap they are looking at.
   function wasRefine(e) {
     var cfg = e.detail && e.detail.requestConfig;
-    return !!(cfg && cfg.parameters && cfg.parameters.rerank === 'true');
+    // The pre-filter set: `parameters` is only what survived `hx-params`, so
+    // an allowlist edit there would silently turn every refine swap back into
+    // a typing swap — and the typing branch re-arms the timer, which is the
+    // loop that never stops.
+    var params = cfg && (cfg.unfilteredParameters || cfg.parameters);
+    return !!(params && params.rerank === 'true');
+  }
+
+  // The rail's selected row, recomputed from the URL. Run after any swap that
+  // repaints the list while an artifact is open: the fragment renders every
+  // row `aria-selected="false"`, and the open artifact's highlight must
+  // survive a repaint it had nothing to do with.
+  function markOpenRow() {
+    var open = window.location.pathname;
+    document.querySelectorAll('.rail-item').forEach(function (el) {
+      el.setAttribute('aria-selected', el.getAttribute('href') === open ? 'true' : 'false');
+    });
   }
 
   function refinePass() {
@@ -1342,9 +1358,26 @@
     // just before the request, spent by the animation, and good for exactly
     // one swap.
     var from = null;
+    // The last refined answer, kept to be replayed: `key` is the query and
+    // chip it answered, `hrefs` the row set it is valid over, `html` and
+    // `head` the fragment and the count line it painted.
+    var refined = null;
+    // The key of the refine in flight, promoted into `refined` when its swap
+    // lands.
+    var pending = null;
 
     function cancel() {
       if (timer) { clearTimeout(timer); timer = null; }
+    }
+
+    // Positions are taken relative to the list itself rather than the
+    // viewport: the rail is its own scroll box on a wide screen and the
+    // window scrolls on a narrow one, and a refine can land seconds after it
+    // fired. Viewport coordinates captured before a scroll would make every
+    // unmoved row lurch by exactly the scroll distance.
+    function resultsTop() {
+      var el = document.getElementById('results');
+      return el ? el.getBoundingClientRect().top : 0;
     }
 
     function fire() {
@@ -1356,10 +1389,46 @@
       var values = { q: q, rerank: 'true' };
       var chip = form.querySelector('input[name="category"]:checked');
       if (chip && chip.value) values.category = chip.value;
+      var rows = document.querySelectorAll('#results .rail-item');
+      // Nothing to refine: the server skips the rerank call over an empty
+      // answer, so the request would buy a guaranteed-identical fragment.
+      if (!rows.length) return;
+      var key = q + '\u0000' + (values.category || '');
+      var origin = resultsTop();
+      var hrefs = [];
       from = {};
-      document.querySelectorAll('#results .rail-item').forEach(function (el) {
-        from[el.getAttribute('href')] = el.getBoundingClientRect().top;
+      rows.forEach(function (el) {
+        var href = el.getAttribute('href');
+        hrefs.push(href);
+        from[href] = el.getBoundingClientRect().top - origin;
       });
+      // The same query, settled again over the same rows — a type-and-undo,
+      // a chip toggled back. The reranker already answered this exact
+      // question, so its fragment is replayed rather than bought twice.
+      // Replayed only over an identical row set: a capture landing
+      // mid-sitting changes what there is to rank, and a stored answer must
+      // never hide a row the fast pass just showed.
+      // Sorted, because the two lists hold the same rows in different orders:
+      // the screen shows vector order and the stored answer shows the
+      // reranker's.
+      if (refined && refined.key === key && refined.hrefs === hrefs.slice().sort().join('\n')) {
+        var target = document.getElementById('results');
+        if (target) {
+          target.innerHTML = refined.html;
+          var head = document.getElementById('rail-head');
+          if (head && refined.head) head.innerHTML = refined.head;
+          // By hand, so none of the htmx swap machinery ran: the new rows
+          // need their hx- attributes wired, the same enhancements a real
+          // swap gets, and the selection recomputed.
+          htmx.process(target);
+          enhance(target);
+          markOpenRow();
+          trackDwell();
+          glide();
+        }
+        return;
+      }
+      pending = key;
       // `source: form` so this request stands in the form's own sync queue:
       // a keystroke's search replaces an in-flight refine exactly as it
       // replaces an older keystroke's search, and the list shown is always
@@ -1374,6 +1443,7 @@
       from = null;
       if (!was) return;
       if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      var origin = resultsTop();
       document.querySelectorAll('#results .rail-item').forEach(function (el) {
         var top = was[el.getAttribute('href')];
         if (top === undefined) {
@@ -1382,7 +1452,7 @@
           el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' });
           return;
         }
-        var delta = top - el.getBoundingClientRect().top;
+        var delta = top - (el.getBoundingClientRect().top - origin);
         if (!delta) return;
         el.animate(
           [{ transform: 'translateY(' + delta + 'px)' }, { transform: 'none' }],
@@ -1403,6 +1473,28 @@
     document.body.addEventListener('htmx:afterSwap', function (e) {
       if (e.target.id !== 'results') return;
       if (wasRefine(e)) {
+        // The fragment renders every row unselected, and this swap can land
+        // over a list whose open artifact was clicked during the quiet
+        // window; the highlight must not vanish under a repaint that changed
+        // nothing about what is open.
+        markOpenRow();
+        // Kept to be replayed the next time this exact query settles over
+        // this exact row set — see `fire`.
+        var target = document.getElementById('results');
+        if (pending && target) {
+          var hrefs = [];
+          target.querySelectorAll('.rail-item').forEach(function (r) {
+            hrefs.push(r.getAttribute('href'));
+          });
+          var head = document.getElementById('rail-head');
+          refined = {
+            key: pending,
+            hrefs: hrefs.sort().join('\n'),
+            html: target.innerHTML,
+            head: head ? head.innerHTML : null
+          };
+        }
+        pending = null;
         glide();
       } else {
         // Never re-armed off a refine swap: that loop would turn one settled
@@ -1531,10 +1623,7 @@
           var el = document.getElementById(id);
           if (el) el.textContent = '';
         });
-        var open = window.location.pathname;
-        document.querySelectorAll('.rail-item').forEach(function (el) {
-          el.setAttribute('aria-selected', el.getAttribute('href') === open ? 'true' : 'false');
-        });
+        markOpenRow();
       }
     });
   });

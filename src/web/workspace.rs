@@ -798,6 +798,12 @@ mod tests {
             html.contains(r#"data-rerank="true""#),
             "a reranker serving search is what arms the refining pass"
         );
+        assert!(
+            html.contains(r#"hx-params="q,category,rerank""#),
+            "hx-params is the allowlist for what rides a search GET; without \
+             `rerank` on it the refining pass's own flag is filtered off the \
+             wire and the server only ever runs the fast path"
+        );
     }
 
     /// The refining pass, pinned at the seams that keep it honest: it arms
@@ -821,6 +827,13 @@ mod tests {
             js.contains("wasRefine"),
             "a refine swap must be told apart from a typing swap, or the \
              refine reschedules off its own landing and never stops"
+        );
+        assert!(
+            js.contains("unfilteredParameters"),
+            "wasRefine must read the pre-filter parameter set: `parameters` \
+             is what survived hx-params, so an allowlist edit there would \
+             silently turn every refine swap back into a typing swap — and \
+             the refine reschedules off its own landing forever"
         );
     }
 
