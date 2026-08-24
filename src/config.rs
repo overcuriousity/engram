@@ -135,18 +135,10 @@ impl Default for LearnConfig {
 }
 
 /// The one UI concern with settings of its own: the vector background.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct UiConfig {
     pub background: BackgroundConfig,
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self {
-            background: BackgroundConfig::default(),
-        }
-    }
 }
 
 /// The rotating point cloud behind the pages, sampled from the vector store.
