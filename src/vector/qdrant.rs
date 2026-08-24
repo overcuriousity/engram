@@ -1988,7 +1988,9 @@ impl VectorStore for QdrantVectors {
                 &format!("/collections/{}/points/scroll", self.alias),
                 Some(json!({
                     "limit": limit,
-                    "with_payload": true,
+                    // Only `artifact_id` is read below; a full payload would
+                    // haul every point's chunk text along for nothing.
+                    "with_payload": ["artifact_id"],
                     "with_vector": true,
                 })),
             )
