@@ -273,6 +273,21 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         Err(e) => tracing::warn!(error = %e, "could not move the pairs a supersession left behind"),
     }
 
+    // And whatever that could not move: a pair one side of which an operator
+    // deprecated, or one whose supersession chain ends somewhere that is out of
+    // results too. The review queue does not show those rows and does not count
+    // them, which also takes away the Dismiss button that would have settled
+    // them — left alone they pile up where nobody can see or reach them.
+    // Reversibly, so restoring the artifact brings the question back
+    // (`Core::reactivate`). After the repair above and never before it: moving
+    // a question onto the artifact that can answer it beats taking it off the
+    // queue.
+    match core.store.stale_unreachable_pairs().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(pairs = n, "took pairs nobody can act on off the queue"),
+        Err(e) => tracing::warn!(error = %e, "could not settle the pairs nobody can act on"),
+    }
+
     let mut out = Outcome::default();
 
     // Group everything near-identical first, and only then decide who wins.
@@ -702,6 +717,95 @@ pub(crate) mod tests {
         assert!(
             open[0].a_id == ids[2] || open[0].b_id == ids[2],
             "the verdict still names the artifact that is out of results"
+        );
+    }
+
+    /// Undoing a supersession restores the artifact; it used to leave the
+    /// review queue behind. The question the operator restored it to look at
+    /// had been taken off the queue when it went away, and `record_pair`'s
+    /// `INSERT OR IGNORE` means the sweep would never file it again either.
+    #[tokio::test]
+    async fn undoing_a_supersession_puts_the_question_back() {
+        use crate::store::pairs::PairState;
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 30s", [0.999, 0.01]),
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.99)
+            .await
+            .unwrap();
+        let id = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Stale,
+            "the supersession answered it only for as long as it stands"
+        );
+
+        core.unsupersede(&ids[0]).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Pending,
+            "the artifact came back and its question did not"
+        );
+    }
+
+    /// A verdict whose member an operator deprecated is on no queue and in no
+    /// count, which takes away the Dismiss button that would have settled it.
+    /// Pending rows drain through `arm_dedupe`; these had nothing at all, and
+    /// piled up out of sight until somebody happened to restore the artifact.
+    #[tokio::test]
+    async fn the_sweep_takes_a_verdict_nobody_can_act_on_off_the_queue() {
+        use crate::store::pairs::PairState;
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("the timeout is 30 seconds", [1.0, 0.0]),
+                ("the timeout is 90 seconds", [0.0, 1.0]),
+            ],
+        )
+        .await;
+        core.store.record_pair(&ids[0], &ids[1], 0.8).await.unwrap();
+        let id = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        core.store
+            .set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
+            .await
+            .unwrap();
+        core.deprecate(&ids[1]).await.unwrap();
+
+        run(&core).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Stale
+        );
+
+        core.reactivate(&ids[1]).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Pending,
+            "deprecation is the reversible way out of results, except in the queue"
         );
     }
 
