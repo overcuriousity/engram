@@ -5,6 +5,7 @@
 //! deployment therefore always serves the build that matches it, and there is
 //! no separate artifact to publish or forget.
 
+use crate::tenants::Tenant;
 use crate::auth::Identity;
 use crate::web::assets::Assets;
 use crate::web::auth_routes::HtmlTemplate;
@@ -35,9 +36,9 @@ struct InstallTemplate {
 /// The download page. Authenticated like everything else, and it carries this
 /// deployment's origin into the pairing link — the static, signed manifest
 /// cannot know it, so the page is where it is learned.
-async fn install_page(State(st): State<AppState>, _id: Identity, headers: HeaderMap) -> Response {
+async fn install_page(State(st): State<AppState>, tenant: Tenant, headers: HeaderMap) -> Response {
     HtmlTemplate(InstallTemplate {
-        judge_pending: judge_pending(&st).await,
+        judge_pending: judge_pending(&tenant).await,
         origin: request_origin(&headers).unwrap_or_default(),
         xpi_signed: Assets::get("extension/firefox.signed").is_some(),
     })
@@ -64,7 +65,7 @@ fn embedded(path: &str, mime: &str, filename: &str) -> Response {
     }
 }
 
-async fn chrome_zip(_id: Identity) -> Response {
+async fn chrome_zip(tenant: Tenant) -> Response {
     embedded(
         "extension/chrome.zip",
         "application/zip",
@@ -73,7 +74,7 @@ async fn chrome_zip(_id: Identity) -> Response {
 }
 
 /// Served with the type Firefox installs from, so the link is one click.
-async fn firefox_xpi(_id: Identity) -> Response {
+async fn firefox_xpi(tenant: Tenant) -> Response {
     embedded(
         "extension/firefox.xpi",
         "application/x-xpinstall",

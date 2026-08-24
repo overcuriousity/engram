@@ -6,6 +6,7 @@
 //! browser's own auth-flow window opens this page, and the redirect carries
 //! the token back into the extension that started the flow.
 
+use crate::tenants::Tenant;
 use crate::auth::Identity;
 use crate::error::{Error, Result};
 use crate::web::auth_routes::HtmlTemplate;
@@ -124,7 +125,7 @@ pub struct PairParams {
 /// the POST.
 async fn pair_page(
     State(st): State<AppState>,
-    id: Option<Identity>,
+    tenant: Option<Tenant>,
     headers: HeaderMap,
     Query(p): Query<PairParams>,
 ) -> Result<Response> {
@@ -134,18 +135,21 @@ async fn pair_page(
         ));
     }
     Ok(HtmlTemplate(PairTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
+        judge_pending: match &tenant {
+            Some(t) => crate::web::state::judge_pending(t).await,
+            None => None,
+        },
         origin: request_origin(&headers).unwrap_or_default(),
         redirect_uri: p.redirect_uri,
         state: p.state,
-        signed_in: id.is_some(),
+        signed_in: tenant.is_some(),
     })
     .into_response())
 }
 
 async fn pair_submit(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     headers: HeaderMap,
     Form(p): Form<PairParams>,
 ) -> Result<Response> {
@@ -159,9 +163,9 @@ async fn pair_submit(
     // carries the same name, so this is the only thing telling one row from
     // another on the settings page.
     let (_, plaintext) = crate::auth::tokens::mint(
-        &st.core.store.control,
+        &tenant.core.store.control,
         "browser extension",
-        &id.subject,
+        &tenant.user.subject,
         headers.get("user-agent").and_then(|v| v.to_str().ok()),
     )
     .await?;
@@ -177,7 +181,7 @@ async fn pair_submit(
         urlencode(&p.state),
         urlencode(&origin),
     );
-    tracing::info!(subject = %id.subject, "extension paired");
+    tracing::info!(subject = %tenant.user.subject, "extension paired");
     Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
 }
 

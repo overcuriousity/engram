@@ -265,7 +265,12 @@ fn schema_columns(sql: &str) -> Vec<(String, Vec<String>)> {
 
 /// The subject every `Store::memory()` runs as, so that the foreign key on
 /// `jobs.subject` is satisfied without every test knowing tenancy exists.
-pub const TEST_SUBJECT: &str = "test-subject";
+///
+/// `user-1` and not something tidier because that is the subject the web
+/// fixtures have always signed in as. The identity at the door and the owner
+/// of the data behind it have to be one person, or every handler resolves a
+/// tenant that holds none of the rows the test just wrote.
+pub const TEST_SUBJECT: &str = "user-1";
 
 pub fn now() -> i64 {
     std::time::SystemTime::now()

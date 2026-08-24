@@ -8,8 +8,38 @@ use axum::response::Response;
 /// The real router over `core`, in local auth mode with no password
 /// configured (`local`); pass `Some(cfg)` to test the login form itself.
 pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
+    router_as(core, local, true)
+}
+
+/// The same, for a user who has not been granted the judge.
+pub fn router_ungranted(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
+    router_as(core, local, false)
+}
+
+/// A one-tenant registry around `core`, and the real router over it.
+///
+/// Every test written against the single-user app goes through here, which is
+/// the point: if tenancy needed edits scattered across the web tests, the
+/// extractor boundary would be in the wrong place, and this is where that
+/// would show.
+fn router_as(
+    core: Core,
+    local: Option<crate::config::LocalConfig>,
+    can_judge: bool,
+) -> axum::Router {
+    let user = crate::store::control::User {
+        subject: crate::store::TEST_SUBJECT.into(),
+        email: None,
+        slug: crate::store::control::slug_for(crate::store::TEST_SUBJECT),
+        can_judge,
+        created_at: 0,
+        last_seen_at: 0,
+    };
+    let cfg = std::sync::Arc::new(crate::config::Config::test_default());
+    let tenants = std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user));
     crate::web::router(crate::web::state::AppState {
-        core,
+        tenants,
+        config: cfg,
         auth: std::sync::Arc::new(crate::web::state::AuthContext {
             mode: crate::config::AuthMode::Local,
             local,
@@ -20,6 +50,33 @@ pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Ro
         config_path: std::sync::Arc::new(scratch_config()),
         ask_handoff: Default::default(),
     })
+}
+
+/// An `AppState` over one already-open tenant, for the tests that need to hold
+/// the state rather than only the router.
+pub fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web::state::AppState {
+    let cfg = std::sync::Arc::new(crate::config::Config::test_default());
+    let user = crate::store::control::User {
+        subject: crate::store::TEST_SUBJECT.into(),
+        email: None,
+        slug: crate::store::control::slug_for(crate::store::TEST_SUBJECT),
+        can_judge: true,
+        created_at: 0,
+        last_seen_at: 0,
+    };
+    crate::web::state::AppState {
+        tenants: std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user)),
+        config: cfg,
+        auth: std::sync::Arc::new(crate::web::state::AuthContext {
+            mode,
+            local: None,
+            oidc: None,
+            pending: crate::auth::oidc::PendingStore::new(),
+            secure_cookies: mode == crate::config::AuthMode::Oidc,
+        }),
+        config_path: std::sync::Arc::new(scratch_config()),
+        ask_handoff: Default::default(),
+    }
 }
 
 /// A `config.toml` of its own per app under test.
@@ -58,8 +115,18 @@ pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::st
         .insert_session(&cid, "user-1", None, 3600)
         .await
         .unwrap();
+    let cfg = std::sync::Arc::new(crate::config::Config::test_default());
+    let user = crate::store::control::User {
+        subject: crate::store::TEST_SUBJECT.into(),
+        email: None,
+        slug: crate::store::control::slug_for(crate::store::TEST_SUBJECT),
+        can_judge: true,
+        created_at: 0,
+        last_seen_at: 0,
+    };
     let state = crate::web::state::AppState {
-        core,
+        tenants: std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user)),
+        config: cfg,
         auth: std::sync::Arc::new(crate::web::state::AuthContext {
             mode: crate::config::AuthMode::Local,
             local: None,

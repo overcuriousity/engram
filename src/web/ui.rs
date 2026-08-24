@@ -1,3 +1,4 @@
+use crate::tenants::Tenant;
 use crate::auth::Identity;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
@@ -523,9 +524,9 @@ fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &str) -> Str
 /// Two counts and the last few captures, off the slimmest reads there are:
 /// the idle rail is on the most-opened screen, re-renders on every box-clear,
 /// and must cost nothing.
-pub(crate) async fn rail_idle(st: &AppState) -> Result<RailIdleTemplate> {
-    let (corpora, artifacts) = st.core.store.held_brief().await?;
-    let recent = st
+pub(crate) async fn rail_idle(tenant: &Tenant) -> Result<RailIdleTemplate> {
+    let (corpora, artifacts) = tenant.core.store.held_brief().await?;
+    let recent = tenant
         .core
         .store
         .recent_captures(5)
@@ -786,12 +787,12 @@ struct TokenCreatedTemplate {
 
 async fn gap_dismiss(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path((kind, id)): Path<(String, String)>,
 ) -> Result<Response> {
     let kind = crate::store::gaps::GapKind::parse(&kind)
         .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
-    st.core.store.dismiss_gap(kind, &id).await?;
+    tenant.core.store.dismiss_gap(kind, &id).await?;
     Ok(axum::http::StatusCode::OK.into_response())
 }
 
@@ -856,21 +857,21 @@ struct ContextForm {
 /// written down.
 async fn context_offer(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     Form(f): Form<ContextForm>,
 ) -> Result<Response> {
-    if !st.core.recommends() {
+    if !tenant.core.recommends() {
         return Ok(HtmlTemplate(ContextTemplate::default()).into_response());
     }
     let bundle = crate::core::context::parse_bundle(&f.bundle);
-    st.core
-        .record_context_event(&f.bundle, &bundle, Some(&id.subject));
+    tenant.core
+        .record_context_event(&f.bundle, &bundle, Some(&tenant.user.subject));
 
     // A recommendation that cannot be computed is not worth a 500: the area is
     // what it was yesterday, which is empty.
-    let offer = st
+    let offer = tenant
         .core
-        .offer(Some(&id.subject), &bundle)
+        .offer(Some(&tenant.user.subject), &bundle)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "could not build a recommendation");
@@ -891,7 +892,7 @@ async fn context_offer(
     // gone since the profile was built leaves an empty snippet, which is the
     // card it was before this line existed rather than an error.
     let snippet = match &offer {
-        Some(o) => match st.core.store.get_artifact(&o.artifact_id).await {
+        Some(o) => match tenant.core.store.get_artifact(&o.artifact_id).await {
             Ok(c) => markdown::snippet(&c.text, 160),
             Err(_) => String::new(),
         },
@@ -925,22 +926,22 @@ struct SeenForm {
 /// nothing is waiting on the answer.
 async fn context_seen(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     Form(f): Form<SeenForm>,
 ) -> Result<Response> {
     use crate::core::recommend::Rung;
     let Some(rung) = Rung::parse(&f.rung) else {
         return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
     };
-    if st.core.store.get_artifact(&f.artifact_id).await.is_err() {
+    if tenant.core.store.get_artifact(&f.artifact_id).await.is_err() {
         return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
     }
-    st.core.record_recommendation(
+    tenant.core.record_recommendation(
         &f.artifact_id,
         "recommended_shown",
         rung.as_str(),
         f.slot,
-        Some(&id.subject),
+        Some(&tenant.user.subject),
     );
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
@@ -1070,7 +1071,11 @@ const MAX_QUERY_CHARS: usize = 2000;
 
 pub(crate) async fn search_results(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
+    // Alongside the tenant, not instead of it: a `Tenant` is cached across
+    // requests and cannot carry the session this one came in on, which is the
+    // whole of what keeps the sitting at the web door.
+    identity: crate::auth::Identity,
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
     // Clearing the box fires a request with an empty query. That is not an
@@ -1089,7 +1094,7 @@ pub(crate) async fn search_results(
     // limit is on the door rather than in app.js because it is the embedder's
     // bill either way, whatever the client was.
     if p.q.trim().is_empty() || p.q.chars().count() > MAX_QUERY_CHARS {
-        return Ok(HtmlTemplate(rail_idle(&st).await?).into_response());
+        return Ok(HtmlTemplate(rail_idle(&tenant).await?).into_response());
     }
 
     // The same terms the sparse branch derives, handed to the client so
@@ -1100,18 +1105,18 @@ pub(crate) async fn search_results(
     // What this sitting is working on. A typing burst folds into one entry
     // here as it does in the log, so what is carried is the query that was
     // meant rather than every prefix of it.
-    if let Some(sess) = &id.session {
-        st.core.sittings.queried(
+    if let Some(sess) = &identity.session {
+        tenant.core.sittings.queried(
             sess,
             p.q.trim(),
             crate::store::now(),
-            st.core.pursuit.idle_secs as i64,
+            tenant.core.pursuit.idle_secs as i64,
         );
     }
     // Read into a local: a lock guard living inside the call expression would
     // still be held across the await, and a future holding one is not `Send`.
-    let cap = st.core.ranking.read().expect("ranking lock").per_source_cap;
-    let (hits, t) = st
+    let cap = tenant.core.ranking.read().expect("ranking lock").per_source_cap;
+    let (hits, t) = tenant
         .core
         .search_with(
             &SearchQuery {
@@ -1130,10 +1135,10 @@ pub(crate) async fn search_results(
             // the query it was an early spelling of, and two people typing at
             // once are not spelling the same thing.
             crate::store::feedback::Door::Ui
-                .by(id.subject)
+                .by(tenant.user.subject)
                 // The live sitting, for priming. Off unless `sitting.prime` is
                 // on, and impossible at any door with no session.
-                .in_sitting(id.session.clone()),
+                .in_sitting(identity.session.clone()),
         )
         .await?;
 
@@ -1321,22 +1326,22 @@ fn disambiguate_pair_titles(rows: &mut [PairRow]) {
     }
 }
 
-async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+async fn queue_fragment(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
     let mut rows = Vec::new();
-    let corpora = st.core.store.list_corpora(10, 0).await?;
+    let corpora = tenant.core.store.list_corpora(10, 0).await?;
     // Asked once for the page rather than once per row: this fragment is polled
     // while anything is in flight, and the coverage read is a three-way join.
     // Failure is the empty map for the reason a missing capture is: the line is
     // what a capture did beyond being stored, and a page that cannot say so
     // says nothing rather than failing to render the queue.
-    let covered = st
+    let covered = tenant
         .core
         .store
         .gaps_covered_by_each(&corpora.iter().map(|c| c.id.clone()).collect::<Vec<_>>())
         .await
         .unwrap_or_default();
     for s in corpora {
-        let (resolved, total) = st.core.store.segment_progress(&s.id).await?;
+        let (resolved, total) = tenant.core.store.segment_progress(&s.id).await?;
         let progress = (total > 0 && resolved < total).then(|| format!("{resolved}/{total}"));
         // Terminal states: nothing else will happen without someone asking.
         // NeedsReview is terminal in this sense — it is waiting on a person.
@@ -1370,7 +1375,7 @@ async fn queue_fragment(State(st): State<AppState>, _id: Identity) -> Result<Res
             settled: matches!(s.status, CorpusStatus::Ready),
             badge: status_badge(&s.status),
             status: s.status.as_str().to_string(),
-            artifact_count: st.core.store.count_artifacts_for_corpus(&s.id).await?,
+            artifact_count: tenant.core.store.count_artifacts_for_corpus(&s.id).await?,
             created: fmt_time(s.created_at),
             covered: covered
                 .get(&s.id)
@@ -1441,7 +1446,7 @@ struct RereadForm {
 /// queued.
 async fn reread_uncovered_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
     Form(f): Form<RereadForm>,
 ) -> Result<Response> {
@@ -1452,7 +1457,7 @@ async fn reread_uncovered_ui(
 
     // A page left open while the capture was still being read would otherwise
     // offer to re-read lines that are merely not written yet.
-    let s = st.core.store.get_corpus(&cid).await?;
+    let s = tenant.core.store.get_corpus(&cid).await?;
     if !coverage_final(&s.status) {
         return Ok(back);
     }
@@ -1461,7 +1466,7 @@ async fn reread_uncovered_ui(
     // reasons it renders nothing red: a restored placeholder's text is its own
     // artifacts, and an artifact naming no lines may have come from exactly the
     // lines about to be re-read.
-    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
+    let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
     if s.restored_at.is_some() || chunks.iter().any(|c| c.corpus_span.is_none()) {
         return Ok(back);
     }
@@ -1478,7 +1483,7 @@ async fn reread_uncovered_ui(
         return Ok(back);
     }
 
-    let segments = st.core.store.segments_for_corpus(&cid).await?;
+    let segments = tenant.core.store.segments_for_corpus(&cid).await?;
     for w in segments.iter().filter(|w| {
         lost.iter()
             .any(|(a, z)| w.start_line <= *z && *a <= w.end_line)
@@ -1488,7 +1493,7 @@ async fn reread_uncovered_ui(
         // so pressing this twice handed the same window to a second worker: two
         // paid model calls and two sets of artifacts for one passage, then the
         // dedupe sweep to clean up after them.
-        if st
+        if tenant
             .core
             .store
             .live_job(
@@ -1503,8 +1508,8 @@ async fn reread_uncovered_ui(
         // being added to rather than replaced. Deleting what it already wrote
         // would throw away artifacts that may have been edited, tagged or
         // verified since, for lines that were never the problem.
-        st.core.store.reset_segment(&cid, w.idx, true).await?;
-        st.core
+        tenant.core.store.reset_segment(&cid, w.idx, true).await?;
+        tenant.core
             .store
             .enqueue(
                 crate::store::jobs::Stage::SegmentWindow,
@@ -1526,11 +1531,11 @@ struct DwellForm {
 /// it. `sendBeacon` lands here; nothing is rendered back.
 async fn artifact_dwell(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     Path(aid): Path<String>,
     Form(f): Form<DwellForm>,
 ) -> Result<Response> {
-    st.core.record_dwell(&aid, f.secs, Some(&id.subject));
+    tenant.core.record_dwell(&aid, f.secs, Some(&tenant.user.subject));
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1538,21 +1543,21 @@ async fn artifact_dwell(
 /// promotion wrote retired, the window `verbatim` again.
 async fn unpromote_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path((cid, idx)): Path<(String, i64)>,
 ) -> Result<Response> {
-    st.core.undo_promotion(&cid, idx).await?;
+    tenant.core.undo_promotion(&cid, idx).await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
 
 async fn corpus_detail(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
     Query(range): Query<LineRange>,
 ) -> Result<Response> {
-    let s = st.core.store.get_corpus(&cid).await?;
-    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
+    let s = tenant.core.store.get_corpus(&cid).await?;
+    let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
     let restored = s.restored_at.is_some();
 
     // A restored placeholder's text is its own artifacts joined back together,
@@ -1582,7 +1587,7 @@ async fn corpus_detail(
         .map(artifact_view)
         .collect();
 
-    let segments = st.core.store.segments_for_corpus(&cid).await?;
+    let segments = tenant.core.store.segments_for_corpus(&cid).await?;
     // Until the capture has finished being read, a passage nothing claims is
     // a passage nothing has got to yet. Banded, still — the arrangement is how
     // the page reads — but not red, and not offering to re-read what is
@@ -1675,7 +1680,7 @@ async fn corpus_detail(
     let note = s.metadata["note"].as_str().map(str::to_string);
     let meta_rows = metadata_rows(&s.metadata);
     let exif_rows = exif_tag_rows(&s.metadata);
-    let written_from: Vec<ArtifactView> = st
+    let written_from: Vec<ArtifactView> = tenant
         .core
         .store
         .artifacts_originating_in(&cid)
@@ -1702,7 +1707,7 @@ async fn corpus_detail(
         })
         .collect();
     Ok(HtmlTemplate(CorpusTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
+        judge_pending: crate::web::state::judge_pending(&tenant).await,
         id: s.id,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
@@ -1788,24 +1793,24 @@ struct ArtifactEditForm {
 
 async fn put_artifact(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
     Form(f): Form<ArtifactEditForm>,
 ) -> Result<Response> {
     if f.text.trim().is_empty() {
         return Err(Error::Validation("chunk text is empty".into()));
     }
-    st.core.store.update_artifact_text(&cid, &f.text).await?;
+    tenant.core.store.update_artifact_text(&cid, &f.text).await?;
     // The stored vector describes wording that no longer exists.
-    st.core
+    tenant.core
         .store
         .enqueue(crate::store::jobs::Stage::Embed, "artifact", &cid)
         .await?;
     if f.view == "detail" {
-        let d = build_artifact_detail(&st.core, &cid, &f.terms).await?;
+        let d = build_artifact_detail(&tenant.core, &cid, &f.terms).await?;
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
-    let c = st.core.store.get_artifact(&cid).await?;
+    let c = tenant.core.store.get_artifact(&cid).await?;
     Ok(HtmlTemplate(ArtifactFragment {
         c: artifact_view(&c),
     })
@@ -1814,10 +1819,10 @@ async fn put_artifact(
 
 async fn delete_corpus_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<Response> {
-    st.core.delete_corpus(&cid).await?;
+    tenant.core.delete_corpus(&cid).await?;
     Ok(Redirect::to("/ui/capture").into_response())
 }
 
@@ -1839,12 +1844,12 @@ async fn delete_corpus_ui(
 /// which would leave the deleted artifact on screen until a reload.
 async fn delete_artifact_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
 ) -> Result<Response> {
-    let corpus_id = st.core.store.get_artifact(&aid).await?.corpus_id;
-    st.core.delete_artifact(&aid).await?;
+    let corpus_id = tenant.core.store.get_artifact(&aid).await?.corpus_id;
+    tenant.core.delete_artifact(&aid).await?;
     if headers.contains_key("hx-request") {
         return Ok(axum::response::Html(String::new()).into_response());
     }
@@ -1866,7 +1871,7 @@ struct ReprocessForm {
 /// `stage=extract` re-reads a captured PDF.
 async fn reprocess_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
     Form(form): Form<ReprocessForm>,
 ) -> Result<Response> {
@@ -1875,7 +1880,7 @@ async fn reprocess_ui(
         Some(s) => crate::store::jobs::Stage::parse(&s)
             .ok_or_else(|| Error::Validation(format!("unknown stage `{s}`")))?,
     };
-    st.core.reprocess(&cid, stage).await?;
+    tenant.core.reprocess(&cid, stage).await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
 
@@ -1937,10 +1942,10 @@ const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
 /// Used by Capture, which shows them because that is where the work arrives,
 /// and by nothing else: Housekeeping is what is left over once the only part of
 /// Ops that needs a person has moved to the page people actually open.
-pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
+pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
     let mut waiting = 0i64;
     for state in PAIR_STATES {
-        waiting += st.core.store.count_pairs_awaiting_review(state).await?;
+        waiting += tenant.core.store.count_pairs_awaiting_review(state).await?;
     }
 
     let mut pairs = Vec::new();
@@ -1950,15 +1955,15 @@ pub(crate) async fn pair_rows(st: &AppState) -> Result<(Vec<PairRow>, i64)> {
         // artifact that is not active. A pair one of those has already taken
         // out of results is work nobody can do, and offering it answered the
         // press with `cannot supersede: loser … is superseded`.
-        for p in st
+        for p in tenant
             .core
             .store
             .pairs_awaiting_review(state, PAIR_LIMIT as i64)
             .await?
         {
             let (Ok(a), Ok(b)) = (
-                st.core.store.get_artifact(&p.a_id).await,
-                st.core.store.get_artifact(&p.b_id).await,
+                tenant.core.store.get_artifact(&p.a_id).await,
+                tenant.core.store.get_artifact(&p.b_id).await,
             ) else {
                 continue;
             };
@@ -2133,8 +2138,8 @@ fn ends_mid_sentence(text: &str) -> bool {
 }
 
 /// The API tokens, formatted for a table.
-async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
-    Ok(st
+async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
+    Ok(tenant
         .core
         .store
         .control
@@ -2166,16 +2171,16 @@ async fn token_rows(st: &AppState) -> Result<Vec<TokenRow>> {
 /// from the same quiet line under Capture, and no more advertised than
 /// Housekeeping is: neither belongs in a top row that is three destinations
 /// wide on purpose.
-async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+async fn settings(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
     Ok(HtmlTemplate(SettingsTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
-        tokens: token_rows(&st).await?,
-        feedback: match st.core.learn.enabled {
-            true => Some(st.core.store.feedback_stats().await?),
+        judge_pending: crate::web::state::judge_pending(&tenant).await,
+        tokens: token_rows(&tenant).await?,
+        feedback: match tenant.core.learn.enabled {
+            true => Some(tenant.core.store.feedback_stats().await?),
             false => None,
         },
-        asks: match st.core.learn.enabled {
-            true => Some(st.core.store.ask_stats().await?),
+        asks: match tenant.core.learn.enabled {
+            true => Some(tenant.core.store.ask_stats().await?),
             false => None,
         },
     })
@@ -2186,10 +2191,10 @@ async fn settings(State(st): State<AppState>, _id: Identity) -> Result<Response>
 /// pairs behind it are dismissed so the sweep does not simply redo it.
 async fn undo_merge_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(aid): Path<String>,
 ) -> Result<Response> {
-    crate::jobs::merge::undo(&st.core, &aid).await?;
+    crate::jobs::merge::undo(&tenant.core, &aid).await?;
     Ok(Redirect::to("/ui/insights").into_response())
 }
 
@@ -2206,10 +2211,10 @@ async fn undo_merge_ui(
 /// under one window — but the questions are the harder loss, being the only
 /// source `--export-eval` has for `questions.json`, so the button and its
 /// confirmation name them rather than leaving them to the word "searches".
-async fn purge_feedback_ui(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+async fn purge_feedback_ui(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
     // The index first, while the rows still say which points carry a set.
-    let cleared = st.core.forget_situations().await;
-    let n = st.core.store.purge_feedback().await?;
+    let cleared = tenant.core.forget_situations().await;
+    let n = tenant.core.store.purge_feedback().await?;
     tracing::info!(
         dropped = n,
         points_cleared = cleared,
@@ -2227,7 +2232,7 @@ struct MintForm {
 
 async fn mint_token(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     headers: axum::http::HeaderMap,
     Form(f): Form<MintForm>,
 ) -> Result<Response> {
@@ -2237,9 +2242,9 @@ async fn mint_token(
         f.name.trim()
     };
     let (_, plaintext) = crate::auth::tokens::mint(
-        &st.core.store.control,
+        &tenant.core.store.control,
         name,
-        &id.subject,
+        &tenant.user.subject,
         headers.get("user-agent").and_then(|v| v.to_str().ok()),
     )
     .await?;
@@ -2249,10 +2254,10 @@ async fn mint_token(
 
 async fn revoke_token_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(tid): Path<String>,
 ) -> Result<Response> {
-    crate::auth::tokens::revoke(&st.core.store.control, &tid).await?;
+    crate::auth::tokens::revoke(&tenant.core.store.control, &tid).await?;
     Ok(Redirect::to("/ui/settings").into_response())
 }
 
@@ -2263,11 +2268,11 @@ struct ResolveForm {
 
 async fn resolve_near_dupe_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
     Form(form): Form<ResolveForm>,
 ) -> Result<Response> {
-    st.core.resolve_near_duplicate(&cid, form.action).await?;
+    tenant.core.resolve_near_duplicate(&cid, form.action).await?;
     Ok(Redirect::to("/ui/insights").into_response())
 }
 
@@ -2309,14 +2314,14 @@ impl ReturnTo {
 /// The redirect is still what a browser without htmx gets, and `to` is still
 /// what it follows. Nothing here is the only way any of these buttons work.
 async fn artifact_changed(
-    st: &AppState,
+    tenant: &Tenant,
     headers: &axum::http::HeaderMap,
     aid: &str,
     terms: &str,
     back: &ReturnTo,
 ) -> Result<Response> {
     if headers.contains_key("hx-request") {
-        let d = build_artifact_detail(&st.core, aid, terms).await?;
+        let d = build_artifact_detail(&tenant.core, aid, terms).await?;
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(Redirect::to(back.path()).into_response())
@@ -2324,23 +2329,23 @@ async fn artifact_changed(
 
 async fn unsupersede_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
-    st.core.unsupersede(&aid).await?;
-    artifact_changed(&st, &headers, &aid, &p.terms, &back).await
+    tenant.core.unsupersede(&aid).await?;
+    artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
 async fn dismiss_pair_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(pid): Path<i64>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
-    st.core
+    tenant.core
         .store
         .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
         .await?;
@@ -2363,13 +2368,13 @@ async fn dismiss_pair_ui(
 /// place for one of them to be dropped.
 async fn discard_pair_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(pid): Path<i64>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
-    let pair = st.core.store.get_pair(pid).await?;
+    let pair = tenant.core.store.get_pair(pid).await?;
     let detail = pair.detail.clone();
-    crate::jobs::dedupe::discard_both(&st.core, &pair, detail.as_deref()).await?;
+    crate::jobs::dedupe::discard_both(&tenant.core, &pair, detail.as_deref()).await?;
     Ok(Redirect::to(back.path()).into_response())
 }
 
@@ -2400,11 +2405,11 @@ struct KeepForm {
 /// Nothing before this press hides anything — see `jobs::consolidate::judge_pending`.
 async fn apply_pair_supersede_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(pid): Path<i64>,
     Form(f): Form<KeepForm>,
 ) -> Result<Response> {
-    let pair = st.core.store.get_pair(pid).await?;
+    let pair = tenant.core.store.get_pair(pid).await?;
     // The winner has to be one of this pair's own artifacts. A form field is
     // user input, and superseding an arbitrary id because it arrived in a POST
     // would hide an artifact that has nothing to do with the row that was
@@ -2427,11 +2432,11 @@ async fn apply_pair_supersede_ui(
     } else {
         pair.a_id
     };
-    st.core.supersede(&obsolete_id, &winner_id).await?;
+    tenant.core.supersede(&obsolete_id, &winner_id).await?;
     // The judge's explanation is carried through rather than dropped: it is the
     // only record of why this supersede was applied, and `set_pair_state`
     // writes `detail` unconditionally, so passing `None` would null it.
-    st.core
+    tenant.core
         .store
         .set_pair_state(
             pid,
@@ -2444,38 +2449,38 @@ async fn apply_pair_supersede_ui(
 
 async fn deprecate_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
-    st.core.deprecate(&aid).await?;
-    artifact_changed(&st, &headers, &aid, &p.terms, &back).await
+    tenant.core.deprecate(&aid).await?;
+    artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
 async fn reactivate_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
-    st.core.reactivate(&aid).await?;
-    artifact_changed(&st, &headers, &aid, &p.terms, &back).await
+    tenant.core.reactivate(&aid).await?;
+    artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
 async fn verify_ui(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
-    st.core.verify(&aid).await?;
-    artifact_changed(&st, &headers, &aid, &p.terms, &back).await
+    tenant.core.verify(&aid).await?;
+    artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
 /// Turns each `[n]` the answer cites into a link to that excerpt's rail item.
@@ -2739,14 +2744,15 @@ struct ArtifactViewParams {
 /// wants a page with navigation around it.
 async fn artifact_detail(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
+    identity: crate::auth::Identity,
     headers: axum::http::HeaderMap,
     Path(cid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
 ) -> Result<Response> {
-    let d = build_artifact_detail(&st.core, &cid, &p.terms).await?;
+    let d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
     // Opening a chunk is the deliberate act that counts as remembering it.
-    st.core.mark_artifact_seen(&cid);
+    tenant.core.mark_artifact_seen(&cid);
     // And the act the pursuit sweep reads: opened, or pivoted through — unless
     // this came from the area under the search box, in which case it is written
     // under its own kind and *not* as an ordinary open. A `recommended_open`
@@ -2764,33 +2770,33 @@ async fn artifact_detail(
         .as_deref()
         .and_then(crate::core::recommend::Rung::parse)
     {
-        Some(rung) => st.core.record_recommendation(
+        Some(rung) => tenant.core.record_recommendation(
             &cid,
             "recommended_open",
             rung.as_str(),
             p.rec,
-            Some(&id.subject),
+            Some(&tenant.user.subject),
         ),
-        None => st
+        None => tenant
             .core
-            .record_interaction(&cid, p.via.as_deref(), Some(&id.subject)),
+            .record_interaction(&cid, p.via.as_deref(), Some(&tenant.user.subject)),
     }
     // The live half of the same act. Written here rather than inside
     // `record_interaction` because this is where the session is known — and
     // that is the whole of what keeps the sitting at the web door.
-    if let Some(sess) = &id.session {
-        st.core.sittings.touched(
+    if let Some(sess) = &identity.session {
+        tenant.core.sittings.touched(
             sess,
             &cid,
             crate::store::now(),
-            st.core.pursuit.idle_secs as i64,
+            tenant.core.pursuit.idle_secs as i64,
         );
     }
     if headers.contains_key("hx-request") {
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
-        judge_pending: crate::web::state::judge_pending(&st).await,
+        judge_pending: crate::web::state::judge_pending(&tenant).await,
         d,
     })
     .into_response())
@@ -2803,10 +2809,10 @@ async fn artifact_detail(
 /// that produced it — undoing one is out of scope, and Ops is where it would go.
 async fn dismiss_link(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path((artifact_id, other_id)): Path<(String, String)>,
 ) -> Result<Response> {
-    st.core.store.dismiss_link(&artifact_id, &other_id).await?;
+    tenant.core.store.dismiss_link(&artifact_id, &other_id).await?;
     // The row swaps itself out and leaves the pane alone, so the artifact you
     // were reading is still on screen afterwards.
     Ok(axum::response::Html(String::new()).into_response())
@@ -2816,17 +2822,17 @@ async fn dismiss_link(
 /// beside its source lines and decided the warning was noise.
 async fn mark_artifact_reviewed(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<Response> {
     // For an orphaned merge, "reviewed" means accepted as a merge of what
     // remains — recorded on source_count, or the next sweep re-flags it and
     // the operator's judgement lasts one tick.
-    let c = st.core.store.get_artifact(&cid).await?;
+    let c = tenant.core.store.get_artifact(&cid).await?;
     if c.flags.iter().any(|f| f == "orphaned_source") {
-        st.core.store.accept_source_loss(&cid).await?;
+        tenant.core.store.accept_source_loss(&cid).await?;
     }
-    st.core.store.clear_artifact_flags(&cid).await?;
+    tenant.core.store.clear_artifact_flags(&cid).await?;
     Ok(axum::response::Html(String::new()).into_response())
 }
 
@@ -2857,8 +2863,7 @@ struct NotFoundTemplate {
 /// one path nobody routed was the one path that rendered the whole nav,
 /// `judge_pending` — a live count out of the base — included.
 pub async fn not_found(
-    State(st): State<AppState>,
-    id: Option<Identity>,
+    tenant: Option<Tenant>,
     method: axum::http::Method,
     uri: axum::http::Uri,
 ) -> Response {
@@ -2870,11 +2875,11 @@ pub async fn not_found(
     if machine || method != axum::http::Method::GET {
         return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
     }
-    if id.is_none() {
+    let Some(tenant) = tenant else {
         return crate::error::Error::Unauthorized.into_response();
-    }
+    };
     let page = NotFoundTemplate {
-        judge_pending: crate::web::state::judge_pending(&st).await,
+        judge_pending: crate::web::state::judge_pending(&tenant).await,
     };
     match askama::Template::render(&page) {
         Ok(html) => (
@@ -2902,7 +2907,7 @@ pub fn ui_router() -> Router<AppState> {
         // a signed-out visitor to sign in rather than bouncing them onward.
         .route(
             "/ui/browse",
-            get(|_id: Identity| async { Redirect::to("/ui/capture") }),
+            get(|tenant: Tenant| async { Redirect::to("/ui/capture") }),
         )
         .route("/ui/corpora/{id}", get(corpus_detail))
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
@@ -2929,7 +2934,7 @@ pub fn ui_router() -> Router<AppState> {
         // exist.
         .route(
             "/ui/housekeeping",
-            get(|_id: Identity| async { Redirect::to("/ui/insights") }),
+            get(|tenant: Tenant| async { Redirect::to("/ui/insights") }),
         )
         .route("/ui/settings", get(settings))
         .route("/ui/ops/tokens", post(mint_token))
@@ -10079,18 +10084,7 @@ mod tests {
     }
 
     async fn ask_state_over(core: crate::core::Core) -> AppState {
-        AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-            config_path: std::sync::Arc::new(crate::web::test_support::scratch_config()),
-            ask_handoff: Default::default(),
-        }
+        crate::web::test_support::state_over(core, crate::config::AuthMode::Local)
     }
 
     /// A router and a session over a state the caller still holds, so a test
@@ -10098,9 +10092,8 @@ mod tests {
     /// builds its own state and cannot be asked what is in it.
     async fn app_over(st: &AppState) -> (axum::Router, String) {
         let cid = crate::store::new_id();
-        st.core
-            .store
-            .control
+        st.tenants
+            .control()
             .insert_session(&cid, "user-1", None, 3600)
             .await
             .unwrap();

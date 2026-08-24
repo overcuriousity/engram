@@ -9,6 +9,7 @@ pub mod lineage_view;
 pub mod markdown;
 pub mod pair;
 pub mod state;
+pub mod tenant;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ui;
@@ -85,8 +86,8 @@ pub fn router(state: AppState) -> Router {
         .nest(
             "/api/v1",
             api::api_router(
-                state.core.capture.image_max_bytes,
-                state.core.capture.pdf_max_bytes,
+                state.config.capture.image_max_bytes,
+                state.config.capture.pdf_max_bytes,
             ),
         )
         .fallback(ui::not_found)

@@ -64,6 +64,9 @@ pub struct Tenants {
     /// create the collection. `INSERT OR IGNORE` makes the row safe on its
     /// own; this is what makes the Qdrant call safe.
     provisioning: tokio::sync::Mutex<()>,
+    /// Whether this registry holds one tenant that answers for every subject.
+    /// See `Tenants::single`.
+    solo: bool,
 }
 
 impl Tenants {
@@ -74,6 +77,7 @@ impl Tenants {
             vectors,
             open: Mutex::new((HashMap::new(), Vec::new())),
             provisioning: tokio::sync::Mutex::new(()),
+            solo: false,
         }
     }
 
@@ -95,6 +99,38 @@ impl Tenants {
 
     pub fn open_count(&self) -> usize {
         self.open.lock().map(|g| g.0.len()).unwrap_or(0)
+    }
+
+    /// A registry that serves exactly one already-open tenant, whoever asks.
+    ///
+    /// What `auth.mode = "local"` is: one account, one base, no provisioning —
+    /// and what every test written against the single-user app gets, with a
+    /// real router and a real extractor in front of it. It answers for any
+    /// subject because in local mode there is only ever one person behind the
+    /// door, and the local username is not the same string as the subject the
+    /// data was written under.
+    ///
+    /// Isolation is not tested through this. `test_support::test_tenants`
+    /// builds a real registry, and that is what the cross-tenant tests use.
+    pub fn single(cfg: Arc<Config>, core: Core, user: User) -> Tenants {
+        struct NoVectors;
+        #[async_trait::async_trait]
+        impl VectorFactory for NoVectors {
+            async fn open(
+                &self,
+                _alias: &str,
+                _dim: usize,
+            ) -> Result<Arc<dyn crate::vector::VectorStore>> {
+                Err(Error::NotFound)
+            }
+        }
+        let control = core.store.control.clone();
+        let subject = user.subject.clone();
+        let mut t = Tenants::new(cfg, control, Arc::new(NoVectors));
+        t.solo = true;
+        t.remember(Tenant { core, user });
+        debug_assert!(t.cached(&subject).is_some());
+        t
     }
 
     /// The web door: an authenticated subject, provisioned on first sight.
@@ -151,6 +187,9 @@ impl Tenants {
 
     fn cached(&self, subject: &str) -> Option<Tenant> {
         let mut g = self.open.lock().ok()?;
+        if self.solo {
+            return g.0.values().next().cloned();
+        }
         let t = g.0.get(subject).cloned()?;
         let (_, order) = &mut *g;
         order.retain(|s| s != subject);

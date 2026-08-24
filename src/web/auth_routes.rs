@@ -182,9 +182,8 @@ async fn start_session(
     next: Option<String>,
 ) -> Result<Response> {
     let sid = crate::store::new_id();
-    st.core
-        .store
-        .control
+    st.tenants
+        .control()
         .insert_session(
             &sid,
             &identity.subject,
@@ -213,7 +212,7 @@ async fn logout(State(st): State<AppState>, headers: axum::http::HeaderMap) -> R
         && let Some(sid) = cookie_value(h, SESSION_COOKIE)
     {
         // Delete the row, not just the cookie: a copied cookie must stop working.
-        st.core.store.control.delete_session(&sid).await?;
+        st.tenants.control().delete_session(&sid).await?;
     }
     Ok((
         StatusCode::SEE_OTHER,
@@ -436,18 +435,7 @@ mod tests {
     #[tokio::test]
     async fn the_local_login_form_is_refused_in_oidc_mode() {
         let core = crate::core::test_support::test_core().await;
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Oidc,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: true,
-            }),
-            config_path: std::sync::Arc::new(crate::web::test_support::scratch_config()),
-            ask_handoff: Default::default(),
-        };
+        let state = crate::web::test_support::state_over(core, crate::config::AuthMode::Oidc);
         let res = crate::web::router(state)
             .oneshot(form("/auth/login", "username=dev&password=hunter2"))
             .await

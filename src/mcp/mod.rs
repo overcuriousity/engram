@@ -276,21 +276,66 @@ fn service_config(
     StreamableHttpServerConfig::default().with_allowed_hosts(hosts)
 }
 
-pub fn mcp_router(state: AppState) -> Router<AppState> {
+/// One MCP service per tenant, built on first use and kept.
+///
+/// `StreamableHttpService` is constructed with the tools it will serve, and the
+/// tools hold a `Core` — so a single service is a single user's data, and the
+/// door has to pick the right one before the request reaches it. Building one
+/// per tenant also gives each user their own `LocalSessionManager`, which is
+/// what an MCP session ought to be: one client talking to one base.
+type TenantServices = std::sync::Mutex<
+    std::collections::HashMap<
+        String,
+        rmcp::transport::streamable_http_server::StreamableHttpService<
+            PkdbTools,
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
+        >,
+    >,
+>;
+
+fn service_for(
+    services: &TenantServices,
+    tenant: &crate::tenants::Tenant,
+    public_host: Option<String>,
+) -> rmcp::transport::streamable_http_server::StreamableHttpService<
+    PkdbTools,
+    rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
+> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
+    let mut map = services.lock().expect("mcp services");
+    map.entry(tenant.user.subject.clone())
+        .or_insert_with(|| {
+            let core = tenant.core.clone();
+            StreamableHttpService::new(
+                move || Ok(PkdbTools { core: core.clone() }),
+                std::sync::Arc::new(LocalSessionManager::default()),
+                service_config(public_host),
+            )
+        })
+        .clone()
+}
 
-    let core = state.core.clone();
+pub fn mcp_router(state: AppState) -> Router<AppState> {
     let public_host = state.auth.oidc.as_ref().and_then(|o| o.public_host());
-    let service = StreamableHttpService::new(
-        move || Ok(PkdbTools { core: core.clone() }),
-        std::sync::Arc::new(LocalSessionManager::default()),
-        service_config(public_host),
-    );
+    let services: std::sync::Arc<TenantServices> = Default::default();
 
     Router::new()
-        .route_service("/mcp", service)
+        .route(
+            "/mcp",
+            axum::routing::any(
+                move |tenant: crate::tenants::Tenant, req: axum::extract::Request| {
+                    let services = services.clone();
+                    let public_host = public_host.clone();
+                    async move {
+                        use tower::Service;
+                        let mut svc = service_for(&services, &tenant, public_host);
+                        svc.call(req).await
+                    }
+                },
+            ),
+        )
         .layer(axum::middleware::from_fn_with_state(state, mcp_guard))
 }
 
@@ -371,18 +416,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_requires_a_bearer_token() {
         let core = crate::core::test_support::test_core().await;
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-            config_path: std::sync::Arc::new(crate::web::test_support::scratch_config()),
-            ask_handoff: Default::default(),
-        };
+        let state = crate::web::test_support::state_over(core, crate::config::AuthMode::Local);
         let res = crate::web::router(state)
             .oneshot(
                 Request::builder()

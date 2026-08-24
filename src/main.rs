@@ -245,11 +245,13 @@ async fn main() -> anyhow::Result<()> {
 
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
-    let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
-    control.provision(BOOT_SUBJECT, None).await?;
-    let store = engram::store::Store::connect(&cfg.store, control, BOOT_SUBJECT).await?;
+    let control_handle = engram::store::control::Control::connect(&cfg.store.control_path).await?;
+    control_handle.provision(BOOT_SUBJECT, None).await?;
+    let store =
+        engram::store::Store::connect(&cfg.store, control_handle.clone(), BOOT_SUBJECT).await?;
     let vectors: Arc<dyn engram::vector::VectorStore> =
         Arc::new(engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
+    let cfg_arc = Arc::new(cfg.clone());
     let core = Core::from_config(&cfg, vectors, store);
     startup_checks(&core, &cfg).await?;
 
@@ -266,8 +268,21 @@ async fn main() -> anyhow::Result<()> {
         .map(|o| o.redirect_url.starts_with("https://"))
         .unwrap_or(false);
 
+    // Interim, until Task 8 replaces this with the control-only boot: one
+    // registry holding the single core this path built.
+    let user = control_handle
+        .user(BOOT_SUBJECT)
+        .await?
+        .expect("the boot subject was provisioned above");
+    let tenants = Arc::new(engram::tenants::Tenants::single(
+        cfg_arc.clone(),
+        core.clone(),
+        user,
+    ));
+
     let state = engram::web::state::AppState {
-        core: core.clone(),
+        tenants,
+        config: cfg_arc.clone(),
         auth: Arc::new(engram::web::state::AuthContext {
             mode: cfg.auth.mode,
             local: cfg.auth.local.clone(),

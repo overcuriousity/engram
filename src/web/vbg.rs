@@ -126,6 +126,7 @@ pub fn project_3d(vectors: &[Vec<f32>]) -> Vec<[f32; 3]> {
     out
 }
 
+use crate::tenants::Tenant;
 use crate::auth::Identity;
 use crate::error::Result;
 use crate::web::state::AppState;
@@ -172,8 +173,8 @@ fn cached(body: SampleResponse, max_age: u64) -> Response {
 /// storage-blocking setting makes `setItem` throw, and without a header on the
 /// response every page load in that browser would re-run a scroll of
 /// `sample_size` points with their dense vectors attached.
-pub async fn sample(State(st): State<AppState>, _id: Identity) -> Result<Response> {
-    let cfg = &st.core.ui.background;
+pub async fn sample(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
+    let cfg = &tenant.core.ui.background;
     let empty = || SampleResponse {
         points: vec![],
         count: 0,
@@ -184,7 +185,7 @@ pub async fn sample(State(st): State<AppState>, _id: Identity) -> Result<Respons
         // off should not go on paying a request per page load for it.
         return Ok(cached(empty(), cfg.refresh_secs));
     }
-    let sampled = match st.core.vectors.sample(cfg.sample_size).await {
+    let sampled = match tenant.core.vectors.sample(cfg.sample_size).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "vector background sample failed");

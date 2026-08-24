@@ -9,6 +9,7 @@
 //! the ranking buried can still be confirmed. That is the only way a ranking
 //! failure leaves a record instead of passing as a shrug.
 
+use crate::tenants::Tenant;
 use crate::auth::Identity;
 use crate::error::Result;
 use crate::store::feedback::{PendingEvent, Stats, Verdict};
@@ -223,7 +224,7 @@ fn shuffled(event_id: &str, mut choices: Vec<Choice>) -> Vec<Choice> {
 /// One read per candidate rather than one query for all of them: the pool is at
 /// most `feedback.candidates` long, this is not a hot path, and a hand-built
 /// `IN (?, ?, …)` would be the more fragile of the two.
-async fn card_for(st: &AppState, event: PendingEvent) -> Result<Card> {
+async fn card_for(tenant: &Tenant, event: PendingEvent) -> Result<Card> {
     let mut choices = Vec::with_capacity(event.candidates.len());
     for c in &event.candidates {
         // A deleted artifact keeps its candidate row — the pool is history —
@@ -231,7 +232,7 @@ async fn card_for(st: &AppState, event: PendingEvent) -> Result<Card> {
         // failure is raised, because a pool quietly one short is one the
         // operator judges anyway, and the verdict is recorded as though the
         // missing candidate had been seen and rejected.
-        match st.core.store.get_artifact(&c.artifact_id).await {
+        match tenant.core.store.get_artifact(&c.artifact_id).await {
             Ok(a) => choices.push(Choice {
                 // Deprecated and superseded artifacts are shown greyed rather
                 // than dropped, for the reason just given: shortening the pool
@@ -265,9 +266,9 @@ async fn card_for(st: &AppState, event: PendingEvent) -> Result<Card> {
     })
 }
 
-async fn next_pending_card(st: &AppState) -> Result<Option<Card>> {
-    match st.core.store.next_pending().await? {
-        Some(event) => Ok(Some(card_for(st, event).await?)),
+async fn next_pending_card(tenant: &Tenant) -> Result<Option<Card>> {
+    match tenant.core.store.next_pending().await? {
+        Some(event) => Ok(Some(card_for(tenant, event).await?)),
         None => Ok(None),
     }
 }
@@ -278,9 +279,9 @@ async fn next_pending_card(st: &AppState) -> Result<Option<Card>> {
 /// judgement buys is a measurement, and after the first one the distance is to
 /// the next re-sweep. Read from the last run rather than counted, so the two
 /// always agree about when it is due.
-async fn pulse_of(st: &AppState, stats: &Stats, delta: String, prev: i64) -> Result<Pulse> {
-    let tune = &st.core.feedback.tune;
-    let (floor, label) = match st.core.store.latest_eval_run().await? {
+async fn pulse_of(tenant: &Tenant, stats: &Stats, delta: String, prev: i64) -> Result<Pulse> {
+    let tune = &tenant.core.feedback.tune;
+    let (floor, label) = match tenant.core.store.latest_eval_run().await? {
         None => (0, "until the first sweep"),
         Some(last) => (last.judged_count, "until the next sweep"),
     };
@@ -308,7 +309,7 @@ async fn pulse_of(st: &AppState, stats: &Stats, delta: String, prev: i64) -> Res
         recall: format!("{:.2}", stats.recall_at_10),
         mrr: format!("{:.2}", stats.mrr),
         delta,
-        recent: st
+        recent: tenant
             .core
             .store
             .judged_since(crate::store::now() - 86_400)
@@ -321,23 +322,23 @@ async fn pulse_of(st: &AppState, stats: &Stats, delta: String, prev: i64) -> Res
     })
 }
 
-async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+async fn page(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
     use axum::response::IntoResponse;
-    let stats = st.core.store.feedback_stats().await?;
+    let stats = tenant.core.store.feedback_stats().await?;
     let misses = if stats.judged >= MISS_LIST_AT {
-        st.core.store.misses(20).await?
+        tenant.core.store.misses(20).await?
     } else {
         vec![]
     };
     Ok(HtmlTemplate(JudgeTemplate {
         // Read off the stats already in hand rather than counted again.
-        judge_pending: st.core.learn.enabled.then_some(stats.pending),
-        pulse: Some(pulse_of(&st, &stats, String::new(), stats.judged).await?),
-        tune: Some(tune_view(&st, "").await?),
+        judge_pending: tenant.core.learn.enabled.then_some(stats.pending),
+        pulse: Some(pulse_of(&tenant, &stats, String::new(), stats.judged).await?),
+        tune: Some(tune_view(&tenant, "").await?),
         tune_oob: false,
         misses,
-        asks: st.core.store.ask_stats().await?,
-        card: next_pending_card(&st).await?,
+        asks: tenant.core.store.ask_stats().await?,
+        card: next_pending_card(&tenant).await?,
         flash: None,
     })
     .into_response())
@@ -348,13 +349,13 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
 /// The figures ride inside the card, so they are always rendered — leaving them
 /// out would blank the bar rather than leave it alone. What is left out is the
 /// movement: `delta` is empty, and every animation on this fragment keys on it.
-async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+async fn next_card(tenant: Tenant) -> Result<Response> {
     use axum::response::IntoResponse;
-    let stats = st.core.store.feedback_stats().await?;
+    let stats = tenant.core.store.feedback_stats().await?;
     Ok(HtmlTemplate(CardTemplate {
-        card: next_pending_card(&st).await?,
+        card: next_pending_card(&tenant).await?,
         flash: None,
-        pulse: Some(pulse_of(&st, &stats, String::new(), stats.judged).await?),
+        pulse: Some(pulse_of(&tenant, &stats, String::new(), stats.judged).await?),
         tune: None,
         tune_oob: true,
     })
@@ -366,19 +367,19 @@ async fn next_card(State(st): State<AppState>, _id: Identity) -> Result<Response
 /// The MRR is read on both sides of the write, so the delta shown is the one
 /// this judgement actually caused rather than a figure recomputed later.
 async fn card_after(
-    st: &AppState,
+    tenant: &Tenant,
     before: Stats,
     rank: Option<i64>,
     verdict: Verdict,
     judged: &str,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    let stats = st.core.store.feedback_stats().await?;
+    let stats = tenant.core.store.feedback_stats().await?;
     let after = stats.mrr;
     // A verdict is what buys the next measurement. Off the request path: the
     // operator must not wait on a grid of searches, and a sweep that fails
     // must not fail the verdict that paid for it.
-    crate::eval::sweep::maybe_spawn(&st.core);
+    crate::eval::sweep::maybe_spawn(&tenant.core);
     let moved = after - before.mrr;
     // Three places rather than two, and no floor under it. Half a point was the
     // threshold, on the reasoning that a smaller move leaves the figure on
@@ -395,15 +396,15 @@ async fn card_after(
         format!("▼ −{:.2}", moved.abs())
     };
     Ok(HtmlTemplate(CardTemplate {
-        card: next_pending_card(st).await?,
+        card: next_pending_card(tenant).await?,
         flash: Some(Flash {
             line: diagnosis(rank, verdict).to_string(),
             tier: tier(rank, verdict),
             delta: format!("MRR {:.2} → {after:.2}", before.mrr),
             undo: Some(judged.to_string()),
         }),
-        pulse: Some(pulse_of(st, &stats, delta, before.judged).await?),
-        tune: Some(tune_view(st, "").await?),
+        pulse: Some(pulse_of(tenant, &stats, delta, before.judged).await?),
+        tune: Some(tune_view(tenant, "").await?),
         tune_oob: true,
     })
     .into_response())
@@ -415,13 +416,13 @@ async fn card_after(
 /// movement to report and nothing to undo. The event is still pending, so it is
 /// fetched by id rather than taken from the queue — a capture landing in the
 /// meantime would otherwise swap the card out from under the correction.
-async fn card_again(st: &AppState, event_id: &str, line: &str) -> Result<Response> {
+async fn card_again(tenant: &Tenant, event_id: &str, line: &str) -> Result<Response> {
     use axum::response::IntoResponse;
-    let card = match st.core.store.pending_by_id(event_id).await? {
-        Some(event) => Some(card_for(st, event).await?),
-        None => next_pending_card(st).await?,
+    let card = match tenant.core.store.pending_by_id(event_id).await? {
+        Some(event) => Some(card_for(tenant, event).await?),
+        None => next_pending_card(tenant).await?,
     };
-    let stats = st.core.store.feedback_stats().await?;
+    let stats = tenant.core.store.feedback_stats().await?;
     Ok(HtmlTemplate(CardTemplate {
         card,
         flash: Some(Flash {
@@ -434,7 +435,7 @@ async fn card_again(st: &AppState, event_id: &str, line: &str) -> Result<Respons
         }),
         // Nothing was recorded, so the figures are rendered where they stand and
         // `delta` is empty, which is what every animation on them keys on.
-        pulse: Some(pulse_of(st, &stats, String::new(), stats.judged).await?),
+        pulse: Some(pulse_of(tenant, &stats, String::new(), stats.judged).await?),
         tune: None,
         tune_oob: true,
     })
@@ -450,11 +451,11 @@ async fn card_again(st: &AppState, event_id: &str, line: &str) -> Result<Respons
 /// purpose, and a detail view that leaked it would undo the whole arrangement.
 async fn read_artifact(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(artifact_id): Path<String>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    let a = st.core.store.get_artifact(&artifact_id).await?;
+    let a = tenant.core.store.get_artifact(&artifact_id).await?;
     Ok(HtmlTemplate(FullTemplate {
         html: crate::web::markdown::render(&a.text),
     })
@@ -469,24 +470,24 @@ async fn read_artifact(
 /// whatever now heads the queue.
 async fn undo(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
     // The event may have expired between the verdict and the second thoughts.
     // The store says so now rather than reporting a write it did not make; here
     // that is not an error, for the reason below.
-    match st.core.store.unjudge(&event_id).await {
+    match tenant.core.store.unjudge(&event_id).await {
         Ok(()) | Err(crate::error::Error::NotFound) => {}
         Err(e) => return Err(e),
     }
-    let card = match st.core.store.pending_by_id(&event_id).await? {
-        Some(event) => Some(card_for(&st, event).await?),
+    let card = match tenant.core.store.pending_by_id(&event_id).await? {
+        Some(event) => Some(card_for(&tenant, event).await?),
         // Expired out from under the operator, or never existed. The next card
         // is a better answer than an error page.
-        None => next_pending_card(&st).await?,
+        None => next_pending_card(&tenant).await?,
     };
-    let stats = st.core.store.feedback_stats().await?;
+    let stats = tenant.core.store.feedback_stats().await?;
     Ok(HtmlTemplate(CardTemplate {
         card,
         flash: None,
@@ -494,7 +495,7 @@ async fn undo(
         // at them while it happens. No delta, though: the tick and the bar's
         // travel are how the page acknowledges work, and taking a judgement
         // back is not some of it.
-        pulse: Some(pulse_of(&st, &stats, String::new(), stats.judged).await?),
+        pulse: Some(pulse_of(&tenant, &stats, String::new(), stats.judged).await?),
         tune: None,
         tune_oob: true,
     })
@@ -508,7 +509,7 @@ pub struct HitForm {
 
 async fn hit(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(event_id): Path<String>,
     axum::extract::Form(f): axum::extract::Form<HitForm>,
 ) -> Result<Response> {
@@ -520,7 +521,7 @@ async fn hit(
     // as a find, and drags recall@10 down for a ranking failure that never
     // happened. Pool membership is deliberately not required — an artifact the
     // search never offered is exactly what the assign path is for.
-    let artifact = st.core.store.get_artifact(&f.artifact_id).await?;
+    let artifact = tenant.core.store.get_artifact(&f.artifact_id).await?;
 
     // Being active is required, though. `eval::export` freezes only active,
     // un-superseded artifacts and drops any pair naming something else, so a
@@ -530,8 +531,7 @@ async fn hit(
     // recorded: the card comes back so the answer can be given again against
     // something the benchmark will still be able to hold.
     if !artifact.in_results() {
-        return card_again(
-            &st,
+        return card_again(&tenant,
             &event_id,
             "that one is deprecated or superseded, so the benchmark can't hold it. \
              Pick what answers this now, or call it a gap.",
@@ -541,43 +541,43 @@ async fn hit(
 
     // Read before the write: afterwards the event is no longer pending, and the
     // rank is what decides which diagnosis the operator gets.
-    let rank = st
+    let rank = tenant
         .core
         .store
         .rank_in_event(&event_id, &f.artifact_id)
         .await?;
-    let before = st.core.store.feedback_stats().await?;
-    st.core.store.judge_hit(&event_id, &f.artifact_id).await?;
-    card_after(&st, before, rank, Verdict::Hit, &event_id).await
+    let before = tenant.core.store.feedback_stats().await?;
+    tenant.core.store.judge_hit(&event_id, &f.artifact_id).await?;
+    card_after(&tenant, before, rank, Verdict::Hit, &event_id).await
 }
 
 async fn gap(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
-    let before = st.core.store.feedback_stats().await?;
-    st.core.store.judge(&event_id, Verdict::Gap).await?;
-    card_after(&st, before, None, Verdict::Gap, &event_id).await
+    let before = tenant.core.store.feedback_stats().await?;
+    tenant.core.store.judge(&event_id, Verdict::Gap).await?;
+    card_after(&tenant, before, None, Verdict::Gap, &event_id).await
 }
 
 async fn discard(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
-    let before = st.core.store.feedback_stats().await?;
-    st.core.store.judge(&event_id, Verdict::Discard).await?;
-    card_after(&st, before, None, Verdict::Discard, &event_id).await
+    let before = tenant.core.store.feedback_stats().await?;
+    tenant.core.store.judge(&event_id, Verdict::Discard).await?;
+    card_after(&tenant, before, None, Verdict::Discard, &event_id).await
 }
 
 async fn skip(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
-    st.core.store.skip_event(&event_id).await?;
-    next_card(State(st), _id).await
+    tenant.core.store.skip_event(&event_id).await?;
+    next_card(tenant).await
 }
 
 // ── The "none of these" path ────────────────────────────────────────────────
@@ -610,14 +610,14 @@ struct AssignTemplate {
 
 async fn assign(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
     // By id, not by "whichever is next to judge": a capture landing between the
     // card being drawn and this click would otherwise win the ordering and
     // leave the screen with no query on it at all.
-    let event_query = st
+    let event_query = tenant
         .core
         .store
         .event_query(&event_id)
@@ -641,12 +641,12 @@ pub struct AssignQuery {
 
 async fn assign_results(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(event_id): Path<String>,
     axum::extract::Query(p): axum::extract::Query<AssignQuery>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    let event_query = st
+    let event_query = tenant
         .core
         .store
         .event_query(&event_id)
@@ -670,7 +670,7 @@ async fn assign_results(
         // The one search in the application that must never be captured: it is
         // composed in full knowledge of the answer, which is the contamination
         // the whole feature exists to keep out of the dataset.
-        let hits = st
+        let hits = tenant
             .core
             .search(&query, crate::store::feedback::Door::Judge)
             .await?;
@@ -770,8 +770,8 @@ fn rank_str(r: Option<usize>) -> String {
     })
 }
 
-async fn tune_view(st: &AppState, flash: &str) -> Result<TuneView> {
-    let rec = st.core.store.open_recommendation().await?.map(|run| Rec {
+async fn tune_view(tenant: &Tenant, flash: &str) -> Result<TuneView> {
+    let rec = tenant.core.store.open_recommendation().await?.map(|run| Rec {
         line: describe(&run),
         diff: run
             .diff
@@ -783,7 +783,7 @@ async fn tune_view(st: &AppState, flash: &str) -> Result<TuneView> {
     // Only where a sweep has actually run and come back empty. Before the
     // first one there is nothing to explain, and a line explaining nothing is
     // one more thing on a page that has enough.
-    let quiet = match (&rec, st.core.store.latest_eval_run().await?) {
+    let quiet = match (&rec, tenant.core.store.latest_eval_run().await?) {
         (None, Some(last)) if !last.recommended => format!(
             "last sweep {}: no improvement found over {} pairs.",
             ago(last.created_at),
@@ -791,7 +791,7 @@ async fn tune_view(st: &AppState, flash: &str) -> Result<TuneView> {
         ),
         _ => String::new(),
     };
-    let applied = st
+    let applied = tenant
         .core
         .store
         .applied_eval_runs(10)
@@ -816,10 +816,10 @@ async fn tune_view(st: &AppState, flash: &str) -> Result<TuneView> {
 // ── Taking a recommendation live ────────────────────────────────────────────
 
 /// The tuning block, redrawn, with a line about what just happened.
-async fn tune_fragment(st: &AppState, line: &str) -> Result<Response> {
+async fn tune_fragment(tenant: &Tenant, line: &str) -> Result<Response> {
     use axum::response::IntoResponse;
     Ok(HtmlTemplate(TuneTemplate {
-        tune: Some(tune_view(st, line).await?),
+        tune: Some(tune_view(tenant, line).await?),
         // Answering the button inside the block itself, which htmx swaps by
         // target rather than by id.
         tune_oob: false,
@@ -836,10 +836,10 @@ async fn tune_fragment(st: &AppState, line: &str) -> Result<Response> {
 /// their server is doing.
 async fn tune_apply(
     State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(run_id): Path<String>,
 ) -> Result<Response> {
-    let Some(run) = st.core.store.eval_run(&run_id).await? else {
+    let Some(run) = tenant.core.store.eval_run(&run_id).await? else {
         return Err(crate::error::Error::NotFound);
     };
     // A recommendation that was already taken, a run that never was one, or
@@ -847,10 +847,9 @@ async fn tune_apply(
     // left open, and none is a reason to write anything. Asked of the store
     // rather than of this row, so what the button may take is exactly what the
     // page may offer.
-    let open = st.core.store.open_recommendation().await?;
+    let open = tenant.core.store.open_recommendation().await?;
     if open.as_ref().is_none_or(|o| o.id != run.id) {
-        return tune_fragment(
-            &st,
+        return tune_fragment(&tenant,
             "that sweep is not an open recommendation — nothing was changed.",
         )
         .await;
@@ -864,14 +863,13 @@ async fn tune_apply(
         // the recommendation stays open and can be applied once the file can
         // be written.
         tracing::warn!(error = %e, path = %st.config_path.display(), "config.toml not written");
-        return tune_fragment(
-            &st,
+        return tune_fragment(&tenant,
             "config.toml could not be written, so nothing was applied. \
              The recommendation is still here.",
         )
         .await;
     }
-    *st.core.ranking.write().expect("ranking lock") = params;
+    *tenant.core.ranking.write().expect("ranking lock") = params;
     // The stamp is what closes the recommendation, so its answer is the one
     // thing here that must not be dropped. `false` is the second press of the
     // same button arriving while the first was still in flight: same run, same
@@ -881,7 +879,7 @@ async fn tune_apply(
     // to a request that did change the file and the parameters: the operator
     // would have read "nothing happened" about a server that is now running
     // settings its history does not mention.
-    match st.core.store.mark_eval_run_applied(&run_id).await {
+    match tenant.core.store.mark_eval_run_applied(&run_id).await {
         // The environment is layered over the file, so where one of these keys
         // is set the write is real and the restart undoes it. Said now, beside
         // the button, rather than discovered months later as a history claiming
@@ -895,19 +893,17 @@ async fn tune_apply(
                     keys.join(" and ")
                 ),
             };
-            tune_fragment(&st, &line).await
+            tune_fragment(&tenant, &line).await
         }
         Ok(false) => {
-            tune_fragment(
-                &st,
+            tune_fragment(&tenant,
                 "that sweep had already been applied — nothing changed.",
             )
             .await
         }
         Err(e) => {
             tracing::error!(error = %e, run = %run_id, "applied run not stamped");
-            tune_fragment(
-                &st,
+            tune_fragment(&tenant,
                 "these settings are live and written to config.toml, but the run could not be \
                  recorded as applied — it may be offered again.",
             )
