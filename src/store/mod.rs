@@ -3,6 +3,7 @@ pub mod asks;
 pub mod attachments;
 pub mod auth;
 pub mod context;
+pub mod control;
 pub mod corpora;
 pub mod eval_runs;
 pub mod feedback;
