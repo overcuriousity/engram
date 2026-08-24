@@ -754,6 +754,20 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&loser_id.to_string()))
             .await?;
+        // Every other question about the loser now belongs to the winner. Done
+        // after the artifact is hidden, and its failure is logged rather than
+        // returned: the supersession itself has happened by this point, so
+        // reporting failure would tell `jobs::try_supersede` the artifact
+        // "stays active" when it does not. What is left behind is stale pairs,
+        // which the sweep's repair pass
+        // (`jobs::consolidate::follow_supersessions`) moves on the next tick.
+        match self.store.follow_supersession(loser_id, winner_id).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(pairs = n, winner_id, "moved open pairs onto the winner"),
+            Err(e) => {
+                tracing::warn!(loser_id, winner_id, error = %e, "could not move the loser's open pairs")
+            }
+        }
         tracing::info!(loser_id, winner_id, "superseded an artifact");
         Ok(())
     }

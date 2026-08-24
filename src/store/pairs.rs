@@ -316,6 +316,62 @@ impl Store {
         )
     }
 
+    /// The pairs in a state that a person can still act on: both artifacts are
+    /// in results.
+    ///
+    /// The review queue's buttons all end in `Core::supersede`, `deprecate` or
+    /// a merge, and every one of those refuses a side that is not active. A row
+    /// naming an artifact that has since been hidden or deprecated is therefore
+    /// a question with no answer available — offering it produced
+    /// `cannot supersede: loser … is superseded` on the press, which is a
+    /// correct guard reporting a queue that should never have listed the row.
+    ///
+    /// Read-side rather than a settlement, because both ways out of results are
+    /// reversible: an operator reactivates a deprecated artifact and the pair
+    /// is a real question again. A supersession's own rows are moved onto
+    /// the winner instead — see `follow_supersession` and the sweep's repair
+    /// pass — so what this hides for good is the reversible half: a pair whose
+    /// member an operator deprecated.
+    pub async fn pairs_awaiting_review(
+        &self,
+        state: PairState,
+        limit: i64,
+    ) -> Result<Vec<ArtifactPair>> {
+        let rows = sqlx::query(
+            "SELECT p.* FROM artifact_pairs p
+               JOIN artifacts a ON a.id = p.a_id
+               JOIN artifacts b ON b.id = p.b_id
+              WHERE p.state = ?
+                AND a.status = 'active' AND a.superseded_by IS NULL
+                AND b.status = 'active' AND b.superseded_by IS NULL
+              ORDER BY p.score DESC, p.created_at DESC LIMIT ?",
+        )
+        .bind(state.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_pair).collect())
+    }
+
+    /// How many pairs `pairs_awaiting_review` would return without a limit.
+    ///
+    /// Counted under the same rule as the listing, so the "N more waiting" line
+    /// under a queue that shows the first few cannot promise rows the queue
+    /// will never render.
+    pub async fn count_pairs_awaiting_review(&self, state: PairState) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifact_pairs p
+               JOIN artifacts a ON a.id = p.a_id
+               JOIN artifacts b ON b.id = p.b_id
+              WHERE p.state = ?
+                AND a.status = 'active' AND a.superseded_by IS NULL
+                AND b.status = 'active' AND b.superseded_by IS NULL",
+        )
+        .bind(state.as_str())
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     /// Move a pair to any state other than `Superseded`, clearing the judge's
     /// proposed direction along with it.
     ///
@@ -532,6 +588,163 @@ impl Store {
             }
         }
         Ok(moved)
+    }
+
+    /// Move every question still open about `loser` onto the artifact that
+    /// replaced it, and settle the ones the supersession itself answered.
+    ///
+    /// The merge path has done this since merges existed
+    /// (`repoint_open_pairs`); a supersession is the same event — an artifact
+    /// leaves results and another one stands for it — and did not. What that
+    /// left behind is a pair naming an artifact that is no longer in results,
+    /// still listed on the review queue, whose "keep this one" press
+    /// `Core::supersede` refuses: the loser it would hide already points at a
+    /// winner, and superseding it again would build the chain `A -> B -> C`
+    /// that nothing in the UI can follow.
+    ///
+    /// Three rows settle instead of moving. One whose other side *is* the
+    /// winner would become a pair of the winner with itself, and the
+    /// supersession has answered what it asked. One whose `obsolete_id` names
+    /// the loser proposed hiding the artifact that is now hidden, so the
+    /// proposal is spent. And one that would collide with an existing pair
+    /// between the same two artifacts leaves that row alone whatever state it
+    /// carries — the rule `repoint_open_pairs` keeps for the same reason, and
+    /// what makes an operator's dismissal binding.
+    ///
+    /// A verdict moves with its state rather than reopening as `Pending`. The
+    /// judge found that two artifacts disagree; the winner of a supersession
+    /// was near enough its loser to stand for it, so the disagreement with the
+    /// other side is very probably still there, and re-filing it as pending
+    /// would spend a call to re-learn it. That carry-over is an inference and
+    /// not a fresh ruling, which is what the appended detail says — a person
+    /// reading the row has to know the verdict was pronounced over a different
+    /// artifact. A `Pending` row carries no verdict, so it moves the way the
+    /// merge path moves it: counters reset, detail cleared, because the
+    /// question it now asks is about a different pair of artifacts.
+    ///
+    /// Only rows that are still waiting on someone. `NoConflict`, `Dismissed`
+    /// and `Oversized` are answered questions, and `NearIdentical` is the
+    /// sweep's own filing, which recomputes liveness for the whole cluster
+    /// before it acts (`jobs::consolidate`).
+    ///
+    /// `score` is left alone and is now stale, exactly as in
+    /// `repoint_open_pairs`: it orders the judge queue and gates nothing here.
+    pub async fn follow_supersession(&self, loser: &str, winner: &str) -> Result<u64> {
+        if loser == winner {
+            return Ok(0);
+        }
+        let rows = sqlx::query(
+            "SELECT * FROM artifact_pairs
+              WHERE state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+                AND (a_id = ? OR b_id = ?)",
+        )
+        .bind(loser)
+        .bind(loser)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut moved = 0u64;
+        for p in rows.iter().map(row_to_pair) {
+            let other = if p.a_id == loser {
+                p.b_id.clone()
+            } else {
+                p.a_id.clone()
+            };
+            if other == winner {
+                self.set_pair_state(
+                    p.id,
+                    PairState::Dismissed,
+                    Some("the supersession of these two answered this"),
+                )
+                .await?;
+                continue;
+            }
+            if p.obsolete_id.as_deref() == Some(loser) {
+                self.set_pair_state(
+                    p.id,
+                    PairState::Dismissed,
+                    Some("the artifact this proposed hiding is already hidden"),
+                )
+                .await?;
+                continue;
+            }
+            if self.pair_state_between(&other, winner).await?.is_some() {
+                self.set_pair_state(
+                    p.id,
+                    PairState::Dismissed,
+                    Some("a pair between these two already exists"),
+                )
+                .await?;
+                continue;
+            }
+            let (a, b) = if other.as_str() <= winner {
+                (other.as_str(), winner)
+            } else {
+                (winner, other.as_str())
+            };
+            if p.state == PairState::Pending {
+                sqlx::query(
+                    "UPDATE artifact_pairs
+                        SET a_id = ?, b_id = ?, judge_attempts = 0, judge_unreadable = 0,
+                            detail = NULL
+                      WHERE id = ?",
+                )
+                .bind(a)
+                .bind(b)
+                .bind(p.id)
+                .execute(&self.pool)
+                .await?;
+            } else {
+                let note = format!("carried over from {loser}, which {winner} superseded");
+                let detail = match p.detail.as_deref() {
+                    Some(d) => format!("{d} ({note})"),
+                    None => note,
+                };
+                sqlx::query(
+                    "UPDATE artifact_pairs SET a_id = ?, b_id = ?, detail = ? WHERE id = ?",
+                )
+                .bind(a)
+                .bind(b)
+                .bind(detail)
+                .bind(p.id)
+                .execute(&self.pool)
+                .await?;
+            }
+            moved += 1;
+        }
+        Ok(moved)
+    }
+
+    /// Every supersession that still has a question open about the artifact it
+    /// hid, as `(loser, winner)`.
+    ///
+    /// What the sweep's repair pass reads. `Core::supersede` moves those pairs
+    /// where the supersession happens, and cannot be the only place that does:
+    /// a crash between the row write and the move, the callers that write
+    /// `set_superseded_by` directly, and every row filed before that rule
+    /// existed all leave the same drift behind.
+    ///
+    /// Only winners that are themselves in results. Re-pointing onto a hidden
+    /// artifact would move the question rather than answer it, and the chain it
+    /// implies is the sweep's own drift repair to fix first.
+    pub async fn supersessions_with_open_pairs(&self, limit: i64) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT loser.id AS loser, winner.id AS winner
+               FROM artifacts loser
+               JOIN artifacts winner ON winner.id = loser.superseded_by
+               JOIN artifact_pairs p ON p.a_id = loser.id OR p.b_id = loser.id
+              WHERE loser.superseded_by IS NOT NULL
+                AND winner.status = 'active' AND winner.superseded_by IS NULL
+                AND p.state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+              LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get("loser"), r.get("winner")))
+            .collect())
     }
 
     /// Put every pair the old fan-in cap refused back into the judge queue.
@@ -1539,6 +1752,228 @@ mod tests {
             s.pairs_to_judge(10).await.unwrap().len(),
             1,
             "a reopened pair the judge will never be handed is not reopened"
+        );
+    }
+
+    /// A pair naming an artifact that has just been superseded is a question
+    /// about something no longer in results. The merge path already moves those
+    /// onto the artifact that replaced them; a supersession has exactly the same
+    /// shape, and left them behind.
+    #[tokio::test]
+    async fn an_open_pair_follows_its_member_into_a_supersession() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(loser, other, 0.91).await.unwrap();
+
+        assert_eq!(s.follow_supersession(loser, winner).await.unwrap(), 1);
+
+        let open = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
+        assert_eq!(open.len(), 1);
+        let mut sides = [open[0].a_id.clone(), open[0].b_id.clone()];
+        sides.sort();
+        let mut want = [other.clone(), winner.clone()];
+        want.sort();
+        assert_eq!(sides, want, "the pair still names the artifact that lost");
+    }
+
+    /// The two sides of the supersession are the pair. Nothing is left to ask:
+    /// re-pointing it would make the winner a pair with itself.
+    #[tokio::test]
+    async fn a_pair_between_the_two_sides_of_a_supersession_is_settled() {
+        let s = Store::memory().await.unwrap();
+        let (loser, winner) = two_artifacts(&s).await;
+        s.record_pair(&loser, &winner, 0.91).await.unwrap();
+
+        s.follow_supersession(&loser, &winner).await.unwrap();
+
+        assert!(
+            s.pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            s.pairs_by_state(PairState::Dismissed, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// A verdict is carried over rather than thrown away or re-asked. The judge
+    /// found two artifacts that disagree; the one that survived the supersession
+    /// still disagrees with the other side, and re-filing it as pending would
+    /// spend a model call to learn what is already known.
+    #[tokio::test]
+    async fn a_verdict_keeps_its_state_when_it_follows_a_supersession() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(loser, other, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
+            .await
+            .unwrap();
+
+        s.follow_supersession(loser, winner).await.unwrap();
+
+        let open = s
+            .pairs_by_state(PairState::Contradiction, 10)
+            .await
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert!(
+            open[0].a_id == *winner || open[0].b_id == *winner,
+            "the verdict still names the artifact that lost"
+        );
+        let detail = open[0].detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("30 seconds vs 90"),
+            "the judge's reasoning was dropped: {detail}"
+        );
+        assert!(
+            detail.contains(winner.as_str()),
+            "nothing says the verdict was carried over: {detail}"
+        );
+    }
+
+    /// The judge proposed hiding the very artifact that has since been hidden.
+    /// Applying it now would supersede an artifact that already points at a
+    /// winner, which `Core::supersede` refuses — so the proposal is spent.
+    #[tokio::test]
+    async fn a_proposal_to_hide_the_side_that_lost_is_settled() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(loser, other, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_superseded(id, loser, Some("the older reading"))
+            .await
+            .unwrap();
+
+        s.follow_supersession(loser, winner).await.unwrap();
+
+        assert!(
+            s.pairs_by_state(PairState::Superseded, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a proposal nobody can apply is still on the queue"
+        );
+    }
+
+    /// Re-pointing onto a pair that already exists must leave the existing row
+    /// alone, whatever state it carries — the same rule the merge path keeps,
+    /// and what makes an operator's dismissal binding.
+    #[tokio::test]
+    async fn following_a_supersession_leaves_an_existing_pair_alone() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(loser, other, 0.91).await.unwrap();
+        s.record_pair(other, winner, 0.88).await.unwrap();
+        let existing = s
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.a_id != *loser && p.b_id != *loser)
+            .expect("the pair between the survivors");
+        s.set_pair_state(
+            existing.id,
+            PairState::NoConflict,
+            Some("nothing in common"),
+        )
+        .await
+        .unwrap();
+
+        s.follow_supersession(loser, winner).await.unwrap();
+
+        let kept = s.get_pair(existing.id).await.unwrap();
+        assert_eq!(kept.state, PairState::NoConflict);
+        assert!(
+            s.pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the row that could not move is still pending"
+        );
+    }
+
+    /// A settled pair carries a decision about artifacts it was really about.
+    /// Moving it would re-file that decision against an artifact nobody judged.
+    #[tokio::test]
+    async fn a_settled_pair_is_not_dragged_into_a_supersession() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(loser, other, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::NoConflict, Some("nothing in common"))
+            .await
+            .unwrap();
+
+        assert_eq!(s.follow_supersession(loser, winner).await.unwrap(), 0);
+
+        let kept = s.get_pair(id).await.unwrap();
+        assert_eq!(kept.state, PairState::NoConflict);
+        assert!(kept.a_id == *loser || kept.b_id == *loser);
+    }
+
+    /// The review queue offers a button that supersedes one side of the pair,
+    /// and `Core::supersede` refuses a side that is not active. A pair naming
+    /// an artifact that has left results is therefore a question nobody can
+    /// answer — it must not be listed, and it must not be counted.
+    #[tokio::test]
+    async fn a_pair_whose_member_left_results_is_not_awaiting_review() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 4).await;
+        s.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
+        s.record_pair(&ids[2], &ids[3], 0.88).await.unwrap();
+        s.set_artifact_status(&ids[1], crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        let open = s
+            .pairs_awaiting_review(PairState::Pending, 10)
+            .await
+            .unwrap();
+        assert_eq!(open.len(), 1, "a pair nobody can act on is still listed");
+        assert_eq!(open[0].a_id, ids[2]);
+        assert_eq!(
+            s.count_pairs_awaiting_review(PairState::Pending)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    /// Superseded, not deprecated: the other half of `in_results`, and the one
+    /// that produced the error this was found by.
+    #[tokio::test]
+    async fn a_pair_naming_a_superseded_artifact_is_not_awaiting_review() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        s.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::Contradiction, Some("30 vs 90"))
+            .await
+            .unwrap();
+        s.set_superseded_by(&ids[0], Some(&ids[2])).await.unwrap();
+
+        assert!(
+            s.pairs_awaiting_review(PairState::Contradiction, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            s.count_pairs_awaiting_review(PairState::Contradiction)
+                .await
+                .unwrap(),
+            0
         );
     }
 }
