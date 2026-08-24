@@ -159,6 +159,7 @@ impl PkdbTools {
             mark: true,
             include_deprecated: false,
             include_superseded: false,
+            rerank: true,
         };
         match self
             .core
@@ -418,6 +419,7 @@ mod tests {
                         mark: true,
                         include_deprecated: false,
                         include_superseded: false,
+                        rerank: true,
                     },
                     crate::store::feedback::Door::Ui,
                 )

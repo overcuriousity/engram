@@ -473,6 +473,10 @@ struct ResultsTemplate {
     all_weak: bool,
     /// The query's indexable terms, for client-side highlighting.
     terms: String,
+    /// This fragment is the refining pass — the reranker confirmed the order.
+    /// The tick beside the count is what makes the reordering legible as a
+    /// refinement rather than a glitch.
+    reranked: bool,
 }
 
 /// The rail before anything is asked: the base introducing itself.
@@ -1024,6 +1028,11 @@ pub(crate) struct UiSearchParams {
     pub(crate) tags: Option<String>,
     #[serde(default)]
     pub(crate) category: Option<String>,
+    /// The refining pass. Absent on every keystroke — typing gets vector
+    /// order at embedding speed — and `true` on the request app.js fires once
+    /// the operator stops, whose answer reorders the rail it just painted.
+    #[serde(default)]
+    pub(crate) rerank: bool,
 }
 
 /// Function words carry no signal and appear in every chunk, so highlighting
@@ -1114,6 +1123,7 @@ pub(crate) async fn search_results(
                 mark: false,
                 include_deprecated: false,
                 include_superseded: false,
+                rerank: p.rerank,
             },
             cap,
             // Scoped to the operator, because coalescing folds a keystroke into
@@ -1152,6 +1162,10 @@ pub(crate) async fn search_results(
         results,
         associated,
         terms,
+        // From the search's outcome, not from the request's intent: a rerank
+        // that failed or was skipped answered in vector order, and the tick
+        // would assert a confirmation that never took place.
+        reranked: t.reranked,
     })
     .into_response();
     // Measured as before, reported where a browser already knows to show it.
@@ -3452,6 +3466,7 @@ mod tests {
                     mark: false,
                     include_deprecated: false,
                     include_superseded: false,
+                    rerank: true,
                 },
                 crate::store::feedback::Door::Ui,
             )
@@ -5918,6 +5933,7 @@ mod tests {
             associated: vec![],
             all_weak: true,
             terms: String::new(),
+            reranked: false,
         })
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
@@ -6015,6 +6031,7 @@ mod tests {
             associated: vec![render_hit(0, hit(None, Some("a")), &titles)],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         })
         .unwrap();
         assert!(!html.contains("Untitled"), "{html}");
@@ -6059,6 +6076,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         }
         .render()
         .unwrap();
@@ -6080,6 +6098,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         }
         .render()
         .unwrap();
@@ -6101,6 +6120,7 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         };
         let body = template.render().unwrap();
         assert!(body.contains("Recalled by association"), "{body}");
@@ -6116,10 +6136,40 @@ mod tests {
             )],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         };
         let body = judged.render().unwrap();
         assert!(body.contains("the tool and its errors"), "{body}");
         assert!(!body.contains("seen together with"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_reranked_fragment_says_it_was_refined() {
+        // The refining pass visibly reorders the rail; the tick beside the
+        // count is what says the movement was the reranker rather than a
+        // glitch. The fast pass must not carry it: it is claiming an order
+        // the reranker never confirmed.
+        let refined = ResultsTemplate {
+            results: vec![rendered(Some("Mounting E01 images"), None)],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            reranked: true,
+        }
+        .render()
+        .unwrap();
+        assert!(refined.contains("refined"), "{refined}");
+
+        let fast = ResultsTemplate {
+            results: vec![rendered(Some("Mounting E01 images"), None)],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            reranked: false,
+        }
+        .render()
+        .unwrap();
+        assert!(!fast.contains("refined"), "{fast}");
     }
 
     #[tokio::test]
@@ -6169,6 +6219,7 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: true,
             terms: String::new(),
+            reranked: false,
         };
         let body = weak_with_association.render().unwrap();
         assert!(
@@ -6181,6 +6232,7 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         };
         let body = good_with_association.render().unwrap();
         assert!(
@@ -6418,6 +6470,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         }
         .render()
         .unwrap();
@@ -6434,6 +6487,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         }
         .render()
         .unwrap();
@@ -6452,6 +6506,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             terms: String::new(),
+            reranked: false,
         }
         .render()
         .unwrap();
@@ -6688,6 +6743,139 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let html = body_of(res).await;
         assert!(!html.contains("<html"), "results must be a fragment");
+    }
+
+    #[tokio::test]
+    async fn a_box_with_no_search_reranker_never_claims_refinement() {
+        // The tick says "the reranker confirmed this order". With no reranker
+        // wired — or one scoped to ask alone — a `rerank=true` request still
+        // answers, but the claim must not appear: it would be asserting a
+        // confirmation that never happened.
+        let (app, cookie, core) = app_session_and_core().await;
+        app.clone()
+            .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=mounting&rerank=true")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains("result-count"),
+            "the fragment must actually carry results for this test to mean \
+             anything: {html}"
+        );
+        assert!(
+            !html.contains("refined"),
+            "a box with no search reranker claimed a refinement: {html}"
+        );
+    }
+
+    /// The tick's title is "Order confirmed by the reranker", so it has to be
+    /// derived from what the rerank call did — not from what the request asked
+    /// for. A reranker that is configured but down degrades to vector order
+    /// with a warning, and the fragment must degrade its claim with it.
+    #[tokio::test]
+    async fn a_fragment_whose_rerank_failed_never_claims_refinement() {
+        let core = crate::core::test_support::test_core_with_failing_reranker().await;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        app.clone()
+            .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&handle).await.unwrap() {}
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=mounting&rerank=true")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains("result-count"),
+            "the fragment must actually carry results for this test to mean \
+             anything: {html}"
+        );
+        assert!(
+            !html.contains("refined"),
+            "the rerank call failed, so the order is vector order and the \
+             fragment must not claim the reranker confirmed it: {html}"
+        );
+    }
+
+    /// The same claim over nothing: the server skips the rerank call for an
+    /// empty result set, so "0 results · refined" would be a confirmation of
+    /// an order that was never sent anywhere.
+    #[tokio::test]
+    async fn an_empty_result_set_never_claims_refinement() {
+        let (core, _reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        let (app, cookie) = app_with_cookie(core).await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=nothing+matches+this&rerank=true")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            !html.contains("refined"),
+            "no rerank call was made for an empty answer, so nothing was \
+             confirmed: {html}"
+        );
+    }
+
+    /// The positive half, end to end: a working reranker asked for by the
+    /// request is what earns the tick.
+    #[tokio::test]
+    async fn a_rerank_that_actually_ran_earns_the_refined_tick() {
+        let (core, _reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        app.clone()
+            .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&handle).await.unwrap() {}
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=mounting&rerank=true")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains("refined"),
+            "the reranker ran and confirmed the order; the tick is earned: {html}"
+        );
     }
 
     #[tokio::test]
@@ -8701,10 +8889,11 @@ mod tests {
         );
 
         // The box's own form is a GET that searches on every keystroke. The
-        // staged file sits inside it, so the serialisation is pinned to the two
+        // staged file sits inside it, so the serialisation is pinned to the
         // fields the search actually takes — without this, every keystroke
-        // carries a filename into the query string.
-        assert!(page.contains(r#"hx-params="q,category""#), "{page}");
+        // carries a filename into the query string. `rerank` is on the list
+        // for the refining pass, whose own flag rides this form's GET.
+        assert!(page.contains(r#"hx-params="q,category,rerank""#), "{page}");
     }
 
     #[tokio::test]

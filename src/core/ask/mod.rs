@@ -512,6 +512,9 @@ impl Core {
                     mark: deliberate,
                     include_deprecated: false,
                     include_superseded: false,
+                    // Whether ask reranks is the scope's decision, not this
+                    // call's: nobody is typing here.
+                    rerank: true,
                 },
                 None,
                 // Deliberately not captured: the right answer to a question is

@@ -289,11 +289,19 @@ function hint(message) {
 }
 
 let searchTimer;
+// The settled pass, the same contract as the web UI's workspace: the
+// keystroke's search answers in vector order, and once the operator stops
+// typing the same question is asked once more with `rerank=true`. On a
+// deployment whose scope covers search that buys the reranked order; on one
+// without, the server answers in the same vector order and the identical
+// list is left untouched below.
+let refineTimer;
 
 box.addEventListener('input', () => {
   fit();
   reflectVerbs();
   clearTimeout(searchTimer);
+  clearTimeout(refineTimer);
   // Debounced, because this is search-as-you-type and every keystroke would
   // otherwise be an embedding call on the deployment.
   searchTimer = setTimeout(runSearch, 200);
@@ -406,10 +414,40 @@ async function runSearch() {
       return;
     }
     renderHits(hits, $('results'));
+    // Long enough past the 200ms debounce to mean "settled", short enough
+    // that the refinement still reads as part of the same answer — the same
+    // quiet window the web UI waits.
+    clearTimeout(refineTimer);
+    refineTimer = setTimeout(() => refineSearch(q, mine, hits), 500);
   } catch (e) {
     if (mine !== turn) return;
     await fail(e);
   }
+}
+
+/// The settled query, asked once more with the reranker on. Unattended, so it
+/// is held to less than a search: a failure keeps the vector-order list
+/// already on screen and says nothing, and an answer that arrives after
+/// anything else took the pane — a keystroke, an ask, back — is dropped.
+async function refineSearch(q, owner, fast) {
+  if (owner !== turn) return;
+  let hits;
+  try {
+    hits = await engramApi.call(
+      '/api/v1/search?door=extension&rerank=true&q=' + encodeURIComponent(q));
+  } catch (e) {
+    return;
+  }
+  if (owner !== turn) return;
+  // The same rows in the same order — a deployment that does not rerank
+  // search, or one whose reranker agreed with the vector order. Nothing to
+  // repaint, and no reason to rebuild nodes under a reading operator.
+  if (
+    hits.length === fast.length &&
+    hits.every((h, i) => h.artifact_id === fast[i].artifact_id)
+  ) return;
+  clearResults();
+  renderHits(hits, $('results'));
 }
 
 // An ask runs for as long as the model takes — `infer.ask.timeout_secs`
@@ -438,8 +476,11 @@ $('ask').addEventListener('click', async () => {
   // the document — an answer that streams into nowhere. Disarmed before the
   // await below rather than after it, or the 200ms can elapse while pairing is
   // read from storage and the search that fires takes the higher turn, whose
-  // `abandonAsk` aborts the ask this click just asked for.
+  // `abandonAsk` aborts the ask this click just asked for. The refine armed
+  // by that search's own hits is disarmed with it — its turn-guard would
+  // drop the answer anyway, but there is no reason to put it on the wire.
   clearTimeout(searchTimer);
+  clearTimeout(refineTimer);
 
   if (!(await requirePaired())) return;
 

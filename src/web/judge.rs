@@ -664,6 +664,8 @@ async fn assign_results(
             mark: false,
             include_deprecated: false,
             include_superseded: false,
+            // One deliberate lookup; the scope decides whether it reranks.
+            rerank: true,
         };
         // The one search in the application that must never be captured: it is
         // composed in full knowledge of the answer, which is the contamination

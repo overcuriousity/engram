@@ -273,6 +273,14 @@ tier = "deep"
 # base_url = "http://localhost:8001"
 # model = "bge-reranker-v2-m3"
 # style = "tei"
+#
+# Where the reranker is consulted. Both places unless narrowed. Typing in the
+# web UI never waits on it either way: keystrokes come back in vector order at
+# embedding speed, and the reranked order lands as a visible refinement once
+# the query settles. `apply = ["ask"]` is the opt-out for search entirely —
+# for a rerank endpoint slow or billed enough that only a deliberate question
+# should spend it.
+# apply = ["ask", "search"]
 
 # Reading captured images. Optional and disabled by default: with this block
 # absent the image door is closed and the capture page offers text only.

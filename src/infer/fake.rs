@@ -483,6 +483,27 @@ impl Reranker for FakeReranker {
     }
 }
 
+/// A reranker whose endpoint is down: every call errors. What the caller does
+/// next — vector order, and no claim of refinement — is the behavior under
+/// test.
+#[derive(Default)]
+pub struct FailingReranker;
+
+#[async_trait]
+impl Reranker for FailingReranker {
+    async fn rerank(
+        &self,
+        _query: &str,
+        _docs: &[String],
+        _top_n: usize,
+    ) -> Result<Vec<(usize, f32)>> {
+        Err(Error::Inference {
+            role: "rerank",
+            detail: "endpoint is down".into(),
+        })
+    }
+}
+
 /// Answers with `reply`, or — with `None` — with the user prompt it was
 /// handed. What `ask` puts in front of the model is the whole of what the
 /// model can use, and echoing it makes the prompt the thing under test.
