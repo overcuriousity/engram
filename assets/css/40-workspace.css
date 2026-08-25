@@ -847,3 +847,8 @@ body { overflow-x: hidden; }
 }
 .reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }
 
+/* A full basis, so it takes a line of its own under the row rather than
+   competing with the verbs for one. Last in the DOM as well as last on screen:
+   placed earlier it would have wrapped the chips onto a third line, which
+   costs the row the density it is arranged for. */
+.attach-types { flex: 1 0 100%; margin: 0.25rem 0 0; }

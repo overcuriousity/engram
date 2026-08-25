@@ -121,10 +121,16 @@
      which a staged file disarms: the box is that file's note by then, and a
      note is not a question to spend a model call on. #}
   <div class="verbs">
+    {# Both carry the reason they are dead. app.js clears `disabled` the moment
+       there is something to act on, so the title only ever describes the state
+       that renders it — and a permanently grey button with no stated reason is
+       indistinguishable from a broken one. #}
     {% if ask_enabled && held %}
-    <button class="btn btn-accent" type="button" data-verb="ask" disabled>Ask</button>
+    <button class="btn btn-accent" type="button" data-verb="ask" disabled
+            title="Type or attach something first">Ask</button>
     {% endif %}
-    <button class="btn" type="button" data-verb="capture" disabled>Capture</button>
+    <button class="btn" type="button" data-verb="capture" disabled
+            title="Type or attach something first">Capture</button>
     {# The invitation to a file, present from first paint. It lived inside the
        staged box for four commits — a box hidden until a file was staged —
        so the only way to stage one was a drag nobody was told about. Built
@@ -174,6 +180,17 @@
       {% endfor %}
     </div>
     {% endif %}
+    {# The accepted types, in the page rather than only on the label's `title`,
+       which a pointer reads and nothing else does. Last in the row and given a
+       full basis by the stylesheet, so the buttons, the spacer and the chips
+       keep the one line they are laid out for and this sits under them.
+
+       It carries `hint`, which means the phone hides it along with the rest of
+       the prose in this bar. That is the bar's own rule and it is right: a
+       phone has about six hundred pixels of height and the results are what
+       they are for. Nothing is lost there — the picker a phone opens names
+       what it will accept itself, and the input keeps its `aria-label`. #}
+    <span class="muted hint attach-types">{% if vision_enabled %}A .txt file, a PDF or an image{% else %}A .txt file or a PDF{% endif %} — or drop one anywhere on the page.</span>
   </div>
   {# Two hints, because the two states need different sentences. With something
      held, the useful thing to say is how to phrase a query — a whole sentence
@@ -186,8 +203,8 @@
      notes onto a server somebody else runs. #}
   <p id="box-hint" class="muted hint">
     {%- if held -%}
-    A sentence or a whole paragraph finds more than keywords do — paste what you
-    are looking at.
+    Typing searches as you go. A sentence or a whole paragraph finds more than
+    keywords do — paste what you are looking at.
     {%- else -%}
     engram keeps what you paste in your own words and finds it again by meaning,
     not by keywords. This base is yours: nobody else can search it.

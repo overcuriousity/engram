@@ -92,7 +92,7 @@ reading, and search from a panel beside it.</p>
 {% when None %}
 {% endmatch %}
 <form method="post" action="/ui/ops/feedback/purge"
-      onsubmit="return confirm('Delete every captured search and every recorded question, with every verdict given on one, and every pursuit and what was opened? The judged questions cannot be recovered — they are what the ask harness is measured against.')">
+      onsubmit="return confirm('Delete every recorded search and question, and every verdict given on one? The judged ones cannot be recovered — they are what the retrieval figure is measured from.')">
   <button class="btn btn-sm btn-danger" type="submit">Delete all captured searches, questions and pursuits</button>
 </form>
 {% when None %}

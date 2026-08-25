@@ -910,6 +910,55 @@ mod tests {
         );
     }
 
+    /// A button that is dead on arrival and says nothing about why reads as a
+    /// broken application rather than as a control waiting for its input.
+    #[tokio::test]
+    async fn a_disabled_verb_says_what_it_is_waiting_for() {
+        let html = workspace("/ui").await;
+        assert!(
+            html.contains(r#"title="Type or attach something first""#),
+            "the disabled verb names what it wants: {html}"
+        );
+        // The element, not the phrase: the same sentence is already on the
+        // label's `title`, so asserting the words alone would pass on a page
+        // where the only copy of them is the tooltip this exists to replace.
+        assert!(
+            html.contains(r#"class="muted hint attach-types""#),
+            "and Attach names its types where a finger can read them, not only \
+             in a tooltip: {html}"
+        );
+    }
+
+    /// Results appear beside a person who pressed nothing. The old hint
+    /// explained how to phrase a query, which is true and is not the thing
+    /// they do not know.
+    #[tokio::test]
+    async fn the_box_says_that_typing_is_already_searching() {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(
+            html.contains("Typing searches"),
+            "the one thing a first-time user cannot deduce from the page: {html}"
+        );
+    }
+
     fn answer_fixture(dropped: usize) -> String {
         askama::Template::render(&AnswerTemplate {
             answer: "<p>An answer.</p>".into(),
