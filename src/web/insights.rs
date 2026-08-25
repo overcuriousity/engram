@@ -638,8 +638,41 @@ mod tests {
         // would hide both. What is noisy rather than absent goes behind the
         // disclosure at the foot instead.
         assert!(
-            html.contains("Housekeeping"),
+            html.contains("What the machine is doing"),
             "what the machine is doing is true of an empty base too"
+        );
+    }
+
+    /// Two questions, one page: what is in my memory and what needs me, versus
+    /// what is the machine doing. The second is operator-grade — stage ids,
+    /// target ids, raw error strings — and every user sees this page now.
+    #[tokio::test]
+    async fn the_machines_own_readout_is_behind_a_disclosure() {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        let html = insights(core).await;
+
+        let (above, inside) = html
+            .split_once(r#"<details class="machine">"#)
+            .expect("the disclosure exists");
+
+        assert!(
+            above.contains("What this memory is like"),
+            "what is held stays above the fold"
+        );
+        // The counts sentence rather than a heading: the section carries the
+        // disclosure's own name now, so the summary is the heading and the
+        // body is what it was always for.
+        assert!(
+            !above.contains("embedded."),
+            "the machine's own readout does not"
+        );
+        assert!(inside.contains("embedded."), "it is inside the disclosure");
+        assert!(
+            !html.contains(r#"<details class="machine" open"#),
+            "and closed: nobody opened this page to read job counts"
         );
     }
 

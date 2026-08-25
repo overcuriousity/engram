@@ -4240,8 +4240,9 @@ mod tests {
 
         let html = get(&app, "/ui/insights", &cookie).await;
         assert!(
-            html.contains("Housekeeping"),
-            "the maintenance section is there"
+            html.contains("What the machine is doing"),
+            "the maintenance section is there, under the name that says what \
+             it holds rather than what a person might do about it"
         );
 
         let res = app

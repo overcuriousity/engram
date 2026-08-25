@@ -96,88 +96,6 @@
   <a class="quiet-link" href="/ui/settings">Settings</a>
 </p>
 
-<h2>Housekeeping</h2>
-
-
-{# The counts as a sentence rather than as `done: 17`-style badges: this is a
-   page you open to reassure yourself, and a row of key-value chips reads as a
-   debug dump of something going wrong.
-
-   Every number says what it counts. "1523 done" sat beside "1236 artifacts"
-   and read as a count of artifacts — of which there cannot be more done than
-   there are — when it was a count of jobs. Same for the links: a bare "45
-   links, 0 named" says nothing about what is linked to what. #}
-<p class="muted">
-  {{ artifact_count }} artifacts, {{ vector_count }} embedded.
-  {% if job_counts.is_empty() %}No jobs queued.{% else %}
-  {% for j in job_counts %}{{ j.1 }} jobs {{ j.0 }}{% if !loop.last %}, {% endif %}{% endfor %}.
-  {% endif %}
-  {% if let Some(age) = oldest_pending_secs %}Oldest pending job {{ age }}s old.{% endif %}
-  {% if let Some(l) = links %}
-  {{ l.total }} links between artifacts, {{ l.related }} named, {{ l.judge_queue }} waiting on the judge.
-  {% endif %}
-</p>
-
-{# The last day, not "last night". Units that reschedule themselves on their
-   own periods do not line up into one cycle, and grouping them by an invented
-   cycle identity would be inventing it. The history under the summary is the
-   half a single overwritten line could never give: whether a sweep started
-   going wrong yesterday or has been going wrong for a week. #}
-{% if !last_day.is_empty() || last_day_failures > 0 || !sweep_history.is_empty() %}
-<h3>The last day</h3>
-<p class="muted">
-  {% if last_day.is_empty() %}The sweeps ran and found nothing to do.{% else %}
-  {% for c in last_day %}{{ c.n }} {{ c.what }}{% if !loop.last %}, {% endif %}{% endfor %}.
-  {% endif %}
-  {% if last_day_failures > 0 %}
-  {{ last_day_failures }} run{% if last_day_failures != 1 %}s{% endif %} failed.
-  {% endif %}
-</p>
-{% if !sweep_history.is_empty() %}
-<table class="grid">
-  <thead><tr><th>When</th><th>Sweep</th><th>Did</th><th>Took</th></tr></thead>
-  <tbody>
-  {% for r in sweep_history %}
-    <tr>
-      <td>{{ r.when }}</td>
-      <td title="{{ r.stage_id }}">{{ r.stage }}</td>
-      <td>
-        {% if !r.error.is_empty() %}
-        <span class="flag">failed</span>
-        <div class="muted row-sub">{{ r.error }}</div>
-        {% else if r.counts.is_empty() %}
-        <span class="muted">nothing to do</span>
-        {% else %}
-        {% for c in r.counts %}{{ c.n }} {{ c.what }}{% if !loop.last %}, {% endif %}{% endfor %}
-        {% endif %}
-      </td>
-      <td class="muted">{{ r.took }}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-{% endif %}
-
-{# Shown against clicked, by rung. The one number that can settle whether the
-   weights the recommender rests on are right — they are chosen, not measured,
-   and until this has data, fitting them would be guessing with extra steps.
-   `[sitting] prime` has sat at `false` for months because nobody measured it;
-   this is here so the same thing does not happen twice. #}
-{% if !offer_rates.is_empty() %}
-<h3>What was offered</h3>
-<p class="muted">The last thirty days. A weekly pattern needs weeks, so a rate
-  measured over a day would be a number nobody could act on.</p>
-<table class="grid">
-  <thead><tr><th>Rung</th><th>Shown</th><th>Opened</th></tr></thead>
-  <tbody>
-  {% for r in offer_rates %}
-    <tr><td>{{ r.rung }}</td><td>{{ r.shown }}</td><td>{{ r.opened }}</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-
 {% if !merged.is_empty() %}
 <h3>Merged</h3>
 <p class="muted">
@@ -402,6 +320,96 @@
 </table>
 {% endif %}
 
+{# Everything below is about the instance rather than about what is in it, and
+   it is the same readout for every user of it. Stage identifiers, target
+   identifiers and raw error strings are what an operator opens a page for and
+   what everybody else scrolls past, so the page states the memory above and
+   offers the machine here, closed. A disclosure rather than a second page: a
+   route would need a handler, a link and an empty state of its own to draw the
+   same line. #}
+<details class="machine">
+  <summary><h2>What the machine is doing</h2></summary>
+
+
+{# The counts as a sentence rather than as `done: 17`-style badges: this is a
+   page you open to reassure yourself, and a row of key-value chips reads as a
+   debug dump of something going wrong.
+
+   Every number says what it counts. "1523 done" sat beside "1236 artifacts"
+   and read as a count of artifacts — of which there cannot be more done than
+   there are — when it was a count of jobs. Same for the links: a bare "45
+   links, 0 named" says nothing about what is linked to what. #}
+<p class="muted">
+  {{ artifact_count }} artifacts, {{ vector_count }} embedded.
+  {% if job_counts.is_empty() %}No jobs queued.{% else %}
+  {% for j in job_counts %}{{ j.1 }} jobs {{ j.0 }}{% if !loop.last %}, {% endif %}{% endfor %}.
+  {% endif %}
+  {% if let Some(age) = oldest_pending_secs %}Oldest pending job {{ age }}s old.{% endif %}
+  {% if let Some(l) = links %}
+  {{ l.total }} links between artifacts, {{ l.related }} named, {{ l.judge_queue }} waiting on the judge.
+  {% endif %}
+</p>
+
+{# The last day, not "last night". Units that reschedule themselves on their
+   own periods do not line up into one cycle, and grouping them by an invented
+   cycle identity would be inventing it. The history under the summary is the
+   half a single overwritten line could never give: whether a sweep started
+   going wrong yesterday or has been going wrong for a week. #}
+{% if !last_day.is_empty() || last_day_failures > 0 || !sweep_history.is_empty() %}
+<h3>The last day</h3>
+<p class="muted">
+  {% if last_day.is_empty() %}The sweeps ran and found nothing to do.{% else %}
+  {% for c in last_day %}{{ c.n }} {{ c.what }}{% if !loop.last %}, {% endif %}{% endfor %}.
+  {% endif %}
+  {% if last_day_failures > 0 %}
+  {{ last_day_failures }} run{% if last_day_failures != 1 %}s{% endif %} failed.
+  {% endif %}
+</p>
+{% if !sweep_history.is_empty() %}
+<table class="grid">
+  <thead><tr><th>When</th><th>Sweep</th><th>Did</th><th>Took</th></tr></thead>
+  <tbody>
+  {% for r in sweep_history %}
+    <tr>
+      <td>{{ r.when }}</td>
+      <td title="{{ r.stage_id }}">{{ r.stage }}</td>
+      <td>
+        {% if !r.error.is_empty() %}
+        <span class="flag">failed</span>
+        <div class="muted row-sub">{{ r.error }}</div>
+        {% else if r.counts.is_empty() %}
+        <span class="muted">nothing to do</span>
+        {% else %}
+        {% for c in r.counts %}{{ c.n }} {{ c.what }}{% if !loop.last %}, {% endif %}{% endfor %}
+        {% endif %}
+      </td>
+      <td class="muted">{{ r.took }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
+{# Shown against clicked, by rung. The one number that can settle whether the
+   weights the recommender rests on are right — they are chosen, not measured,
+   and until this has data, fitting them would be guessing with extra steps.
+   `[sitting] prime` has sat at `false` for months because nobody measured it;
+   this is here so the same thing does not happen twice. #}
+{% if !offer_rates.is_empty() %}
+<h3>What was offered</h3>
+<p class="muted">The last thirty days. A weekly pattern needs weeks, so a rate
+  measured over a day would be a number nobody could act on.</p>
+<table class="grid">
+  <thead><tr><th>Rung</th><th>Shown</th><th>Opened</th></tr></thead>
+  <tbody>
+  {% for r in offer_rates %}
+    <tr><td>{{ r.rung }}</td><td>{{ r.shown }}</td><td>{{ r.opened }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 {% if !retrying.is_empty() %}
 <h3>Retrying</h3>
 <p class="muted">Work that hit something and is waiting to try again. Nothing here needs you.</p>
@@ -420,6 +428,8 @@
   </tbody>
 </table>
 {% endif %}
+</details>
+
 
 {# One sentence for everything that is empty. Five headings each answered
    "None." made a base with nothing wrong with it look like a backlog. #}
