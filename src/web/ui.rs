@@ -722,6 +722,13 @@ struct SettingsTemplate {
     /// only the searches let an operator clear their query log without knowing
     /// the judged questions went with it.
     asks: Option<crate::store::asks::AskStats>,
+    /// Who is looking at this base.
+    ///
+    /// Every user has held their own database and their own collection since
+    /// #52, and no page said so. The email where the identity provider gave
+    /// one, because that is the name a person recognises as theirs; the
+    /// subject otherwise, because a stable identifier beats no answer.
+    account: String,
 }
 
 pub struct SourceRow {
@@ -2177,6 +2184,11 @@ async fn settings(tenant: Tenant) -> Result<Response> {
             true => Some(tenant.core.store.ask_stats().await?),
             false => None,
         },
+        account: tenant
+            .user
+            .email
+            .clone()
+            .unwrap_or_else(|| tenant.user.subject.clone()),
     })
     .into_response())
 }
@@ -3062,6 +3074,7 @@ mod tests {
 
     fn settings_fixture(tokens: Vec<TokenRow>) -> String {
         askama::Template::render(&SettingsTemplate {
+            account: crate::store::TEST_SUBJECT.into(),
             judge_pending: None,
             tokens,
             feedback: None,
@@ -4282,6 +4295,31 @@ mod tests {
         assert!(
             ext.contains("Settings → API tokens"),
             "named where they are"
+        );
+    }
+
+    /// After #52 every user has their own base, and nothing anywhere said
+    /// which account was looking at one. Settings is where account things
+    /// live; it was also the one page a phone could not reach.
+    #[tokio::test]
+    async fn settings_is_reachable_and_names_the_account() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+
+        let html = get(&app, "/ui", &cookie).await;
+        assert_eq!(
+            html.matches(r#"href="/ui/settings""#).count(),
+            2,
+            "the top row and the tabbar, so a phone can reach it too: {html}"
+        );
+
+        let settings = get(&app, "/ui/settings", &cookie).await;
+        assert!(
+            settings.contains("Signed in as"),
+            "and the page that holds account things says which account"
+        );
+        assert!(
+            settings.contains(crate::store::TEST_SUBJECT),
+            "named, not merely alluded to"
         );
     }
 
