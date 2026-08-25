@@ -18,7 +18,6 @@ pub mod segments;
 pub mod shingle;
 pub mod sweeps;
 
-use crate::config::StoreConfig;
 use crate::error::Result;
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -49,12 +48,11 @@ pub struct Store {
 }
 
 impl Store {
-    pub async fn connect(
-        cfg: &StoreConfig,
-        control: control::Control,
-        subject: &str,
-    ) -> Result<Store> {
-        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", cfg.path))
+    /// Open one tenant's file. The path is passed rather than read from
+    /// [`StoreConfig`]: every base belongs to a user, and `store.dir` plus the
+    /// slug is what names it.
+    pub async fn connect(path: &str, control: control::Control, subject: &str) -> Result<Store> {
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
             .create_if_missing(true)
             // WAL lets readers proceed during writes, which matters because the
@@ -422,13 +420,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("engram-schema-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("engram.db");
-        let cfg = crate::config::StoreConfig {
-            path: path.to_str().unwrap().to_string(),
-            ..Default::default()
-        };
-
         let store = Store::connect(
-            &cfg,
+            path.to_str().unwrap(),
             control::Control::memory().await.unwrap(),
             TEST_SUBJECT,
         )

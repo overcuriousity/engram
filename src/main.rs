@@ -62,10 +62,39 @@ struct Args {
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
     match cfg.auth.mode {
         AuthMode::Oidc => {
-            if cfg.auth.oidc.is_none() {
+            let Some(oidc) = &cfg.auth.oidc else {
                 return Err(Error::Validation(
                     "auth.mode = \"oidc\" but no [auth.oidc] block".into(),
                 ));
+            };
+            // Refused at startup rather than answered either way at the first
+            // login. An empty allowlist used to mean "everyone", and everyone
+            // is not a small word here: the first request from a subject
+            // engram has never seen provisions a tenant, so against a provider
+            // with open self-registration that is a stranger creating a
+            // database and a vector collection, with no cap anywhere on the
+            // path. Silently closing it instead would lock a working
+            // deployment out of its own instance on upgrade, which is why
+            // neither reading is guessed.
+            let listed = !oidc.allowed_subs.is_empty()
+                || !oidc.allowed_emails.is_empty()
+                || !oidc.allowed_groups.is_empty();
+            if !listed && !oidc.open_registration {
+                return Err(Error::Validation(
+                    "[auth.oidc] names nobody who may sign in. List the people this instance is \
+                     for in `allowed_subs`, `allowed_emails` or `allowed_groups` — or, if the \
+                     identity provider is the only gate you want, set `open_registration = true`. \
+                     Be aware that an open instance provisions a tenant for every subject the \
+                     provider authenticates, so a provider that allows self-registration allows \
+                     strangers to create databases here."
+                        .into(),
+                ));
+            }
+            if !listed {
+                tracing::warn!(
+                    "auth.oidc.open_registration is set: every subject the identity provider \
+                     authenticates gets a tenant provisioned on first request"
+                );
             }
         }
         AuthMode::Local => {
@@ -122,140 +151,6 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Take over a single-user installation, once.
-///
-/// Guarded on the `users` table being empty, so this cannot fire on a running
-/// multi-user instance however the config is edited afterwards. The alias is
-/// renamed rather than the collections behind it: nothing re-embeds, and the
-/// generation history the reindex path depends on is preserved.
-///
-/// Everything after the user row is rolled back if a later step fails, and the
-/// row with it. A half-adopted install that boots is worse than one that
-/// refuses, because it presents as a base whose searches have gone empty
-/// rather than as an error anybody can read — and worse than that, a user row
-/// left behind is one that makes `users` non-empty, which is the guard above.
-/// The next boot would then skip adoption in silence and start an empty base
-/// beside the operator's real one, for ever. So the order below puts every
-/// step that can fail for an ordinary reason — a directory that cannot be
-/// made, a database that cannot be read — either before the row is written or
-/// behind a rollback that removes it.
-///
-/// The rename is passed in rather than performed here so that this can be
-/// tested without a Qdrant: the steps that decide whether adoption is safe are
-/// the guard, the row, the file and what came out of it, and none of them needs
-/// a vector store to be up in order to be wrong.
-async fn adopt<F, Fut>(
-    cfg: &Config,
-    control: &engram::store::control::Control,
-    rename_alias: F,
-) -> Result<Option<engram::store::control::User>>
-where
-    F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = Result<()>>,
-{
-    let Some(subject) = cfg.migrate.adopt_subject.as_deref() else {
-        return Ok(None);
-    };
-    if !control.users().await?.is_empty() {
-        return Ok(None);
-    }
-    let old = std::path::Path::new(&cfg.store.path);
-    if !old.exists() {
-        return Ok(None);
-    }
-
-    // Before the row, not after it: this fails on a read-only mount or a
-    // permission, and a failure between the row and here left the row.
-    std::fs::create_dir_all(&cfg.store.dir)
-        .map_err(|e| Error::Store(format!("could not make {}: {e}", cfg.store.dir)))?;
-
-    control.provision(subject, None).await?;
-    // The operator adopting an installation is the person who has been using
-    // it, and judging is the one thing they could do before and would silently
-    // stop being able to do after.
-    if let Err(e) = control.set_can_judge(subject, true).await {
-        let _ = control.delete_user(subject).await;
-        return Err(e);
-    }
-    let user = match control.user(subject).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            let _ = control.delete_user(subject).await;
-            return Err(Error::Store(
-                "the user just provisioned is not there".into(),
-            ));
-        }
-        Err(e) => {
-            let _ = control.delete_user(subject).await;
-            return Err(e);
-        }
-    };
-
-    // Before the file moves, so a failure here has nothing to put back. What
-    // the old database holds about the person using it does not travel with
-    // the rename: those three tables live in the control plane now.
-    let carried = match control
-        .carry_over_single_user(&cfg.store.path, subject)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            control.discard_carried_over(subject).await;
-            let _ = control.delete_user(subject).await;
-            return Err(Error::Store(format!(
-                "could not carry {} into the control database: {e}",
-                cfg.store.path
-            )));
-        }
-    };
-
-    let new = std::path::Path::new(&cfg.store.dir).join(format!("{}.db", user.slug));
-    if let Err(e) = std::fs::rename(old, &new) {
-        control.discard_carried_over(subject).await;
-        let _ = control.delete_user(subject).await;
-        return Err(Error::Store(format!(
-            "could not move {} to {}: {e}",
-            old.display(),
-            new.display()
-        )));
-    }
-    // WAL and shared-memory sidecars travel with the file they belong to. A
-    // -wal left behind is a committed write that never reaches the base it was
-    // written for, which reads afterwards as data that was there yesterday.
-    for ext in ["-wal", "-shm"] {
-        let from = std::path::PathBuf::from(format!("{}{ext}", old.display()));
-        if from.exists() {
-            let _ = std::fs::rename(&from, format!("{}{ext}", new.display()));
-        }
-    }
-
-    let alias = format!("{}_{}", cfg.vector.collection, user.slug);
-    if let Err(e) = rename_alias(alias).await {
-        // Put the file back before failing, or the next boot finds no base to
-        // adopt and quietly starts an empty one.
-        let _ = std::fs::rename(&new, old);
-        for ext in ["-wal", "-shm"] {
-            let _ = std::fs::rename(
-                format!("{}{ext}", new.display()),
-                format!("{}{ext}", old.display()),
-            );
-        }
-        control.discard_carried_over(subject).await;
-        let _ = control.delete_user(subject).await;
-        return Err(e);
-    }
-    tracing::info!(subject, slug = %user.slug, "adopted the single-user base");
-    if !carried.is_empty() {
-        tracing::info!(
-            api_tokens = carried.tokens,
-            sessions = carried.sessions,
-            jobs = carried.jobs,
-            "carried the single-user auth and queue rows into the control database"
-        );
-    }
-    Ok(Some(user))
-}
-
 /// Resolve `--user`, or refuse with the list rather than picking one.
 ///
 /// A default here is how the wrong collection gets reindexed: the operator
@@ -293,14 +188,8 @@ async fn tenant_store(
     control: &engram::store::control::Control,
     user: &engram::store::control::User,
 ) -> Result<engram::store::Store> {
-    let store_cfg = engram::config::StoreConfig {
-        path: std::path::Path::new(&cfg.store.dir)
-            .join(format!("{}.db", user.slug))
-            .to_string_lossy()
-            .to_string(),
-        ..cfg.store.clone()
-    };
-    engram::store::Store::connect(&store_cfg, control.clone(), &user.subject).await
+    let path = std::path::Path::new(&cfg.store.dir).join(format!("{}.db", user.slug));
+    engram::store::Store::connect(&path.to_string_lossy(), control.clone(), &user.subject).await
 }
 
 /// The account subcommands. Returns whether one of them ran, since each is an
@@ -502,18 +391,6 @@ async fn main() -> anyhow::Result<()> {
 
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
-    // One-time, and guarded on `users` being empty. The alias is renamed onto
-    // the adopting user's name rather than the collections behind it moving,
-    // so nothing re-embeds.
-    let vector_cfg = cfg.vector.clone();
-    adopt(&cfg, &control, |alias| async move {
-        engram::vector::qdrant::QdrantVectors::connect(&vector_cfg)
-            .await?
-            .rename_alias(&alias)
-            .await
-    })
-    .await?;
-
     let cfg_arc = Arc::new(cfg.clone());
     let tenants = Arc::new(engram::tenants::Tenants::new(
         cfg_arc.clone(),
@@ -623,220 +500,6 @@ mod startup_tests {
 
     use engram::store::control::Control;
 
-    /// Adoption without the Qdrant half. The alias rename is passed in so this
-    /// can run without a vector store; what is being tested here is the row,
-    /// the file and the guard, and the rename's own failure has its own test.
-    async fn adopt_dry(
-        cfg: &Config,
-        control: &Control,
-    ) -> Result<Option<engram::store::control::User>> {
-        adopt(cfg, control, |_alias| async { Ok(()) }).await
-    }
-
-    /// A config naming a single-user database in `dir`, with `dir/users` as the
-    /// tenant directory.
-    fn adopting_config(dir: &std::path::Path, subject: Option<&str>) -> Config {
-        let mut cfg = Config::test_default();
-        cfg.store.path = dir.join("engram.db").to_string_lossy().into();
-        cfg.store.dir = dir.join("users").to_string_lossy().into();
-        cfg.migrate.adopt_subject = subject.map(String::from);
-        cfg
-    }
-
-    /// A real single-user base: connecting once puts the schema in the file.
-    async fn single_user_base(cfg: &Config, control: &Control) {
-        engram::store::Store::connect(&cfg.store, control.clone(), "unused")
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn adoption_claims_the_single_user_database_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let control = Control::memory().await.unwrap();
-        let cfg = adopting_config(dir.path(), Some("sub-1"));
-        single_user_base(&cfg, &control).await;
-
-        let user = adopt_dry(&cfg, &control).await.unwrap().expect("adopted");
-        assert!(user.can_judge, "the adopting operator keeps the judge");
-        assert!(
-            !std::path::Path::new(&cfg.store.path).exists(),
-            "the old file was moved, not copied"
-        );
-        assert!(
-            dir.path()
-                .join("users")
-                .join(format!("{}.db", user.slug))
-                .exists()
-        );
-
-        // Second boot is a no-op: the users table is no longer empty.
-        assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn adoption_does_nothing_without_a_subject_to_adopt_for() {
-        let dir = tempfile::tempdir().unwrap();
-        let control = Control::memory().await.unwrap();
-        let cfg = adopting_config(dir.path(), None);
-        single_user_base(&cfg, &control).await;
-        assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
-        assert!(
-            std::path::Path::new(&cfg.store.path).exists(),
-            "nothing was moved"
-        );
-    }
-
-    #[tokio::test]
-    async fn adoption_does_nothing_when_there_is_no_base_to_adopt() {
-        let dir = tempfile::tempdir().unwrap();
-        let control = Control::memory().await.unwrap();
-        let cfg = adopting_config(dir.path(), Some("sub-1"));
-        assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
-        assert!(
-            control.users().await.unwrap().is_empty(),
-            "no row was left behind"
-        );
-    }
-
-    /// A half-adopted install that boots is worse than one that refuses: it
-    /// presents as a base whose searches have gone empty, with the file it
-    /// should be reading sitting under a name nothing looks at.
-    #[tokio::test]
-    async fn a_failed_alias_rename_puts_the_file_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let control = Control::memory().await.unwrap();
-        let cfg = adopting_config(dir.path(), Some("sub-1"));
-        single_user_base(&cfg, &control).await;
-
-        let err = adopt(&cfg, &control, |_alias| async {
-            Err(Error::Vector("qdrant is down".into()))
-        })
-        .await;
-        assert!(err.is_err());
-        assert!(
-            std::path::Path::new(&cfg.store.path).exists(),
-            "the base was left where the next boot cannot find it"
-        );
-        assert!(
-            control.users().await.unwrap().is_empty(),
-            "a user row was left with no base behind it"
-        );
-    }
-
-    /// The row is the guard. A step that fails after it is written and does
-    /// not take it back out makes `users` non-empty for ever, and the next
-    /// boot then skips adoption in silence: an empty base beside the
-    /// operator's real one, with nothing anywhere saying why.
-    #[tokio::test]
-    async fn a_failure_before_the_file_moves_leaves_no_user_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let control = Control::memory().await.unwrap();
-        let mut cfg = adopting_config(dir.path(), Some("sub-1"));
-        single_user_base(&cfg, &control).await;
-        // A tenant directory that cannot be made, because its parent is a file.
-        let blocker = dir.path().join("blocker");
-        std::fs::write(&blocker, b"not a directory").unwrap();
-        cfg.store.dir = blocker.join("users").to_string_lossy().into();
-
-        assert!(adopt_dry(&cfg, &control).await.is_err());
-        assert!(
-            control.users().await.unwrap().is_empty(),
-            "a user row was left behind, and it is what turns adoption off"
-        );
-        assert!(
-            std::path::Path::new(&cfg.store.path).exists(),
-            "nothing should have moved"
-        );
-    }
-
-    /// What the rename does not carry: the three tables that moved to the
-    /// control plane. Without this the upgrade quietly invalidates every API
-    /// token and drops whatever was queued when the old process stopped.
-    #[tokio::test]
-    async fn adoption_carries_the_tokens_sessions_and_queued_work_over() {
-        let dir = tempfile::tempdir().unwrap();
-        let control = Control::memory().await.unwrap();
-        let cfg = adopting_config(dir.path(), Some("sub-1"));
-        single_user_base(&cfg, &control).await;
-        legacy_auth_rows(&cfg.store.path).await;
-
-        adopt_dry(&cfg, &control).await.unwrap().expect("adopted");
-
-        let tokens = control.active_tokens().await.unwrap();
-        assert_eq!(tokens.len(), 1, "the extension's token stopped working");
-        assert_eq!(tokens[0].subject, "sub-1");
-        assert!(
-            control.get_session("sid-1").await.unwrap().is_some(),
-            "the browser that was open got signed out"
-        );
-        let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE subject = 'sub-1'")
-            .fetch_one(&control.pool)
-            .await
-            .unwrap();
-        assert_eq!(queued, 1, "work queued at shutdown was dropped");
-    }
-
-    /// A token, a session and a queued unit, written the way the single-user
-    /// build wrote them: in the tenant database, with no `subject` on the job.
-    async fn legacy_auth_rows(path: &str) {
-        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-        use std::str::FromStr;
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(SqliteConnectOptions::from_str(&format!("sqlite://{path}")).unwrap())
-            .await
-            .unwrap();
-        sqlx::raw_sql(
-            "CREATE TABLE sessions (
-               id TEXT PRIMARY KEY, subject TEXT NOT NULL, email TEXT,
-               expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
-             CREATE TABLE api_tokens (
-               id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL,
-               subject TEXT NOT NULL, created_at INTEGER NOT NULL,
-               last_used_at INTEGER, revoked_at INTEGER, user_agent TEXT);
-             CREATE TABLE jobs (
-               id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL,
-               target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
-               state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
-               run_after INTEGER NOT NULL DEFAULT 0, last_error TEXT, claimed_at INTEGER,
-               created_at INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0,
-               class INTEGER NOT NULL DEFAULT 0, UNIQUE(stage, target_id));
-             INSERT INTO api_tokens (id, name, token_hash, subject, created_at)
-               VALUES ('tok-1', 'extension', 'hash', 'dev', 10);
-             INSERT INTO jobs (stage, target_kind, target_id)
-               VALUES ('synthesize', 'corpus', 'c-1');",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO sessions (id, subject, email, expires_at, created_at)
-             VALUES ('sid-1', 'dev', NULL, ?, 10)",
-        )
-        .bind(engram::store::now() + 3600)
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-    }
-
-    /// A second instance, or an operator editing the file after the fact.
-    #[tokio::test]
-    async fn adoption_refuses_once_anyone_is_registered() {
-        let dir = tempfile::tempdir().unwrap();
-        let control = Control::memory().await.unwrap();
-        let cfg = adopting_config(dir.path(), Some("sub-1"));
-        single_user_base(&cfg, &control).await;
-        control.provision("someone-else", None).await.unwrap();
-
-        assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
-        assert!(
-            std::path::Path::new(&cfg.store.path).exists(),
-            "a live instance's single-user file was moved out from under it"
-        );
-    }
-
     #[tokio::test]
     async fn a_data_command_names_its_tenant_or_says_who_it_could_have_meant() {
         let control = Control::memory().await.unwrap();
@@ -861,6 +524,53 @@ mod startup_tests {
         cfg.auth.mode = AuthMode::Oidc;
         cfg.auth.oidc = None;
         assert!(validate_auth(&cfg, false).is_err());
+    }
+
+    #[test]
+    fn oidc_mode_refuses_a_config_that_names_nobody() {
+        // Neither reading is guessed. Reading it as "everyone" hands a tenant
+        // — a control row, a database file and a vector collection — to every
+        // subject the provider authenticates; reading it as "nobody" locks a
+        // working deployment out of its own instance on upgrade. So it is a
+        // startup error until an operator says which one they meant.
+        let mut cfg = Config::test_default();
+        cfg.auth.mode = AuthMode::Oidc;
+        cfg.auth.oidc = Some(oidc_cfg());
+        assert!(validate_auth(&cfg, false).is_err());
+    }
+
+    #[test]
+    fn oidc_mode_passes_once_somebody_is_named() {
+        let mut cfg = Config::test_default();
+        cfg.auth.mode = AuthMode::Oidc;
+        let mut oidc = oidc_cfg();
+        oidc.allowed_emails = vec!["me@example.com".into()];
+        cfg.auth.oidc = Some(oidc);
+        assert!(validate_auth(&cfg, false).is_ok());
+    }
+
+    #[test]
+    fn oidc_mode_passes_when_the_open_door_is_asked_for_in_writing() {
+        let mut cfg = Config::test_default();
+        cfg.auth.mode = AuthMode::Oidc;
+        let mut oidc = oidc_cfg();
+        oidc.open_registration = true;
+        cfg.auth.oidc = Some(oidc);
+        assert!(validate_auth(&cfg, false).is_ok());
+    }
+
+    fn oidc_cfg() -> engram::config::OidcConfig {
+        engram::config::OidcConfig {
+            issuer_url: "https://idp.example".into(),
+            client_id: "engram".into(),
+            client_secret: Some("s".into()),
+            redirect_url: "https://engram.example/auth/callback".into(),
+            scopes: vec!["openid".into()],
+            open_registration: false,
+            allowed_subs: vec![],
+            allowed_emails: vec![],
+            allowed_groups: vec![],
+        }
     }
 
     #[test]

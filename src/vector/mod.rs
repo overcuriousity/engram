@@ -382,6 +382,18 @@ pub trait VectorStore: Send + Sync {
     /// promised beyond determinism between identical calls.
     async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>>;
     async fn count(&self) -> Result<u64>;
+    /// Which generation of the store a `count` was taken from, where the
+    /// backing store has such a thing.
+    ///
+    /// The background's cache tag carries this beside the count, because a
+    /// count on its own cannot see a `--reindex` that re-embeds the same
+    /// number of points into a fresh collection: the tag matched, the answer
+    /// said `unchanged`, and the page went on drawing a cloud of vectors that
+    /// no longer existed anywhere. `None` from a store with no notion of a
+    /// generation, which leaves the tag as it was.
+    async fn revision(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {

@@ -35,24 +35,6 @@ pub struct Config {
     pub recommend: RecommendConfig,
     #[serde(default)]
     pub ui: UiConfig,
-    #[serde(default)]
-    pub migrate: MigrateConfig,
-}
-
-/// The one-time move from a single-user installation into a tenant.
-///
-/// Its own block rather than a key under `[store]`, because it describes an
-/// event and not a setting: it is read once, on the first boot with an empty
-/// `users` table, and means nothing on every boot after that.
-#[derive(Debug, Deserialize, Clone, Default)]
-#[serde(default)]
-pub struct MigrateConfig {
-    /// The OIDC subject to hand `store.path` and the existing Qdrant alias to.
-    ///
-    /// Whoever has been using this base. Adoption is guarded on `users` being
-    /// empty, so this cannot fire on a running multi-user instance however the
-    /// file is edited afterwards.
-    pub adopt_subject: Option<String>,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -161,9 +143,11 @@ pub struct UiConfig {
 
 /// The rotating point cloud behind the pages, sampled from the vector store.
 ///
-/// Decorative, and it costs a background fetch every `refresh_secs` plus one
-/// scroll of the collection. On by default: it is the machine showing its own
-/// shape, and off is one line for the operator who wants the pages plain.
+/// Decorative, and held to a decoration's budget: the client keeps the cloud it
+/// was given and asks once per page load whether the store still matches it,
+/// which costs a count. Only a store that has changed costs a scroll. On by
+/// default: it is the machine showing its own shape, and off is one line for
+/// the operator who wants the pages plain.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct BackgroundConfig {
@@ -171,8 +155,6 @@ pub struct BackgroundConfig {
     /// Vectors sampled per snapshot. 2000 points read as a cloud; far fewer
     /// read as noise, far more cost the phone drawing them.
     pub sample_size: usize,
-    /// How long the client keeps a snapshot before fetching another.
-    pub refresh_secs: u64,
 }
 
 impl Default for BackgroundConfig {
@@ -180,7 +162,6 @@ impl Default for BackgroundConfig {
         Self {
             enabled: true,
             sample_size: 2000,
-            refresh_secs: 6 * 3600,
         }
     }
 }
@@ -679,9 +660,6 @@ fn default_workers() -> usize {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct StoreConfig {
-    /// The single-user database. Read by adoption alone, and meaningless once
-    /// the `users` table is non-empty.
-    pub path: String,
     /// The instance-wide control database: identity, and the job queue.
     pub control_path: String,
     /// Where per-tenant databases live, one `{slug}.db` per user.
@@ -700,7 +678,6 @@ pub struct StoreConfig {
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
-            path: "engram.db".into(),
             control_path: "engram-control.db".into(),
             dir: "data/users".into(),
             max_open_tenants: 32,
@@ -1672,6 +1649,24 @@ pub struct OidcConfig {
     pub redirect_url: String,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
+    /// Admit everyone the identity provider authenticates, with no list to
+    /// name them in.
+    ///
+    /// Off by default, and deliberately something an operator has to write
+    /// down. A first request from a subject engram has never seen provisions a
+    /// tenant — a control row, a SQLite file and a Qdrant collection — so
+    /// against a provider that lets anyone self-register, an open door is
+    /// unbounded resource creation by strangers. Nothing else in the path caps
+    /// it. Setting this says the provider's own registration is the gate and
+    /// that is understood.
+    ///
+    /// Ignored when any of the three lists below is non-empty: a listed
+    /// deployment already has a narrower door than this could open.
+    #[serde(default)]
+    pub open_registration: bool,
+    /// Subjects admitted by name. Empty, with the other two lists empty as
+    /// well, admits everyone the provider authenticates only when
+    /// `open_registration` says so — see [`crate::auth::oidc::is_allowed`].
     #[serde(default)]
     pub allowed_subs: Vec<String>,
     #[serde(default)]
@@ -2284,7 +2279,6 @@ impl Config {
             sitting: SittingConfig::default(),
             recommend: RecommendConfig::default(),
             ui: UiConfig::default(),
-            migrate: MigrateConfig::default(),
         }
     }
 }
@@ -2313,11 +2307,10 @@ mod tests {
     }
 
     #[test]
-    fn the_background_ships_on_with_a_six_hour_snapshot() {
+    fn the_background_ships_on() {
         let b = UiConfig::default().background;
         assert!(b.enabled);
         assert_eq!(b.sample_size, 2000);
-        assert_eq!(b.refresh_secs, 6 * 3600);
     }
 
     #[test]

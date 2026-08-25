@@ -629,35 +629,6 @@ impl QdrantVectors {
         Ok(())
     }
 
-    /// Point a new alias name at whatever this one currently serves, and drop
-    /// the old name.
-    ///
-    /// One `actions` batch, so there is no window in which the collection is
-    /// reachable under neither name. The alias moves rather than the
-    /// collections behind it: nothing re-embeds, and the generation history the
-    /// reindex path walks is preserved exactly as it was.
-    ///
-    /// An alias that resolves to nothing is not an error. There is no data to
-    /// carry across, which is the ordinary shape of adopting a base that was
-    /// configured but never captured into.
-    pub async fn rename_alias(&self, to: &str) -> Result<()> {
-        let Some(target) = self.resolve_alias().await? else {
-            return Ok(());
-        };
-        let _: Value = self
-            .call(
-                Method::POST,
-                "/collections/aliases",
-                Some(json!({ "actions": [
-                    { "create_alias": { "collection_name": target, "alias_name": to } },
-                    { "delete_alias": { "alias_name": self.alias } }
-                ]})),
-            )
-            .await?;
-        tracing::info!(from = %self.alias, to, collection = %target, "alias renamed");
-        Ok(())
-    }
-
     /// Point the alias at `collection`, replacing any previous target. Qdrant
     /// applies both actions in one transaction, so no request ever observes an
     /// alias that resolves to nothing.
@@ -2049,6 +2020,15 @@ impl VectorStore for QdrantVectors {
 
     async fn count(&self) -> Result<u64> {
         self.exact_count(&self.alias).await
+    }
+
+    /// The physical collection the alias resolves to right now — `{alias}_v3`
+    /// and so on. Read live rather than resolved once at startup: `--reindex`
+    /// runs as its own process and repoints the alias underneath a server that
+    /// is already up, so a target cached at boot would report the generation
+    /// that has just been replaced.
+    async fn revision(&self) -> Result<Option<String>> {
+        self.resolve_alias().await
     }
 }
 

@@ -1383,9 +1383,10 @@
   // ── Vector background ───────────────────────────────────────────────────
   // A slow monochrome rotation of the store's own vectors, projected to 3-D
   // on the server (random projection, fixed seed). Decorative, and held to a
-  // decoration's budget: one fetch every few hours, a 12 fps ceiling, no
-  // loop at all under prefers-reduced-motion, and silence on every failure —
-  // a picture of the database may never take the page down with it.
+  // decoration's budget: one revalidation per load, a few bytes of it
+  // whenever the store has not moved, a 12 fps ceiling, no loop at all under
+  // prefers-reduced-motion, and silence on every failure — a picture of the
+  // database may never take the page down with it.
   function vectorBg() {
     var CACHE_KEY = 'engram.vbg';
 
@@ -1394,10 +1395,10 @@
     //
     // It is also where the snapshot is dropped. Every other key this file
     // writes is a local preference; this one is server data — a projection of
-    // one account's store, good for six hours — and `/auth/logout` clears the
-    // cookie and nothing else. Without this, signing out and signing a second
-    // account in on the same browser redrew the first one's cloud straight
-    // from `localStorage`, with no authorization anywhere on the path.
+    // one account's store — and `/auth/logout` clears the cookie and nothing
+    // else. Without this, signing out and signing a second account in on the
+    // same browser redrew the first one's cloud straight from `localStorage`,
+    // with no authorization anywhere on the path.
     if (!document.querySelector('.topbar')) {
       try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
       return;
@@ -1599,8 +1600,6 @@
       requestAnimationFrame(frame);
     }
 
-    var DEFAULT_REFRESH = 21600;
-
     // Everything drawn is read back out of storage a page load later, where
     // anything at all could be standing in for it. One string in the array and
     // the draw loop throws on every frame, so the shape is checked once here
@@ -1617,57 +1616,70 @@
       return true;
     }
 
-    function keep(pts, refreshSecs) {
+    function keep(pts, tag) {
       try {
-        localStorage.setItem(CACHE_KEY, JSON.stringify({
-          ts: Date.now(), points: pts, refreshSecs: refreshSecs
-        }));
+        localStorage.setItem(CACHE_KEY, JSON.stringify({ tag: tag, points: pts }));
       } catch (e) {}
     }
 
-    var now = Date.now();
+    // The canvas comes down, the snapshot stays. Used wherever there is
+    // nothing to draw *this* load without that being a verdict on what is in
+    // storage: a store the server could not reach, a backdrop switched off, a
+    // projection that came back empty. Whatever is stored is revalidated on
+    // the next load anyway, so throwing it away here buys nothing and costs a
+    // full refetch.
+    function hide() {
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+    }
+
+    // The snapshot is never drawn on its own authority, however fresh it looks.
+    // It used to stand for six hours, which meant a base emptied — or reindexed
+    // away, or simply signed out of on a shared browser — went on being drawn
+    // as a cloud of points that no longer existed anywhere. So every load asks,
+    // carrying the tag of what it holds: the answer is either a few bytes
+    // saying the store still matches, or the cloud that replaces it.
     var cached = null;
     try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) {}
-    if (cached && cached.ts) {
-      // `typeof`, not `||`: a configured `refresh_secs = 0` means "fetch every
-      // time" — during a reindex, say — and `||` read that as a falsy blank
-      // and substituted six hours, which is the exact opposite of what the
-      // operator asked for.
-      var ttl = typeof cached.refreshSecs === 'number' ? cached.refreshSecs : DEFAULT_REFRESH;
-      if (now - cached.ts < ttl * 1000) {
-        if (usable(cached.points)) { start(cached.points); return; }
-        // An empty snapshot is cached like any other. Turning the backdrop off
-        // in the config should stop the requests too, and an empty answer that
-        // was never written back meant a disabled feature still cost one fetch
-        // per page load, for good.
-        //
-        // Empty is the *only* unusable snapshot that means that, and the two
-        // were read as one: anything else in the slot is damage — a truncated
-        // write, a half-quota `setItem`, a shape from a version that wrote
-        // something else — and taking it for a switched-off backdrop left the
-        // page with no canvas until the six hours ran out, on every load, with
-        // a live endpoint one request away. Damage falls through to the fetch,
-        // which overwrites it.
-        if (Array.isArray(cached.points) && !cached.points.length) {
-          canvas.parentNode.removeChild(canvas);
-          return;
-        }
-      }
-    }
+    // An empty point list is a snapshot like any other — of a store with
+    // nothing drawable in it — and its tag is worth sending. Without that,
+    // "there is nothing to draw" was the one answer the client could never
+    // cache, so an instance with the backdrop off, or a store whose vectors
+    // are all off the modal width, re-ran the whole question on every page
+    // load and never once got to skip it.
+    var stored = cached && Array.isArray(cached.points)
+      && (cached.points.length === 0 || usable(cached.points));
+    var have = stored && typeof cached.tag === 'string' ? cached.tag : null;
+
+    var url = '/api/v1/vectors/sample';
+    if (have) url += '?have=' + encodeURIComponent(have);
     // `cache: 'no-store'` as well as the response's own header. The header is
     // what stops a *new* answer being held; this is what stops an answer some
-    // earlier build let the browser keep — a six-hour `max-age` snapshot of
-    // whoever was signed in then — being replayed to whoever is signed in now.
-    fetch('/api/v1/vectors/sample', { credentials: 'same-origin', cache: 'no-store' })
+    // earlier build let the browser keep — a `max-age` snapshot of whoever was
+    // signed in then — being replayed to whoever is signed in now.
+    fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (!data) { canvas.parentNode.removeChild(canvas); return; }
+        // No answer, or an answer with no tag in it: the store could not be
+        // asked, so nothing here is a statement about the cloud in storage.
+        // A tag that fails to match is the statement; its absence is not.
+        if (!data || typeof data.tag !== 'string') { hide(); return; }
+        if (data.unchanged && have) {
+          if (cached.points.length) start(cached.points); else hide();
+          return;
+        }
         var pts = usable(data.points) ? data.points : [];
-        keep(pts, data.refresh_secs);
-        if (!pts.length) { canvas.parentNode.removeChild(canvas); return; }
+        // Stored before the length is looked at, so that "nothing to draw"
+        // is remembered under its own tag and the next load is the cheap
+        // exchange rather than another full sample.
+        keep(pts, data.tag);
+        if (!pts.length) { hide(); return; }
         start(pts);
       })
-      .catch(function () { canvas.parentNode.removeChild(canvas); });
+      .catch(function () {
+        // The network, not the store: nothing here says the cloud is wrong, so
+        // the snapshot is left where it is for the next load to revalidate.
+        hide();
+      });
   }
 
   // ── The refining pass ─────────────────────────────────────────────────────

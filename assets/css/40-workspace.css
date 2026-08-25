@@ -193,7 +193,16 @@ body { overflow-x: hidden; }
    one-region-at-a-time rule that used to live here is `.regions.has-selection`
    under a container query. */
 
-.rail { display: flex; flex-direction: column; gap: 0.5rem; max-height: 40rem; overflow-y: auto; }
+/* `overflow-x: hidden` is not belt and braces. Setting one axis to `auto`
+   computes the other from `visible` to `auto`, so the rail grew a horizontal
+   scrollbar of its own accord — a bar across the bottom of the column that
+   moves the list by a millimetre and says nothing, since every card inside
+   already wraps. The vertical axis is the only one this box has ever had
+   anything to scroll. */
+.rail {
+  display: flex; flex-direction: column; gap: 0.5rem;
+  max-height: 40rem; overflow-y: auto; overflow-x: hidden;
+}
 /* The results are their own element inside the rail, so that a search replaces
    them and not the heading above them — the heading names the act that filled
    the rail, and a swap that took it with the list would leave the rail
@@ -300,10 +309,17 @@ body { overflow-x: hidden; }
 /* Deliberately not `.rail-item`: the card is the shape of a ranked answer,
    and a recent capture is not an answer to anything. A quiet row — title
    left, when right — that lights up only under the pointer. */
+/* No negative side margins, however much the hover box wants to bleed to the
+   rail's edge. The rail scrolls vertically, which computes its horizontal
+   overflow from `visible` to `auto`, so a row six pixels wider than its column
+   gave the rail a real horizontal scroll — a bar across the bottom that moved
+   the whole column sideways and cut the first character off every line in it.
+   The hover box lines up with the text instead, which is where the rest of the
+   rail's content already ends. */
 .idle-row {
   display: flex; gap: 0.75rem; align-items: baseline; justify-content: space-between;
   text-decoration: none; color: var(--color-fg-secondary);
-  padding: 0.25rem 0.375rem; margin: 0 -0.375rem; border-radius: var(--radius-sm);
+  padding: 0.25rem 0.375rem; border-radius: var(--radius-sm);
 }
 .idle-row:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
 .idle-row-title {

@@ -1310,10 +1310,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("jobs.db");
         let store = Store::connect(
-            &crate::config::StoreConfig {
-                path: path.to_string_lossy().to_string(),
-                ..Default::default()
-            },
+            &path.to_string_lossy(),
             {
                 let c = crate::store::control::Control::memory().await.unwrap();
                 c.provision(crate::store::TEST_SUBJECT, None).await.unwrap();

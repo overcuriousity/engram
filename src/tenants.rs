@@ -300,11 +300,12 @@ impl Tenants {
     async fn open(&self, user: User, trigger: Trigger) -> Result<Tenant> {
         std::fs::create_dir_all(&self.cfg.store.dir)
             .map_err(|e| Error::Store(format!("could not make {}: {e}", self.cfg.store.dir)))?;
-        let store_cfg = crate::config::StoreConfig {
-            path: self.db_path(&user).to_string_lossy().to_string(),
-            ..self.cfg.store.clone()
-        };
-        let store = Store::connect(&store_cfg, self.control.clone(), &user.subject).await?;
+        let store = Store::connect(
+            &self.db_path(&user).to_string_lossy(),
+            self.control.clone(),
+            &user.subject,
+        )
+        .await?;
         let vectors = self
             .vectors
             .open(&self.alias(&user), self.cfg.infer.embed.dim)

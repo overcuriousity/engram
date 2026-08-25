@@ -57,10 +57,25 @@ impl Default for PendingStore {
     }
 }
 
-/// Who may sign in. An empty allowlist denies everyone by design: without it,
-/// every account the identity provider knows about could read the knowledge
-/// base.
+/// Who may sign in.
+///
+/// A deployment names its people in one of the three lists, and membership of
+/// any one of them admits. The provider is the gate for *authentication* —
+/// engram does not keep a second one — but who that gate is allowed to let
+/// through is still engram's to say, because a subject arriving for the first
+/// time gets a tenant provisioned for it: a control row, a database file and a
+/// vector collection.
+///
+/// With all three lists empty nobody is admitted unless
+/// `open_registration` is set, which is the deployment saying in writing that
+/// the provider's own registration is the door. Startup refuses a
+/// configuration that is silent on the question rather than picking either
+/// answer on the operator's behalf — see `validate_auth` in `main.rs`.
 pub fn is_allowed(cfg: &OidcConfig, subject: &str, email: Option<&str>, groups: &[String]) -> bool {
+    if cfg.allowed_subs.is_empty() && cfg.allowed_emails.is_empty() && cfg.allowed_groups.is_empty()
+    {
+        return cfg.open_registration;
+    }
     if cfg.allowed_subs.iter().any(|s| s == subject) {
         return true;
     }
@@ -165,17 +180,6 @@ impl OidcClient {
     pub async fn discover(cfg: &OidcConfig) -> Result<OidcClient> {
         use openidconnect::IssuerUrl;
         use openidconnect::core::CoreProviderMetadata;
-
-        if cfg.allowed_subs.is_empty()
-            && cfg.allowed_emails.is_empty()
-            && cfg.allowed_groups.is_empty()
-        {
-            return Err(Error::Validation(
-                "auth.oidc has an empty allowlist: set allowed_subs, allowed_emails or \
-                 allowed_groups, otherwise every account in your identity provider could sign in"
-                    .into(),
-            ));
-        }
 
         // Two clients, because the two kinds of request carry different things.
         //
@@ -381,6 +385,7 @@ mod tests {
             client_secret: Some("s".into()),
             redirect_url: "https://engram.example/auth/callback".into(),
             scopes: vec!["openid".into()],
+            open_registration: false,
             allowed_subs: subs.iter().map(|s| s.to_string()).collect(),
             allowed_emails: emails.iter().map(|s| s.to_string()).collect(),
             allowed_groups: groups.iter().map(|s| s.to_string()).collect(),
@@ -403,14 +408,49 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_allowlist_denies_everyone() {
-        // Defaulting open would hand the knowledge base to every account in
-        // the identity provider.
+    fn an_empty_allowlist_admits_nobody_on_its_own() {
+        // Naming nobody is not the same as naming everybody. It used to be:
+        // three empty lists admitted whoever the provider authenticated, and
+        // every new subject arriving got a tenant provisioned for it.
         assert!(!is_allowed(
             &cfg(&[], &[]),
             "sub-1",
             Some("me@example.com"),
             &[]
+        ));
+    }
+
+    #[test]
+    fn open_registration_is_what_opens_an_empty_allowlist() {
+        // The deployment whose identity provider already holds the right
+        // membership, saying so in writing.
+        let mut c = cfg(&[], &[]);
+        c.open_registration = true;
+        assert!(is_allowed(&c, "sub-1", Some("me@example.com"), &[]));
+    }
+
+    #[test]
+    fn a_populated_list_outranks_open_registration() {
+        // A deployment that both lists people and leaves the flag on has
+        // already stated the narrower intent; the flag must not widen it back.
+        let mut c = cfg(&["sub-1"], &[]);
+        c.open_registration = true;
+        assert!(is_allowed(&c, "sub-1", None, &[]));
+        assert!(!is_allowed(&c, "sub-2", None, &[]));
+    }
+
+    #[test]
+    fn one_populated_list_closes_the_door_on_everyone_else() {
+        // The lists are only permissive while all three are empty: naming a
+        // single subject must not leave the other two lists reading as
+        // "anyone", or a narrowing edit would silently change nothing.
+        let c = cfg(&["sub-1"], &[]);
+        assert!(!is_allowed(&c, "sub-2", Some("me@example.com"), &[]));
+        assert!(!is_allowed(
+            &c,
+            "sub-2",
+            None,
+            &["engram-users".to_string()]
         ));
     }
 
