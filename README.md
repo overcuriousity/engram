@@ -133,7 +133,86 @@ authenticates in front of it.
 Other one-shot commands: `--reindex` copies every vector into a fresh collection
 generation and swaps the alias onto it, `--export-eval DIR` writes the
 evaluation pairs, `--recompute-coverage` re-measures corpus coverage from stored
-artifacts. Each of them exits when done.
+artifacts. Each of them exits when done, and each takes `--user <SUBJECT>`
+naming the base it acts on — see below.
+
+## Multiple users
+
+Every user gets their own SQLite database and their own Qdrant collection. No
+user data is shared, and there is no query anywhere that could be written
+without a tenant filter, because no tenant filter exists: the isolation is
+structural rather than a predicate. Every setting in `config.toml` stays
+instance-wide.
+
+What is *not* divided is compute. There is one embed endpoint, one synthesize
+endpoint, one reranker, and most likely one GPU behind all of them, so
+`server.workers` stays one number however many people sign up: it is the
+admission point in front of that hardware. A worker pool per user would let ten
+signed-in users fire `10 × server.workers` concurrent requests at a single
+endpoint, where throughput does not scale but collapses. Adding a user costs a
+file and a collection; it does not cost a thread pool.
+
+Set `auth.mode = "oidc"`. The first request from an unseen subject provisions
+that user — a row, a database, a collection. There is no registration UI and no
+password management: the identity provider owns accounts, and engram owns
+nothing but the mapping. `auth.mode = "local"` stays a development shortcut, and
+provisions one tenant keyed on the configured username.
+
+Three keys under `[store]`, all optional:
+
+| Key | Default | |
+|---|---|---|
+| `control_path` | `engram-control.db` | Identity, sessions, tokens, and the one job queue |
+| `dir` | `data/users` | Where the per-user databases live, one `{slug}.db` each |
+| `max_open_tenants` | `32` | How many bases may be open at once; eviction is transparent |
+
+### Accounts
+
+```bash
+engram --list-users                      # subject, slug, email, judge grant
+engram --grant-judge  sub-abc123
+engram --revoke-judge sub-abc123
+engram --delete-user  sub-abc123         # row, file and alias, behind a typed yes
+```
+
+The judge grant gates the whole of `/ui/judge`, which is also the only route in
+the tree that writes `config.toml` — applying a tuning recommendation moves the
+instance's ranking parameters, so it is not something every account should
+reach. There is no admin role; the flag is granted out of band, per user, and
+takes effect on the next request rather than on a restart. The raw form works
+too:
+
+```bash
+sqlite3 engram-control.db "UPDATE users SET can_judge = 1 WHERE subject = '…'"
+```
+
+`--reindex`, `--export-eval` and `--recompute-coverage` each require
+`--user <SUBJECT>`. Omitting it is an error listing the known subjects rather
+than a default: defaulting to an arbitrary tenant is how the wrong collection
+gets reindexed.
+
+### Adopting an existing single-user base
+
+Set `migrate.adopt_subject` to the OIDC subject of whoever has been using it and
+start engram. It moves `store.path` to `{store.dir}/{slug}.db`, writes the user
+row with the judge granted, and renames the existing Qdrant alias onto
+`{vector.collection}_{slug}`. The alias moves rather than the collections behind
+it, so nothing re-embeds and the generation history `--reindex` walks is
+preserved.
+
+It is guarded on the `users` table being empty, so it fires exactly once and
+cannot go off on a running instance however the file is edited afterwards. If
+the alias rename fails the file move is rolled back, because a half-adopted
+install that boots reads as a base whose searches have gone empty.
+
+### Backup
+
+A backup is the control database **plus** every file under `store.dir`, taken
+together. They reference each other: the queue names subjects, the subjects name
+files. Restoring one side from a different moment than the other shows up as
+store drift — an artifact one store holds and the other does not — which
+`heal_store_drift` repairs per tenant on that tenant's next open, and which the
+Ops page reports in the meantime.
 
 ## Configuration
 
