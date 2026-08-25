@@ -45,16 +45,49 @@ pub(crate) async fn try_supersede(core: &Core, loser: &str, winner: &str, why: &
     }
 }
 
-/// Claim and run at most one job. Returns false when the queue is empty, which
-/// is the loop's signal to sleep.
-pub async fn run_one(core: &Core) -> Result<bool> {
-    let Some((_subject, job)) = core.store.control.claim_job().await? else {
+/// Claim one unit and run it, whoever it belongs to.
+///
+/// What a worker calls. The queue is instance-wide; the work is not. The
+/// subject comes off the claimed row and names the core the unit runs against,
+/// so a worker never holds a tenant across two units — which is what makes
+/// this round-robin between users without a scheduler in it.
+pub async fn run_any(tenants: &crate::tenants::Tenants) -> Result<bool> {
+    let Some((subject, job)) = tenants.control().claim_job().await? else {
         return Ok(false);
     };
+    let core = match tenants.get(&subject).await {
+        Ok(t) => t.core,
+        // The user was deleted between the enqueue and the claim. Their queue
+        // goes with the row cascade, but a unit already in a worker's hand can
+        // outlive it, and retrying it can never succeed.
+        Err(Error::NotFound) => {
+            tracing::info!(subject = %subject, "queue row for a user that no longer exists; dropping");
+            tenants.control().complete_job(job.id).await?;
+            return Ok(true);
+        }
+        Err(e) => return Err(e),
+    };
+    run_dispatched(&core, job, Some(&subject)).await
+}
 
+/// Claim and run at most one of *this tenant's* jobs. Returns false when their
+/// queue is empty, which is the loop's signal to sleep.
+///
+/// Beside `run_any` rather than replaced by it: "take this base's next step" is
+/// a real operation, and every test that drives a capture to completion is
+/// asking for exactly it.
+pub async fn run_one(core: &Core) -> Result<bool> {
+    let Some(job) = core.store.claim_job().await? else {
+        return Ok(false);
+    };
+    run_dispatched(core, job, None).await
+}
+
+async fn run_dispatched(core: &Core, job: Job, subject: Option<&str>) -> Result<bool> {
     let span = tracing::info_span!(
         "job",
         id = job.id,
+        subject = subject.unwrap_or(""),
         stage = job.stage.as_str(),
         target = %job.target_id,
         attempt = job.attempts
@@ -388,14 +421,21 @@ async fn settle_failed_artifact(core: &Core, job: &Job, e: &Error) -> Result<()>
 pub struct Worker;
 
 impl Worker {
+    /// The pool, over the whole instance.
+    ///
+    /// `server.workers` keeps meaning what it has always meant — how many
+    /// things this machine does at once — however many people sign up. It is
+    /// the admission point in front of one set of inference endpoints, and a
+    /// pool per user would put that queueing in the model server's socket
+    /// backlog instead: invisible, unordered, unfair.
     pub fn spawn(
-        core: Core,
+        tenants: std::sync::Arc<crate::tenants::Tenants>,
         workers: usize,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Vec<tokio::task::JoinHandle<()>> {
         (0..workers.max(1))
             .map(|n| {
-                let core = core.clone();
+                let tenants = tenants.clone();
                 let mut shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     tracing::info!(worker = n, "worker started");
@@ -404,7 +444,7 @@ impl Worker {
                             _ = shutdown.changed() => {
                                 if *shutdown.borrow() { break; }
                             }
-                            worked = run_one(&core) => {
+                            worked = run_any(&tenants) => {
                                 match worked {
                                     Ok(true) => continue,
                                     Ok(false) => tokio::time::sleep(POLL_INTERVAL).await,
@@ -724,6 +764,70 @@ mod tests {
         assert!(
             !core.store.live_job(Stage::Dedupe, "p1").await.unwrap(),
             "the unit is still armed"
+        );
+    }
+
+    /// The instance-wide claim, and the thing it has to get right: the unit
+    /// runs against the core belonging to whoever queued it.
+    ///
+    /// `Retention` because it leaves a trace in the tenant it ran for —
+    /// `run_accounted` writes a `sweep_runs` row into that tenant's own
+    /// database. A worker that resolved the wrong core would still complete
+    /// the job; the row is what says which base it touched.
+    #[tokio::test]
+    async fn a_unit_runs_against_the_core_of_whoever_queued_it() {
+        let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
+        a.core
+            .store
+            .arm_periodic(Stage::Retention, "collection", "collection", 0)
+            .await
+            .unwrap();
+
+        assert!(run_any(&tenants).await.unwrap(), "the job was claimed");
+
+        let ran = |t: &crate::tenants::Tenant| {
+            let store = t.core.store.clone();
+            async move { store.sweep_runs_since(0, 10).await.unwrap().len() }
+        };
+        assert_eq!(ran(&a).await, 1, "the sweep did not run for the tenant that armed it");
+        assert_eq!(ran(&b).await, 0, "another tenant's base was touched");
+    }
+
+    /// A row can outlive its user: the cascade takes the queue with the row,
+    /// but a unit claimed a moment before the delete is already in a worker's
+    /// hand. Retrying it can never succeed, so it is closed rather than failed.
+    #[tokio::test]
+    async fn a_job_for_a_deleted_user_is_dropped_rather_than_retried() {
+        let (tenants, a, _b, _dir) = crate::tenants::test_support::two_tenants().await;
+        a.core
+            .store
+            .enqueue(Stage::Embed, "corpus", "c-a")
+            .await
+            .unwrap();
+        // The cascade would take the queue row with the user, which is the
+        // ordinary case and leaves nothing to claim. What this reaches is the
+        // narrower one the branch exists for: the row outliving its user
+        // because the two deletes did not happen together. Foreign keys are
+        // per-connection in SQLite, so one connection with them off is how
+        // that state is reachable at all.
+        {
+            use sqlx::Executor;
+            let mut conn = tenants.control().pool.acquire().await.unwrap();
+            conn.execute("PRAGMA foreign_keys = OFF").await.unwrap();
+            sqlx::query("DELETE FROM users WHERE subject = ?")
+                .bind("sub-a")
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            run_any(&tenants).await.unwrap(),
+            "the orphaned unit was claimed and dealt with"
+        );
+        assert!(
+            !run_any(&tenants).await.unwrap(),
+            "it was closed, not left to be claimed again"
         );
     }
 

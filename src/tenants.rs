@@ -182,7 +182,37 @@ impl Tenants {
             .open(&self.alias(&user), self.cfg.infer.embed.dim)
             .await?;
         let core = Core::from_config(&self.cfg, vectors, store);
+        self.on_first_open(&core);
         Ok(Tenant { core, user })
+    }
+
+    /// What used to happen at boot, for the one base there was.
+    ///
+    /// Both of these are about a *collection* rather than an endpoint, so
+    /// neither can be answered once for the instance any more. They run here,
+    /// lazily, rather than for every registered user at startup: a hundred
+    /// users would otherwise mean a hundred full collection scrolls before the
+    /// port opens.
+    ///
+    /// On the background queue, not awaited. A first request must not wait out
+    /// a scroll of the whole collection, and a base that cannot be reconciled
+    /// is still a base its owner can read.
+    fn on_first_open(&self, core: &Core) {
+        let core = core.clone();
+        let cfg = self.cfg.clone();
+        core.background.clone().spawn(async move {
+            if let Err(e) = embed_recipe_check(&core, &cfg).await {
+                tracing::warn!(error = %e, "could not check the embedding recipe");
+            }
+            // The two stores hold complementary halves of the same artifact and
+            // are written separately, so either can end up with an entry the
+            // other lacks: a crash between the two writes, or a restore of one
+            // from a backup taken at a different moment. Until something
+            // notices, one side's artifacts are simply missing.
+            if let Err(e) = core.heal_store_drift().await {
+                tracing::warn!(error = %e, "could not reconcile the two stores; the next pass retries");
+            }
+        });
     }
 
     fn cached(&self, subject: &str) -> Option<Tenant> {
@@ -328,4 +358,39 @@ mod tests {
         assert_eq!(a.core.store.list_corpora(10, 0).await.unwrap().len(), 1);
         assert!(b.core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
+}
+
+/// Say it out loud when the embedding recipe changed under a base that already
+/// has vectors in it.
+///
+/// `model`, `dim` and the three templates together decide what a stored vector
+/// means (`EmbedRole::fingerprint`). Change any of them and the vectors already
+/// in the collection describe the old recipe while every new query is rendered
+/// through the new one — a base that answers worse for no visible reason, with
+/// nothing in any log tying it to the config edit that caused it.
+///
+/// A warning and not a refusal: the operator may be mid-migration, and a base
+/// that will not open is worse than one that says what is wrong with it. The
+/// fingerprint is stored either way, so the warning is printed once rather than
+/// on every open.
+///
+/// Here rather than at startup because `meta` is per tenant, which is the whole
+/// reason it stayed out of the control database: it also holds the sweep
+/// cursors, and one shared row would have one tenant's recipe describing
+/// everybody's collection.
+pub async fn embed_recipe_check(core: &Core, cfg: &Config) -> Result<()> {
+    const KEY: &str = "embed.recipe";
+    let now = cfg.infer.embed.fingerprint();
+    if let Some(before) = core.store.meta_get(KEY).await?
+        && before != now
+    {
+        tracing::warn!(
+            model = %cfg.infer.embed.model,
+            "the embedding recipe changed — model, dim or a template. Vectors stored under the \
+             old one do not compare with queries rendered through the new one: drop the \
+             collection and re-capture, or put the old recipe back"
+        );
+    }
+    core.store.meta_set(KEY, &now).await?;
+    Ok(())
 }

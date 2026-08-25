@@ -251,16 +251,27 @@ const AGE_PER_TICK: i64 = 20;
 /// but the sweep to notice, and the sweep switched off. None of that is
 /// duplicate hygiene, and none of it is something an operator asks to keep by
 /// turning duplicate hygiene off.
+/// One ticker for the instance, and a pass per registered user.
+///
+/// It iterates `users` rather than the open registry, because a tenant nobody
+/// has touched since boot is exactly the one whose interrupted work nothing
+/// else will find. That opens each base in turn, which is the cost of the
+/// guarantee; the passes themselves are SQLite-local and cheap.
+///
+/// The instance-wide half — reclaiming units a dead process left `running`,
+/// ageing background work, expiring sessions — runs once per tick and not once
+/// per user: those queries are over the whole control database, and repeating
+/// them per tenant would do the same work N times for the same answer.
 pub fn spawn_repair_ticker(
-    core: crate::core::Core,
+    tenants: std::sync::Arc<crate::tenants::Tenants>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let period = std::time::Duration::from_secs(REPAIR_INTERVAL_HOURS * 3600);
         let mut tick = tokio::time::interval(period);
-        // Not from now: start already reconciles the two stores. An interval
-        // that fired immediately would scroll the whole collection a second
-        // time for an answer the process just computed.
+        // Not from now: a tenant reconciles its two stores on its first open.
+        // An interval that fired immediately would scroll the whole collection
+        // a second time for an answer the process just computed.
         let drift_period = std::time::Duration::from_secs(STORE_DRIFT_INTERVAL_HOURS * 3600);
         let mut drift_tick =
             tokio::time::interval_at(tokio::time::Instant::now() + drift_period, drift_period);
@@ -269,12 +280,85 @@ pub fn spawn_repair_ticker(
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() { break; }
                 }
-                _ = tick.tick() => repair_once(&core).await,
-                _ = drift_tick.tick() => reconcile_stores_once(&core).await,
+                _ = tick.tick() => repair_every_tenant(&tenants).await,
+                _ = drift_tick.tick() => {
+                    for core in open_every_tenant(&tenants).await {
+                        reconcile_stores_once(&core).await;
+                    }
+                }
             }
         }
         tracing::info!("repair ticker stopped");
     })
+}
+
+/// The instance-wide half of a repair tick, then the per-tenant half.
+pub(crate) async fn repair_every_tenant(tenants: &crate::tenants::Tenants) {
+    repair_control_once(tenants.control(), tenants.config()).await;
+    for core in open_every_tenant(tenants).await {
+        repair_once(&core).await;
+    }
+}
+
+/// Every registered user's core, opened.
+///
+/// A tenant that cannot be opened is logged and left out rather than stopping
+/// the pass for everybody else; the next tick tries again. Registered users and
+/// not the open registry, because a base nobody has touched since boot is
+/// exactly the one whose interrupted work nothing else will find.
+async fn open_every_tenant(tenants: &crate::tenants::Tenants) -> Vec<crate::core::Core> {
+    let users = match tenants.control().users().await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list the users to repair; retrying on the next pass");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::with_capacity(users.len());
+    for u in users {
+        match tenants.get(&u.subject).await {
+            Ok(t) => out.push(t.core),
+            Err(e) => {
+                tracing::warn!(subject = %u.subject, error = %e, "could not open a base to repair it")
+            }
+        }
+    }
+    out
+}
+
+/// The repairs that are about the queue rather than about anyone's knowledge.
+///
+/// One control database, so one pass — not one per tenant. `reclaim_stuck` and
+/// `age_background` are already instance-wide queries, and running them per
+/// user would ask the same question as many times as there are users and act
+/// on the first answer.
+pub(crate) async fn repair_control_once(
+    control: &crate::store::control::Control,
+    cfg: &crate::config::Config,
+) {
+    match control.reclaim_stuck(crate::jobs::STUCK_AFTER_SECS).await {
+        Ok(n) if n > 0 => tracing::info!(reclaimed = n, "requeued jobs left running by a dead process"),
+        Err(e) => tracing::warn!(error = %e, "could not requeue jobs left running"),
+        _ => {}
+    }
+    // Saturating for the same reason `periodic_period` is: `age_after_mins`
+    // comes out of `config.toml`, and a large enough value panics in debug and
+    // wraps in release, leaving an `older_than` that ages rows which have not
+    // waited at all. `0` is not a way to switch ageing off — it means every
+    // waiting unit is old enough, so the classes stop dividing anything, which
+    // is the behaviour from before the column existed.
+    let older_than =
+        crate::store::now().saturating_sub(cfg.schedule.age_after_mins.max(0).saturating_mul(60));
+    match control.age_background(older_than, AGE_PER_TICK).await {
+        Ok(n) if n > 0 => tracing::info!(aged = n, "background units have waited long enough"),
+        Err(e) => tracing::warn!(error = %e, "could not age the units that have been waiting"),
+        _ => {}
+    }
+    match control.purge_expired_sessions().await {
+        Ok(n) if n > 0 => tracing::info!(purged = n, "removed expired sessions"),
+        Err(e) => tracing::warn!(error = %e, "could not remove expired sessions"),
+        _ => {}
+    }
 }
 
 /// One pass. Each step warns and the next still runs: they are independent, each
@@ -328,27 +412,9 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
     // otherwise never run again — the one failure mode a ticker does not have,
     // and the reason this pass stays outside the schedule.
     arm_missing_periodic(core).await;
-    // Priority without ageing is starvation: one long ingest would keep night
-    // work off the workers for as long as it lasted. Here rather than in the
-    // claim for the reason `age_background` gives — an inequality in the
-    // ordering costs the covering index — and here rather than on a sweep for
-    // the reason everything else in this pass is here: it is what keeps the
-    // schedule moving, so it cannot be scheduled by the thing it keeps moving.
-    //
-    // Saturating for the same reason `periodic_period` is: `age_after_mins`
-    // comes out of `config.toml`, and a large enough value panics in debug and
-    // wraps in release, leaving an `older_than` that ages rows which have not
-    // waited at all. `0` is not a way to switch ageing off — it means every
-    // waiting unit is old enough, so the classes stop dividing anything, which
-    // is the behaviour from before the column existed. `config.example.toml`
-    // says so.
-    let older_than =
-        crate::store::now().saturating_sub(core.schedule.age_after_mins.max(0).saturating_mul(60));
-    match core.store.control.age_background(older_than, AGE_PER_TICK).await {
-        Ok(n) if n > 0 => tracing::info!(aged = n, "background units have waited long enough"),
-        Err(e) => tracing::warn!(error = %e, "could not age the units that have been waiting"),
-        _ => {}
-    }
+    // Priority without ageing is starvation, but the ageing is instance-wide
+    // and lives in `repair_control_once` beside the rest of the queue's own
+    // repairs — one control database, one pass.
     // Housekeeping about housekeeping. It rode on the retention unit, which is
     // behind `feedback`: an operator with capture off and `retain_days` at its
     // default has no retention unit at all, while the sweeps that do run — the
@@ -395,6 +461,35 @@ pub const ASSOCIATE_TARGET: &str = "collection";
 
 #[cfg(test)]
 mod tests {
+
+    /// The instance-wide half of a repair tick: one control database, one pass,
+    /// covering every tenant's stuck work rather than the caller's alone.
+    #[tokio::test]
+    async fn a_repair_tick_requeues_stuck_work_for_every_tenant() {
+        let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
+        for t in [&a, &b] {
+            t.core
+                .store
+                .enqueue(crate::store::jobs::Stage::Embed, "corpus", "c1")
+                .await
+                .unwrap();
+        }
+        // Both claimed by a process that then died: `running`, claimed long
+        // enough ago that nothing is coming back for them.
+        sqlx::query("UPDATE jobs SET state = 'running', claimed_at = ?")
+            .bind(crate::store::now() - crate::jobs::STUCK_AFTER_SECS - 60)
+            .execute(&tenants.control().pool)
+            .await
+            .unwrap();
+
+        repair_control_once(tenants.control(), tenants.config()).await;
+
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state = 'pending'")
+            .fetch_one(&tenants.control().pool)
+            .await
+            .unwrap();
+        assert_eq!(pending, 2, "one tenant's stuck work was left running");
+    }
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;

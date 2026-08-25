@@ -114,7 +114,7 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         cfg.infer.embed.api_key.as_deref(),
     )
     .await;
-    embed_recipe_check(core, cfg).await?;
+    engram::tenants::embed_recipe_check(core, cfg).await?;
     if let Some(r) = &cfg.infer.rerank {
         engram::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
         if !r.applies_to(engram::config::RerankApply::Search) {
@@ -129,35 +129,6 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     } else {
         tracing::info!("vision not configured; the image door is closed");
     }
-    Ok(())
-}
-
-/// Say it out loud when the embedding recipe changed under a base that already
-/// has vectors in it.
-///
-/// `model`, `dim` and the three templates together decide what a stored vector
-/// means (`EmbedRole::fingerprint`). Change any of them and the vectors already
-/// in the collection describe the old recipe while every new query is rendered
-/// through the new one — a base that answers worse for no visible reason, with
-/// nothing in any log tying it to the config edit that caused it.
-///
-/// A warning and not a refusal: the operator may be mid-migration, and a base
-/// that will not boot is worse than one that says what is wrong with it. The
-/// fingerprint is stored either way, so the warning is printed once rather than
-/// every restart.
-async fn embed_recipe_check(core: &Core, cfg: &Config) -> Result<()> {
-    const KEY: &str = "embed.recipe";
-    let now = cfg.infer.embed.fingerprint();
-    match core.store.meta_get(KEY).await? {
-        Some(before) if before != now => tracing::warn!(
-            model = %cfg.infer.embed.model,
-            "the embedding recipe changed — model, dim or a template. Vectors stored under the \
-             old one do not compare with queries rendered through the new one: drop the \
-             collection and re-capture, or put the old recipe back"
-        ),
-        _ => {}
-    }
-    core.store.meta_set(KEY, &now).await?;
     Ok(())
 }
 
@@ -281,7 +252,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let state = engram::web::state::AppState {
-        tenants,
+        tenants: tenants.clone(),
         config: cfg_arc.clone(),
         auth: Arc::new(engram::web::state::AuthContext {
             mode: cfg.auth.mode,
@@ -308,8 +279,10 @@ async fn main() -> anyhow::Result<()> {
     // recovers an interrupted schedule, including arming a sweep that died
     // between being claimed and re-arming itself, so it cannot be scheduled by
     // the thing it recovers.
-    let repair = engram::core::background::spawn_repair_ticker(core.clone(), shutdown_rx.clone());
-    let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
+    let repair =
+        engram::core::background::spawn_repair_ticker(tenants.clone(), shutdown_rx.clone());
+    let mut handles =
+        engram::jobs::Worker::spawn(tenants.clone(), cfg.server.workers, shutdown_rx);
     // Joined with the workers so shutdown waits for it too, rather than
     // leaving a task the runtime drops mid-enqueue.
     handles.push(repair);
