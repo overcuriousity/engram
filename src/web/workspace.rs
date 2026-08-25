@@ -12,6 +12,7 @@
 //! *keep this answer* flow working. See
 //! `docs/superpowers/specs/2026-08-22-one-text-surface-design.md` §3.
 
+use crate::tenants::Tenant;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query, State};
@@ -19,7 +20,6 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
-use crate::auth::Identity;
 use crate::core::ingest::{ORIGIN_ASK, ORIGIN_WEB};
 use crate::error::{Error, Result};
 use crate::web::auth_routes::HtmlTemplate;
@@ -141,7 +141,7 @@ struct WorkspaceTemplate {
 /// and what happens on first paint; a copy of this per door is how they come
 /// to disagree about the chips.
 async fn base_template(
-    st: &AppState,
+    tenant: &Tenant,
     q: String,
     category: String,
     open_with: &'static str,
@@ -149,7 +149,7 @@ async fn base_template(
     // A vector store that cannot answer must not take the page down with it:
     // without chips the page is what it was yesterday, with them it is better,
     // and neither is worth a 500.
-    let mut facets = st
+    let mut facets = tenant
         .core
         .vectors
         .facets(FACET_LIMIT)
@@ -168,22 +168,22 @@ async fn base_template(
     // its complement: whatever will not be filled by a search on arrival is
     // filled by the idle rail here.
     let idle = match q.is_empty() || !open_with.is_empty() {
-        true => crate::web::ui::rail_idle(st)
+        true => crate::web::ui::rail_idle(tenant)
             .await?
             .render()
             .map_err(|e| crate::error::Error::Internal(e.to_string()))?,
         false => String::new(),
     };
     Ok(WorkspaceTemplate {
-        judge_pending: crate::web::state::judge_pending(st).await,
-        ask_enabled: crate::web::state::ask_enabled(st),
+        judge_pending: crate::web::state::judge_pending(tenant).await,
+        ask_enabled: crate::web::state::ask_enabled(tenant),
         q,
         facets,
         category,
-        recommend: st.core.recommends(),
-        vision_enabled: st.core.describer.is_some(),
-        search_reranks: st.core.reranks_search(),
-        eager: st.core.synthesis == crate::config::SynthesisMode::Eager,
+        recommend: tenant.core.recommends(),
+        vision_enabled: tenant.core.describer.is_some(),
+        search_reranks: tenant.core.reranks_search(),
+        eager: tenant.core.synthesis == crate::config::SynthesisMode::Eager,
         prefill_ask: String::new(),
         prefill_question: String::new(),
         open_with,
@@ -191,12 +191,8 @@ async fn base_template(
     })
 }
 
-async fn page(
-    State(st): State<AppState>,
-    _id: Identity,
-    Query(p): Query<UiSearchParams>,
-) -> Result<Response> {
-    let t = base_template(&st, p.q, p.category.unwrap_or_default(), "").await?;
+async fn page(tenant: Tenant, Query(p): Query<UiSearchParams>) -> Result<Response> {
+    let t = base_template(&tenant, p.q, p.category.unwrap_or_default(), "").await?;
     Ok(HtmlTemplate(t).into_response())
 }
 
@@ -237,11 +233,7 @@ struct CapturedTemplate {
     near_dupe_percent: i64,
 }
 
-async fn capture_submit(
-    State(st): State<AppState>,
-    _id: Identity,
-    Form(f): Form<CaptureForm>,
-) -> Result<Response> {
+async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Response> {
     // An answer the operator chose to keep is still a paste, and is stored as
     // one — the same pipeline, the same synthesis, no special case downstream.
     // What differs is only the trace: the origin says a model wrote it, and the
@@ -256,7 +248,7 @@ async fn capture_submit(
     // supposed to buy. A claim that cannot be checked is worse than no claim, so
     // a lost row falls back to an ordinary paste, which is what it now is.
     let capture = match f.from_ask.as_deref().filter(|s| !s.is_empty()) {
-        Some(ask_id) => match st.core.store.ask_event(ask_id).await? {
+        Some(ask_id) => match tenant.core.store.ask_event(ask_id).await? {
             Some(ev) => crate::core::ingest::Capture::new(&f.text, ORIGIN_ASK).with_ask(
                 &ev.id,
                 &ev.question,
@@ -272,7 +264,7 @@ async fn capture_submit(
         },
         None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
     };
-    let out = st.core.ingest_capture(capture).await?;
+    let out = tenant.core.ingest_capture(capture).await?;
     Ok(HtmlTemplate(CapturedTemplate {
         id: out.id,
         duplicate: out.duplicate,
@@ -292,20 +284,16 @@ async fn capture_submit(
 /// anything about the three pages having folded into one. A prefill that names
 /// an ask nobody recorded is not an error worth a page for: the box is simply
 /// empty, which is what an ordinary visit looks like.
-async fn capture_door(
-    State(st): State<AppState>,
-    _id: Identity,
-    Query(p): Query<CapturePrefill>,
-) -> Result<Response> {
+async fn capture_door(tenant: Tenant, Query(p): Query<CapturePrefill>) -> Result<Response> {
     let prefilled = match &p.from_ask {
-        Some(id) => st.core.store.ask_event(id).await?,
+        Some(id) => tenant.core.store.ask_event(id).await?,
         None => None,
     };
     let (q, prefill_ask, prefill_question) = match prefilled {
         Some(ev) => (ev.answer, ev.id, ev.question),
         None => (String::new(), String::new(), String::new()),
     };
-    let mut t = base_template(&st, q, String::new(), "capture").await?;
+    let mut t = base_template(&tenant, q, String::new(), "capture").await?;
     t.prefill_ask = prefill_ask;
     t.prefill_question = prefill_question;
     Ok(HtmlTemplate(t).into_response())
@@ -395,11 +383,11 @@ struct AskForm {
 /// guard, and it is spent on first use.
 async fn ask_submit(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     Form(f): Form<AskForm>,
 ) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
+    if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
     // Refused before anything is parked, so an empty box costs no entry in the
@@ -414,7 +402,7 @@ async fn ask_submit(
             tags: vec![],
             category: None,
         },
-        &id.subject,
+        &tenant.user.subject,
     );
     Ok(axum::Json(serde_json::json!({ "id": handoff })).into_response())
 }
@@ -430,11 +418,11 @@ async fn ask_submit(
 /// verdict bar, nothing to judge, and retention deletes an unjudged row anyway.
 async fn ask_stream(
     State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     Path(handoff): Path<String>,
 ) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
+    if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
     use tokio_stream::StreamExt as _;
@@ -444,10 +432,10 @@ async fn ask_stream(
     // call on a replay; never another subject's question, which would be
     // answered to the wrong person and recorded under their name.
     let req = st
-        .ask_handoff_take(&handoff, &id.subject)
+        .ask_handoff_take(&handoff, &tenant.user.subject)
         .ok_or(Error::NotFound)?;
-    let core = st.core.clone();
-    let origin = crate::store::feedback::Door::Ui.by(id.subject);
+    let core = tenant.core.clone();
+    let origin = crate::store::feedback::Door::Ui.by(tenant.user.subject);
     let events = async_stream::stream! {
         let s = core.ask_events(&req, origin);
         tokio::pin!(s);
@@ -590,8 +578,13 @@ fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
     .into()
 }
 
-async fn ask_verdict_bar(st: &AppState, id: &str, oob: bool) -> Result<String> {
-    let ev = st.core.store.ask_event(id).await?.ok_or(Error::NotFound)?;
+async fn ask_verdict_bar(tenant: &Tenant, id: &str, oob: bool) -> Result<String> {
+    let ev = tenant
+        .core
+        .store
+        .ask_event(id)
+        .await?
+        .ok_or(Error::NotFound)?;
     AskVerdictTemplate {
         event_id: ev.id,
         verdict: ev.verdict.map(verdict_label),
@@ -602,38 +595,36 @@ async fn ask_verdict_bar(st: &AppState, id: &str, oob: bool) -> Result<String> {
 }
 
 async fn ask_verdict(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<VerdictForm>,
 ) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
+    if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
     match f.verdict.as_str() {
-        "none" => st.core.store.unjudge_ask(&id).await?,
+        "none" => tenant.core.store.unjudge_ask(&id).await?,
         v => {
             let verdict = crate::store::asks::AskVerdict::parse(v)
                 .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
-            st.core.store.judge_ask(&id, verdict).await?;
+            tenant.core.store.judge_ask(&id, verdict).await?;
         }
     }
-    Ok(axum::response::Html(ask_verdict_bar(&st, &id, false).await?).into_response())
+    Ok(axum::response::Html(ask_verdict_bar(&tenant, &id, false).await?).into_response())
 }
 
 async fn ask_carried(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<CarriedForm>,
 ) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
+    if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
-    let carried = st.core.store.toggle_carried(&id, f.n).await?;
-    let bar = ask_verdict_bar(&st, &id, true).await?;
+    let carried = tenant.core.store.toggle_carried(&id, f.n).await?;
+    let bar = ask_verdict_bar(&tenant, &id, true).await?;
     Ok(HtmlTemplate(AskCarriedTemplate {
         event_id: id,
         n: f.n,
@@ -657,21 +648,22 @@ async fn ask_carried(
 /// The answer as the model wrote it, not as the operator retyped it: an
 /// operator who wants to edit first has `edit first` beside this, which is the
 /// old path unchanged.
-async fn ask_keep(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(id): Path<String>,
-) -> Result<Response> {
+async fn ask_keep(tenant: Tenant, Path(id): Path<String>) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
+    if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
     // Unlike the capture door, there is no text to fall back to here: the row
     // is where the answer lives. A question that retention has already taken
     // has nothing left to keep, and saying so is better than storing an empty
     // source or an unprovenanced one.
-    let ev = st.core.store.ask_event(&id).await?.ok_or(Error::NotFound)?;
-    let out = st
+    let ev = tenant
+        .core
+        .store
+        .ask_event(&id)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let out = tenant
         .core
         .ingest_capture(
             crate::core::ingest::Capture::new(&ev.answer, ORIGIN_ASK).with_ask(
@@ -717,15 +709,11 @@ struct CarriedForm {
 /// it bridged. It existed because a query typed on the rail and then retyped
 /// into ask was the cost of two pages with nothing carried between them —
 /// there is one box now, and the query is already in it.
-async fn ask_door(
-    State(st): State<AppState>,
-    _id: Identity,
-    Query(p): Query<AskPrefill>,
-) -> Result<Response> {
-    if !st.core.asks() {
+async fn ask_door(tenant: Tenant, Query(p): Query<AskPrefill>) -> Result<Response> {
+    if !tenant.core.asks() {
         return Err(crate::error::Error::NotFound);
     }
-    let t = base_template(&st, p.q, String::new(), "ask").await?;
+    let t = base_template(&tenant, p.q, String::new(), "ask").await?;
     Ok(HtmlTemplate(t).into_response())
 }
 

@@ -35,6 +35,24 @@ pub struct Config {
     pub recommend: RecommendConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub migrate: MigrateConfig,
+}
+
+/// The one-time move from a single-user installation into a tenant.
+///
+/// Its own block rather than a key under `[store]`, because it describes an
+/// event and not a setting: it is read once, on the first boot with an empty
+/// `users` table, and means nothing on every boot after that.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MigrateConfig {
+    /// The OIDC subject to hand `store.path` and the existing Qdrant alias to.
+    ///
+    /// Whoever has been using this base. Adoption is guarded on `users` being
+    /// empty, so this cannot fire on a running multi-user instance however the
+    /// file is edited afterwards.
+    pub adopt_subject: Option<String>,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -561,11 +579,23 @@ pub struct ScheduleConfig {
     /// Ops is how the guess gets checked, since a sweep whose runs thin out is
     /// visible there rather than silent.
     pub age_after_mins: i64,
+    /// The ceiling on how long a sweep that keeps finding nothing waits.
+    ///
+    /// A base with nothing to do wakes, queries, finds nothing and sleeps
+    /// again — for ever, by construction, once per interval per sweep per
+    /// tenant. Each consecutive empty run doubles the wait up to this, and any
+    /// new data cancels it outright, because every producer already calls
+    /// `arm_now`. So the cost of being wrong here is bounded on both sides: a
+    /// sweep on a quiet base runs late, never not at all.
+    pub backoff_max_hours: u64,
 }
 
 impl Default for ScheduleConfig {
     fn default() -> Self {
-        Self { age_after_mins: 60 }
+        Self {
+            age_after_mins: 60,
+            backoff_max_hours: 24,
+        }
     }
 }
 
@@ -647,8 +677,35 @@ fn default_workers() -> usize {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
 pub struct StoreConfig {
+    /// The single-user database. Read by adoption alone, and meaningless once
+    /// the `users` table is non-empty.
     pub path: String,
+    /// The instance-wide control database: identity, and the job queue.
+    pub control_path: String,
+    /// Where per-tenant databases live, one `{slug}.db` per user.
+    pub dir: String,
+    /// How many tenants may be open at once. An open tenant costs a SQLite
+    /// pool and a background queue; the rest are opened on demand, and
+    /// eviction is transparent because the next request reopens the same file
+    /// — and, through `Tenants::working_for`, over the same sitting. Reopening
+    /// the file was never the whole of that promise: the working memory search
+    /// and ask carry lives in the `Core` the cache miss rebuilds, so until it
+    /// was held across eviction this cap was visible to any user unlucky
+    /// enough to be evicted between two requests. See `core::Working`.
+    pub max_open_tenants: usize,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            path: "engram.db".into(),
+            control_path: "engram-control.db".into(),
+            dir: "data/users".into(),
+            max_open_tenants: 32,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -2131,6 +2188,104 @@ impl Config {
             l.password_hash = R.into();
         }
         format!("{c:#?}")
+    }
+}
+
+impl Config {
+    /// A `Config` with every role configured and nothing reachable.
+    ///
+    /// Lives here rather than in the binary's tests because the tenant
+    /// registry needs one too, and two fixtures drifting apart is how a test
+    /// starts asserting against a config the binary never builds. Not behind
+    /// `cfg(test)`: the binary's own tests compile against this crate as a
+    /// dependency, where that flag is not set.
+    #[doc(hidden)]
+    pub fn test_default() -> Config {
+        Config {
+            server: ServerConfig {
+                bind: "127.0.0.1:8080".into(),
+                workers: 2,
+            },
+            store: StoreConfig::default(),
+            vector: VectorConfig {
+                url: "http://localhost:6333".into(),
+                collection: "chunks".into(),
+                api_key: None,
+                recency_weight: 0.05,
+                recency_half_life_days: 180,
+                pinned_boost: 0.15,
+                weak_below: 0.35,
+                per_source_cap: 3,
+            },
+            infer: InferConfig {
+                synthesis: SynthesisMode::Eager,
+                segment_tokens: DEFAULT_SEGMENT_TOKENS,
+                synthesize: Some(SynthesizeRole {
+                    base_url: "http://localhost:8000/v1".into(),
+                    model: "m".into(),
+                    api_key: None,
+                    context_tokens: 32768,
+                    max_output_tokens: 8192,
+                    output_ratio: 1.4,
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    reasoning_effort: None,
+                    ceiling_param: None,
+                    structured_output: true,
+                    context_opening_tokens: 200,
+                    context_overlap_tokens: 150,
+                }),
+                embed: EmbedRole {
+                    base_url: "http://localhost:8000/v1".into(),
+                    model: "e".into(),
+                    api_key: None,
+                    dim: 1024,
+                    max_input_tokens: 8192,
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    query_template: EmbedTemplates::default().query_template,
+                    document_template: EmbedTemplates::default().document_template,
+                    document_template_untitled: EmbedTemplates::default()
+                        .document_template_untitled,
+                    chunk_tokens: DEFAULT_CHUNK_TOKENS,
+                },
+                ask: Some(AskRole {
+                    base_url: "http://localhost:8000/v1".into(),
+                    model: "m".into(),
+                    api_key: None,
+                    context_tokens: 32768,
+                    max_output_tokens: 4096,
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                    reasoning_effort: None,
+                    ceiling_param: None,
+                    plan: false,
+                    structured_output: true,
+                    plan_endpoint: None,
+                }),
+                rerank: None,
+                vision: None,
+            },
+            auth: AuthConfig {
+                mode: AuthMode::Local,
+                oidc: None,
+                local: Some(LocalConfig {
+                    username: "dev".into(),
+                    password_hash: "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aaaa".into(),
+                }),
+            },
+            consolidate: ConsolidateConfig::default(),
+            learn: LearnConfig::default(),
+            feedback: FeedbackConfig::default(),
+            capture: CaptureConfig::default(),
+            pacing: PacingConfig::default(),
+            associate: AssociateConfig::default(),
+            activation: ActivationConfig::default(),
+            promote: PromoteConfig::default(),
+            pursuit: PursuitConfig::default(),
+            schedule: ScheduleConfig::default(),
+            sitting: SittingConfig::default(),
+            recommend: RecommendConfig::default(),
+            ui: UiConfig::default(),
+            migrate: MigrateConfig::default(),
+        }
     }
 }
 

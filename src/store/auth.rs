@@ -1,4 +1,5 @@
-use super::{Store, now};
+use super::control::Control;
+use super::now;
 use crate::error::Result;
 use sqlx::Row;
 
@@ -31,7 +32,7 @@ pub struct Session {
     pub expires_at: i64,
 }
 
-impl Store {
+impl Control {
     pub async fn insert_token(
         &self,
         id: &str,
@@ -79,11 +80,19 @@ impl Store {
             .collect())
     }
 
-    pub async fn list_tokens(&self) -> Result<Vec<ApiToken>> {
+    /// One subject's tokens, newest first.
+    ///
+    /// The predicate is not a nicety. `api_tokens` used to live in the single
+    /// user's own database, where "every row" and "my rows" were the same set;
+    /// it is one instance-wide table now, and an unfiltered listing is every
+    /// tenant's token ids, names, user-agents and last-used times rendered on
+    /// whoever opened Settings.
+    pub async fn list_tokens(&self, subject: &str) -> Result<Vec<ApiToken>> {
         let rows = sqlx::query(
             "SELECT id, name, subject, created_at, last_used_at, revoked_at, user_agent
-             FROM api_tokens ORDER BY created_at DESC",
+             FROM api_tokens WHERE subject = ? ORDER BY created_at DESC",
         )
+        .bind(subject)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -109,13 +118,25 @@ impl Store {
         Ok(())
     }
 
-    pub async fn revoke_token(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE api_tokens SET revoked_at = ? WHERE id = ?")
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Revoke one of `subject`'s tokens, and say whether there was one.
+    ///
+    /// Scoped for the same reason the listing is, and the consequence is worse:
+    /// an id-only UPDATE lets any signed-in user kill another tenant's
+    /// extension pairing. `false` rather than an error, so the caller decides
+    /// whether an unknown id is a 404 or nothing at all — from the outside the
+    /// two cases must look the same, or the answer enumerates other people's
+    /// token ids.
+    pub async fn revoke_token(&self, id: &str, subject: &str) -> Result<bool> {
+        Ok(
+            sqlx::query("UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND subject = ?")
+                .bind(now())
+                .bind(id)
+                .bind(subject)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                > 0,
+        )
     }
 
     pub async fn insert_session(

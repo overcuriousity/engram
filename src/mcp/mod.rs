@@ -67,9 +67,61 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
         .join("\n\n---\n\n")
 }
 
+/// Where a tool call's `Core` comes from.
+///
+/// The whole point of the enum is that the production variant does *not* hold
+/// one. See `PkdbTools`.
+#[derive(Clone)]
+enum CoreSource {
+    /// One fixed core, held for the life of the tools. The single-base tests,
+    /// and nothing that serves a request. Boxed because it is by far the larger
+    /// of the two and by far the rarer.
+    Fixed(Box<Core>),
+    /// Resolved from the registry on every call, by subject.
+    Tenant(std::sync::Arc<crate::tenants::Tenants>, String),
+}
+
+impl CoreSource {
+    async fn core(&self) -> crate::error::Result<Core> {
+        match self {
+            CoreSource::Fixed(c) => Ok((**c).clone()),
+            CoreSource::Tenant(tenants, subject) => Ok(tenants.get(subject).await?.core),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PkdbTools {
-    pub core: Core,
+    source: CoreSource,
+    /// Whether `ask` is a tool at all.
+    ///
+    /// Carried rather than asked of the core, because `routes` is synchronous —
+    /// the handler macro calls it — and resolving a tenant is not. It costs
+    /// nothing to carry: `Core::asks` is `infer.complete` being configured,
+    /// which is instance-wide and identical for every tenant on it.
+    asks: bool,
+}
+
+impl PkdbTools {
+    /// Tools over one fixed core.
+    pub fn over(core: Core) -> PkdbTools {
+        PkdbTools {
+            asks: core.asks(),
+            source: CoreSource::Fixed(Box::new(core)),
+        }
+    }
+
+    /// Tools that look their tenant up when a call arrives.
+    fn for_subject(
+        tenants: std::sync::Arc<crate::tenants::Tenants>,
+        subject: String,
+        asks: bool,
+    ) -> PkdbTools {
+        PkdbTools {
+            source: CoreSource::Tenant(tenants, subject),
+            asks,
+        }
+    }
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -107,7 +159,7 @@ impl PkdbTools {
     /// "not configured" — it is not a tool.
     pub(crate) fn routes(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let mut r = Self::tool_router();
-        if !self.core.asks() {
+        if !self.asks {
             r.remove_route("ask");
         }
         r
@@ -119,7 +171,11 @@ impl PkdbTools {
                        segmentation and embedding happen in the background."
     )]
     async fn ingest(&self, Parameters(p): Parameters<IngestParams>) -> String {
-        match self.core.ingest(&p.text, "mcp", p.title.as_deref()).await {
+        let core = match self.source.core().await {
+            Ok(c) => c,
+            Err(e) => return format!("Ingest failed: {e}"),
+        };
+        match core.ingest(&p.text, "mcp", p.title.as_deref()).await {
             Ok(o) if o.duplicate => format!("Already stored as `{}`.", o.id),
             // A parked capture is stored and nothing more: no segmentation, no
             // embedding, and nothing searchable until a person decides. Saying
@@ -161,11 +217,11 @@ impl PkdbTools {
             include_superseded: false,
             rerank: true,
         };
-        match self
-            .core
-            .search(&query, crate::store::feedback::Door::Mcp)
-            .await
-        {
+        let core = match self.source.core().await {
+            Ok(c) => c,
+            Err(e) => return format!("Search failed: {e}"),
+        };
+        match core.search(&query, crate::store::feedback::Door::Mcp).await {
             Ok(r) => format_search_results(&r),
             Err(e) => format!("Search failed: {e}"),
         }
@@ -177,8 +233,11 @@ impl PkdbTools {
                        Slower than search; prefer search unless synthesis is needed."
     )]
     async fn ask(&self, Parameters(p): Parameters<AskParams>) -> String {
-        match self
-            .core
+        let core = match self.source.core().await {
+            Ok(c) => c,
+            Err(e) => return format!("Ask failed: {e}"),
+        };
+        match core
             .ask(
                 &crate::core::ask::AskRequest {
                     q: p.q,
@@ -276,21 +335,115 @@ fn service_config(
     StreamableHttpServerConfig::default().with_allowed_hosts(hosts)
 }
 
-pub fn mcp_router(state: AppState) -> Router<AppState> {
+/// One MCP service per tenant, built on first use and kept — up to the same
+/// cap the tenant registry holds cores to.
+///
+/// `StreamableHttpService` is constructed with the tools it will serve, so a
+/// single service is a single user's tools, and the door has to pick the right
+/// one before the request reaches it. Building one per tenant also gives each
+/// user their own `LocalSessionManager`, which is what an MCP session ought to
+/// be: one client talking to one base.
+///
+/// What the tools carry is a subject and the registry, never a `Core`. Holding
+/// the core the door happened to be given would pin it here for as long as the
+/// service stayed in this map — a second lifetime beside the registry's own, so
+/// an instance would hold up to `2 × max_open_tenants` SQLite pools and vector
+/// clients with one cap in charge of each half and neither in charge of the
+/// total. It also kept `Working::is_idle` false forever for anybody who had
+/// ever used `/mcp`, since a pinned core is a live `Arc` on their sittings, so
+/// the registry could never reap their working memory. Resolving per call puts
+/// `store.max_open_tenants` back in sole charge of what is open.
+///
+/// The map still cannot only grow — an entry keyed by subject with nothing that
+/// removes it is a `LocalSessionManager` per person who has ever opened `/mcp`
+/// — so: a recency list beside it, and the same cap.
+///
+/// Evicting a service ends the MCP sessions it was tracking; a client that
+/// comes back initializes a new one, which is the ordinary reconnect path.
+type TenantServices = std::sync::Mutex<(
+    std::collections::HashMap<
+        String,
+        rmcp::transport::streamable_http_server::StreamableHttpService<
+            PkdbTools,
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
+        >,
+    >,
+    Vec<String>,
+)>;
+
+fn service_for(
+    services: &TenantServices,
+    tenants: &std::sync::Arc<crate::tenants::Tenants>,
+    tenant: &crate::tenants::Tenant,
+    public_host: Option<String>,
+    cap: usize,
+) -> rmcp::transport::streamable_http_server::StreamableHttpService<
+    PkdbTools,
+    rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
+> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
+    let subject = tenant.user.subject.clone();
+    // The one thing read off the core the door was handed, and only because
+    // `routes` is synchronous. It is the same answer for every tenant.
+    let asks = tenant.core.asks();
+    let mut g = services.lock().expect("mcp services");
+    let (map, order) = &mut *g;
+    let svc = map
+        .entry(subject.clone())
+        .or_insert_with(|| {
+            let tenants = tenants.clone();
+            let subject = subject.clone();
+            StreamableHttpService::new(
+                move || {
+                    Ok(PkdbTools::for_subject(
+                        tenants.clone(),
+                        subject.clone(),
+                        asks,
+                    ))
+                },
+                std::sync::Arc::new(LocalSessionManager::default()),
+                service_config(public_host),
+            )
+        })
+        .clone();
+    order.retain(|s| *s != subject);
+    order.push(subject);
+    // The caller's own entry was just moved to the back, so it is never the
+    // one dropped here.
+    while map.len() > cap.max(1) {
+        let Some(oldest) = order.first().cloned() else {
+            break;
+        };
+        order.remove(0);
+        map.remove(&oldest);
+    }
+    svc
+}
 
-    let core = state.core.clone();
+pub fn mcp_router(state: AppState) -> Router<AppState> {
     let public_host = state.auth.oidc.as_ref().and_then(|o| o.public_host());
-    let service = StreamableHttpService::new(
-        move || Ok(PkdbTools { core: core.clone() }),
-        std::sync::Arc::new(LocalSessionManager::default()),
-        service_config(public_host),
-    );
+    let cap = state.config.store.max_open_tenants;
+    let tenants = state.tenants.clone();
+    let services: std::sync::Arc<TenantServices> = Default::default();
 
     Router::new()
-        .route_service("/mcp", service)
+        .route(
+            "/mcp",
+            axum::routing::any(
+                move |tenant: crate::tenants::Tenant, req: axum::extract::Request| {
+                    let services = services.clone();
+                    let tenants = tenants.clone();
+                    let public_host = public_host.clone();
+                    async move {
+                        use tower::Service;
+                        let mut svc = service_for(&services, &tenants, &tenant, public_host, cap);
+                        svc.call(req).await
+                    }
+                },
+            ),
+        )
         .layer(axum::middleware::from_fn_with_state(state, mcp_guard))
 }
 
@@ -300,6 +453,50 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// A session manager per entry, so a map that only ever grows holds one for
+    /// every person who has ever opened `/mcp`, whatever
+    /// `store.max_open_tenants` says an instance holds open.
+    #[tokio::test]
+    async fn the_service_map_holds_no_more_tenants_than_the_registry_does() {
+        let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
+        let services: TenantServices = Default::default();
+        service_for(&services, &tenants, &a, None, 1);
+        service_for(&services, &tenants, &b, None, 1);
+
+        let g = services.lock().unwrap();
+        assert_eq!(g.0.len(), 1, "the map grew past the cap");
+        assert!(
+            g.0.contains_key(&b.user.subject),
+            "the tenant that just asked was the one dropped"
+        );
+    }
+
+    /// The tools carry a subject, not a core, so a call goes to whoever the
+    /// service was built for — resolved when the call arrives, through the one
+    /// registry whose cap decides what an instance holds open.
+    #[tokio::test]
+    async fn a_tool_call_reaches_the_subjects_own_base() {
+        let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
+        let tools = PkdbTools::for_subject(tenants.clone(), a.user.subject.clone(), false);
+        let out = tools
+            .source
+            .core()
+            .await
+            .unwrap()
+            .ingest("only a's", "mcp", None)
+            .await
+            .unwrap();
+
+        assert!(
+            a.core.store.get_corpus(&out.id).await.is_ok(),
+            "the call did not land in the subject's own base"
+        );
+        assert!(
+            b.core.store.get_corpus(&out.id).await.is_err(),
+            "the call landed in another tenant's base"
+        );
+    }
 
     fn search_hit(title: Option<&str>, text: &str) -> SearchResult {
         SearchResult {
@@ -371,18 +568,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_requires_a_bearer_token() {
         let core = crate::core::test_support::test_core().await;
-        let state = crate::web::state::AppState {
-            core,
-            auth: std::sync::Arc::new(crate::web::state::AuthContext {
-                mode: crate::config::AuthMode::Local,
-                local: None,
-                oidc: None,
-                pending: crate::auth::oidc::PendingStore::new(),
-                secure_cookies: false,
-            }),
-            config_path: std::sync::Arc::new(crate::web::test_support::scratch_config()),
-            ask_handoff: Default::default(),
-        };
+        let state =
+            crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await;
         let res = crate::web::router(state)
             .oneshot(
                 Request::builder()
@@ -528,7 +715,7 @@ mod tests {
         let call = |config: StreamableHttpServerConfig| async {
             let core = crate::core::test_support::test_core().await;
             let service = StreamableHttpService::new(
-                move || Ok(PkdbTools { core: core.clone() }),
+                move || Ok(PkdbTools::over(core.clone())),
                 std::sync::Arc::new(LocalSessionManager::default()),
                 config,
             );
@@ -563,11 +750,11 @@ mod tests {
     #[tokio::test]
     async fn the_ask_tool_is_offered_only_with_an_ask_model() {
         let core = crate::core::test_support::test_core().await;
-        let tools = PkdbTools { core: core.clone() };
+        let tools = PkdbTools::over(core.clone());
         assert!(tools.routes().has_route("ask"));
         let mut core = core;
         core.completer = None;
-        let tools = PkdbTools { core };
+        let tools = PkdbTools::over(core);
         assert!(!tools.routes().has_route("ask"));
         assert!(tools.routes().has_route("search"));
     }

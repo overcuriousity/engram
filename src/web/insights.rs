@@ -12,13 +12,12 @@
 //! the page is the surgical cut, moving those would drag shared machinery
 //! across a boundary for nothing.
 
+use crate::tenants::Tenant;
 use askama::Template;
 use axum::Router;
-use axum::extract::State;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 
-use crate::auth::Identity;
 use crate::error::Result;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
@@ -44,7 +43,7 @@ struct Retrieval {
 /// The old door. It takes an `Identity` like every other `/ui` route: a
 /// redirect that answers before the session is checked is a route that tells
 /// an anonymous caller which paths exist.
-async fn moved(_id: Identity) -> Response {
+async fn moved(_: Tenant) -> Response {
     Redirect::to("/ui/insights").into_response()
 }
 
@@ -252,20 +251,20 @@ pub(crate) struct MergedRow {
     orphaned: bool,
 }
 
-async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
+async fn page(tenant: Tenant) -> Result<Response> {
     use sqlx::Row;
 
-    let (pairs, more_pairs) = crate::web::ui::pair_rows(&st).await?;
+    let (pairs, more_pairs) = crate::web::ui::pair_rows(&tenant).await?;
     let pairs = crate::web::ui::group_pairs(pairs);
 
     // Read, never computed: the page shows what the sweep grouped and named,
     // and whatever has been judged since sits under itself until the next
     // pass. Nothing here embeds or calls a model.
-    let (gaps, loose) = if st.core.learn.enabled {
-        let (rows, loose) = st
+    let (gaps, loose) = if tenant.core.learn.enabled {
+        let (rows, loose) = tenant
             .core
             .store
-            .gap_rows(st.core.embedder.model(), st.core.weak_below)
+            .gap_rows(tenant.core.embedder.model(), tenant.core.weak_below)
             .await?;
         (
             rows.into_iter()
@@ -285,13 +284,13 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     };
 
     let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
-        .fetch_one(&st.core.store.pool)
+        .fetch_one(&tenant.core.store.pool)
         .await?
         .get("n");
 
     // Not a queue of chores: work that hit something and is waiting to try
     // again on its own. Nothing here needs a person.
-    let retrying: Vec<RetryingRow> = st
+    let retrying: Vec<RetryingRow> = tenant
         .core
         .store
         .retrying_jobs(50)
@@ -309,9 +308,9 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     // A parked capture is the one corpus state no worker advances. It has to be
     // shown here or it sits unprocessed with nothing saying why.
     let mut parked = Vec::new();
-    for c in st.core.store.parked_corpora(50).await? {
+    for c in tenant.core.store.parked_corpora(50).await? {
         let other_id = c.near_dupe_of.clone().unwrap_or_default();
-        let other_title = match st.core.store.get_corpus(&other_id).await {
+        let other_title = match tenant.core.store.get_corpus(&other_id).await {
             Ok(o) => o.title_hint.unwrap_or_else(|| "untitled".into()),
             Err(_) => "(deleted)".into(),
         };
@@ -329,9 +328,14 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     // One past the cap, so the page can say it is capped rather than truncate
     // in silence — a table that stops at 25 with nothing said reads as a table
     // of everything there is.
-    for c in st.core.store.superseded_artifacts(TABLE_CAP + 1).await? {
+    for c in tenant
+        .core
+        .store
+        .superseded_artifacts(TABLE_CAP + 1)
+        .await?
+    {
         let winner_id = c.superseded_by.clone().unwrap_or_default();
-        let winner_title = match st.core.store.get_artifact(&winner_id).await {
+        let winner_title = match tenant.core.store.get_artifact(&winner_id).await {
             Ok(w) => title_of(&w),
             Err(_) => "(deleted)".to_string(),
         };
@@ -345,10 +349,10 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     }
 
     let mut merged = Vec::new();
-    let merged_chunks = st.core.store.merged_artifacts(TABLE_CAP + 1).await?;
+    let merged_chunks = tenant.core.store.merged_artifacts(TABLE_CAP + 1).await?;
     // One lineage call per page, not one per row: `roots_of` takes the batch.
     let merged_ids: Vec<String> = merged_chunks.iter().map(|c| c.id.clone()).collect();
-    let roots = st
+    let roots = tenant
         .core
         .store
         .roots_of(&merged_ids)
@@ -356,7 +360,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         .unwrap_or_default();
     for c in merged_chunks {
         let sources = source_rows(
-            &st.core.store,
+            &tenant.core.store,
             &c.id,
             roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
         )
@@ -374,12 +378,17 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     merged.truncate(TABLE_CAP as usize);
 
     let mut generated = Vec::new();
-    let gen_chunks = st.core.store.synthesized_artifacts(TABLE_CAP).await?;
+    let gen_chunks = tenant.core.store.synthesized_artifacts(TABLE_CAP).await?;
     let gen_ids: Vec<String> = gen_chunks.iter().map(|c| c.id.clone()).collect();
-    let gen_roots = st.core.store.roots_of(&gen_ids).await.unwrap_or_default();
+    let gen_roots = tenant
+        .core
+        .store
+        .roots_of(&gen_ids)
+        .await
+        .unwrap_or_default();
     for c in gen_chunks {
         let sources = source_rows(
-            &st.core.store,
+            &tenant.core.store,
             &c.id,
             gen_roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
         )
@@ -392,9 +401,9 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             sources,
         });
     }
-    let pursuit_enabled = st.core.learn.enabled;
+    let pursuit_enabled = tenant.core.learn.enabled;
     let recent = match pursuit_enabled {
-        true => st.core.store.recent_pursuits(50).await?,
+        true => tenant.core.store.recent_pursuits(50).await?,
         false => Vec::new(),
     };
     let pursuit_recent = recent.len();
@@ -404,10 +413,10 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     // counting the state sent the operator to a gap list that had already
     // dropped half of them.
     let on_the_gap_list = match pursuit_enabled {
-        true => st
+        true => tenant
             .core
             .store
-            .open_pursuit_gap_ids(st.core.embedder.model())
+            .open_pursuit_gap_ids(tenant.core.embedder.model())
             .await
             .unwrap_or_default(),
         false => Default::default(),
@@ -419,7 +428,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     // What the memory did while nobody was looking. The last day as one
     // sentence, and under it the runs themselves — which is the half a single
     // overwritten summary could never give.
-    let day = st
+    let day = tenant
         .core
         .store
         .sweep_runs_since(crate::store::now() - 86_400, 500)
@@ -434,7 +443,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         .into_iter()
         .map(|(what, n)| SweepCount { n, what })
         .collect();
-    let sweep_history: Vec<SweepRunRow> = st
+    let sweep_history: Vec<SweepRunRow> = tenant
         .core
         .store
         .sweep_history(TABLE_CAP)
@@ -470,7 +479,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     // One past the cap, as the two tables above do it: this is the undo for
     // every artifact the judge retires unattended, so a list that stops
     // without saying so reads as "these are all of them".
-    let mut deprecated: Vec<DeprecatedRow> = st
+    let mut deprecated: Vec<DeprecatedRow> = tenant
         .core
         .store
         .artifacts_by_status(
@@ -488,7 +497,7 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
     deprecated.truncate(DEPRECATED_CAP as usize);
 
     // Read-only candidates: nothing here has been changed, only listed.
-    let stale = st
+    let stale = tenant
         .core
         .stale_candidates(50)
         .await
@@ -508,18 +517,18 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         .collect();
 
     Ok(HtmlTemplate(InsightsTemplate {
-        held: st.core.store.held().await?,
-        fading: st
+        held: tenant.core.store.held().await?,
+        fading: tenant
             .core
             .store
-            .fading(st.core.activation.half_life_days, crate::store::now())
+            .fading(tenant.core.activation.half_life_days, crate::store::now())
             .await?,
         // Read only where searches are being recorded at all. The measure is
         // read off judged searches, and on an installation that records none
         // the honest answer is that there is nothing to say — not 0.00.
-        retrieval: match st.core.learn.enabled {
+        retrieval: match tenant.core.learn.enabled {
             true => {
-                let f = st.core.store.feedback_stats().await?;
+                let f = tenant.core.store.feedback_stats().await?;
                 Some(Retrieval {
                     recall_at_10: format!("{:.2}", f.recall_at_10),
                     mrr: format!("{:.2}", f.mrr),
@@ -530,12 +539,12 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
             }
             false => None,
         },
-        ask_enabled: crate::web::state::ask_enabled(&st),
+        ask_enabled: crate::web::state::ask_enabled(&tenant),
         pairs,
         more_pairs,
         gaps,
         loose,
-        judge_pending: crate::web::state::judge_pending(&st).await,
+        judge_pending: crate::web::state::judge_pending(&tenant).await,
         retrying,
         parked,
         superseded,
@@ -547,14 +556,14 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         deprecated_cap: DEPRECATED_CAP,
         deprecated,
         stale,
-        job_counts: st.core.store.job_counts().await?,
-        oldest_pending_secs: st.core.store.oldest_pending_age().await?,
+        job_counts: tenant.core.store.job_counts().await?,
+        oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,
         artifact_count,
         // Qdrant being briefly unreachable must not blank the ops page, which
         // is exactly where you look when something is wrong.
-        vector_count: st.core.vectors.count().await.unwrap_or(0),
-        links: match st.core.associating() {
-            true => Some(st.core.store.link_counts().await?),
+        vector_count: tenant.core.vectors.count().await.unwrap_or(0),
+        links: match tenant.core.associating() {
+            true => Some(tenant.core.store.link_counts().await?),
             false => None,
         },
         generated,
@@ -568,8 +577,8 @@ async fn page(State(st): State<AppState>, _id: Identity) -> Result<Response> {
         // weeks, so a hit rate measured over a day would be a number nobody
         // could act on. Read like `vector_count` — a failure here must not
         // blank the page you open when something is wrong.
-        offer_rates: match st.core.recommends() {
-            true => st
+        offer_rates: match tenant.core.recommends() {
+            true => tenant
                 .core
                 .store
                 .offer_rates(crate::store::now() - 30 * 86_400)

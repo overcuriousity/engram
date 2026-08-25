@@ -17,8 +17,48 @@ bind = "127.0.0.1:8080"
 workers = 1
 
 [store]
-# SQLite file. Created on first run. Back this up.
+# The single-user database. Read by adoption alone (see [migrate] below), and
+# meaningless once anyone is registered. A fresh install never touches it.
 path = "engram.db"
+
+# The control database: who the users are, their sessions and API tokens, and
+# the one instance-wide job queue. Everything about people and scheduling
+# rather than about knowledge. Created on first run.
+# control_path = "engram-control.db"
+
+# Where the per-user databases live, one {slug}.db each. The slug is a hash of
+# the OIDC subject, derived once at provisioning and stored, so it survives any
+# later change to how it is derived.
+#
+# A backup is this directory *and* control_path, taken together. Restoring one
+# side from a different moment shows up as store drift, which heal_store_drift
+# repairs per tenant on that tenant's next open.
+# dir = "data/users"
+
+# How many users' bases may be open at once. An open tenant costs a SQLite pool
+# and a background queue; the rest are opened on demand, and eviction is
+# transparent — the next request or claim reopens the same file, and the
+# evicted user's live sitting is handed back to it, so what search and ask
+# carry does not depend on how many other people are reading right now.
+# max_open_tenants = 32
+
+# ── Adoption ─────────────────────────────────────────────────────────────────
+# Hand an existing single-user installation to its first real user, once.
+#
+# Set this to the OIDC subject of whoever has been using the base, start
+# engram, and it moves store.path to store.dir/{slug}.db, writes the user row
+# with the judge granted, and renames the existing Qdrant alias onto
+# {vector.collection}_{slug}. The alias moves rather than the collections
+# behind it, so nothing re-embeds and the generation history is preserved.
+#
+# It is guarded on the users table being empty, so it fires exactly once and
+# cannot go off on a running instance however this file is edited afterwards.
+# If the alias rename fails the file move is rolled back: a half-adopted
+# install that boots reads as a base whose searches have gone empty, which is
+# worse than one that refuses. Leave the key set or remove it; both are no-ops
+# on the second boot.
+# [migrate]
+# adopt_subject = "sub-abc123"
 
 [vector]
 # Qdrant base URL. Its REST API, not the gRPC port: 6333 locally, or whatever
@@ -616,6 +656,17 @@ month_cycle = 0.0
 # At most twenty units are promoted per repair pass, so a backlog that built up
 # behind a slow endpoint cannot put itself in front of a capture all at once.
 age_after_mins = 60
+
+# The ceiling on how long a sweep that keeps finding nothing waits before
+# looking again. Each consecutive empty run doubles the wait up to this.
+#
+# A base with nothing to do wakes, queries, finds nothing and sleeps — once per
+# interval per sweep, for ever, and once per user besides. That costs no model
+# calls (a sweep with nothing to do makes none), so the answer is proportionate:
+# a wake-up, a file open and a handful of queries, spread out. Any new data
+# cancels the wait outright, because every producer already pulls a sleeping
+# unit forward, so a quiet base runs its sweeps late and never not at all.
+# backoff_max_hours = 24
 
 # ── The sitting ──────────────────────────────────────────────────────────────
 # What this session has touched, carried between search, ask and capture. In

@@ -8,6 +8,7 @@
 use super::{Store, now};
 use crate::error::Result;
 use sqlx::Row;
+use std::collections::{HashMap, HashSet};
 
 /// How many unreadable replies a pair is worth before the judge stops being
 /// offered it.
@@ -161,6 +162,34 @@ pub struct ArtifactPair {
     /// applied merge. What the stranded-merge reap uses to reopen exactly the
     /// pairs a merge that never embedded had closed.
     pub merged_into: Option<String>,
+}
+
+/// What one supersession did to the questions still open about its loser.
+///
+/// Two counts and not one, because `follow_supersession` has two outcomes and
+/// both of them are work: a pair moves onto the winner, or it settles `Stale`
+/// because there is nowhere to move it to. Returning only `moved` is what left
+/// `jobs::consolidate`'s repair pass reporting `{"repaired":0,"staled":0}` after
+/// a tick that had drained a backlog of the second kind — and `jobs::did_work`
+/// reads that report and nothing else, so the sweep doubled its backoff while
+/// there was still work in front of it. The same mistake `Outcome.reaped`
+/// records for the passes beside it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Followed {
+    /// Pairs repointed at the winner.
+    pub moved: u64,
+    /// Pairs taken off the queue because the question the supersession left
+    /// cannot be moved anywhere — see the four cases above.
+    pub staled: u64,
+}
+
+impl Followed {
+    /// Rows this supersession settled one way or the other. What a caller
+    /// asking "did anything happen" wants, and what a caller logging what it
+    /// moved does not.
+    pub fn settled(&self) -> u64 {
+        self.moved + self.staled
+    }
 }
 
 pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
@@ -723,9 +752,9 @@ impl Store {
     ///
     /// `score` is left alone and is now stale, exactly as in
     /// `repoint_open_pairs`: it orders the judge queue and gates nothing here.
-    pub async fn follow_supersession(&self, loser: &str, winner: &str) -> Result<u64> {
+    pub async fn follow_supersession(&self, loser: &str, winner: &str) -> Result<Followed> {
         if loser == winner {
-            return Ok(0);
+            return Ok(Followed::default());
         }
         let rows = sqlx::query(
             "SELECT * FROM artifact_pairs
@@ -737,7 +766,7 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut moved = 0u64;
+        let mut out = Followed::default();
         for p in rows.iter().map(row_to_pair) {
             let other = if p.a_id == loser {
                 p.b_id.clone()
@@ -751,6 +780,7 @@ impl Store {
                     Some("the supersession of these two answered this"),
                 )
                 .await?;
+                out.staled += 1;
                 continue;
             }
             if p.obsolete_id.as_deref() == Some(loser) {
@@ -760,6 +790,7 @@ impl Store {
                     Some("the artifact this proposed hiding is already hidden"),
                 )
                 .await?;
+                out.staled += 1;
                 continue;
             }
             if p.state == PairState::Vacuous {
@@ -772,6 +803,7 @@ impl Store {
                     ),
                 )
                 .await?;
+                out.staled += 1;
                 continue;
             }
             if let Some(existing) = self.pair_between(&other, winner).await? {
@@ -792,6 +824,7 @@ impl Store {
                     Some("a pair between these two already exists"),
                 )
                 .await?;
+                out.staled += 1;
                 continue;
             }
             let (a, b) = if other.as_str() <= winner {
@@ -831,9 +864,9 @@ impl Store {
                 .execute(&self.pool)
                 .await?;
             }
-            moved += 1;
+            out.moved += 1;
         }
-        Ok(moved)
+        Ok(out)
     }
 
     /// Settle `Stale` every open pair naming an artifact that is no longer in
@@ -855,24 +888,86 @@ impl Store {
     /// Run after the sweep's repair pass, never before it: moving a question
     /// onto the artifact that answers it beats taking it off the queue.
     ///
+    /// And bounded to what that pass has finished with, which is the whole
+    /// reason this is three queries rather than one UPDATE. `follow_supersessions`
+    /// takes 200 supersessions a sweep so a backlog drains over a few ticks; an
+    /// unbounded settle running straight afterwards reached the other 200-and-up
+    /// first and marked them `Stale`. That is a one-way door:
+    /// `supersessions_with_open_pairs` selects only
+    /// `('pending','contradiction','superseded','vacuous')`, so a stale row is
+    /// invisible to the repair for ever, and `reopen_stale_pairs` needs both
+    /// sides back in results, which a superseded loser never is. The verdict
+    /// was never carried onto the winner and no later tick could carry it —
+    /// biting hardest on exactly the upgrade and adoption cases the repair pass
+    /// exists for. So a pair whose out-of-results side has a supersession chain
+    /// ending somewhere still in results is left alone: it is a question the
+    /// repair still owes a move, and it will get one within a few ticks.
+    ///
     /// `Stale` rather than `Dismissed` so that restoring the artifact brings
     /// the question back (`reopen_stale_pairs`). Both ways out of results are
     /// reversible; settling these as somebody's decision would make the queue
     /// the one place where they are not.
     pub async fn stale_unreachable_pairs(&self) -> Result<u64> {
-        let res = sqlx::query(
-            "UPDATE artifact_pairs
-                SET state = 'stale', obsolete_id = NULL, merged_into = NULL,
-                    detail = 'one of these artifacts is no longer in results'
-              WHERE state IN ('pending', 'contradiction', 'superseded', 'vacuous')
-                AND EXISTS (
-                      SELECT 1 FROM artifacts x
-                       WHERE x.id IN (artifact_pairs.a_id, artifact_pairs.b_id)
-                         AND (x.status <> 'active' OR x.superseded_by IS NOT NULL))",
+        let rows = sqlx::query(
+            "SELECT p.id AS pair_id, x.id AS side, x.superseded_by AS winner
+               FROM artifact_pairs p
+               JOIN artifacts x ON x.id IN (p.a_id, p.b_id)
+              WHERE p.state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+                AND (x.status <> 'active' OR x.superseded_by IS NOT NULL)",
         )
-        .execute(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
-        Ok(res.rows_affected())
+
+        // One walk per superseded artifact, not per pair that names it: a
+        // cluster's loser is usually on several open pairs at once.
+        let mut chain_end: HashMap<String, Option<String>> = HashMap::new();
+        let mut owed: HashSet<i64> = HashSet::new();
+        let mut candidates: HashSet<i64> = HashSet::new();
+        for r in &rows {
+            let pair_id: i64 = r.get("pair_id");
+            candidates.insert(pair_id);
+            let side: String = r.get("side");
+            let Some(winner): Option<String> = r.get("winner") else {
+                continue;
+            };
+            let end = match chain_end.get(&winner) {
+                Some(e) => e.clone(),
+                None => {
+                    let e = self.end_of_supersession_chain(&winner).await?;
+                    chain_end.insert(winner.clone(), e.clone());
+                    e
+                }
+            };
+            if end.is_some_and(|w| w != side) {
+                owed.insert(pair_id);
+            }
+        }
+        let to_settle: Vec<i64> = candidates
+            .into_iter()
+            .filter(|id| !owed.contains(id))
+            .collect();
+        if to_settle.is_empty() {
+            return Ok(0);
+        }
+
+        let mut settled = 0u64;
+        // Chunked well under SQLITE_MAX_VARIABLE_NUMBER, which is 999 on the
+        // builds that predate 3.32 and is not worth finding out about at
+        // runtime on a repair pass.
+        for chunk in to_settle.chunks(500) {
+            let holes = vec!["?"; chunk.len()].join(", ");
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE artifact_pairs
+                    SET state = 'stale', obsolete_id = NULL, merged_into = NULL,
+                        detail = 'one of these artifacts is no longer in results'
+                  WHERE id IN ({holes})"
+            )));
+            for id in chunk {
+                q = q.bind(id);
+            }
+            settled += q.execute(&self.pool).await?.rows_affected();
+        }
+        Ok(settled)
     }
 
     /// Put back the questions an artifact's departure from results had taken
@@ -2013,7 +2108,7 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
 
-        assert_eq!(s.follow_supersession(loser, winner).await.unwrap(), 1);
+        assert_eq!(s.follow_supersession(loser, winner).await.unwrap().moved, 1);
 
         let open = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
         assert_eq!(open.len(), 1);
@@ -2032,7 +2127,13 @@ mod tests {
         let (loser, winner) = two_artifacts(&s).await;
         s.record_pair(&loser, &winner, 0.91).await.unwrap();
 
-        s.follow_supersession(&loser, &winner).await.unwrap();
+        let f = s.follow_supersession(&loser, &winner).await.unwrap();
+        // Counted as what it is. Reported as `moved` alone, a tick that settled
+        // nothing but rows like this one told `jobs::did_work` it had found
+        // nothing at all, and the sweep doubled its wait with a backlog of them
+        // still in front of it.
+        assert_eq!((f.moved, f.staled), (0, 1));
+        assert_eq!(f.settled(), 1);
 
         assert!(
             s.pairs_by_state(PairState::Pending, 10)
@@ -2235,6 +2336,59 @@ mod tests {
         assert_eq!(s.stale_unreachable_pairs().await.unwrap(), 1);
     }
 
+    /// The stale pass ran unbounded straight after a repair pass that takes 200
+    /// supersessions a sweep, so it reached everything the repair had not got to
+    /// yet and settled it `Stale` first. That is a one-way door:
+    /// `supersessions_with_open_pairs` does not select stale rows, and
+    /// `reopen_stale_pairs` needs both sides back in results, which a superseded
+    /// loser never is. The verdict was never carried onto the winner and no
+    /// later tick could carry it.
+    #[tokio::test]
+    async fn a_question_the_repair_still_owes_a_move_is_not_settled_first() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(loser, other, 0.91).await.unwrap();
+        let id = s.pair_between(loser, other).await.unwrap().unwrap().id;
+        s.set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
+            .await
+            .unwrap();
+        s.set_superseded_by(loser, Some(winner)).await.unwrap();
+
+        assert_eq!(
+            s.stale_unreachable_pairs().await.unwrap(),
+            0,
+            "a verdict the repair pass was going to move was settled out from under it"
+        );
+        assert_eq!(
+            s.get_pair(id).await.unwrap().state,
+            PairState::Contradiction
+        );
+
+        // And the repair, on this tick or a later one, still moves it.
+        assert_eq!(s.follow_supersession(loser, winner).await.unwrap().moved, 1);
+        let moved = s.get_pair(id).await.unwrap();
+        assert_eq!(moved.state, PairState::Contradiction);
+        assert!(
+            [&moved.a_id, &moved.b_id].contains(&winner),
+            "the verdict did not land on the winner"
+        );
+    }
+
+    /// The bound is on what the repair can still reach, and nothing else: a
+    /// deprecated side has no supersession to follow, so it settles the tick it
+    /// is found on, exactly as before.
+    #[tokio::test]
+    async fn a_deprecated_side_still_comes_off_the_queue_at_once() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        s.set_artifact_status(&b, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert_eq!(s.stale_unreachable_pairs().await.unwrap(), 1);
+    }
+
     /// The queue does not show a pair whose member has left results, which also
     /// takes away the Dismiss button that would have settled it. A verdict has
     /// no other drain — `arm_dedupe` only ever settles pending rows — so those
@@ -2363,7 +2517,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(s.follow_supersession(loser, winner).await.unwrap(), 0);
+        assert_eq!(
+            s.follow_supersession(loser, winner)
+                .await
+                .unwrap()
+                .settled(),
+            0
+        );
 
         let kept = s.get_pair(id).await.unwrap();
         assert_eq!(kept.state, PairState::NoConflict);

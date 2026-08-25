@@ -272,7 +272,7 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
               WHERE state = 'pending'",
         )
         .bind(crate::store::now() + 86_400)
-        .execute(&core.store.pool)
+        .execute(&core.store.control.pool)
         .await
         .unwrap();
 
@@ -296,7 +296,7 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
     for _ in 0..20 {
         sqlx::query("UPDATE jobs SET run_after = ? WHERE stage = 'embed' AND state = 'pending'")
             .bind(crate::store::now() + 86_400)
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
         if !crate::jobs::run_one(core).await.unwrap_or(false) {
@@ -305,7 +305,7 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
     }
 
     sqlx::query("UPDATE jobs SET run_after = 0 WHERE stage = 'embed'")
-        .execute(&core.store.pool)
+        .execute(&core.store.control.pool)
         .await
         .unwrap();
 }
@@ -332,7 +332,7 @@ mod tests {
             .unwrap();
         plan(&core, &out.id).await.unwrap();
         sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
 
@@ -340,7 +340,7 @@ mod tests {
 
         let attempts: Vec<i64> =
             sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
-                .fetch_all(&core.store.pool)
+                .fetch_all(&core.store.control.pool)
                 .await
                 .unwrap();
         assert!(
@@ -367,7 +367,7 @@ mod tests {
         )
         .bind(stage.as_str())
         .bind(target)
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap()
     }
@@ -399,7 +399,7 @@ mod tests {
 
         sqlx::query("UPDATE jobs SET state = 'running', claimed_at = ? WHERE stage = 'embed'")
             .bind(crate::store::now())
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
 
@@ -422,7 +422,7 @@ mod tests {
         let later = crate::store::now() + 3600;
         sqlx::query("UPDATE jobs SET state = 'pending', attempts = 4, run_after = ?, seq = 7 WHERE stage = 'embed'")
             .bind(later)
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
 
@@ -444,7 +444,7 @@ mod tests {
         let id = segmented(&core).await;
 
         sqlx::query("UPDATE jobs SET state = 'done' WHERE stage = 'embed'")
-            .execute(&core.store.pool)
+            .execute(&core.store.control.pool)
             .await
             .unwrap();
 
@@ -744,7 +744,7 @@ mod tests {
         ));
         for _ in 0..crate::store::jobs::MAX_ATTEMPTS + 3 {
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             let _ = crate::jobs::run_one(&core).await;
@@ -753,7 +753,7 @@ mod tests {
         let still_queued: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM jobs WHERE stage = 'title' AND state = 'pending'",
         )
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(still_queued, 0, "a cosmetic failure is retried forever");
@@ -828,7 +828,7 @@ mod tests {
         let armed: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM jobs WHERE stage = 'title' AND state = 'pending'",
         )
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(armed, 0, "a name already given up on was asked for again");
@@ -855,7 +855,7 @@ mod tests {
         let armed: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state = 'pending'",
         )
-        .fetch_one(&core.store.pool)
+        .fetch_one(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(armed as usize, windows);
@@ -887,7 +887,7 @@ mod tests {
         plan(&core, &b.id).await.unwrap();
         for _ in 0..400 {
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             if !crate::jobs::run_one(&core).await.unwrap_or(false) {
@@ -938,7 +938,7 @@ mod tests {
         let embed_armed: i64 =
             sqlx::query_scalar("SELECT count(*) FROM jobs WHERE stage = 'embed' AND target_id = ?")
                 .bind(&out.id)
-                .fetch_one(&core.store.pool)
+                .fetch_one(&core.store.control.pool)
                 .await
                 .unwrap();
         assert_eq!(
@@ -1006,7 +1006,7 @@ mod tests {
             "SELECT target_kind, target_id FROM jobs
               WHERE stage = 'embed' AND state = 'pending'",
         )
-        .fetch_all(&core.store.pool)
+        .fetch_all(&core.store.control.pool)
         .await
         .unwrap();
         assert_eq!(embed_jobs.len(), 1, "expected one batched embed job");

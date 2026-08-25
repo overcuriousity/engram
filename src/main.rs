@@ -36,6 +36,27 @@ struct Args {
     /// coverage is measured, since the figure is otherwise written once.
     #[arg(long)]
     recompute_coverage: bool,
+    /// Which tenant a data command acts on. Required by --reindex,
+    /// --export-eval and --recompute-coverage: there is no longer one base for
+    /// them to mean.
+    #[arg(long, value_name = "SUBJECT")]
+    user: Option<String>,
+    /// List the users this instance knows, with their slug and judge grant.
+    #[arg(long)]
+    list_users: bool,
+    /// Let SUBJECT reach /ui/judge, which is also the only route that writes
+    /// config.toml.
+    #[arg(long, value_name = "SUBJECT")]
+    grant_judge: Option<String>,
+    /// Take that grant back.
+    #[arg(long, value_name = "SUBJECT")]
+    revoke_judge: Option<String>,
+    /// Remove SUBJECT: the row, the database file, and the Qdrant alias. The
+    /// queue rows go with the row, through ON DELETE CASCADE; the sessions and
+    /// API tokens go with it too, or a token nobody revoked would provision the
+    /// account straight back.
+    #[arg(long, value_name = "SUBJECT")]
+    delete_user: Option<String>,
 }
 
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
@@ -62,36 +83,15 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
 /// Fail fast on anything that would otherwise surface much later as bad search
 /// results. Inference probes are warnings only: ingest is designed to work
 /// while the endpoints are down.
-async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
-    core.vectors.ensure_collection(cfg.infer.embed.dim).await?;
-
-    let reclaimed = core
-        .store
-        .reclaim_stuck(engram::jobs::STUCK_AFTER_SECS)
-        .await?;
-    if reclaimed > 0 {
-        tracing::info!(
-            reclaimed,
-            "requeued jobs left running by a previous process"
-        );
-    }
-    let purged = core.store.purge_expired_sessions().await?;
-    if purged > 0 {
-        tracing::info!(purged, "removed expired sessions");
-    }
-
-    // The two stores hold complementary halves of the same artifact and are
-    // written separately, so either can end up with an entry the other lacks: a
-    // crash between the two writes, a restore of one from a backup taken at a
-    // different moment. Until something notices, one side's artifacts are simply
-    // missing.
-    let worker = core.clone();
-    core.background.spawn(async move {
-        if let Err(e) = worker.heal_store_drift().await {
-            tracing::warn!(error = %e, "could not reconcile the two stores; the next sweep retries");
-        }
-    });
-
+///
+/// No tenant is opened here, so startup time does not scale with how many
+/// people have signed up. What used to be in this function and is not any more
+/// is everything that was about a *collection* rather than an endpoint —
+/// `ensure_collection` and the embedding-recipe check moved into provisioning
+/// and a tenant's first open, because there is no longer one collection to
+/// mean. Reclaiming stuck work and expiring sessions moved to the repair tick,
+/// which now owns the control database's own housekeeping.
+async fn startup_checks(cfg: &Config) -> Result<()> {
     if let Some(s) = &cfg.infer.synthesize {
         engram::infer::openai::probe("chunk", &s.base_url, s.api_key.as_deref()).await;
     } else {
@@ -105,7 +105,6 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
         cfg.infer.embed.api_key.as_deref(),
     )
     .await;
-    embed_recipe_check(core, cfg).await?;
     if let Some(r) = &cfg.infer.rerank {
         engram::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
         if !r.applies_to(engram::config::RerankApply::Search) {
@@ -123,33 +122,287 @@ async fn startup_checks(core: &Core, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Say it out loud when the embedding recipe changed under a base that already
-/// has vectors in it.
+/// Take over a single-user installation, once.
 ///
-/// `model`, `dim` and the three templates together decide what a stored vector
-/// means (`EmbedRole::fingerprint`). Change any of them and the vectors already
-/// in the collection describe the old recipe while every new query is rendered
-/// through the new one — a base that answers worse for no visible reason, with
-/// nothing in any log tying it to the config edit that caused it.
+/// Guarded on the `users` table being empty, so this cannot fire on a running
+/// multi-user instance however the config is edited afterwards. The alias is
+/// renamed rather than the collections behind it: nothing re-embeds, and the
+/// generation history the reindex path depends on is preserved.
 ///
-/// A warning and not a refusal: the operator may be mid-migration, and a base
-/// that will not boot is worse than one that says what is wrong with it. The
-/// fingerprint is stored either way, so the warning is printed once rather than
-/// every restart.
-async fn embed_recipe_check(core: &Core, cfg: &Config) -> Result<()> {
-    const KEY: &str = "embed.recipe";
-    let now = cfg.infer.embed.fingerprint();
-    match core.store.meta_get(KEY).await? {
-        Some(before) if before != now => tracing::warn!(
-            model = %cfg.infer.embed.model,
-            "the embedding recipe changed — model, dim or a template. Vectors stored under the \
-             old one do not compare with queries rendered through the new one: drop the \
-             collection and re-capture, or put the old recipe back"
-        ),
-        _ => {}
+/// Everything after the user row is rolled back if a later step fails, and the
+/// row with it. A half-adopted install that boots is worse than one that
+/// refuses, because it presents as a base whose searches have gone empty
+/// rather than as an error anybody can read — and worse than that, a user row
+/// left behind is one that makes `users` non-empty, which is the guard above.
+/// The next boot would then skip adoption in silence and start an empty base
+/// beside the operator's real one, for ever. So the order below puts every
+/// step that can fail for an ordinary reason — a directory that cannot be
+/// made, a database that cannot be read — either before the row is written or
+/// behind a rollback that removes it.
+///
+/// The rename is passed in rather than performed here so that this can be
+/// tested without a Qdrant: the steps that decide whether adoption is safe are
+/// the guard, the row, the file and what came out of it, and none of them needs
+/// a vector store to be up in order to be wrong.
+async fn adopt<F, Fut>(
+    cfg: &Config,
+    control: &engram::store::control::Control,
+    rename_alias: F,
+) -> Result<Option<engram::store::control::User>>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let Some(subject) = cfg.migrate.adopt_subject.as_deref() else {
+        return Ok(None);
+    };
+    if !control.users().await?.is_empty() {
+        return Ok(None);
     }
-    core.store.meta_set(KEY, &now).await?;
-    Ok(())
+    let old = std::path::Path::new(&cfg.store.path);
+    if !old.exists() {
+        return Ok(None);
+    }
+
+    // Before the row, not after it: this fails on a read-only mount or a
+    // permission, and a failure between the row and here left the row.
+    std::fs::create_dir_all(&cfg.store.dir)
+        .map_err(|e| Error::Store(format!("could not make {}: {e}", cfg.store.dir)))?;
+
+    control.provision(subject, None).await?;
+    // The operator adopting an installation is the person who has been using
+    // it, and judging is the one thing they could do before and would silently
+    // stop being able to do after.
+    if let Err(e) = control.set_can_judge(subject, true).await {
+        let _ = control.delete_user(subject).await;
+        return Err(e);
+    }
+    let user = match control.user(subject).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            let _ = control.delete_user(subject).await;
+            return Err(Error::Store(
+                "the user just provisioned is not there".into(),
+            ));
+        }
+        Err(e) => {
+            let _ = control.delete_user(subject).await;
+            return Err(e);
+        }
+    };
+
+    // Before the file moves, so a failure here has nothing to put back. What
+    // the old database holds about the person using it does not travel with
+    // the rename: those three tables live in the control plane now.
+    let carried = match control
+        .carry_over_single_user(&cfg.store.path, subject)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            control.discard_carried_over(subject).await;
+            let _ = control.delete_user(subject).await;
+            return Err(Error::Store(format!(
+                "could not carry {} into the control database: {e}",
+                cfg.store.path
+            )));
+        }
+    };
+
+    let new = std::path::Path::new(&cfg.store.dir).join(format!("{}.db", user.slug));
+    if let Err(e) = std::fs::rename(old, &new) {
+        control.discard_carried_over(subject).await;
+        let _ = control.delete_user(subject).await;
+        return Err(Error::Store(format!(
+            "could not move {} to {}: {e}",
+            old.display(),
+            new.display()
+        )));
+    }
+    // WAL and shared-memory sidecars travel with the file they belong to. A
+    // -wal left behind is a committed write that never reaches the base it was
+    // written for, which reads afterwards as data that was there yesterday.
+    for ext in ["-wal", "-shm"] {
+        let from = std::path::PathBuf::from(format!("{}{ext}", old.display()));
+        if from.exists() {
+            let _ = std::fs::rename(&from, format!("{}{ext}", new.display()));
+        }
+    }
+
+    let alias = format!("{}_{}", cfg.vector.collection, user.slug);
+    if let Err(e) = rename_alias(alias).await {
+        // Put the file back before failing, or the next boot finds no base to
+        // adopt and quietly starts an empty one.
+        let _ = std::fs::rename(&new, old);
+        for ext in ["-wal", "-shm"] {
+            let _ = std::fs::rename(
+                format!("{}{ext}", new.display()),
+                format!("{}{ext}", old.display()),
+            );
+        }
+        control.discard_carried_over(subject).await;
+        let _ = control.delete_user(subject).await;
+        return Err(e);
+    }
+    tracing::info!(subject, slug = %user.slug, "adopted the single-user base");
+    if !carried.is_empty() {
+        tracing::info!(
+            api_tokens = carried.tokens,
+            sessions = carried.sessions,
+            jobs = carried.jobs,
+            "carried the single-user auth and queue rows into the control database"
+        );
+    }
+    Ok(Some(user))
+}
+
+/// Resolve `--user`, or refuse with the list rather than picking one.
+///
+/// A default here is how the wrong collection gets reindexed: the operator
+/// meant one tenant and the flag silently meant another. Refusing costs one
+/// re-run; guessing costs a rebuild of somebody else's base.
+async fn require_user(
+    control: &engram::store::control::Control,
+    subject: Option<&str>,
+) -> Result<engram::store::control::User> {
+    let known = control.users().await?;
+    match subject.and_then(|s| known.iter().find(|u| u.subject == s)) {
+        Some(u) => Ok(u.clone()),
+        None => Err(Error::Validation(format!(
+            "--user is required, and must name one of: {}",
+            if known.is_empty() {
+                "nobody yet — no user has signed in".to_string()
+            } else {
+                known
+                    .iter()
+                    .map(|u| u.subject.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ))),
+    }
+}
+
+/// Open one tenant's store, for the commands that only read SQLite.
+///
+/// Deliberately not through `Tenants`: these need neither a vector store nor an
+/// inference endpoint to be up, and going through the registry would make them
+/// wait on both.
+async fn tenant_store(
+    cfg: &Config,
+    control: &engram::store::control::Control,
+    user: &engram::store::control::User,
+) -> Result<engram::store::Store> {
+    let store_cfg = engram::config::StoreConfig {
+        path: std::path::Path::new(&cfg.store.dir)
+            .join(format!("{}.db", user.slug))
+            .to_string_lossy()
+            .to_string(),
+        ..cfg.store.clone()
+    };
+    engram::store::Store::connect(&store_cfg, control.clone(), &user.subject).await
+}
+
+/// The account subcommands. Returns whether one of them ran, since each is an
+/// exit rather than a step on the way to serving.
+///
+/// There is no admin role behind these: they are the operator at a shell, which
+/// is the only place account changes belong on an instance whose accounts are
+/// owned by an identity provider.
+async fn run_account_command(
+    args: &Args,
+    cfg: &Config,
+    control: &engram::store::control::Control,
+) -> Result<bool> {
+    if args.list_users {
+        let users = control.users().await?;
+        if users.is_empty() {
+            println!("no users yet — the first OIDC login provisions one");
+        }
+        for u in users {
+            println!(
+                "{}  {}  {}{}",
+                u.subject,
+                u.slug,
+                u.email.as_deref().unwrap_or("-"),
+                if u.can_judge { "  judge" } else { "" }
+            );
+        }
+        return Ok(true);
+    }
+    if let Some(subject) = &args.grant_judge {
+        if !control.set_can_judge(subject, true).await? {
+            return Err(Error::Validation(format!("no such user: {subject}")));
+        }
+        // No restart, and no wait for a cache to turn over: the judge gate
+        // reads this column on every request rather than the copy of the row
+        // the registry is holding. See `web::tenant::CanJudge`.
+        println!("{subject} may now judge, and write config.toml through /ui/judge");
+        return Ok(true);
+    }
+    if let Some(subject) = &args.revoke_judge {
+        if !control.set_can_judge(subject, false).await? {
+            return Err(Error::Validation(format!("no such user: {subject}")));
+        }
+        // Takes effect on their next request, for the reason above: the gate
+        // reads the column and not the registry's copy of it.
+        println!("{subject} may no longer judge");
+        return Ok(true);
+    }
+    if let Some(subject) = &args.delete_user {
+        let user = require_user(control, Some(subject.as_str())).await?;
+        let db = std::path::Path::new(&cfg.store.dir).join(format!("{}.db", user.slug));
+        let alias = format!("{}_{}", cfg.vector.collection, user.slug);
+        println!("this removes, permanently:");
+        println!("  the user row for {subject}, and every queued job with it");
+        println!("  every session and API token that subject holds");
+        println!("  {}", db.display());
+        println!("  the Qdrant alias {alias}, and every generation behind it");
+        print!("type yes to go ahead: ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|e| Error::Validation(format!("could not read an answer: {e}")))?;
+        if answer.trim() != "yes" {
+            println!("left alone");
+            return Ok(true);
+        }
+        // The vectors first: it is the one step that can fail for a reason
+        // outside this machine, and a row deleted before it would leave a
+        // collection nothing names and nobody will ever look for. The alias
+        // and its generations go together — an alias per tenant is the whole
+        // point, so nothing else is pointing at them.
+        match engram::vector::qdrant::QdrantVectors::connect(&engram::config::VectorConfig {
+            collection: alias.clone(),
+            ..cfg.vector.clone()
+        })
+        .await
+        {
+            Ok(v) => v.drop_collection().await?,
+            // Not a warning. The alias name is a pure function of the subject,
+            // so a collection left behind is not merely orphaned: the next time
+            // that person signs in, `ensure_collection` finds the surviving
+            // alias and adopts it, and the deleted account comes back with
+            // every vector it had behind a fresh, empty database. Leaving the
+            // user row in place is the recoverable outcome — the operator fixes
+            // Qdrant and runs the command again.
+            Err(e) => {
+                return Err(Error::Validation(format!(
+                    "could not reach Qdrant to drop {alias}: {e}. \
+                     Nothing was deleted; try again once Qdrant is reachable."
+                )));
+            }
+        }
+        control.delete_user(subject).await?;
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", db.display()));
+        }
+        println!("{subject} is gone");
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[tokio::main]
@@ -174,10 +427,25 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Every command below reaches the control database, and none of them can
+    // say which base they mean without it.
+    let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
+
+    if run_account_command(&args, &cfg, &control).await? {
+        return Ok(());
+    }
+
     if args.reindex {
-        let vectors = engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?;
+        let user = require_user(&control, args.user.as_deref()).await?;
+        let alias = format!("{}_{}", cfg.vector.collection, user.slug);
+        let vectors =
+            engram::vector::qdrant::QdrantVectors::connect(&engram::config::VectorConfig {
+                collection: alias.clone(),
+                ..cfg.vector.clone()
+            })
+            .await?;
         let target = vectors.reindex(cfg.infer.embed.dim).await?;
-        println!("{} now serves `{}`", cfg.vector.collection, target);
+        println!("{alias} now serves `{target}`");
         return Ok(());
     }
 
@@ -185,7 +453,8 @@ async fn main() -> anyhow::Result<()> {
         // SQLite only. The artifacts are already synthesised and the pairs are
         // already judged, so this costs nothing and needs neither Qdrant nor an
         // inference endpoint to be up.
-        let store = engram::store::Store::connect(&cfg.store).await?;
+        let user = require_user(&control, args.user.as_deref()).await?;
+        let store = tenant_store(&cfg, &control, &user).await?;
         let (artifacts, pairs, questions) = engram::eval::export::export(&store, dir).await?;
         println!(
             "wrote {artifacts} artifacts, {pairs} pairs and {questions} questions to {}",
@@ -203,7 +472,8 @@ async fn main() -> anyhow::Result<()> {
     if args.recompute_coverage {
         // No vector store and no inference: this only reads artifacts and
         // writes one number per corpus, so it must not need either to be up.
-        let store = engram::store::Store::connect(&cfg.store).await?;
+        let user = require_user(&control, args.user.as_deref()).await?;
+        let store = tenant_store(&cfg, &control, &user).await?;
         let core = Core::from_config(
             &cfg,
             Arc::new(engram::vector::memory::MemoryVectors::new()),
@@ -232,11 +502,29 @@ async fn main() -> anyhow::Result<()> {
 
     validate_auth(&cfg, args.i_know_this_is_insecure)?;
 
-    let store = engram::store::Store::connect(&cfg.store).await?;
-    let vectors: Arc<dyn engram::vector::VectorStore> =
-        Arc::new(engram::vector::qdrant::QdrantVectors::connect(&cfg.vector).await?);
-    let core = Core::from_config(&cfg, vectors, store);
-    startup_checks(&core, &cfg).await?;
+    // One-time, and guarded on `users` being empty. The alias is renamed onto
+    // the adopting user's name rather than the collections behind it moving,
+    // so nothing re-embeds.
+    let vector_cfg = cfg.vector.clone();
+    adopt(&cfg, &control, |alias| async move {
+        engram::vector::qdrant::QdrantVectors::connect(&vector_cfg)
+            .await?
+            .rename_alias(&alias)
+            .await
+    })
+    .await?;
+
+    let cfg_arc = Arc::new(cfg.clone());
+    let tenants = Arc::new(engram::tenants::Tenants::new(
+        cfg_arc.clone(),
+        control.clone(),
+        Arc::new(engram::tenants::QdrantFactory {
+            cfg: cfg.vector.clone(),
+        }),
+    ));
+    // No tenant is opened here, so startup does not scale with how many people
+    // have signed up. The first request from each opens theirs.
+    startup_checks(&cfg).await?;
 
     let oidc = match cfg.auth.mode {
         AuthMode::Oidc => {
@@ -252,7 +540,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(false);
 
     let state = engram::web::state::AppState {
-        core: core.clone(),
+        tenants: tenants.clone(),
+        config: cfg_arc.clone(),
         auth: Arc::new(engram::web::state::AuthContext {
             mode: cfg.auth.mode,
             local: cfg.auth.local.clone(),
@@ -271,15 +560,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let background = core.background.clone();
     // One ticker left. The five that queued the sweeps are gone: a sweep arms
     // itself an interval out when it finishes, so the queue holds the schedule
     // and `run_after` is the cursor. Repair stays outside it — it is what
     // recovers an interrupted schedule, including arming a sweep that died
     // between being claimed and re-arming itself, so it cannot be scheduled by
     // the thing it recovers.
-    let repair = engram::core::background::spawn_repair_ticker(core.clone(), shutdown_rx.clone());
-    let mut handles = engram::jobs::Worker::spawn(core, cfg.server.workers, shutdown_rx);
+    let repair =
+        engram::core::background::spawn_repair_ticker(tenants.clone(), shutdown_rx.clone());
+    let mut handles = engram::jobs::Worker::spawn(tenants.clone(), cfg.server.workers, shutdown_rx);
     // Joined with the workers so shutdown waits for it too, rather than
     // leaving a task the runtime drops mid-enqueue.
     handles.push(repair);
@@ -299,11 +588,18 @@ async fn main() -> anyhow::Result<()> {
     for h in handles {
         let _ = h.await;
     }
-    // The last searches served each left a write behind. The listener is
-    // already closed, so this drains a bounded set rather than chasing new
-    // work; bounded further in case one of them is stuck on a wedged Qdrant.
-    if background.inflight() > 0 {
+    // The last searches served each left a write behind, one queue per tenant.
+    // The listener is already closed, so this drains a bounded set rather than
+    // chasing new work; bounded further in case one of them is stuck on a
+    // wedged Qdrant. Only the open ones: a tenant nobody touched this run has
+    // nothing in flight by construction.
+    for t in tenants.open_tenants() {
+        let background = t.core.background.clone();
+        if background.inflight() == 0 {
+            continue;
+        }
         tracing::info!(
+            subject = %t.user.subject,
             inflight = background.inflight(),
             "draining background writes"
         );
@@ -312,6 +608,7 @@ async fn main() -> anyhow::Result<()> {
             .is_err()
         {
             tracing::warn!(
+                subject = %t.user.subject,
                 inflight = background.inflight(),
                 "gave up waiting for background writes"
             );
@@ -323,100 +620,244 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
-    use engram::config::*;
 
-    fn test_config() -> Config {
-        Config {
-            server: ServerConfig {
-                bind: "127.0.0.1:8080".into(),
-                workers: 2,
-            },
-            store: StoreConfig {
-                path: "engram.db".into(),
-            },
-            vector: VectorConfig {
-                url: "http://localhost:6333".into(),
-                collection: "chunks".into(),
-                api_key: None,
-                recency_weight: 0.05,
-                recency_half_life_days: 180,
-                pinned_boost: 0.15,
-                weak_below: 0.35,
-                per_source_cap: 3,
-            },
-            infer: InferConfig {
-                synthesis: engram::config::SynthesisMode::Eager,
-                segment_tokens: engram::config::DEFAULT_SEGMENT_TOKENS,
-                synthesize: Some(SynthesizeRole {
-                    base_url: "http://localhost:8000/v1".into(),
-                    model: "m".into(),
-                    api_key: None,
-                    context_tokens: 32768,
-                    max_output_tokens: 8192,
-                    output_ratio: 1.4,
-                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
-                    reasoning_effort: None,
-                    ceiling_param: None,
-                    structured_output: true,
-                    context_opening_tokens: 200,
-                    context_overlap_tokens: 150,
-                }),
-                embed: EmbedRole {
-                    base_url: "http://localhost:8000/v1".into(),
-                    model: "e".into(),
-                    api_key: None,
-                    dim: 1024,
-                    max_input_tokens: 8192,
-                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
-                    query_template: engram::config::EmbedTemplates::default().query_template,
-                    document_template: engram::config::EmbedTemplates::default().document_template,
-                    document_template_untitled: engram::config::EmbedTemplates::default()
-                        .document_template_untitled,
-                    chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
-                },
-                ask: Some(AskRole {
-                    base_url: "http://localhost:8000/v1".into(),
-                    model: "m".into(),
-                    api_key: None,
-                    context_tokens: 32768,
-                    max_output_tokens: 4096,
-                    timeout_secs: engram::config::DEFAULT_TIMEOUT_SECS,
-                    reasoning_effort: None,
-                    ceiling_param: None,
-                    plan: false,
-                    structured_output: true,
-                    plan_endpoint: None,
-                }),
-                rerank: None,
-                vision: None,
-            },
-            auth: AuthConfig {
-                mode: AuthMode::Local,
-                oidc: None,
-                local: Some(LocalConfig {
-                    username: "dev".into(),
-                    password_hash: "$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aaaa".into(),
-                }),
-            },
-            consolidate: ConsolidateConfig::default(),
-            learn: LearnConfig::default(),
-            feedback: FeedbackConfig::default(),
-            capture: CaptureConfig::default(),
-            pacing: engram::config::PacingConfig::default(),
-            associate: AssociateConfig::default(),
-            activation: ActivationConfig::default(),
-            promote: engram::config::PromoteConfig::default(),
-            pursuit: engram::config::PursuitConfig::default(),
-            schedule: engram::config::ScheduleConfig::default(),
-            sitting: engram::config::SittingConfig::default(),
-            recommend: engram::config::RecommendConfig::default(),
-            ui: UiConfig::default(),
-        }
+    use engram::store::control::Control;
+
+    /// Adoption without the Qdrant half. The alias rename is passed in so this
+    /// can run without a vector store; what is being tested here is the row,
+    /// the file and the guard, and the rename's own failure has its own test.
+    async fn adopt_dry(
+        cfg: &Config,
+        control: &Control,
+    ) -> Result<Option<engram::store::control::User>> {
+        adopt(cfg, control, |_alias| async { Ok(()) }).await
+    }
+
+    /// A config naming a single-user database in `dir`, with `dir/users` as the
+    /// tenant directory.
+    fn adopting_config(dir: &std::path::Path, subject: Option<&str>) -> Config {
+        let mut cfg = Config::test_default();
+        cfg.store.path = dir.join("engram.db").to_string_lossy().into();
+        cfg.store.dir = dir.join("users").to_string_lossy().into();
+        cfg.migrate.adopt_subject = subject.map(String::from);
+        cfg
+    }
+
+    /// A real single-user base: connecting once puts the schema in the file.
+    async fn single_user_base(cfg: &Config, control: &Control) {
+        engram::store::Store::connect(&cfg.store, control.clone(), "unused")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn adoption_claims_the_single_user_database_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let cfg = adopting_config(dir.path(), Some("sub-1"));
+        single_user_base(&cfg, &control).await;
+
+        let user = adopt_dry(&cfg, &control).await.unwrap().expect("adopted");
+        assert!(user.can_judge, "the adopting operator keeps the judge");
+        assert!(
+            !std::path::Path::new(&cfg.store.path).exists(),
+            "the old file was moved, not copied"
+        );
+        assert!(
+            dir.path()
+                .join("users")
+                .join(format!("{}.db", user.slug))
+                .exists()
+        );
+
+        // Second boot is a no-op: the users table is no longer empty.
+        assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn adoption_does_nothing_without_a_subject_to_adopt_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let cfg = adopting_config(dir.path(), None);
+        single_user_base(&cfg, &control).await;
+        assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
+        assert!(
+            std::path::Path::new(&cfg.store.path).exists(),
+            "nothing was moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn adoption_does_nothing_when_there_is_no_base_to_adopt() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let cfg = adopting_config(dir.path(), Some("sub-1"));
+        assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
+        assert!(
+            control.users().await.unwrap().is_empty(),
+            "no row was left behind"
+        );
+    }
+
+    /// A half-adopted install that boots is worse than one that refuses: it
+    /// presents as a base whose searches have gone empty, with the file it
+    /// should be reading sitting under a name nothing looks at.
+    #[tokio::test]
+    async fn a_failed_alias_rename_puts_the_file_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let cfg = adopting_config(dir.path(), Some("sub-1"));
+        single_user_base(&cfg, &control).await;
+
+        let err = adopt(&cfg, &control, |_alias| async {
+            Err(Error::Vector("qdrant is down".into()))
+        })
+        .await;
+        assert!(err.is_err());
+        assert!(
+            std::path::Path::new(&cfg.store.path).exists(),
+            "the base was left where the next boot cannot find it"
+        );
+        assert!(
+            control.users().await.unwrap().is_empty(),
+            "a user row was left with no base behind it"
+        );
+    }
+
+    /// The row is the guard. A step that fails after it is written and does
+    /// not take it back out makes `users` non-empty for ever, and the next
+    /// boot then skips adoption in silence: an empty base beside the
+    /// operator's real one, with nothing anywhere saying why.
+    #[tokio::test]
+    async fn a_failure_before_the_file_moves_leaves_no_user_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let mut cfg = adopting_config(dir.path(), Some("sub-1"));
+        single_user_base(&cfg, &control).await;
+        // A tenant directory that cannot be made, because its parent is a file.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        cfg.store.dir = blocker.join("users").to_string_lossy().into();
+
+        assert!(adopt_dry(&cfg, &control).await.is_err());
+        assert!(
+            control.users().await.unwrap().is_empty(),
+            "a user row was left behind, and it is what turns adoption off"
+        );
+        assert!(
+            std::path::Path::new(&cfg.store.path).exists(),
+            "nothing should have moved"
+        );
+    }
+
+    /// What the rename does not carry: the three tables that moved to the
+    /// control plane. Without this the upgrade quietly invalidates every API
+    /// token and drops whatever was queued when the old process stopped.
+    #[tokio::test]
+    async fn adoption_carries_the_tokens_sessions_and_queued_work_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let cfg = adopting_config(dir.path(), Some("sub-1"));
+        single_user_base(&cfg, &control).await;
+        legacy_auth_rows(&cfg.store.path).await;
+
+        adopt_dry(&cfg, &control).await.unwrap().expect("adopted");
+
+        let tokens = control.active_tokens().await.unwrap();
+        assert_eq!(tokens.len(), 1, "the extension's token stopped working");
+        assert_eq!(tokens[0].subject, "sub-1");
+        assert!(
+            control.get_session("sid-1").await.unwrap().is_some(),
+            "the browser that was open got signed out"
+        );
+        let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE subject = 'sub-1'")
+            .fetch_one(&control.pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 1, "work queued at shutdown was dropped");
+    }
+
+    /// A token, a session and a queued unit, written the way the single-user
+    /// build wrote them: in the tenant database, with no `subject` on the job.
+    async fn legacy_auth_rows(path: &str) {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::from_str(&format!("sqlite://{path}")).unwrap())
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE sessions (
+               id TEXT PRIMARY KEY, subject TEXT NOT NULL, email TEXT,
+               expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE api_tokens (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL,
+               subject TEXT NOT NULL, created_at INTEGER NOT NULL,
+               last_used_at INTEGER, revoked_at INTEGER, user_agent TEXT);
+             CREATE TABLE jobs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL,
+               target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+               state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+               run_after INTEGER NOT NULL DEFAULT 0, last_error TEXT, claimed_at INTEGER,
+               created_at INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0,
+               class INTEGER NOT NULL DEFAULT 0, UNIQUE(stage, target_id));
+             INSERT INTO api_tokens (id, name, token_hash, subject, created_at)
+               VALUES ('tok-1', 'extension', 'hash', 'dev', 10);
+             INSERT INTO jobs (stage, target_kind, target_id)
+               VALUES ('synthesize', 'corpus', 'c-1');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, subject, email, expires_at, created_at)
+             VALUES ('sid-1', 'dev', NULL, ?, 10)",
+        )
+        .bind(engram::store::now() + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+    }
+
+    /// A second instance, or an operator editing the file after the fact.
+    #[tokio::test]
+    async fn adoption_refuses_once_anyone_is_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let cfg = adopting_config(dir.path(), Some("sub-1"));
+        single_user_base(&cfg, &control).await;
+        control.provision("someone-else", None).await.unwrap();
+
+        assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
+        assert!(
+            std::path::Path::new(&cfg.store.path).exists(),
+            "a live instance's single-user file was moved out from under it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_data_command_names_its_tenant_or_says_who_it_could_have_meant() {
+        let control = Control::memory().await.unwrap();
+        control.provision("sub-a", None).await.unwrap();
+        control.provision("sub-b", None).await.unwrap();
+
+        assert_eq!(
+            require_user(&control, Some("sub-b")).await.unwrap().subject,
+            "sub-b"
+        );
+        let e = require_user(&control, None).await.unwrap_err().to_string();
+        assert!(e.contains("sub-a") && e.contains("sub-b"), "{e}");
+        assert!(
+            require_user(&control, Some("nobody")).await.is_err(),
+            "an unknown subject is not a silent default"
+        );
     }
 
     #[test]
     fn oidc_mode_requires_an_oidc_block() {
-        let mut cfg = test_config();
+        let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Oidc;
         cfg.auth.oidc = None;
         assert!(validate_auth(&cfg, false).is_err());
@@ -424,7 +865,7 @@ mod startup_tests {
 
     #[test]
     fn local_mode_requires_a_local_block() {
-        let mut cfg = test_config();
+        let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Local;
         cfg.auth.local = None;
         assert!(validate_auth(&cfg, false).is_err());
@@ -432,7 +873,7 @@ mod startup_tests {
 
     #[test]
     fn local_mode_on_a_public_bind_is_refused() {
-        let mut cfg = test_config();
+        let mut cfg = Config::test_default();
         cfg.server.bind = "0.0.0.0:8080".into();
         assert!(validate_auth(&cfg, false).is_err());
         assert!(
@@ -443,6 +884,6 @@ mod startup_tests {
 
     #[test]
     fn a_valid_local_config_passes() {
-        assert!(validate_auth(&test_config(), false).is_ok());
+        assert!(validate_auth(&Config::test_default(), false).is_ok());
     }
 }

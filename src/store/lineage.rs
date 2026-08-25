@@ -225,26 +225,58 @@ impl Store {
     /// moment the merge is written, so a merge stuck here is invisible to
     /// search, its roots were never superseded, and nothing else would notice
     /// — the only signal was a forever-retrying job.
+    ///
+    /// "Stranded" means no embed unit that is still going to get to it, and
+    /// that half of the question lives in the other database now — so the
+    /// `LIMIT` cannot be applied with the `WHERE`, and a single over-fetched
+    /// window would answer nothing at all whenever the merges waiting on an
+    /// embedder outnumber it. Paged instead, until the caller has what it asked
+    /// for or the candidates run out. The set being walked is merges that are
+    /// not embedded *yet*, which empties itself as they embed, so the loop is
+    /// bounded by work in flight rather than by the size of the base.
     pub async fn stranded_merges(&self, limit: i64) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT a.id FROM artifacts a
-              WHERE a.provenance = 'merged'
-                AND a.status = 'active'
-                AND a.superseded_by IS NULL
-                AND a.embed_state != 'embedded'
-                AND NOT EXISTS (
-                      SELECT 1 FROM jobs j
-                       WHERE j.stage = 'embed'
-                         AND j.target_id = a.id
-                         AND j.state IN ('pending', 'running')
-                         AND j.attempts < ?)
-              LIMIT ?",
-        )
-        .bind(crate::store::jobs::MAX_ATTEMPTS)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get("id")).collect())
+        const PAGE: i64 = 500;
+        let want = limit.max(0) as usize;
+        let mut out: Vec<String> = Vec::new();
+        let mut after = String::new();
+        while out.len() < want {
+            let rows = sqlx::query(
+                "SELECT a.id FROM artifacts a
+                  WHERE a.provenance = 'merged'
+                    AND a.status = 'active'
+                    AND a.superseded_by IS NULL
+                    AND a.embed_state != 'embedded'
+                    AND a.id > ?
+                  ORDER BY a.id
+                  LIMIT ?",
+            )
+            .bind(&after)
+            .bind(PAGE)
+            .fetch_all(&self.pool)
+            .await?;
+            let candidates: Vec<String> = rows.iter().map(|r| r.get("id")).collect();
+            let Some(last) = candidates.last().cloned() else {
+                break;
+            };
+            after = last;
+            let armed = self
+                .control
+                .targets_with_jobs(
+                    &self.subject,
+                    crate::store::jobs::Stage::Embed,
+                    &candidates,
+                    &["pending", "running"],
+                    Some(crate::store::jobs::MAX_ATTEMPTS),
+                )
+                .await?;
+            out.extend(
+                candidates
+                    .into_iter()
+                    .filter(|id| !armed.contains(id))
+                    .take(want - out.len()),
+            );
+        }
+        Ok(out)
     }
 
     /// Active merged artifacts, other than `child_id`, every root of which is

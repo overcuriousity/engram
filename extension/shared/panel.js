@@ -447,6 +447,14 @@ async function refineSearch(q, owner, fast) {
     hits.every((h, i) => h.artifact_id === fast[i].artifact_id)
   ) return;
   clearResults();
+  // The same branch `runSearch` has, for the same reason. A rerank that comes
+  // back empty over a list the operator is reading would otherwise clear the
+  // node and render nothing into it, leaving a blank pane that says neither
+  // "nothing" nor anything else.
+  if (!hits.length) {
+    $('results').textContent = 'Nothing.';
+    return;
+  }
   renderHits(hits, $('results'));
 }
 

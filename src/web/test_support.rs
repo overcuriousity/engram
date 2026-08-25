@@ -7,9 +7,23 @@ use axum::response::Response;
 
 /// The real router over `core`, in local auth mode with no password
 /// configured (`local`); pass `Some(cfg)` to test the login form itself.
-pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
+///
+/// A one-tenant registry around `core`, and the real router over it. Every
+/// test written against the single-user app goes through here, which is the
+/// point: if tenancy needed edits scattered across the web tests, the
+/// extractor boundary would be in the wrong place, and this is where that
+/// would show.
+///
+/// The user it registers holds the judge grant. A router alone cannot express
+/// the ungranted case, because the gate is only reachable by someone signed
+/// in — see `app_with_cookie_ungranted`, which carries a session.
+pub async fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
+    let user = granted_user(&core, true).await;
+    let cfg = std::sync::Arc::new(crate::config::Config::test_default());
+    let tenants = std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user));
     crate::web::router(crate::web::state::AppState {
-        core,
+        tenants,
+        config: cfg,
         auth: std::sync::Arc::new(crate::web::state::AuthContext {
             mode: crate::config::AuthMode::Local,
             local,
@@ -20,6 +34,48 @@ pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Ro
         config_path: std::sync::Arc::new(scratch_config()),
         ask_handoff: Default::default(),
     })
+}
+
+/// The registered user, with the grant written where the judge gate reads it.
+///
+/// Both places: the `User` the registry hands to a handler, and the row in the
+/// control database the gate consults on every judge request. They have to
+/// agree, and the row is the one that decides — see `web::tenant::CanJudge`.
+async fn granted_user(core: &Core, can_judge: bool) -> crate::store::control::User {
+    let subject = crate::store::TEST_SUBJECT;
+    core.store.control.provision(subject, None).await.ok();
+    core.store
+        .control
+        .set_can_judge(subject, can_judge)
+        .await
+        .expect("write the judge grant");
+    crate::store::control::User {
+        subject: subject.into(),
+        email: None,
+        slug: crate::store::control::slug_for(subject),
+        can_judge,
+        created_at: 0,
+    }
+}
+
+/// An `AppState` over one already-open tenant, for the tests that need to hold
+/// the state rather than only the router.
+pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web::state::AppState {
+    let cfg = std::sync::Arc::new(crate::config::Config::test_default());
+    let user = granted_user(&core, true).await;
+    crate::web::state::AppState {
+        tenants: std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user)),
+        config: cfg,
+        auth: std::sync::Arc::new(crate::web::state::AuthContext {
+            mode,
+            local: None,
+            oidc: None,
+            pending: crate::auth::oidc::PendingStore::new(),
+            secure_cookies: mode == crate::config::AuthMode::Oidc,
+        }),
+        config_path: std::sync::Arc::new(scratch_config()),
+        ask_handoff: Default::default(),
+    }
 }
 
 /// A `config.toml` of its own per app under test.
@@ -48,17 +104,36 @@ pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
     (app, cookie)
 }
 
+/// The same, for a signed-in user who has not been granted the judge. The
+/// session is real; only the grant is missing, which is the only thing the
+/// gate is allowed to be answering.
+pub async fn app_with_cookie_ungranted(core: Core) -> (axum::Router, String) {
+    let (app, cookie, _) = app_with_state_as(core, false).await;
+    (app, cookie)
+}
+
 /// `app_with_cookie`, plus the state behind it — what a test needs when it has
 /// to read something a handler wrote outside the database, such as the
 /// configuration file the apply path rewrites.
 pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::state::AppState) {
+    app_with_state_as(core, true).await
+}
+
+async fn app_with_state_as(
+    core: Core,
+    can_judge: bool,
+) -> (axum::Router, String, crate::web::state::AppState) {
     let cid = crate::store::new_id();
     core.store
+        .control
         .insert_session(&cid, "user-1", None, 3600)
         .await
         .unwrap();
+    let cfg = std::sync::Arc::new(crate::config::Config::test_default());
+    let user = granted_user(&core, can_judge).await;
     let state = crate::web::state::AppState {
-        core,
+        tenants: std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user)),
+        config: cfg,
         auth: std::sync::Arc::new(crate::web::state::AuthContext {
             mode: crate::config::AuthMode::Local,
             local: None,
@@ -78,10 +153,10 @@ pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::st
 
 /// A router over `core` plus a bearer token for `user-1`.
 pub async fn app_with_token(core: Core) -> (axum::Router, String) {
-    let (_, token) = crate::auth::tokens::mint(&core.store, "test", "user-1", None)
+    let (_, token) = crate::auth::tokens::mint(&core.store.control, "test", "user-1", None)
         .await
         .unwrap();
-    (router(core, None), token)
+    (router(core, None).await, token)
 }
 
 pub async fn body_of(res: Response) -> String {

@@ -45,16 +45,69 @@ pub(crate) async fn try_supersede(core: &Core, loser: &str, winner: &str, why: &
     }
 }
 
-/// Claim and run at most one job. Returns false when the queue is empty, which
-/// is the loop's signal to sleep.
+/// Claim one unit and run it, whoever it belongs to.
+///
+/// What a worker calls. The queue is instance-wide; the work is not. The
+/// subject comes off the claimed row and names the core the unit runs against,
+/// so a worker never holds a tenant across two units — which is what makes
+/// this round-robin between users without a scheduler in it.
+pub async fn run_any(tenants: &crate::tenants::Tenants) -> Result<bool> {
+    let Some((subject, job)) = tenants.control().claim_job().await? else {
+        return Ok(false);
+    };
+    let core = match tenants.get(&subject).await {
+        Ok(t) => t.core,
+        // The user was deleted between the enqueue and the claim. Their queue
+        // goes with the row cascade, but a unit already in a worker's hand can
+        // outlive it, and retrying it can never succeed.
+        Err(Error::NotFound) => {
+            tracing::info!(subject = %subject, "queue row for a user that no longer exists; dropping");
+            tenants.control().complete_job(job.id).await?;
+            return Ok(true);
+        }
+        // Anything else is a fault of this moment rather than of the row: a
+        // Qdrant that will not answer, a file that will not open. The claim
+        // above already happened, so returning here would leave the unit
+        // `running` with nobody holding it — one attempt spent, no
+        // `last_error`, and nothing until the hourly `reclaim_stuck` notices.
+        // Put it back on the queue at the ordinary backoff, which is what
+        // every other failure in this module does, and then let the worker
+        // loop log and pause on the error rather than spinning through the
+        // whole queue one claim at a time while the endpoint is down.
+        Err(e) => {
+            tracing::warn!(
+                subject = %subject,
+                error = %e,
+                "could not open the base this unit belongs to; requeueing it"
+            );
+            tenants
+                .control()
+                .fail_job(job.id, job.attempts, &e.to_string())
+                .await?;
+            return Err(e);
+        }
+    };
+    run_dispatched(&core, job, Some(&subject)).await
+}
+
+/// Claim and run at most one of *this tenant's* jobs. Returns false when their
+/// queue is empty, which is the loop's signal to sleep.
+///
+/// Beside `run_any` rather than replaced by it: "take this base's next step" is
+/// a real operation, and every test that drives a capture to completion is
+/// asking for exactly it.
 pub async fn run_one(core: &Core) -> Result<bool> {
     let Some(job) = core.store.claim_job().await? else {
         return Ok(false);
     };
+    run_dispatched(core, job, None).await
+}
 
+async fn run_dispatched(core: &Core, job: Job, subject: Option<&str>) -> Result<bool> {
     let span = tracing::info_span!(
         "job",
         id = job.id,
+        subject = subject.unwrap_or(""),
         stage = job.stage.as_str(),
         target = %job.target_id,
         attempt = job.attempts
@@ -93,6 +146,10 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         core.store.complete_job(job.id).await?;
         return Ok(true);
     }
+    // Only a sweep answers this, and only a sweep is asked: `did_work`
+    // governs how long until the next *periodic* run, and a unit that is not
+    // periodic has none.
+    let mut did_work = false;
     let result = match (job.stage, job.target_kind.as_str()) {
         (Stage::Synthesize | Stage::Enrich, _) => synthesize::plan(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
@@ -118,7 +175,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::ArmDedupe
             | Stage::Context,
             _,
-        ) => run_accounted(core, job.stage).await,
+        ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
     };
 
     match result {
@@ -130,7 +187,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             if job.stage == Stage::Embed && job.target_kind == "corpus" {
                 embed::rearm_if_more(core, &job.target_id).await?;
             }
-            rearm_periodic(core, &job).await;
+            rearm_periodic(core, &job, did_work).await;
             arm_successor(core, &job).await;
             Ok(true)
         }
@@ -229,7 +286,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
 /// is written here rather than beside `complete_job`: a failed sweep stays
 /// queued behind a backoff, and that is a retry of the same unit rather than a
 /// run that never happened.
-async fn run_accounted(core: &Core, stage: Stage) -> Result<()> {
+async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
     let started_at = crate::store::now();
     let outcome = match stage {
         Stage::Consolidate => consolidate::run(core).await.and_then(detail),
@@ -263,7 +320,35 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<()> {
     {
         tracing::warn!(stage = stage.as_str(), error = %e, "could not record what the sweep did");
     }
-    outcome.map(|_| ())
+    outcome.map(|d| did_work(&d))
+}
+
+/// Whether a sweep's own account says it did anything.
+///
+/// Read off the counts it already writes into `sweep_runs.detail` rather than
+/// each sweep learning to answer separately: every report is a flat object of
+/// numbers, so any non-zero one is work, and a report that gains a field keeps
+/// working without being told about this.
+///
+/// Only the *flat* numbers. A count nested one level down is read by nobody
+/// here, and that is the escape hatch a report uses for a standing count — a
+/// number saying what exists rather than what this pass did. Left flat, such a
+/// count claims work on every run over unchanged data and the backoff never
+/// engages at all, which is how the retention and context sweeps each woke a
+/// dormant base every interval to report the clusters it already had. See
+/// `retention::Standing` and `context::Standing`.
+///
+/// An unreadable report is not work. Claiming otherwise would reset the backoff
+/// on a base where nothing is happening, which is the one case the backoff is
+/// for.
+fn did_work(detail: &str) -> bool {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(detail)
+    else {
+        return false;
+    };
+    map.values()
+        .filter_map(serde_json::Value::as_f64)
+        .any(|n| n != 0.0)
 }
 
 /// The counts a sweep returned, as the JSON the account stores.
@@ -286,17 +371,47 @@ fn detail<T: serde::Serialize>(report: T) -> Result<String> {
 /// A sweep switched off since it was armed re-arms as nothing: `periodic_period`
 /// returns `None`, the row stays closed, and the repair pass will not put it
 /// back either, because it is no longer in `periodic_units`.
-async fn rearm_periodic(core: &Core, job: &Job) {
-    let Some(period) = crate::core::background::periodic_period(core, job.stage) else {
+async fn rearm_periodic(core: &Core, job: &Job, did_work: bool) {
+    rearm_periodic_with(core, job.stage, &job.target_id, did_work).await;
+}
+
+/// How long until this sweep runs again.
+///
+/// The configured period when the run did something, doubled per consecutive
+/// empty run when it did not, capped at `schedule.backoff_max_hours`. A quiet
+/// base therefore stops waking every interval to find nothing — which is what a
+/// dormant tenant costs, multiplied by however many of them there are.
+///
+/// The reset comes free, and it is what makes this a backoff rather than a
+/// firing rule: `arm_now` already pulls a sleeping unit's `run_after` forward to
+/// zero and already clears the count, and every producer already calls it. New
+/// data cancels the wait without a single producer change. In a firing world a
+/// lost token stalls a transition for ever and silently; here a missed signal
+/// costs one longer interval.
+async fn rearm_periodic_with(core: &Core, stage: Stage, target: &str, did_work: bool) {
+    let Some(period) = crate::core::background::periodic_period(core, stage) else {
         return;
     };
-    let at = crate::store::now() + period.as_secs() as i64;
+    let empty = if did_work {
+        0
+    } else {
+        core.store.empty_runs(stage, target).await.unwrap_or(0) + 1
+    };
+    let cap = core.schedule.backoff_max_hours.saturating_mul(3600);
+    // `empty - 1` doublings: the first empty run waits the configured period,
+    // and the shift is bounded well under `u64`'s width so a long-dormant base
+    // cannot wrap it back to something short.
+    let wait = period
+        .as_secs()
+        .saturating_mul(1u64 << empty.clamp(1, 32).saturating_sub(1))
+        .clamp(period.as_secs(), cap.max(period.as_secs()));
+    let at = crate::store::now() + wait as i64;
     if let Err(e) = core
         .store
-        .arm_periodic(job.stage, &job.target_kind, &job.target_id, at)
+        .arm_periodic_with_backoff(stage, "collection", target, at, empty)
         .await
     {
-        tracing::warn!(stage = job.stage.as_str(), error = %e, "could not re-arm the sweep");
+        tracing::warn!(stage = stage.as_str(), error = %e, "could not re-arm the sweep");
     }
 }
 
@@ -388,14 +503,21 @@ async fn settle_failed_artifact(core: &Core, job: &Job, e: &Error) -> Result<()>
 pub struct Worker;
 
 impl Worker {
+    /// The pool, over the whole instance.
+    ///
+    /// `server.workers` keeps meaning what it has always meant — how many
+    /// things this machine does at once — however many people sign up. It is
+    /// the admission point in front of one set of inference endpoints, and a
+    /// pool per user would put that queueing in the model server's socket
+    /// backlog instead: invisible, unordered, unfair.
     pub fn spawn(
-        core: Core,
+        tenants: std::sync::Arc<crate::tenants::Tenants>,
         workers: usize,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Vec<tokio::task::JoinHandle<()>> {
         (0..workers.max(1))
             .map(|n| {
-                let core = core.clone();
+                let tenants = tenants.clone();
                 let mut shutdown = shutdown.clone();
                 tokio::spawn(async move {
                     tracing::info!(worker = n, "worker started");
@@ -404,7 +526,7 @@ impl Worker {
                             _ = shutdown.changed() => {
                                 if *shutdown.borrow() { break; }
                             }
-                            worked = run_one(&core) => {
+                            worked = run_any(&tenants) => {
                                 match worked {
                                     Ok(true) => continue,
                                     Ok(false) => tokio::time::sleep(POLL_INTERVAL).await,
@@ -436,7 +558,7 @@ mod tests {
     async fn pending_run_after(core: &Core, stage: Stage) -> Option<i64> {
         sqlx::query_scalar("SELECT run_after FROM jobs WHERE stage = ? AND state = 'pending'")
             .bind(stage.as_str())
-            .fetch_optional(&core.store.pool)
+            .fetch_optional(&core.store.control.pool)
             .await
             .unwrap()
     }
@@ -503,7 +625,7 @@ mod tests {
         // And exactly one of it: `UNIQUE(stage, target_id)` still does that
         // work, for free and for the same reason it always did.
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE stage = 'associate'")
-            .fetch_one(&core.store.pool)
+            .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
         assert_eq!(n, 1);
@@ -532,7 +654,7 @@ mod tests {
 
         let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
             .bind(id)
-            .fetch_one(&core.store.pool)
+            .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
         assert_eq!(
@@ -657,7 +779,7 @@ mod tests {
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         let delay = |core: &Core| {
-            let pool = core.store.pool.clone();
+            let control_pool = core.store.control.pool.clone();
             let id = out.id.clone();
             async move {
                 sqlx::query_scalar::<_, i64>(
@@ -666,7 +788,7 @@ mod tests {
                 )
                 .bind(crate::store::now())
                 .bind(id)
-                .fetch_one(&pool)
+                .fetch_one(&control_pool)
                 .await
                 .unwrap()
             }
@@ -677,7 +799,7 @@ mod tests {
         let mut gaps = Vec::new();
         for _ in 0..MAX_ATTEMPTS + 3 {
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             let _ = run_one(&core).await;
@@ -727,6 +849,347 @@ mod tests {
         );
     }
 
+    /// The instance-wide claim, and the thing it has to get right: the unit
+    /// runs against the core belonging to whoever queued it.
+    ///
+    /// `Retention` because it leaves a trace in the tenant it ran for —
+    /// `run_accounted` writes a `sweep_runs` row into that tenant's own
+    /// database. A worker that resolved the wrong core would still complete
+    /// the job; the row is what says which base it touched.
+    #[tokio::test]
+    async fn a_unit_runs_against_the_core_of_whoever_queued_it() {
+        let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
+        a.core
+            .store
+            .arm_periodic(Stage::Retention, "collection", "collection", 0)
+            .await
+            .unwrap();
+
+        assert!(run_any(&tenants).await.unwrap(), "the job was claimed");
+
+        let ran = |t: &crate::tenants::Tenant| {
+            let store = t.core.store.clone();
+            async move { store.sweep_runs_since(0, 10).await.unwrap().len() }
+        };
+        assert_eq!(
+            ran(&a).await,
+            1,
+            "the sweep did not run for the tenant that armed it"
+        );
+        assert_eq!(ran(&b).await, 0, "another tenant's base was touched");
+    }
+
+    /// A row can outlive its user: the cascade takes the queue with the row,
+    /// but a unit claimed a moment before the delete is already in a worker's
+    /// hand. Retrying it can never succeed, so it is closed rather than failed.
+    #[tokio::test]
+    async fn a_job_for_a_deleted_user_is_dropped_rather_than_retried() {
+        let (tenants, a, _b, _dir) = crate::tenants::test_support::two_tenants().await;
+        a.core
+            .store
+            .enqueue(Stage::Embed, "corpus", "c-a")
+            .await
+            .unwrap();
+        // The cascade would take the queue row with the user, which is the
+        // ordinary case and leaves nothing to claim. What this reaches is the
+        // narrower one the branch exists for: the row outliving its user
+        // because the two deletes did not happen together. Foreign keys are
+        // per-connection in SQLite, so one connection with them off is how
+        // that state is reachable at all.
+        {
+            use sqlx::Executor;
+            let mut conn = tenants.control().pool.acquire().await.unwrap();
+            conn.execute("PRAGMA foreign_keys = OFF").await.unwrap();
+            sqlx::query("DELETE FROM users WHERE subject = ?")
+                .bind("sub-a")
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            run_any(&tenants).await.unwrap(),
+            "the orphaned unit was claimed and dealt with"
+        );
+        assert!(
+            !run_any(&tenants).await.unwrap(),
+            "it was closed, not left to be claimed again"
+        );
+    }
+
+    /// The claim happens before the tenant is resolved, so a base that will
+    /// not open leaves a row somebody has already taken. Left there, it is
+    /// `running` with nobody holding it: no backoff, no `last_error`, one
+    /// attempt spent, and nothing until the hourly `reclaim_stuck` — which
+    /// during an outage is every unit in the queue, drained into a state a
+    /// worker cannot see.
+    #[tokio::test]
+    async fn a_unit_whose_base_will_not_open_goes_back_on_the_queue() {
+        use sqlx::Row;
+        let (tenants, _dir) = crate::tenants::test_support::unopenable_tenants().await;
+        tenants.control().provision("sub-a", None).await.unwrap();
+        crate::store::jobs::enqueue_with(
+            tenants.control(),
+            "sub-a",
+            Stage::Relate,
+            "artifact",
+            "art-1",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            run_any(&tenants).await.is_err(),
+            "the outage has to reach the worker loop, which is what makes it pause"
+        );
+
+        let row = sqlx::query("SELECT state, attempts, run_after, last_error FROM jobs")
+            .fetch_one(&tenants.control().pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<String, _>("state"),
+            "pending",
+            "the claim was abandoned in `running`"
+        );
+        assert_eq!(row.get::<i64, _>("attempts"), 1);
+        assert!(
+            row.get::<i64, _>("run_after") > crate::store::now(),
+            "requeued with no backoff at all"
+        );
+        assert!(
+            row.get::<Option<String>, _>("last_error").is_some(),
+            "nothing on the row says why it did not run"
+        );
+    }
+
+    /// The `jobs` row a sweep left behind: when it next runs, and how many
+    /// consecutive runs before this one found nothing.
+    async fn pending_row(core: &Core, stage: Stage) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT run_after, empty_runs FROM jobs WHERE stage = ? AND state = 'pending'",
+        )
+        .bind(stage.as_str())
+        .fetch_one(&core.store.control.pool)
+        .await
+        .unwrap()
+    }
+
+    /// One sweep, as a worker runs it: the unit is closed, then re-armed.
+    ///
+    /// In that order and not the other, because the queue is keyed by
+    /// `(stage, target)` — a re-arm before the close would upsert the very row
+    /// the close then shuts, and the guard on the upsert says so by refusing to
+    /// touch anything that is not already finished.
+    async fn sweep_finds(core: &Core, stage: Stage, did_work: bool) {
+        let id: i64 = sqlx::query_scalar("SELECT id FROM jobs WHERE stage = ?")
+            .bind(stage.as_str())
+            .fetch_optional(&core.store.control.pool)
+            .await
+            .unwrap()
+            .unwrap_or(0);
+        if id > 0 {
+            core.store.complete_job(id).await.unwrap();
+        }
+        rearm_periodic_with(core, stage, "collection", did_work).await;
+    }
+
+    /// How long a re-armed unit has to wait, in whole seconds.
+    ///
+    /// Not on tokio's paused clock, though the pacing gate's tests are: a
+    /// paused clock makes sqlx's pool time out acquiring its first connection,
+    /// because the acquire timeout fires before any real work can happen. These
+    /// tests never sleep, so a second of wall clock between arming and reading
+    /// is the only imprecision, and one second against a period of minutes is
+    /// not what any of them is about.
+    /// A core on which `Retention` is a periodic unit at all. `test_core` has
+    /// learning off and `retain_days` at zero, which is a base with nothing to
+    /// expire and so no unit to schedule.
+    async fn sweeping_core() -> Core {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        core
+    }
+
+    async fn waits_about(core: &Core, stage: Stage, expected: i64) -> bool {
+        let (run_after, _) = pending_row(core, stage).await;
+        (run_after - crate::store::now()).abs_diff(expected) <= 2
+    }
+
+    /// A dormant tenant must not cost a wake-up an interval for ever. Nothing
+    /// here costs a model call — a sweep with nothing to do makes none — so the
+    /// backoff is proportionate to a wake-up, a file open and a few queries.
+    #[tokio::test]
+    async fn a_sweep_that_finds_nothing_waits_longer_each_time() {
+        let core = sweeping_core().await;
+        let base = crate::core::background::periodic_period(&core, Stage::Retention)
+            .unwrap()
+            .as_secs() as i64;
+
+        for (run, expected) in [base, base * 2, base * 4].into_iter().enumerate() {
+            sweep_finds(&core, Stage::Retention, false).await;
+            assert!(
+                waits_about(&core, Stage::Retention, expected).await,
+                "empty run {} did not wait {expected}s",
+                run + 1
+            );
+            let (_, empty) = pending_row(&core, Stage::Retention).await;
+            assert_eq!(empty as usize, run + 1, "the empty runs were not counted");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wait_is_capped() {
+        let core = sweeping_core().await;
+        let cap = core.schedule.backoff_max_hours as i64 * 3600;
+        for _ in 0..20 {
+            sweep_finds(&core, Stage::Retention, false).await;
+        }
+        let (run_after, _) = pending_row(&core, Stage::Retention).await;
+        assert!(
+            run_after - crate::store::now() <= cap,
+            "a quiet base backed off past its ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_did_work_goes_back_to_the_configured_period() {
+        let core = sweeping_core().await;
+        let base = crate::core::background::periodic_period(&core, Stage::Retention)
+            .unwrap()
+            .as_secs() as i64;
+        for _ in 0..5 {
+            sweep_finds(&core, Stage::Retention, false).await;
+        }
+        sweep_finds(&core, Stage::Retention, true).await;
+        assert!(waits_about(&core, Stage::Retention, base).await);
+        let (_, empty) = pending_row(&core, Stage::Retention).await;
+        assert_eq!(empty, 0, "the count did not start over");
+    }
+
+    /// The reset comes free, and it is what makes the backoff safe rather than
+    /// a firing rule: every producer already calls `arm_now`, so new data
+    /// cancels the wait with no producer changes at all.
+    #[tokio::test]
+    async fn new_data_cancels_the_backoff() {
+        let core = sweeping_core().await;
+        for _ in 0..5 {
+            sweep_finds(&core, Stage::Retention, false).await;
+        }
+        core.store
+            .arm_now(Stage::Retention, "collection", "collection")
+            .await
+            .unwrap();
+        let (run_after, empty) = pending_row(&core, Stage::Retention).await;
+        assert_eq!(
+            run_after, 0,
+            "arm_now already pulls a sleeping unit forward"
+        );
+        assert_eq!(empty, 0);
+    }
+
+    /// The case the sentence above did not cover, and the one a busy base hits
+    /// most: the capture lands while the sweep it concerns is running. That row
+    /// is neither sleeping nor closed, so neither of `arm_now`'s guarded
+    /// statements matched it and the count it was meant to clear survived — the
+    /// sweep finished a moment later, read it, and re-armed at the doubled wait
+    /// with the new data already in the base.
+    #[tokio::test]
+    async fn data_arriving_mid_sweep_cancels_the_backoff_too() {
+        let core = sweeping_core().await;
+        let base = crate::core::background::periodic_period(&core, Stage::Retention)
+            .unwrap()
+            .as_secs() as i64;
+        for _ in 0..5 {
+            sweep_finds(&core, Stage::Retention, false).await;
+        }
+
+        // The worker is inside the unit: the row is `running`, which is neither
+        // of the two states `arm_now` guards on. Set here rather than through
+        // `claim_job`, which would not hand out a row still sleeping behind the
+        // backoff this test just built.
+        sqlx::query("UPDATE jobs SET state = 'running' WHERE stage = ?")
+            .bind(Stage::Retention.as_str())
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
+
+        core.store
+            .arm_now(Stage::Retention, "collection", "collection")
+            .await
+            .unwrap();
+
+        // And the sweep finishes, having found nothing — it started before the
+        // capture landed. This run still waits the plain period, because the
+        // count of consecutive empty runs is about a base where nothing is
+        // happening and something just did.
+        sweep_finds(&core, Stage::Retention, false).await;
+        assert!(waits_about(&core, Stage::Retention, base).await);
+    }
+
+    #[test]
+    fn a_sweep_did_work_when_any_of_its_counts_moved() {
+        // Read off the counts the account already writes, rather than each
+        // sweep learning to say so: a report that gains a field keeps working.
+        assert!(!did_work(r#"{"expired":0,"named":0}"#));
+        assert!(did_work(r#"{"expired":0,"named":3}"#));
+        assert!(
+            !did_work("{}"),
+            "a sweep that reported nothing found nothing"
+        );
+        assert!(
+            !did_work("not json"),
+            "an unreadable report is not a claim of work"
+        );
+
+        // A count one level down is a standing count and never work. Flat, the
+        // retention sweep's `clusters` — how many gap clusters the base holds,
+        // not how many this pass touched — claimed work on every run over any
+        // base with a gap in it, which is precisely the dormant base the
+        // backoff exists for.
+        assert!(!did_work(r#"{"expired":0,"standing":{"clusters":3}}"#));
+        assert!(did_work(r#"{"expired":1,"standing":{"clusters":3}}"#));
+
+        let quiet = serde_json::to_string(&crate::jobs::retention::Report {
+            standing: crate::jobs::retention::Standing { clusters: 12 },
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!did_work(&quiet), "{quiet}");
+
+        // Same shape, and worse: `context::run` is a full recompute, so all
+        // three of its standing counts are non-zero on every run over unchanged
+        // data and the sweep could never report an empty run at all.
+        let recomputed = serde_json::to_string(&crate::jobs::context::Report {
+            standing: crate::jobs::context::Standing {
+                events: 40,
+                profiled: 6,
+                clusters: 9,
+            },
+            cleared: 0,
+        })
+        .unwrap();
+        assert!(!did_work(&recomputed), "{recomputed}");
+        let cleared = serde_json::to_string(&crate::jobs::context::Report {
+            cleared: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(did_work(&cleared), "a profile that decayed away is work");
+
+        // The consolidation sweep's repair passes had no field in its report,
+        // so a tick that moved hundreds of pairs onto the artifacts that could
+        // answer them still said `{"superseded":0,"judged":0}` — "no work" —
+        // and doubled its backoff toward the 24-hour ceiling with the backlog
+        // it was draining still there.
+        let repairing = serde_json::to_string(&crate::jobs::consolidate::Outcome {
+            repaired: 180,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(did_work(&repairing), "{repairing}");
+    }
+
     #[tokio::test]
     async fn run_one_reports_when_the_queue_is_empty() {
         let core = test_core().await;
@@ -764,7 +1227,7 @@ mod tests {
         // exercise the attempt budget without sleeping.
         for _ in 0..=MAX_ATTEMPTS {
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&core.store.pool)
+                .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             let _ = run_one(&core).await;

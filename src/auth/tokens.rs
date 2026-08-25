@@ -1,7 +1,7 @@
 use super::Identity;
 use crate::error::{Error, Result};
-use crate::store::Store;
 use crate::store::auth::ApiToken;
+use crate::store::control::Control;
 use argon2::Argon2;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -32,7 +32,7 @@ pub fn verify_secret(secret: &str, stored: &str) -> bool {
 /// because the extension mints every one of its tokens under the same name, so
 /// two rows can otherwise be identical in everything a person can read.
 pub async fn mint(
-    store: &Store,
+    control: &Control,
     name: &str,
     subject: &str,
     user_agent: Option<&str>,
@@ -46,7 +46,7 @@ pub async fn mint(
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     );
     let id = crate::store::new_id();
-    let row = store
+    let row = control
         .insert_token(&id, name, &hash_secret(&plaintext)?, subject, user_agent)
         .await?;
     tracing::info!(token_id = %id, name, "api token minted");
@@ -59,13 +59,13 @@ pub async fn mint(
 /// request. With a single-operator install the token count is tiny and that is
 /// acceptable; if it ever grows, add a fast lookup key rather than weakening
 /// the hash.
-pub async fn verify(store: &Store, presented: &str) -> Result<Identity> {
+pub async fn verify(control: &Control, presented: &str) -> Result<Identity> {
     if !presented.starts_with(TOKEN_PREFIX) {
         return Err(Error::Unauthorized);
     }
-    for t in store.active_tokens().await? {
+    for t in control.active_tokens().await? {
         if verify_secret(presented, &t.token_hash) {
-            store.touch_token(&t.id).await?;
+            control.touch_token(&t.id).await?;
             return Ok(Identity {
                 subject: t.subject,
                 email: None,
@@ -77,18 +77,24 @@ pub async fn verify(store: &Store, presented: &str) -> Result<Identity> {
     Err(Error::Unauthorized)
 }
 
-pub async fn revoke(store: &Store, id: &str) -> Result<()> {
-    store.revoke_token(id).await
+/// Revoke one of `subject`'s tokens. `Error::NotFound` when that subject has
+/// no such token — the same answer a made-up id gets, so the route cannot be
+/// used to find out which ids belong to somebody else.
+pub async fn revoke(control: &Control, id: &str, subject: &str) -> Result<()> {
+    if control.revoke_token(id, subject).await? {
+        return Ok(());
+    }
+    Err(Error::NotFound)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Store;
+    use crate::store::control::Control;
 
     #[tokio::test]
     async fn a_minted_token_verifies_once_and_is_never_retrievable() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
 
         assert!(plaintext.starts_with(TOKEN_PREFIX));
@@ -102,7 +108,7 @@ mod tests {
         assert_eq!(id.subject, "user-1");
 
         // Only the hash is stored, and it is not the token.
-        let stored = s.list_tokens().await.unwrap();
+        let stored = s.list_tokens("user-1").await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].id, row.id);
         let raw: String = sqlx::query_scalar("SELECT token_hash FROM api_tokens")
@@ -115,7 +121,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_wrong_token_is_unauthorized() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         mint(&s, "laptop", "user-1", None).await.unwrap();
         for bad in [
             "engram_wrongwrongwrongwrongwrongwrongwrongwrong",
@@ -134,9 +140,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoked_token_stops_working() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
-        revoke(&s, &row.id).await.unwrap();
+        revoke(&s, &row.id, "user-1").await.unwrap();
         assert!(matches!(
             verify(&s, &plaintext).await,
             Err(crate::error::Error::Unauthorized)
@@ -145,7 +151,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_tokens_are_distinct() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (_, a) = mint(&s, "one", "user-1", None).await.unwrap();
         let (_, b) = mint(&s, "two", "user-1", None).await.unwrap();
         assert_ne!(a, b);
@@ -155,18 +161,62 @@ mod tests {
 
     #[tokio::test]
     async fn verification_records_last_use() {
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
         assert!(row.last_used_at.is_none());
         verify(&s, &plaintext).await.unwrap();
-        let after = s.list_tokens().await.unwrap();
+        let after = s.list_tokens("user-1").await.unwrap();
         assert!(after[0].last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_listing_shows_only_that_subjects_tokens() {
+        let s = Control::memory().await.unwrap();
+        let (mine, _) = mint(&s, "one", "alice", None).await.unwrap();
+        mint(&s, "two", "bob", None).await.unwrap();
+
+        let listed = s.list_tokens("alice").await.unwrap();
+        assert_eq!(listed.len(), 1, "the listing crossed a tenant boundary");
+        assert_eq!(listed[0].id, mine.id);
+    }
+
+    #[tokio::test]
+    async fn revoking_another_subjects_token_is_refused_and_leaves_it_working() {
+        // Not a listing leak but a write: an id-only revoke lets any signed-in
+        // user kill somebody else's extension pairing.
+        let s = Control::memory().await.unwrap();
+        let (bobs, plaintext) = mint(&s, "bob's laptop", "bob", None).await.unwrap();
+
+        assert!(matches!(
+            revoke(&s, &bobs.id, "alice").await,
+            Err(Error::NotFound)
+        ));
+        assert_eq!(verify(&s, &plaintext).await.unwrap().subject, "bob");
+
+        // And the owner still can.
+        revoke(&s, &bobs.id, "bob").await.unwrap();
+        assert!(matches!(
+            verify(&s, &plaintext).await,
+            Err(Error::Unauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoking_an_id_that_does_not_exist_answers_like_someone_elses() {
+        // The two have to be indistinguishable, or the answer enumerates other
+        // people's token ids.
+        let s = Control::memory().await.unwrap();
+        mint(&s, "one", "bob", None).await.unwrap();
+        assert!(matches!(
+            revoke(&s, "no-such-id", "alice").await,
+            Err(Error::NotFound)
+        ));
     }
 
     #[tokio::test]
     async fn a_token_belonging_to_another_subject_carries_that_subject() {
         // Identity must come from the stored row, never from the request.
-        let s = Store::memory().await.unwrap();
+        let s = Control::memory().await.unwrap();
         let (_, a) = mint(&s, "one", "alice", None).await.unwrap();
         let (_, b) = mint(&s, "two", "bob", None).await.unwrap();
         assert_eq!(verify(&s, &a).await.unwrap().subject, "alice");

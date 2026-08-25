@@ -63,13 +63,35 @@ impl FromRequestParts<AppState> for Identity {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Answered once per request, however many extractors ask.
+        //
+        // Two of them routinely do: `Tenant` resolves an `Identity` to find
+        // whose base to open, and a handler that also wants the session id
+        // names `Identity` beside it. Each ask was a full authentication — a
+        // session read and a sliding `extend_session` write per keystroke on
+        // the incremental search route, and for a bearer caller a second walk
+        // of the token table with an argon2 verify on every row. Neither
+        // repetition can produce a different answer: nothing in a request's
+        // lifetime changes the credential it arrived with.
+        if let Some(id) = parts.extensions.get::<Identity>() {
+            return Ok(id.clone());
+        }
+        let id = Self::authenticate(parts, state).await?;
+        parts.extensions.insert(id.clone());
+        Ok(id)
+    }
+}
+
+impl Identity {
+    /// The authentication itself, with no memo in front of it.
+    async fn authenticate(parts: &mut Parts, state: &AppState) -> Result<Self, Error> {
         if let Some(h) = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             && let Some(token) = bearer(h)
         {
-            return tokens::verify(&state.core.store, &token).await;
+            return tokens::verify(state.tenants.control(), &token).await;
         }
 
         if let Some(h) = parts
@@ -77,12 +99,12 @@ impl FromRequestParts<AppState> for Identity {
             .get(axum::http::header::COOKIE)
             .and_then(|v| v.to_str().ok())
             && let Some(sid) = cookie_value(h, SESSION_COOKIE)
-            && let Some(session) = state.core.store.get_session(&sid).await?
+            && let Some(session) = state.tenants.control().get_session(&sid).await?
         {
             // Sliding expiry: active use keeps the session alive.
             state
-                .core
-                .store
+                .tenants
+                .control()
                 .extend_session(&sid, SESSION_TTL_SECS)
                 .await?;
             return Ok(Identity {
@@ -164,6 +186,66 @@ mod tests {
             cookie_value("engram_session_old=nope", SESSION_COOKIE),
             None
         );
+    }
+
+    /// One authentication per request, however many extractors ask for one.
+    ///
+    /// Asserted by taking the session away between the two asks: a second ask
+    /// that still answers cannot have gone back to the store. What that saves
+    /// on the route this was found on — `Tenant` and `Identity` side by side on
+    /// incremental search — is a session read and a sliding-expiry write per
+    /// keystroke, and for a bearer caller a second argon2 walk of the token
+    /// table.
+    #[tokio::test]
+    async fn one_request_authenticates_once_however_many_extractors_ask() {
+        let core = crate::core::test_support::test_core().await;
+        let state =
+            crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await;
+        state
+            .tenants
+            .control()
+            .insert_session("sid-1", "dev", Some("dev@example.org"), SESSION_TTL_SECS)
+            .await
+            .unwrap();
+
+        let mut parts = axum::http::Request::builder()
+            .uri("/")
+            .header(axum::http::header::COOKIE, "engram_session=sid-1")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+
+        let first = Identity::from_request_parts(&mut parts, &state)
+            .await
+            .expect("the session is live");
+        assert_eq!(first.session.as_deref(), Some("sid-1"));
+
+        state
+            .tenants
+            .control()
+            .delete_session("sid-1")
+            .await
+            .unwrap();
+
+        let second = Identity::from_request_parts(&mut parts, &state)
+            .await
+            .expect("the second extractor re-authenticated instead of reading the memo");
+        assert_eq!(first, second);
+
+        // A different request with the same credential is a different memo, so
+        // the session going away is still noticed.
+        let mut fresh = axum::http::Request::builder()
+            .uri("/")
+            .header(axum::http::header::COOKIE, "engram_session=sid-1")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(matches!(
+            Identity::from_request_parts(&mut fresh, &state).await,
+            Err(Error::Unauthorized)
+        ));
     }
 
     #[test]

@@ -1569,16 +1569,30 @@
       // operator asked for.
       var ttl = typeof cached.refreshSecs === 'number' ? cached.refreshSecs : DEFAULT_REFRESH;
       if (now - cached.ts < ttl * 1000) {
+        if (usable(cached.points)) { start(cached.points); return; }
         // An empty snapshot is cached like any other. Turning the backdrop off
         // in the config should stop the requests too, and an empty answer that
         // was never written back meant a disabled feature still cost one fetch
         // per page load, for good.
-        if (!usable(cached.points)) { canvas.parentNode.removeChild(canvas); return; }
-        start(cached.points);
-        return;
+        //
+        // Empty is the *only* unusable snapshot that means that, and the two
+        // were read as one: anything else in the slot is damage — a truncated
+        // write, a half-quota `setItem`, a shape from a version that wrote
+        // something else — and taking it for a switched-off backdrop left the
+        // page with no canvas until the six hours ran out, on every load, with
+        // a live endpoint one request away. Damage falls through to the fetch,
+        // which overwrites it.
+        if (Array.isArray(cached.points) && !cached.points.length) {
+          canvas.parentNode.removeChild(canvas);
+          return;
+        }
       }
     }
-    fetch('/api/v1/vectors/sample', { credentials: 'same-origin' })
+    // `cache: 'no-store'` as well as the response's own header. The header is
+    // what stops a *new* answer being held; this is what stops an answer some
+    // earlier build let the browser keep — a six-hour `max-age` snapshot of
+    // whoever was signed in then — being replayed to whoever is signed in now.
+    fetch('/api/v1/vectors/sample', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (!data) { canvas.parentNode.removeChild(canvas); return; }

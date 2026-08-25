@@ -2023,3 +2023,117 @@ async fn a_sample_returns_artifact_ids_with_their_dense_vectors() {
     );
     v.drop_collection().await.unwrap();
 }
+
+/// Alias per tenant, against a real Qdrant.
+///
+/// The one part of tenancy `MemoryVectors` cannot cover: `tests/multi_tenant.rs`
+/// hands each tenant its own in-memory store by construction, so it proves the
+/// registry asks for a different collection per tenant but never that Qdrant
+/// keeps them apart. Here the two aliases are real names in one server, and
+/// each has to resolve to a different collection and answer with its own points.
+#[tokio::test]
+#[ignore]
+async fn two_tenants_get_two_collections_behind_two_aliases() {
+    let a = fresh("engram_it_tenant_a", 4).await;
+    let b = fresh("engram_it_tenant_b", 4).await;
+
+    assert_ne!(
+        a.resolve_alias().await.unwrap(),
+        b.resolve_alias().await.unwrap(),
+        "two tenants' aliases resolved to one collection"
+    );
+
+    a.upsert(vec![point(
+        "only-a",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &["a"],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+    b.upsert(vec![point(
+        "only-b",
+        "s1",
+        vec![1.0, 0.0, 0.0, 0.0],
+        &["b"],
+        "procedure",
+    )])
+    .await
+    .unwrap();
+
+    // The same query vector, which would rank both points identically if they
+    // shared a collection.
+    for (v, mine, theirs) in [(&a, "only-a", "only-b"), (&b, "only-b", "only-a")] {
+        let hits = v
+            .search(
+                &[1.0, 0.0, 0.0, 0.0],
+                &Default::default(),
+                10,
+                &SearchFilter::default(),
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits
+            .iter()
+            .map(|h| h.payload.artifact_id.as_str())
+            .collect();
+        assert_eq!(ids, vec![mine], "expected only {mine}, got {ids:?}");
+        assert!(!ids.contains(&theirs));
+    }
+
+    a.drop_collection().await.unwrap();
+    b.drop_collection().await.unwrap();
+}
+
+/// Adoption's vector half: the alias moves, the collection behind it does not.
+///
+/// Renaming the alias rather than copying the points is what makes adoption
+/// free — nothing re-embeds, and the generation history the reindex path walks
+/// is preserved exactly as it was.
+#[tokio::test]
+#[ignore]
+async fn renaming_an_alias_carries_the_collection_across_untouched() {
+    let before = fresh("engram_it_adopt_from", 4).await;
+    before
+        .upsert(vec![point(
+            "kept",
+            "s1",
+            vec![1.0, 0.0, 0.0, 0.0],
+            &["x"],
+            "procedure",
+        )])
+        .await
+        .unwrap();
+    let collection = before.resolve_alias().await.unwrap().expect("an alias");
+
+    before.rename_alias("engram_it_adopt_to").await.unwrap();
+
+    let after = QdrantVectors::connect(&cfg("engram_it_adopt_to"))
+        .await
+        .unwrap();
+    assert_eq!(
+        after.resolve_alias().await.unwrap().as_deref(),
+        Some(collection.as_str()),
+        "the new name does not point at the same collection"
+    );
+    assert!(
+        before.resolve_alias().await.unwrap().is_none(),
+        "the old name still resolves"
+    );
+    let hits = after
+        .search(
+            &[1.0, 0.0, 0.0, 0.0],
+            &Default::default(),
+            10,
+            &SearchFilter::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        hits[0].payload.artifact_id, "kept",
+        "the points did not come across"
+    );
+
+    after.drop_collection().await.unwrap();
+}

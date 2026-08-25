@@ -1,3 +1,4 @@
+use super::control::Control;
 use super::{Store, now};
 use crate::error::Result;
 use sqlx::Row;
@@ -238,20 +239,43 @@ enum Guard {
     Closed,
 }
 
-/// `enqueue`, on whatever executor the caller is inside — a capture's
-/// transaction, so the row and the unit that processes it land together or
-/// not at all.
-pub(crate) async fn enqueue_with<'e>(
-    exec: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+/// `enqueue`, on the control pool.
+///
+/// It used to take whatever executor the caller was inside — a capture's
+/// transaction, so that the corpus row and the unit that processes it landed
+/// together or not at all. The queue lives in a second database now, and
+/// SQLite makes no atomicity promise across two of them in WAL mode, so that
+/// guarantee is gone: a crash between the commit and this leaves a corpus with
+/// no queued job. `jobs/reconcile.rs` is what finds it — "a process killed
+/// between two writes" is the case its module doc opens with.
+///
+/// Which fixes the order every caller has to use: **commit first, arm after**.
+/// The other way round the unit is claimable before its target is visible, and
+/// a claimed unit whose target is not there is not a race to a worker — it is
+/// a deletion, closed with `complete_job` so it never runs again. One order
+/// leaves work a sweep can find; the other loses it silently.
+pub(crate) async fn enqueue_with(
+    control: &crate::store::control::Control,
+    subject: &str,
     stage: Stage,
     target_kind: &str,
     target_id: &str,
 ) -> Result<()> {
-    upsert_job_with(exec, stage, target_kind, target_id, 0, Guard::Any).await
+    upsert_job_with(
+        control,
+        subject,
+        stage,
+        target_kind,
+        target_id,
+        0,
+        Guard::Any,
+    )
+    .await
 }
 
-async fn upsert_job_with<'e>(
-    exec: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+async fn upsert_job_with(
+    control: &crate::store::control::Control,
+    subject: &str,
     stage: Stage,
     target_kind: &str,
     target_id: &str,
@@ -259,13 +283,14 @@ async fn upsert_job_with<'e>(
     guard: Guard,
 ) -> Result<()> {
     sqlx::query(guard.statement())
+        .bind(subject)
         .bind(stage.as_str())
         .bind(target_kind)
         .bind(target_id)
         .bind(now())
         .bind(seq)
         .bind(stage.class())
-        .execute(exec)
+        .execute(&control.pool)
         .await?;
     Ok(())
 }
@@ -275,9 +300,9 @@ async fn upsert_job_with<'e>(
 macro_rules! arm_job {
     ($guard:literal) => {
         concat!(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
-             VALUES (?, ?, ?, 'pending', 0, 0, ?, ?, ?)
-             ON CONFLICT(stage, target_id) DO UPDATE SET
+            "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
+             VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?, ?)
+             ON CONFLICT(subject, stage, target_id) DO UPDATE SET
                state = 'pending', attempts = 0, run_after = 0, last_error = NULL,
                claimed_at = NULL, created_at = excluded.created_at, seq = excluded.seq,
                -- Re-armed rows take the stage's class back, ageing included: an
@@ -367,23 +392,76 @@ impl Store {
         run_after: i64,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
-             VALUES (?, ?, ?, 'pending', 0, ?, ?, 0, ?)
-             ON CONFLICT(stage, target_id) DO UPDATE SET
+            "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
+             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?)
+             ON CONFLICT(subject, stage, target_id) DO UPDATE SET
                state = 'pending', attempts = 0, run_after = excluded.run_after,
                last_error = NULL, claimed_at = NULL,
                created_at = excluded.created_at, class = excluded.class
              WHERE jobs.state IN ('done', 'failed')",
         )
+        .bind(&self.subject)
         .bind(stage.as_str())
         .bind(target_kind)
         .bind(target_id)
         .bind(run_after)
         .bind(now())
         .bind(stage.class())
-        .execute(&self.pool)
+        .execute(&self.control.pool)
         .await?;
         Ok(())
+    }
+
+    /// `arm_periodic`, carrying the count of consecutive runs that found
+    /// nothing.
+    ///
+    /// A separate method rather than a fifth argument on `arm_periodic`,
+    /// because the two say different things: `arm_periodic` is the repair
+    /// pass putting a missing sweep back, and knows nothing about how the last
+    /// run went, while this is a sweep that has just finished saying so.
+    pub async fn arm_periodic_with_backoff(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        run_after: i64,
+        empty_runs: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class, empty_runs)
+             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, ?)
+             ON CONFLICT(subject, stage, target_id) DO UPDATE SET
+               state = 'pending', attempts = 0, run_after = excluded.run_after,
+               last_error = NULL, claimed_at = NULL,
+               created_at = excluded.created_at, class = excluded.class,
+               empty_runs = excluded.empty_runs
+             WHERE jobs.state IN ('done', 'failed')",
+        )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(run_after)
+        .bind(now())
+        .bind(stage.class())
+        .bind(empty_runs)
+        .execute(&self.control.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// How many consecutive runs of this unit have found nothing. Zero when
+    /// there is no row, which is the same answer a first run gets.
+    pub async fn empty_runs(&self, stage: Stage, target_id: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT empty_runs FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
+        )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_id)
+        .fetch_optional(&self.control.pool)
+        .await?
+        .unwrap_or(0))
     }
 
     /// This unit has just become worth running: let it go now.
@@ -407,15 +485,34 @@ impl Store {
     /// been ready for one instant looking, to `age_background`, like one that
     /// has been waiting all period.
     pub async fn arm_now(&self, stage: Stage, target_kind: &str, target_id: &str) -> Result<()> {
+        // The backoff count first, and on its own statement, because it is the
+        // one thing here that is true of a row in *any* state. The two
+        // statements below cover a sleeping row and a closed one; a row a
+        // worker is inside matches neither, and that is not a rare case for a
+        // periodic unit — it is a capture landing while the sweep it concerns
+        // is running. Left to them, `rearm_periodic_with` read the count this
+        // arming was supposed to have cleared and re-armed the sweep at the
+        // doubled wait, with the new data already in the base.
+        sqlx::query(
+            "UPDATE jobs SET empty_runs = 0
+              WHERE subject = ? AND stage = ? AND target_id = ?",
+        )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_id)
+        .execute(&self.control.pool)
+        .await?;
         sqlx::query(
             "UPDATE jobs SET run_after = 0, class = ?, created_at = ?
-              WHERE stage = ? AND target_id = ? AND state = 'pending' AND run_after > 0",
+              WHERE subject = ? AND stage = ? AND target_id = ?
+                AND state = 'pending' AND run_after > 0",
         )
         .bind(stage.class())
         .bind(now())
+        .bind(&self.subject)
         .bind(stage.as_str())
         .bind(target_id)
-        .execute(&self.pool)
+        .execute(&self.control.pool)
         .await?;
         self.rearm_idle_seq(stage, target_kind, target_id, 0).await
     }
@@ -429,19 +526,29 @@ impl Store {
         seq: i64,
         guard: Guard,
     ) -> Result<()> {
-        upsert_job_with(&self.pool, stage, target_kind, target_id, seq, guard).await
+        upsert_job_with(
+            &self.control,
+            &self.subject,
+            stage,
+            target_kind,
+            target_id,
+            seq,
+            guard,
+        )
+        .await
     }
 
     /// The `seq` a job currently carries, so a unit that re-arms itself can
     /// climb rather than re-entering at the front of its batch.
     pub async fn job_seq(&self, stage: Stage, target_id: &str) -> Result<Option<i64>> {
-        Ok(
-            sqlx::query_scalar::<_, i64>("SELECT seq FROM jobs WHERE stage = ? AND target_id = ?")
-                .bind(stage.as_str())
-                .bind(target_id)
-                .fetch_optional(&self.pool)
-                .await?,
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT seq FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
         )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_id)
+        .fetch_optional(&self.control.pool)
+        .await?)
     }
 
     /// Is anything going to run this unit? `Some` for a row that is queued or
@@ -454,11 +561,13 @@ impl Store {
     pub async fn live_job(&self, stage: Stage, target_id: &str) -> Result<bool> {
         Ok(sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM jobs
-              WHERE stage = ? AND target_id = ? AND state IN ('pending', 'running')",
+              WHERE subject = ? AND stage = ? AND target_id = ?
+                AND state IN ('pending', 'running')",
         )
+        .bind(&self.subject)
         .bind(stage.as_str())
         .bind(target_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.control.pool)
         .await?
         .is_some())
     }
@@ -470,10 +579,11 @@ impl Store {
     /// undoes exactly that — which is the point when the person who owns the
     /// collection has asked for another try.
     pub async fn delete_job(&self, stage: Stage, target_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM jobs WHERE stage = ? AND target_id = ?")
+        sqlx::query("DELETE FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?")
+            .bind(&self.subject)
             .bind(stage.as_str())
             .bind(target_id)
-            .execute(&self.pool)
+            .execute(&self.control.pool)
             .await?;
         Ok(())
     }
@@ -492,12 +602,13 @@ impl Store {
     pub async fn delete_window_jobs(&self, corpus_id: &str) -> Result<()> {
         sqlx::query(
             "DELETE FROM jobs
-              WHERE stage = 'segment_window'
+              WHERE subject = ? AND stage = 'segment_window'
                 AND substr(target_id, 1, length(?) + 1) = ? || '#'",
         )
+        .bind(&self.subject)
         .bind(corpus_id)
         .bind(corpus_id)
-        .execute(&self.pool)
+        .execute(&self.control.pool)
         .await?;
         Ok(())
     }
@@ -510,6 +621,87 @@ impl Store {
         Ok(self.job_seq(stage, target_id).await?.is_some())
     }
 
+    pub async fn job_counts(&self) -> Result<Vec<(String, i64)>> {
+        let rows =
+            sqlx::query("SELECT state, COUNT(*) AS n FROM jobs WHERE subject = ? GROUP BY state")
+                .bind(&self.subject)
+                .fetch_all(&self.control.pool)
+                .await?;
+        Ok(rows.iter().map(|r| (r.get("state"), r.get("n"))).collect())
+    }
+
+    /// Jobs waiting on a backoff, soonest first.
+    ///
+    /// `attempts > 0` is what separates work that has hit something from work
+    /// that is merely queued: a fresh job has `run_after` in the past and does
+    /// not belong on a page about trouble.
+    pub async fn retrying_jobs(&self, limit: i64) -> Result<Vec<RetryingJob>> {
+        let rows = sqlx::query(
+            "SELECT stage, target_id, attempts, last_error, run_after FROM jobs
+              WHERE subject = ? AND state = 'pending' AND attempts > 0 AND run_after > ?
+              ORDER BY run_after LIMIT ?",
+        )
+        .bind(&self.subject)
+        .bind(now())
+        .bind(limit)
+        .fetch_all(&self.control.pool)
+        .await?;
+        let at = now();
+        Ok(rows
+            .iter()
+            .map(|r| RetryingJob {
+                stage: r.get("stage"),
+                target_id: r.get("target_id"),
+                attempts: r.get("attempts"),
+                next_attempt_secs: (r.get::<i64, _>("run_after") - at).max(0),
+                last_error: r.get("last_error"),
+            })
+            .collect())
+    }
+
+    pub async fn failed_jobs(&self, limit: i64) -> Result<Vec<FailedJob>> {
+        let rows = sqlx::query(
+            "SELECT id, stage, target_id, attempts, last_error FROM jobs
+              WHERE subject = ? AND state = 'failed' ORDER BY id DESC LIMIT ?",
+        )
+        .bind(&self.subject)
+        .bind(limit)
+        .fetch_all(&self.control.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| FailedJob {
+                id: r.get("id"),
+                stage: r.get("stage"),
+                target_id: r.get("target_id"),
+                attempts: r.get("attempts"),
+                last_error: r.get("last_error"),
+            })
+            .collect())
+    }
+
+    /// How long the longest-waiting pending job has been queued, in seconds.
+    ///
+    /// Measured from `created_at`, not `run_after`: a job that was never
+    /// delayed has `run_after = 0`, which would report seconds-since-epoch.
+    pub async fn oldest_pending_age(&self) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            "SELECT MIN(created_at) AS oldest FROM jobs WHERE subject = ? AND state = 'pending'",
+        )
+        .bind(&self.subject)
+        .fetch_one(&self.control.pool)
+        .await?;
+        let oldest: Option<i64> = row.get("oldest");
+        Ok(oldest.map(|t| (now() - t).max(0)))
+    }
+}
+
+/// The instance-wide half of the queue.
+///
+/// Claiming, closing and recovering are about the machine rather than about
+/// any one tenant: one pool of workers serves everybody, so these run without
+/// a subject and `claim_job` reports the one it found.
+impl Control {
     /// Atomic claim. The UPDATE ... WHERE id = (SELECT ...) RETURNING form runs
     /// as one statement under SQLite's write lock, so two workers can never
     /// take the same row.
@@ -535,7 +727,13 @@ impl Store {
     /// with nothing anywhere able to say that one of the two has a person in
     /// front of it. It sorts *before* `seq` and never instead of it: within one
     /// class the fairness above is untouched.
-    pub async fn claim_job(&self) -> Result<Option<Job>> {
+    /// Instance-wide, and it says whose job it is.
+    ///
+    /// `subject` is deliberately absent from the ordering. The claim order is
+    /// the single-user one, unchanged, and `seq` already interleaves batches —
+    /// so across tenants it interleaves those too, and one user's ingest cannot
+    /// drain ahead of another's without a scheduler being written to say so.
+    pub async fn claim_job(&self) -> Result<Option<(String, Job)>> {
         let row = sqlx::query(
             "UPDATE jobs
                 SET state = 'running', claimed_at = ?, attempts = attempts + 1
@@ -544,19 +742,25 @@ impl Store {
                  WHERE state = 'pending' AND run_after <= ?
                  ORDER BY class, attempts, seq, id LIMIT 1
               )
-              RETURNING id, stage, target_kind, target_id, attempts",
+              RETURNING id, subject, stage, target_kind, target_id, attempts",
         )
         .bind(now())
         .bind(now())
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| Job {
-            id: r.get("id"),
-            stage: Stage::parse(r.get::<String, _>("stage").as_str()).unwrap_or(Stage::Synthesize),
-            target_kind: r.get("target_kind"),
-            target_id: r.get("target_id"),
-            attempts: r.get("attempts"),
+        Ok(row.map(|r| {
+            (
+                r.get::<String, _>("subject"),
+                Job {
+                    id: r.get("id"),
+                    stage: Stage::parse(r.get::<String, _>("stage").as_str())
+                        .unwrap_or(Stage::Synthesize),
+                    target_kind: r.get("target_kind"),
+                    target_id: r.get("target_id"),
+                    attempts: r.get("attempts"),
+                },
+            )
         }))
     }
 
@@ -601,61 +805,6 @@ impl Store {
         Ok(res.rows_affected())
     }
 
-    pub async fn job_counts(&self) -> Result<Vec<(String, i64)>> {
-        let rows = sqlx::query("SELECT state, COUNT(*) AS n FROM jobs GROUP BY state")
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(|r| (r.get("state"), r.get("n"))).collect())
-    }
-
-    /// Jobs waiting on a backoff, soonest first.
-    ///
-    /// `attempts > 0` is what separates work that has hit something from work
-    /// that is merely queued: a fresh job has `run_after` in the past and does
-    /// not belong on a page about trouble.
-    pub async fn retrying_jobs(&self, limit: i64) -> Result<Vec<RetryingJob>> {
-        let rows = sqlx::query(
-            "SELECT stage, target_id, attempts, last_error, run_after FROM jobs
-              WHERE state = 'pending' AND attempts > 0 AND run_after > ?
-              ORDER BY run_after LIMIT ?",
-        )
-        .bind(now())
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        let at = now();
-        Ok(rows
-            .iter()
-            .map(|r| RetryingJob {
-                stage: r.get("stage"),
-                target_id: r.get("target_id"),
-                attempts: r.get("attempts"),
-                next_attempt_secs: (r.get::<i64, _>("run_after") - at).max(0),
-                last_error: r.get("last_error"),
-            })
-            .collect())
-    }
-
-    pub async fn failed_jobs(&self, limit: i64) -> Result<Vec<FailedJob>> {
-        let rows = sqlx::query(
-            "SELECT id, stage, target_id, attempts, last_error FROM jobs
-              WHERE state = 'failed' ORDER BY id DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .iter()
-            .map(|r| FailedJob {
-                id: r.get("id"),
-                stage: r.get("stage"),
-                target_id: r.get("target_id"),
-                attempts: r.get("attempts"),
-                last_error: r.get("last_error"),
-            })
-            .collect())
-    }
-
     /// A background unit that has waited long enough becomes foreground.
     ///
     /// Written, not computed. Ageing at claim time would put `created_at` — an
@@ -692,33 +841,89 @@ impl Store {
     /// class the order is `attempts, seq, id` and they were all armed first.
     /// An aged unit going ahead of a fresh capture is the promise (§4.4) and
     /// stays; the whole queue doing it at once is not.
-    pub async fn age_background(&self, older_than: i64, limit: i64) -> Result<u64> {
+    ///
+    /// Per tenant, and `limit` is that tenant's whole budget.
+    ///
+    /// Instance-wide it was one budget shared by everybody, which is the same
+    /// starvation this promotes units to end, moved up a level: ten users past
+    /// the threshold at once got two promotions an hour each, a hundred got a
+    /// fifth of one, and the guarantee the class column exists for thinned out
+    /// in proportion to how many people used the instance. Oldest-first over
+    /// the whole table made it worse than the average suggests — one tenant
+    /// with a deep backlog is *always* the oldest, so it took the entire budget
+    /// and everyone else waited on it.
+    pub async fn age_background(&self, subject: &str, older_than: i64, limit: i64) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE jobs SET class = 0
               WHERE id IN (
                 SELECT id FROM jobs
-                 WHERE state = 'pending' AND class = 1
+                 WHERE subject = ? AND state = 'pending' AND class = 1
                    AND max(created_at, run_after) < ?
                  ORDER BY max(created_at, run_after)
                  LIMIT ?)",
         )
+        .bind(subject)
         .bind(older_than)
         .bind(limit)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
     }
+}
 
-    /// How long the longest-waiting pending job has been queued, in seconds.
+/// Closing a unit, as its owner. Both take a row id, which is already unique
+/// instance-wide, so these only exist so that the callers deep inside the job
+/// runner keep talking to the store they are already holding.
+impl Store {
+    pub async fn complete_job(&self, id: i64) -> Result<()> {
+        self.control.complete_job(id).await
+    }
+
+    pub async fn fail_job(&self, id: i64, attempts: i64, err: &str) -> Result<()> {
+        self.control.fail_job(id, attempts, err).await
+    }
+
+    /// Promote this tenant's background units that have waited long enough.
     ///
-    /// Measured from `created_at`, not `run_after`: a job that was never
-    /// delayed has `run_after = 0`, which would report seconds-since-epoch.
-    pub async fn oldest_pending_age(&self) -> Result<Option<i64>> {
-        let row = sqlx::query("SELECT MIN(created_at) AS oldest FROM jobs WHERE state = 'pending'")
-            .fetch_one(&self.pool)
-            .await?;
-        let oldest: Option<i64> = row.get("oldest");
-        Ok(oldest.map(|t| (now() - t).max(0)))
+    /// Scoped to this store's own subject: unlike the claim, ageing is about
+    /// one person's queue, and `limit` is what that person gets. Kept here
+    /// because the tests drive it through a single base.
+    pub async fn age_background(&self, older_than: i64, limit: i64) -> Result<u64> {
+        self.control
+            .age_background(&self.subject, older_than, limit)
+            .await
+    }
+
+    /// Claim one of *this* tenant's units.
+    ///
+    /// The workers do not use this — they claim instance-wide and dispatch on
+    /// the subject that comes back, which is what keeps one pool in front of
+    /// one set of inference endpoints. This is for asking a single base to take
+    /// its next step, which is what every test of a stage is doing.
+    pub async fn claim_job(&self) -> Result<Option<Job>> {
+        let row = sqlx::query(
+            "UPDATE jobs
+                SET state = 'running', claimed_at = ?, attempts = attempts + 1
+              WHERE id = (
+                SELECT id FROM jobs
+                 WHERE subject = ? AND state = 'pending' AND run_after <= ?
+                 ORDER BY class, attempts, seq, id LIMIT 1
+              )
+              RETURNING id, stage, target_kind, target_id, attempts",
+        )
+        .bind(now())
+        .bind(&self.subject)
+        .bind(now())
+        .fetch_optional(&self.control.pool)
+        .await?;
+
+        Ok(row.map(|r| Job {
+            id: r.get("id"),
+            stage: Stage::parse(r.get::<String, _>("stage").as_str()).unwrap_or(Stage::Synthesize),
+            target_kind: r.get("target_kind"),
+            target_id: r.get("target_id"),
+            attempts: r.get("attempts"),
+        }))
     }
 }
 
@@ -816,7 +1021,7 @@ mod tests {
               ORDER BY class, attempts, seq, id LIMIT 1",
         )
         .bind(now())
-        .fetch_all(&s.pool)
+        .fetch_all(&s.control.pool)
         .await
         .unwrap();
         let plan = rows
@@ -844,7 +1049,7 @@ mod tests {
             .unwrap();
         sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'associate'")
             .bind(now() - 7200)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
         s.enqueue(Stage::Synthesize, "corpus", "src-1")
@@ -861,7 +1066,7 @@ mod tests {
             "a sweep that has waited an hour is still behind a fresh capture"
         );
         let class: i64 = sqlx::query_scalar("SELECT class FROM jobs WHERE stage = 'associate'")
-            .fetch_one(&s.pool)
+            .fetch_one(&s.control.pool)
             .await
             .unwrap();
         assert_eq!(class, 0, "having aged must be durable, not recomputed");
@@ -885,7 +1090,7 @@ mod tests {
         }
         sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'relate'")
             .bind(now() - 7200)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -893,7 +1098,7 @@ mod tests {
 
         let still: i64 =
             sqlx::query_scalar("SELECT count(*) FROM jobs WHERE class = 1 AND stage = 'relate'")
-                .fetch_one(&s.pool)
+                .fetch_one(&s.control.pool)
                 .await
                 .unwrap();
         assert_eq!(still, 3, "the rest wait for the next pass");
@@ -914,12 +1119,12 @@ mod tests {
         }
         sqlx::query("UPDATE jobs SET created_at = ? WHERE target_id = 'a-2'")
             .bind(now() - 86_400)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
         sqlx::query("UPDATE jobs SET created_at = ? WHERE target_id <> 'a-2'")
             .bind(now() - 7200)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -927,7 +1132,7 @@ mod tests {
 
         let aged: String =
             sqlx::query_scalar("SELECT target_id FROM jobs WHERE class = 0 AND stage = 'relate'")
-                .fetch_one(&s.pool)
+                .fetch_one(&s.control.pool)
                 .await
                 .unwrap();
         assert_eq!(aged, "a-2", "the longest wait goes first");
@@ -947,7 +1152,7 @@ mod tests {
             .unwrap();
         sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'retention'")
             .bind(now() - 7200)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -959,7 +1164,7 @@ mod tests {
 
         // Due, and now it ages.
         sqlx::query("UPDATE jobs SET run_after = 0 WHERE stage = 'retention'")
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
         assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 1);
@@ -980,7 +1185,7 @@ mod tests {
         sqlx::query("UPDATE jobs SET created_at = ?, run_after = ? WHERE stage = 'retention'")
             .bind(now() - 21_600)
             .bind(now() - 60)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -993,7 +1198,7 @@ mod tests {
         // An hour of actually being ready, and now it ages.
         sqlx::query("UPDATE jobs SET run_after = ? WHERE stage = 'retention'")
             .bind(now() - 7200)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
         assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 1);
@@ -1011,7 +1216,7 @@ mod tests {
             .unwrap();
         sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'pursuit'")
             .bind(now() - 7200)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -1038,7 +1243,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("UPDATE jobs SET state = 'failed' WHERE stage = 'consolidate'")
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
         assert!(!s.live_job(Stage::Consolidate, "collection").await.unwrap());
@@ -1064,7 +1269,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("UPDATE jobs SET class = 0 WHERE stage = 'pursuit'")
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -1074,7 +1279,7 @@ mod tests {
 
         let (run_after, class): (i64, i64) =
             sqlx::query_as("SELECT run_after, class FROM jobs WHERE stage = 'pursuit'")
-                .fetch_one(&s.pool)
+                .fetch_one(&s.control.pool)
                 .await
                 .unwrap();
         assert_eq!(run_after, 0, "the unit must have been pulled forward");
@@ -1104,9 +1309,18 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("jobs.db");
-        let store = Store::connect(&crate::config::StoreConfig {
-            path: path.to_string_lossy().to_string(),
-        })
+        let store = Store::connect(
+            &crate::config::StoreConfig {
+                path: path.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            {
+                let c = crate::store::control::Control::memory().await.unwrap();
+                c.provision(crate::store::TEST_SUBJECT, None).await.unwrap();
+                c
+            },
+            crate::store::TEST_SUBJECT,
+        )
         .await
         .unwrap();
 
@@ -1160,7 +1374,7 @@ mod tests {
         // Well past the old give-up point.
         for _ in 0..MAX_ATTEMPTS + 3 {
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&s.pool)
+                .execute(&s.control.pool)
                 .await
                 .unwrap();
             let j = s
@@ -1172,7 +1386,7 @@ mod tests {
         }
 
         sqlx::query("UPDATE jobs SET run_after = 0")
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
         let again = s.claim_job().await.unwrap();
@@ -1199,7 +1413,7 @@ mod tests {
             // Past the backoff it just set; the delay is not what this test is
             // about.
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&s.pool)
+                .execute(&s.control.pool)
                 .await
                 .unwrap();
         }
@@ -1209,7 +1423,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("UPDATE jobs SET run_after = 0")
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -1234,12 +1448,12 @@ mod tests {
             // Past the backoff it just set; the delay is not what this test is
             // about.
             sqlx::query("UPDATE jobs SET run_after = 0")
-                .execute(&s.pool)
+                .execute(&s.control.pool)
                 .await
                 .unwrap();
         }
         sqlx::query("UPDATE jobs SET run_after = 0")
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -1296,7 +1510,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("UPDATE jobs SET run_after = 0")
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -1348,7 +1562,7 @@ mod tests {
             .unwrap();
         let (attempts, run_after): (i64, i64) =
             sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE target_id = 'src-1#0'")
-                .fetch_one(&s.pool)
+                .fetch_one(&s.control.pool)
                 .await
                 .unwrap();
         assert_eq!(attempts, 1, "the sweep reset a unit's attempt count");
@@ -1376,11 +1590,11 @@ mod tests {
         sqlx::query("UPDATE jobs SET claimed_at = ? WHERE id = ?")
             .bind(crate::store::now() - 3600)
             .bind(j.id)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
-        assert_eq!(s.reclaim_stuck(600).await.unwrap(), 1);
+        assert_eq!(s.control.reclaim_stuck(600).await.unwrap(), 1);
         assert!(
             s.claim_job().await.unwrap().is_some(),
             "reclaimed job must be runnable again"
@@ -1401,7 +1615,7 @@ mod tests {
         // A job enqueued an hour ago should read as roughly an hour.
         sqlx::query("UPDATE jobs SET created_at = ?")
             .bind(crate::store::now() - 3600)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
         let age = s.oldest_pending_age().await.unwrap().unwrap();
@@ -1434,7 +1648,7 @@ mod tests {
         );
         let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
             .bind(job.id)
-            .fetch_one(&s.pool)
+            .fetch_one(&s.control.pool)
             .await
             .unwrap();
         assert_eq!(state, "pending");
@@ -1447,7 +1661,7 @@ mod tests {
         let j = s.claim_job().await.unwrap().unwrap();
         sqlx::query("UPDATE jobs SET state='failed' WHERE id = ?")
             .bind(j.id)
-            .execute(&s.pool)
+            .execute(&s.control.pool)
             .await
             .unwrap();
 
@@ -1460,5 +1674,107 @@ mod tests {
     fn describe_is_a_stage_that_round_trips_its_name() {
         assert_eq!(Stage::Describe.as_str(), "describe");
         assert_eq!(Stage::parse("describe"), Some(Stage::Describe));
+    }
+
+    #[tokio::test]
+    async fn two_tenants_do_not_see_each_others_jobs() {
+        let control = crate::store::control::Control::memory().await.unwrap();
+        control.provision("sub-a", None).await.unwrap();
+        control.provision("sub-b", None).await.unwrap();
+        let a = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap()
+            .for_subject("sub-a");
+        let b = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap()
+            .for_subject("sub-b");
+
+        a.enqueue(Stage::Embed, "corpus", "shared-id")
+            .await
+            .unwrap();
+        assert!(a.live_job(Stage::Embed, "shared-id").await.unwrap());
+        assert!(!b.live_job(Stage::Embed, "shared-id").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_same_target_id_in_two_tenants_is_two_jobs() {
+        let control = crate::store::control::Control::memory().await.unwrap();
+        control.provision("sub-a", None).await.unwrap();
+        control.provision("sub-b", None).await.unwrap();
+        let a = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap()
+            .for_subject("sub-a");
+        let b = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap()
+            .for_subject("sub-b");
+
+        a.enqueue(Stage::Embed, "corpus", "same").await.unwrap();
+        b.enqueue(Stage::Embed, "corpus", "same").await.unwrap();
+
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+            .fetch_one(&control.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "UNIQUE is per subject, not instance-wide");
+    }
+
+    #[tokio::test]
+    async fn claiming_says_whose_job_it_is() {
+        let control = crate::store::control::Control::memory().await.unwrap();
+        control.provision("sub-a", None).await.unwrap();
+        let a = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap()
+            .for_subject("sub-a");
+        a.enqueue(Stage::Embed, "corpus", "c1").await.unwrap();
+
+        let (subject, job) = control.claim_job().await.unwrap().expect("a job");
+        assert_eq!(subject, "sub-a");
+        assert_eq!(job.target_id, "c1");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_takes_their_queue_with_them() {
+        let control = crate::store::control::Control::memory().await.unwrap();
+        control.provision("sub-a", None).await.unwrap();
+        let a = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap()
+            .for_subject("sub-a");
+        a.enqueue(Stage::Embed, "corpus", "c1").await.unwrap();
+
+        control.delete_user("sub-a").await.unwrap();
+        assert!(control.claim_job().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn one_tenants_sweep_does_not_close_anothers() {
+        let control = crate::store::control::Control::memory().await.unwrap();
+        control.provision("sub-a", None).await.unwrap();
+        control.provision("sub-b", None).await.unwrap();
+        let a = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap()
+            .for_subject("sub-a");
+        let b = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap()
+            .for_subject("sub-b");
+
+        a.enqueue(Stage::Consolidate, "collection", "collection")
+            .await
+            .unwrap();
+        b.enqueue(Stage::Consolidate, "collection", "collection")
+            .await
+            .unwrap();
+        a.delete_job(Stage::Consolidate, "collection")
+            .await
+            .unwrap();
+
+        assert!(!a.live_job(Stage::Consolidate, "collection").await.unwrap());
+        assert!(b.live_job(Stage::Consolidate, "collection").await.unwrap());
     }
 }

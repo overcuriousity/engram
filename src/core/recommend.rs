@@ -318,6 +318,24 @@ impl Core {
         self.background.spawn(async move {
             if let Err(e) = store.record_context(&row).await {
                 tracing::warn!(error = %e, "could not record the situation of a page view");
+                return;
+            }
+            // The producer half of the sweep's empty-run backoff, and the thing
+            // that makes backing off safe there: the context sweep is a full
+            // recompute, so it can only report work when a profile decays away,
+            // and a base being read all week would otherwise still double its
+            // wait until situations written today waited hours to be learned
+            // from. This is the arming `rearm_periodic_with` says every producer
+            // does; for this unit it was the one nobody had written.
+            if let Err(e) = store
+                .arm_now(
+                    crate::store::jobs::Stage::Context,
+                    "collection",
+                    crate::core::background::CONSOLIDATE_TARGET,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "could not bring the context sweep forward");
             }
         });
     }
@@ -625,8 +643,8 @@ mod tests {
         }
 
         let learned = crate::jobs::context::run(&core).await.unwrap();
-        assert_eq!(learned.events, 12);
-        assert_eq!(learned.profiled, 2, "both situations were learned");
+        assert_eq!(learned.standing.events, 12);
+        assert_eq!(learned.standing.profiled, 2, "both situations were learned");
 
         // The seventh Friday, eight minutes before the usual hour.
         let mut seventh = core.clone();

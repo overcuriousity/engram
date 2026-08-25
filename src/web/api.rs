@@ -1,9 +1,9 @@
-use crate::auth::Identity;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::jobs::{FailedJob, Stage};
+use crate::tenants::Tenant;
 use crate::web::state::AppState;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -183,8 +183,7 @@ async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Resul
 }
 
 async fn ingest(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Json(req): Json<IngestRequest>,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
     let supplied = [
@@ -224,7 +223,7 @@ async fn ingest(
     let floor = if floor_exempt(&req) {
         0
     } else {
-        st.core.capture.min_extracted_chars
+        tenant.core.capture.min_extracted_chars
     };
 
     let (text, origin) = if let Some(text) = req.text {
@@ -236,14 +235,14 @@ async fn ingest(
         )
     } else {
         let u = parsed_url.as_ref().expect("one-of check guarantees a url");
-        let html = crate::core::fetch::fetch_html(u, &st.core.capture).await?;
+        let html = crate::core::fetch::fetch_html(u, &tenant.core.capture).await?;
         (
             extract(html, parsed_url.clone(), floor).await?,
             ORIGIN_FETCH,
         )
     };
 
-    let out = st
+    let out = tenant
         .core
         .ingest_capture(
             crate::core::ingest::Capture::new(text, origin)
@@ -357,8 +356,7 @@ async fn read_upload(
 ///
 /// A PDF is stored and queued; the reading happens in `Stage::Extract`.
 async fn upload(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
     let parts = read_upload(multipart, "file", &["note"]).await?;
@@ -416,7 +414,7 @@ async fn upload(
                 .map_err(|_| Error::Validation("that file is not valid UTF-8 text".into()))?;
             let size = bytes.len();
 
-            let out = st
+            let out = tenant
                 .core
                 .ingest_capture(
                     crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD)
@@ -432,7 +430,7 @@ async fn upload(
             Ok((code, Json(out)))
         }
         Kind::Pdf => {
-            let out = st
+            let out = tenant
                 .core
                 .ingest_pdf(crate::core::ingest::PdfCapture {
                     bytes: bytes.to_vec(),
@@ -463,8 +461,7 @@ enum Kind {
 /// The image door. Parts: `image` (required), `title_hint`, `note`. The
 /// bytes are validated and stored here; the reading happens in a job.
 async fn upload_image(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
     let mut parts = read_upload(multipart, "image", &["note", "title_hint"]).await?;
@@ -474,7 +471,7 @@ async fn upload_image(
     else {
         return Err(Error::Validation("no image in the upload".into()));
     };
-    let out = st
+    let out = tenant
         .core
         .ingest_image(crate::core::ingest::ImageCapture {
             bytes: bytes.to_vec(),
@@ -496,13 +493,9 @@ async fn upload_image(
 /// The bytes as uploaded, whatever they are. The image door's `?original=1`
 /// answers the same thing for a photo and stays where it is; this is the name
 /// that does not lie about a PDF.
-async fn get_file(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(id): Path<String>,
-) -> Result<axum::response::Response> {
+async fn get_file(tenant: Tenant, Path(id): Path<String>) -> Result<axum::response::Response> {
     use axum::response::IntoResponse;
-    let Some((mime, bytes)) = st.core.store.attachment_original(&id).await? else {
+    let Some((mime, bytes)) = tenant.core.store.attachment_original(&id).await? else {
         return Err(Error::NotFound);
     };
     Ok((
@@ -526,8 +519,7 @@ struct ImageQuery {
 
 /// The preview by default; `?original=1` for the bytes as uploaded.
 async fn get_image(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(id): Path<String>,
     Query(q): Query<ImageQuery>,
 ) -> Result<axum::response::Response> {
@@ -537,9 +529,9 @@ async fn get_image(
         .as_deref()
         .is_some_and(|v| v == "1" || v == "true");
     let found = if want_original {
-        st.core.store.attachment_original(&id).await?
+        tenant.core.store.attachment_original(&id).await?
     } else {
-        st.core.store.attachment_preview(&id).await?
+        tenant.core.store.attachment_preview(&id).await?
     };
     let Some((mime, bytes)) = found else {
         return Err(Error::NotFound);
@@ -569,12 +561,12 @@ fn default_limit() -> i64 {
 }
 
 async fn list_corpora(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Query(p): Query<ListParams>,
 ) -> Result<Json<Vec<crate::store::corpora::Corpus>>> {
     Ok(Json(
-        st.core
+        tenant
+            .core
             .store
             .list_corpora(p.limit.clamp(1, 200), p.offset.max(0))
             .await?,
@@ -588,34 +580,25 @@ pub struct CorpusDetail {
     pub chunks: Vec<crate::store::artifacts::Chunk>,
 }
 
-async fn get_corpus(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(cid): Path<String>,
-) -> Result<Json<CorpusDetail>> {
-    let source = st.core.store.get_corpus(&cid).await?;
-    let chunks = st.core.store.artifacts_for_corpus(&cid).await?;
+async fn get_corpus(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<CorpusDetail>> {
+    let source = tenant.core.store.get_corpus(&cid).await?;
+    let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
     Ok(Json(CorpusDetail { source, chunks }))
 }
 
-async fn delete_corpus(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(cid): Path<String>,
-) -> Result<StatusCode> {
-    st.core.delete_corpus(&cid).await?;
+async fn delete_corpus(tenant: Tenant, Path(cid): Path<String>) -> Result<StatusCode> {
+    tenant.core.delete_corpus(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn reprocess(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
     Json(req): Json<ReprocessRequest>,
 ) -> Result<StatusCode> {
     let stage = Stage::parse(&req.stage)
         .ok_or_else(|| Error::Validation(format!("unknown stage `{}`", req.stage)))?;
-    st.core.reprocess(&cid, stage).await?;
+    tenant.core.reprocess(&cid, stage).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -628,23 +611,22 @@ struct ResolveBody {
 /// nothing here compares the two documents again, it only carries out what was
 /// chosen.
 async fn resolve_near_dupe(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
     Json(body): Json<ResolveBody>,
 ) -> Result<Json<serde_json::Value>> {
-    st.core.resolve_near_duplicate(&cid, body.action).await?;
+    tenant
+        .core
+        .resolve_near_duplicate(&cid, body.action)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// What consolidation has decided and what it is still asking about.
-async fn consolidation(
-    State(st): State<AppState>,
-    _id: Identity,
-) -> Result<Json<serde_json::Value>> {
+async fn consolidation(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     use crate::store::pairs::PairState;
     Ok(Json(serde_json::json!({
-        "superseded": st.core.store.superseded_artifacts(100).await?,
+        "superseded": tenant.core.store.superseded_artifacts(100).await?,
         // What the judge actually ruled on, listed first for the same reason
         // Ops puts it at the top: it is the one output here that cost a model
         // call, and an operator reading only `pairs` would conclude there was
@@ -653,7 +635,7 @@ async fn consolidation(
         // report presses the same endpoints an operator does, and those refuse
         // an artifact that is no longer active. A pair naming one is work that
         // can only come back `cannot supersede: loser … is superseded`.
-        "contradictions": st
+        "contradictions": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Contradiction, 100)
@@ -662,7 +644,7 @@ async fn consolidation(
         // for the same reason Ops renders them: without this a pair the judge
         // ruled on simply disappears from `pairs`, and an API consumer never
         // sees the proposal it left behind.
-        "supersede_proposals": st
+        "supersede_proposals": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Superseded, 100)
@@ -672,7 +654,7 @@ async fn consolidation(
         // it is found, so nothing new lands here. Emitted regardless — a client
         // indexing this key breaks on a response that drops it, and the pairs
         // already in that state are still waiting on the press.
-        "discard_proposals": st
+        "discard_proposals": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Vacuous, 100)
@@ -683,7 +665,7 @@ async fn consolidation(
         // breaks on a response that drops it, and an empty list already says
         // "nothing here to act on" in the language the rest of this reads.
         "merge_proposals": serde_json::Value::Array(vec![]),
-        "pairs": st
+        "pairs": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Pending, 100)
@@ -724,8 +706,7 @@ pub struct SearchParams {
 }
 
 async fn search(
-    State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     Query(q): Query<SearchParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
     use crate::store::feedback::Door;
@@ -773,11 +754,11 @@ async fn search(
     // is typing, or two operators' panels fold into each other's queries. A
     // deliberate API call is one event and has nothing to fold with.
     let origin: crate::store::feedback::Origin = if typing {
-        door.by(id.subject)
+        door.by(tenant.user.subject)
     } else {
         door.into()
     };
-    Ok(Json(st.core.search(&query, origin).await?))
+    Ok(Json(tenant.core.search(&query, origin).await?))
 }
 
 #[derive(serde::Deserialize)]
@@ -789,24 +770,27 @@ pub struct StaleParams {
 /// for an operator to review and deprecate. Read-only: nothing here changes
 /// an artifact, and nothing here feeds search ranking.
 async fn stale(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Query(p): Query<StaleParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
-    Ok(Json(st.core.stale_candidates(p.limit.unwrap_or(20)).await?))
+    Ok(Json(
+        tenant.core.stale_candidates(p.limit.unwrap_or(20)).await?,
+    ))
 }
 
 async fn ask(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Json<crate::core::ask::AskResponse>> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
+    if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
     Ok(Json(
-        st.core.ask(&req, crate::store::feedback::Door::Api).await?,
+        tenant
+            .core
+            .ask(&req, crate::store::feedback::Door::Api)
+            .await?,
     ))
 }
 
@@ -816,32 +800,31 @@ pub struct ResurfaceParams {
 }
 
 async fn resurface(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Query(p): Query<ResurfaceParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
-    Ok(Json(st.core.resurface(p.limit.unwrap_or(5)).await?))
+    Ok(Json(tenant.core.resurface(p.limit.unwrap_or(5)).await?))
 }
 
 async fn get_artifact(
-    State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<Json<crate::store::artifacts::Chunk>> {
-    let chunk = st.core.store.get_artifact(&cid).await?;
+    let chunk = tenant.core.store.get_artifact(&cid).await?;
     // Asking for one artifact by id is the same deliberate act the detail pane
     // records, and it is the whole of what this door can honestly say: there
     // is no navigation to have pivoted through, so no `via`, and no session to
     // belong to, because a bearer token is not a conversation. Written after
     // the read succeeds — a 404 engaged nothing.
-    st.core.mark_artifact_seen(&cid);
-    st.core.record_interaction(&cid, None, Some(&id.subject));
+    tenant.core.mark_artifact_seen(&cid);
+    tenant
+        .core
+        .record_interaction(&cid, None, Some(&tenant.user.subject));
     Ok(Json(chunk))
 }
 
 async fn patch_artifact(
-    State(st): State<AppState>,
-    _id: Identity,
+    tenant: Tenant,
     Path(cid): Path<String>,
     Json(req): Json<PatchArtifactRequest>,
 ) -> Result<Json<crate::store::artifacts::Chunk>> {
@@ -873,7 +856,7 @@ async fn patch_artifact(
         .map(|c| c.map(|v| crate::infer::prompt::normalize_category(&v)));
     let tags = req.tags.as_deref().map(clean_tags).transpose()?;
 
-    st.core.store.get_artifact(&cid).await?;
+    tenant.core.store.get_artifact(&cid).await?;
 
     // The embedder is shown the title followed by the body, so either of those
     // invalidates the stored vector. A category or a tag changes only what the
@@ -881,27 +864,30 @@ async fn patch_artifact(
     let revectorize = text.is_some() || title.is_some();
 
     if let Some(t) = &text {
-        st.core.store.update_artifact_text(&cid, t).await?;
+        tenant.core.store.update_artifact_text(&cid, t).await?;
     }
     if let Some(t) = &title {
-        st.core
+        tenant
+            .core
             .store
             .update_artifact_title(&cid, t.as_deref())
             .await?;
     }
     if let Some(c) = &category {
-        st.core
+        tenant
+            .core
             .store
             .update_artifact_category(&cid, c.as_deref())
             .await?;
     }
     if let Some(t) = &tags {
-        st.core.store.update_artifact_tags(&cid, t).await?;
+        tenant.core.store.update_artifact_tags(&cid, t).await?;
     }
 
-    let chunk = st.core.store.get_artifact(&cid).await?;
+    let chunk = tenant.core.store.get_artifact(&cid).await?;
     if revectorize {
-        st.core
+        tenant
+            .core
             .store
             .enqueue(Stage::Embed, "artifact", &cid)
             .await?;
@@ -912,7 +898,8 @@ async fn patch_artifact(
         // Only when there is a point to rewrite: for a chunk still waiting to
         // be embedded, this would be a request Qdrant accepts and applies to
         // nothing, and the pending job writes the whole payload anyway.
-        st.core
+        tenant
+            .core
             .vectors
             .set_payload(&crate::vector::VectorPayload {
                 artifact_id: chunk.id.clone(),
@@ -935,24 +922,20 @@ async fn patch_artifact(
     Ok(Json(chunk))
 }
 
-async fn delete_artifact(
-    State(st): State<AppState>,
-    _id: Identity,
-    Path(cid): Path<String>,
-) -> Result<StatusCode> {
+async fn delete_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<StatusCode> {
     // Both stores, in the order that survives an interruption — see
     // `Core::delete_artifact`, which the UI button posts to as well.
-    st.core.delete_artifact(&cid).await?;
+    tenant.core.delete_artifact(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<StatusResponse>> {
+async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
     use sqlx::Row;
     let corpus_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
-        .fetch_all(&st.core.store.pool)
+        .fetch_all(&tenant.core.store.pool)
         .await?;
     let chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
-        .fetch_one(&st.core.store.pool)
+        .fetch_one(&tenant.core.store.pool)
         .await?
         .get("n");
 
@@ -961,13 +944,13 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
             .iter()
             .map(|r| (r.get("status"), r.get("n")))
             .collect(),
-        jobs: st.core.store.job_counts().await?,
-        failed: st.core.store.failed_jobs(50).await?,
-        oldest_pending_secs: st.core.store.oldest_pending_age().await?,
+        jobs: tenant.core.store.job_counts().await?,
+        failed: tenant.core.store.failed_jobs(50).await?,
+        oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,
         chunks,
         // Qdrant being briefly unreachable should not fail the status page,
         // which is exactly where you look when something is wrong.
-        vectors: st.core.vectors.count().await.unwrap_or(0),
+        vectors: tenant.core.vectors.count().await.unwrap_or(0),
     }))
 }
 
@@ -983,24 +966,23 @@ async fn status(State(st): State<AppState>, _id: Identity) -> Result<Json<Status
 ///
 /// One question, one request, and no handoff to expire.
 async fn ask_stream(
-    State(st): State<AppState>,
-    id: Identity,
+    tenant: Tenant,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
-    if !st.core.asks() {
+    if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
     use tokio_stream::StreamExt as _;
 
-    let core = st.core.clone();
+    let core = tenant.core.clone();
     // The door an ask came through, which names the caller and nothing more.
     // Unlike search, where `door=extension` decides how the query is recorded,
     // no ask is recorded from here: `record_ask` admits `Door::Ui` alone, so
     // this answer carries no `event_id` and is never judged. Named anyway,
     // because a question composed while reading is a different thing from one
     // typed into an API client, and the log should not have to guess.
-    let origin = crate::store::feedback::Door::Extension.by(id.subject);
+    let origin = crate::store::feedback::Door::Extension.by(tenant.user.subject);
     let events = async_stream::stream! {
         let s = core.ask_events(&req, origin);
         tokio::pin!(s);
@@ -1338,16 +1320,19 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::OK);
-        // The header, not the client's `localStorage`, is what actually holds
-        // the fetch budget: a browser that cannot write storage has nothing
-        // else stopping it from re-running the scroll on every page load.
+        // Never a `max-age`. One URL answers with a different tenant's contents
+        // depending on who is signed in, and an HTTP cache is keyed on the URL
+        // alone — so a held answer is the previous account's cloud drawn for
+        // the next one, and nothing can reach into a browser cache to drop it.
+        // `refresh_secs` and the client's `localStorage` hold the budget
+        // instead, because that is the layer sign-out can clear.
         let cache = res.headers()[header::CACHE_CONTROL]
             .to_str()
             .unwrap()
             .to_string();
         assert!(
-            cache.starts_with("private, max-age=") && !cache.ends_with("=0"),
-            "the sample must be cacheable by the browser: {cache}"
+            cache.contains("no-store") && !cache.contains("max-age"),
+            "a tenant's cloud must not be held in a browser cache: {cache}"
         );
         let body = json_of(res).await;
         let pts = body["points"].as_array().expect("points is an array");

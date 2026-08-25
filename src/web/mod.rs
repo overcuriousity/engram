@@ -9,6 +9,7 @@ pub mod lineage_view;
 pub mod markdown;
 pub mod pair;
 pub mod state;
+pub mod tenant;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ui;
@@ -85,8 +86,8 @@ pub fn router(state: AppState) -> Router {
         .nest(
             "/api/v1",
             api::api_router(
-                state.core.capture.image_max_bytes,
-                state.core.capture.pdf_max_bytes,
+                state.config.capture.image_max_bytes,
+                state.config.capture.pdf_max_bytes,
             ),
         )
         .fallback(ui::not_found)
@@ -262,7 +263,7 @@ mod tests {
         // was the one path that rendered the whole nav — `judge_pending`, a
         // live count out of the base, included — to a visitor with no session.
         let core = crate::core::test_support::test_core().await;
-        let app = crate::web::test_support::router(core, None);
+        let app = crate::web::test_support::router(core, None).await;
         let res = app
             .clone()
             .oneshot(
@@ -300,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn a_bounced_page_load_tells_the_login_where_it_was_going() {
         let core = crate::core::test_support::test_core().await;
-        let app = crate::web::test_support::router(core, None);
+        let app = crate::web::test_support::router(core, None).await;
         let res = app
             .oneshot(
                 axum::http::Request::builder()
