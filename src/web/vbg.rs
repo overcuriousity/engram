@@ -93,6 +93,34 @@ pub fn project_3d(vectors: &[Vec<f32>]) -> Vec<[f32; 3]> {
         .filter(|p| p.iter().all(|c| c.is_finite()))
         .collect();
 
+    // Centred on its own mean before anything is measured from the origin.
+    //
+    // A random projection is linear, so whatever every embedding has in common
+    // — and sentence embeddings have a great deal in common — projects to one
+    // constant offset shared by all three coordinates of every point. Left in,
+    // it is the largest thing in the picture: the radii below are then mostly
+    // the length of that offset rather than the spread of the cloud, so the
+    // scale collapses the store into a small knot, and the client spins about
+    // the origin, which swings the knot around the frame instead of turning it.
+    // Subtracting the centroid is what makes the rotation read as a rotation.
+    if !out.is_empty() {
+        let n = out.len() as f64;
+        let mut mean = [0.0f64; 3];
+        for p in &out {
+            for (m, c) in mean.iter_mut().zip(p.iter()) {
+                *m += *c as f64;
+            }
+        }
+        for m in &mut mean {
+            *m /= n;
+        }
+        for p in &mut out {
+            for (c, m) in p.iter_mut().zip(mean.iter()) {
+                *c -= *m as f32;
+            }
+        }
+    }
+
     // The 95th percentile, not the maximum. A random projection of
     // high-dimensional vectors concentrates hard around its mean, so the
     // farthest point sits well outside the bulk and dividing by it drew the
@@ -129,27 +157,25 @@ pub fn project_3d(vectors: &[Vec<f32>]) -> Vec<[f32; 3]> {
 use crate::error::Result;
 use crate::tenants::Tenant;
 use axum::Json;
+use axum::extract::Query;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
-
-/// How long a snapshot that could not be taken is allowed to stand.
-///
-/// The good answer is kept for the configured refresh window, but an outage
-/// must not blank the backdrop for six hours. A minute is long enough to stop
-/// a reload storm and short enough that the picture comes back on its own.
-///
-/// Carried in the body rather than in a header, like every other budget this
-/// endpoint sets — see `no_store`.
-const FAILURE_REFRESH_SECS: u64 = 60;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 pub struct SampleResponse {
     pub points: Vec<[f32; 3]>,
     pub count: usize,
-    /// The client caches a snapshot for this long; carried in the response
-    /// so the config value never needs a second door.
-    pub refresh_secs: u64,
+    /// What this cloud is a picture of: the account, and how many vectors it
+    /// held. The client stores it beside the points and sends it back as
+    /// `have`; an answer of `unchanged` means the snapshot it is holding is
+    /// still a picture of this store, and anything else replaces it.
+    pub tag: String,
+    /// Set when `have` named the cloud the store still has. `points` is empty
+    /// in that answer — the client already has them — and this is what says so,
+    /// rather than an empty list, which means the opposite: draw nothing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
 }
 
 /// `no-store`, and deliberately not a `max-age` of any length.
@@ -159,15 +185,13 @@ pub struct SampleResponse {
 /// never enough: it only says *whose* cache may hold the answer, and the
 /// browser's own cache is exactly the one that outlives a sign-out. Two people
 /// sharing a machine had the second one's backdrop drawn from the first one's
-/// store for as long as the refresh window ran — six hours, by default.
+/// store for as long as the refresh window ran.
 ///
-/// The client's `localStorage` snapshot is what holds the budget instead, which
-/// is the layer that can actually be invalidated: `app.js` drops it on sign-out
-/// for precisely this reason, and nothing can reach into a browser cache to do
-/// the same. `refresh_secs` in the body is what that snapshot is kept for. The
-/// cost of the change is a browser where `setItem` throws — a private window, a
-/// full quota — paying one sample scroll per page load, and that is the right
-/// side to be wrong on.
+/// The tag is what holds the client's snapshot instead, and it is checked on
+/// every page load rather than trusted for a window: a snapshot is drawn only
+/// after the store has said it is still the picture it took. That is what an
+/// emptied base looks like now — the tag no longer matches, the answer carries
+/// no points, and the canvas comes down on the same load.
 fn no_store(body: SampleResponse) -> Response {
     (
         [(header::CACHE_CONTROL, "private, no-store".to_string())],
@@ -176,39 +200,71 @@ fn no_store(body: SampleResponse) -> Response {
         .into_response()
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct SampleQuery {
+    /// The tag the client's stored snapshot carries, if it has one.
+    #[serde(default)]
+    pub have: Option<String>,
+}
+
+/// The tag for a store with `count` vectors in it, under this account.
+///
+/// The slug is in it because the snapshot lives in `localStorage`, which is
+/// per browser and not per account: without it, signing a second account in on
+/// the same machine matched the first one's tag whenever the two bases happened
+/// to be the same size, and drew one person's cloud for the other.
+fn tag_for(slug: &str, count: u64) -> String {
+    format!("{slug}:{count}")
+}
+
 /// The backdrop's one door. A failure answers an empty cloud rather than an
 /// error: the picture is decorative, and a decoration must never take a page
 /// down with it.
 ///
-/// Every answer carries `refresh_secs`, which is what actually holds the budget
-/// the module claims: the client keeps its own snapshot for that long. It is
-/// not a guarantee — a private window, a full quota or a storage-blocking
-/// setting makes `setItem` throw, and in such a browser every page load re-runs
-/// a scroll of `sample_size` points with their dense vectors attached. That is
-/// the price of `no_store`, and the reason it is worth paying is there.
-pub async fn sample(tenant: Tenant) -> Result<Response> {
+/// Two shapes of answer. With `?have=<tag>` matching what the store is now, it
+/// is a few bytes saying so and the client redraws what it already had; without
+/// it, a scroll of `sample_size` points projected to 3-D. The count that makes
+/// the tag is one cheap call, which is the whole reason the expensive half can
+/// be skipped on most page loads.
+pub async fn sample(tenant: Tenant, Query(q): Query<SampleQuery>) -> Result<Response> {
     let cfg = &tenant.core.ui.background;
-    let empty = || SampleResponse {
+    let empty = |tag: String| SampleResponse {
         points: vec![],
         count: 0,
-        refresh_secs: cfg.refresh_secs,
+        tag,
+        unchanged: false,
     };
     if !cfg.enabled {
-        // Kept like any other answer: an operator who turned the backdrop off
-        // should not go on paying a request per page load for it.
-        return Ok(no_store(empty()));
+        // A tag of its own, so a client holding a cloud from before the
+        // backdrop was turned off is told to drop it rather than kept in step
+        // with a store it is no longer allowed to draw.
+        return Ok(no_store(empty("off".into())));
+    }
+    let count = match tenant.core.vectors.count().await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "vector background count failed");
+            // A tag that can never match, so the outage takes the picture down
+            // for as long as it lasts and gives it back on the first load
+            // after: a decorative cloud must not outlive the store it claims
+            // to be a picture of.
+            return Ok(no_store(empty("unavailable".into())));
+        }
+    };
+    let tag = tag_for(&tenant.user.slug, count);
+    if q.have.as_deref() == Some(tag.as_str()) {
+        return Ok(no_store(SampleResponse {
+            points: vec![],
+            count: count as usize,
+            tag,
+            unchanged: true,
+        }));
     }
     let sampled = match tenant.core.vectors.sample(cfg.sample_size).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "vector background sample failed");
-            // The short window, in the one place that still has a window: the
-            // client must not hold an empty cloud for the configured six hours
-            // because Qdrant was briefly unreachable.
-            return Ok(no_store(SampleResponse {
-                refresh_secs: FAILURE_REFRESH_SECS,
-                ..empty()
-            }));
+            return Ok(no_store(empty("unavailable".into())));
         }
     };
     let vectors: Vec<Vec<f32>> = sampled.into_iter().map(|(_, v)| v).collect();
@@ -216,7 +272,8 @@ pub async fn sample(tenant: Tenant) -> Result<Response> {
     Ok(no_store(SampleResponse {
         count: points.len(),
         points,
-        refresh_secs: cfg.refresh_secs,
+        tag,
+        unchanged: false,
     }))
 }
 
@@ -262,6 +319,38 @@ mod tests {
         let bulk = &out[..out.len() - 1];
         let mean = bulk.iter().map(radius).sum::<f32>() / bulk.len() as f32;
         assert!(mean > 0.2, "the cloud collapsed around the outlier: {mean}");
+    }
+
+    #[test]
+    fn a_cloud_that_shares_an_offset_is_still_drawn_around_the_origin() {
+        // Every embedding a model produces carries a large common component,
+        // and a linear projection turns that into one offset every point
+        // shares. Left in, the offset is bigger than the spread: the cloud
+        // scales down to a knot sitting off to one side, and the client's spin
+        // about the origin swings it around the frame rather than turning it.
+        let vs: Vec<Vec<f32>> = (0..300)
+            .map(|i| {
+                let t = i as f32;
+                vec![
+                    40.0 + (t * 0.7).sin() * 0.1,
+                    -25.0 + (t * 1.3).cos() * 0.1,
+                    60.0 + (t * 0.3).sin() * 0.1,
+                ]
+            })
+            .collect();
+        let out = project_3d(&vs);
+        let n = out.len() as f32;
+        for axis in 0..3 {
+            let mean = out.iter().map(|p| p[axis]).sum::<f32>() / n;
+            assert!(
+                mean.abs() < 0.05,
+                "axis {axis} sits at {mean}, not around the origin"
+            );
+        }
+        // And the spread survives the centring rather than being scaled away
+        // with the offset.
+        let mean_radius = out.iter().map(radius).sum::<f32>() / n;
+        assert!(mean_radius > 0.2, "the cloud collapsed: {mean_radius}");
     }
 
     #[test]

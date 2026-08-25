@@ -1304,7 +1304,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_background_sample_is_bounded_and_carries_its_refresh() {
+    async fn the_background_sample_is_bounded_and_carries_its_tag() {
         let (app, token, core) = app_token_and_core().await;
         core.vectors
             .upsert(vec![
@@ -1324,8 +1324,9 @@ pub(crate) mod tests {
         // depending on who is signed in, and an HTTP cache is keyed on the URL
         // alone — so a held answer is the previous account's cloud drawn for
         // the next one, and nothing can reach into a browser cache to drop it.
-        // `refresh_secs` and the client's `localStorage` hold the budget
-        // instead, because that is the layer sign-out can clear.
+        // The tag and the client's `localStorage` hold the snapshot instead,
+        // because that is the layer sign-out can clear — and the tag is checked
+        // on every load rather than trusted for a window.
         let cache = res.headers()[header::CACHE_CONTROL]
             .to_str()
             .unwrap()
@@ -1338,7 +1339,8 @@ pub(crate) mod tests {
         let pts = body["points"].as_array().expect("points is an array");
         assert_eq!(pts.len(), 2);
         assert_eq!(body["count"], 2);
-        assert!(body["refresh_secs"].as_u64().unwrap() > 0);
+        let tag = body["tag"].as_str().expect("a tag").to_string();
+        assert!(!tag.is_empty());
         for p in pts {
             let r: f64 = p
                 .as_array()
@@ -1362,6 +1364,66 @@ pub(crate) mod tests {
         let body = json_of(res).await;
         assert_eq!(body["points"], serde_json::json!([]));
         assert_eq!(body["count"], 0);
+        // And it says so with a tag of its own, so a browser holding the cloud
+        // this base used to have is told to drop it. Points that outlive the
+        // vectors they were drawn from are a picture of a store that is not
+        // there — which is what a held snapshot made of an emptied base.
+        assert!(!body["unchanged"].as_bool().unwrap_or(false));
+        assert!(body["tag"].as_str().expect("a tag").ends_with(":0"));
+    }
+
+    #[tokio::test]
+    async fn a_tag_that_still_matches_the_store_saves_the_points() {
+        let (app, token, core) = app_token_and_core().await;
+        core.vectors
+            .upsert(vec![bg_point("a", vec![1.0, 0.0, 0.0])])
+            .await
+            .unwrap();
+
+        let body = json_of(
+            app.clone()
+                .oneshot(get("/api/v1/vectors/sample", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let tag = body["tag"].as_str().unwrap().to_string();
+        assert_eq!(body["points"].as_array().unwrap().len(), 1);
+
+        // The same store, so the client keeps what it has and the scroll is
+        // never run.
+        let again = json_of(
+            app.clone()
+                .oneshot(get(
+                    &format!("/api/v1/vectors/sample?have={tag}"),
+                    Some(&token),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(again["unchanged"], true);
+        assert_eq!(again["points"], serde_json::json!([]));
+
+        // One more vector and the tag no longer describes the base: the answer
+        // carries the new cloud rather than telling the client to redraw a
+        // picture that has stopped being true.
+        core.vectors
+            .upsert(vec![bg_point("b", vec![0.0, 1.0, 0.0])])
+            .await
+            .unwrap();
+        let changed = json_of(
+            app.oneshot(get(
+                &format!("/api/v1/vectors/sample?have={tag}"),
+                Some(&token),
+            ))
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert!(!changed["unchanged"].as_bool().unwrap_or(false));
+        assert_eq!(changed["points"].as_array().unwrap().len(), 2);
+        assert_ne!(changed["tag"].as_str().unwrap(), tag);
     }
 
     #[tokio::test]

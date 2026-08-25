@@ -143,9 +143,11 @@ pub struct UiConfig {
 
 /// The rotating point cloud behind the pages, sampled from the vector store.
 ///
-/// Decorative, and it costs a background fetch every `refresh_secs` plus one
-/// scroll of the collection. On by default: it is the machine showing its own
-/// shape, and off is one line for the operator who wants the pages plain.
+/// Decorative, and held to a decoration's budget: the client keeps the cloud it
+/// was given and asks once per page load whether the store still matches it,
+/// which costs a count. Only a store that has changed costs a scroll. On by
+/// default: it is the machine showing its own shape, and off is one line for
+/// the operator who wants the pages plain.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct BackgroundConfig {
@@ -153,8 +155,6 @@ pub struct BackgroundConfig {
     /// Vectors sampled per snapshot. 2000 points read as a cloud; far fewer
     /// read as noise, far more cost the phone drawing them.
     pub sample_size: usize,
-    /// How long the client keeps a snapshot before fetching another.
-    pub refresh_secs: u64,
 }
 
 impl Default for BackgroundConfig {
@@ -162,7 +162,6 @@ impl Default for BackgroundConfig {
         Self {
             enabled: true,
             sample_size: 2000,
-            refresh_secs: 6 * 3600,
         }
     }
 }
@@ -2265,7 +2264,6 @@ impl Config {
             sitting: SittingConfig::default(),
             recommend: RecommendConfig::default(),
             ui: UiConfig::default(),
-            migrate: MigrateConfig::default(),
         }
     }
 }

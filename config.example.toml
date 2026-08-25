@@ -720,7 +720,7 @@ enabled = true
 # Vectors sampled per snapshot. Capped at 20000 on read: the number reaches a
 # Qdrant scroll limit and a projection loop at once, and this is a decoration.
 sample_size = 2000
-# Seconds the client keeps a snapshot before fetching another (6 h). Also the
-# `max-age` on the response, so a browser that cannot write local storage still
-# only asks this often. Zero means fetch on every page load.
-refresh_secs = 21600
+# The client keeps the cloud it was drawn and asks once per page load whether
+# the store is still the one it is a picture of. Only a base that has changed
+# costs a fresh sample, and one that has been emptied takes the picture down on
+# the same load rather than hours later.

@@ -1599,8 +1599,6 @@
       requestAnimationFrame(frame);
     }
 
-    var DEFAULT_REFRESH = 21600;
-
     // Everything drawn is read back out of storage a page load later, where
     // anything at all could be standing in for it. One string in the array and
     // the draw loop throws on every frame, so the shape is checked once here
@@ -1617,57 +1615,49 @@
       return true;
     }
 
-    function keep(pts, refreshSecs) {
+    function keep(pts, tag) {
       try {
-        localStorage.setItem(CACHE_KEY, JSON.stringify({
-          ts: Date.now(), points: pts, refreshSecs: refreshSecs
-        }));
+        localStorage.setItem(CACHE_KEY, JSON.stringify({ tag: tag, points: pts }));
       } catch (e) {}
     }
 
-    var now = Date.now();
+    function drop() {
+      try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+    }
+
+    // The snapshot is never drawn on its own authority, however fresh it looks.
+    // It used to stand for six hours, which meant a base emptied — or reindexed
+    // away, or simply signed out of on a shared browser — went on being drawn
+    // as a cloud of points that no longer existed anywhere. So every load asks,
+    // carrying the tag of what it holds: the answer is either a few bytes
+    // saying the store still matches, or the cloud that replaces it.
     var cached = null;
     try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) {}
-    if (cached && cached.ts) {
-      // `typeof`, not `||`: a configured `refresh_secs = 0` means "fetch every
-      // time" — during a reindex, say — and `||` read that as a falsy blank
-      // and substituted six hours, which is the exact opposite of what the
-      // operator asked for.
-      var ttl = typeof cached.refreshSecs === 'number' ? cached.refreshSecs : DEFAULT_REFRESH;
-      if (now - cached.ts < ttl * 1000) {
-        if (usable(cached.points)) { start(cached.points); return; }
-        // An empty snapshot is cached like any other. Turning the backdrop off
-        // in the config should stop the requests too, and an empty answer that
-        // was never written back meant a disabled feature still cost one fetch
-        // per page load, for good.
-        //
-        // Empty is the *only* unusable snapshot that means that, and the two
-        // were read as one: anything else in the slot is damage — a truncated
-        // write, a half-quota `setItem`, a shape from a version that wrote
-        // something else — and taking it for a switched-off backdrop left the
-        // page with no canvas until the six hours ran out, on every load, with
-        // a live endpoint one request away. Damage falls through to the fetch,
-        // which overwrites it.
-        if (Array.isArray(cached.points) && !cached.points.length) {
-          canvas.parentNode.removeChild(canvas);
-          return;
-        }
-      }
-    }
+    var have = cached && typeof cached.tag === 'string' && usable(cached.points)
+      ? cached.tag : null;
+
+    var url = '/api/v1/vectors/sample';
+    if (have) url += '?have=' + encodeURIComponent(have);
     // `cache: 'no-store'` as well as the response's own header. The header is
     // what stops a *new* answer being held; this is what stops an answer some
-    // earlier build let the browser keep — a six-hour `max-age` snapshot of
-    // whoever was signed in then — being replayed to whoever is signed in now.
-    fetch('/api/v1/vectors/sample', { credentials: 'same-origin', cache: 'no-store' })
+    // earlier build let the browser keep — a `max-age` snapshot of whoever was
+    // signed in then — being replayed to whoever is signed in now.
+    fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (!data) { canvas.parentNode.removeChild(canvas); return; }
+        if (!data) { drop(); return; }
+        if (data.unchanged && have) { start(cached.points); return; }
         var pts = usable(data.points) ? data.points : [];
-        keep(pts, data.refresh_secs);
-        if (!pts.length) { canvas.parentNode.removeChild(canvas); return; }
+        if (!pts.length) { drop(); return; }
+        keep(pts, data.tag);
         start(pts);
       })
-      .catch(function () { canvas.parentNode.removeChild(canvas); });
+      .catch(function () {
+        // The network, not the store: nothing here says the cloud is wrong, so
+        // the snapshot is left where it is for the next load to revalidate.
+        if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      });
   }
 
   // ── The refining pass ─────────────────────────────────────────────────────
