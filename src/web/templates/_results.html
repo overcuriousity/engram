@@ -68,7 +68,7 @@
            — a neighbour, an association — does not carry one. Zero there means
            "not read", not "no sources", and the badge said the second. #}
         {% if r.origin_count > 0 %}
-        <span class="badge" title="A model wrote this, from {{ r.origin_count }} source corpus/corpora">model-written · {{ r.origin_count }}</span>
+        <span class="badge" title="A model wrote this, from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}">model-written · {{ r.origin_count }}</span>
         {% else %}
         <span class="badge" title="A model wrote this">model-written</span>
         {% endif %}

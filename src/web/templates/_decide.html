@@ -61,13 +61,13 @@
        asking. #}
     <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede"
           data-keep="{{ p.a_title }}"
-          onsubmit="return confirm('Keep “' + this.dataset.keep + '” and hide the other? You can undo this from Housekeeping.')">
+          onsubmit="return confirm('Keep “' + this.dataset.keep + '” and hide the other? You can undo this from Insights.')">
       <input type="hidden" name="keep" value="{{ p.a_id }}">
       <button class="btn btn-sm {% if p.keeps_a %}btn-accent{% endif %}" type="submit">Keep “{{ p.a_title }}”</button>
     </form>
     <form method="post" action="/ui/ops/pairs/{{ p.id }}/supersede"
           data-keep="{{ p.b_title }}"
-          onsubmit="return confirm('Keep “' + this.dataset.keep + '” and hide the other? You can undo this from Housekeeping.')">
+          onsubmit="return confirm('Keep “' + this.dataset.keep + '” and hide the other? You can undo this from Insights.')">
       <input type="hidden" name="keep" value="{{ p.b_id }}">
       <button class="btn btn-sm {% if p.keeps_b %}btn-accent{% endif %}" type="submit">Keep “{{ p.b_title }}”</button>
     </form>
@@ -83,7 +83,7 @@
        syntax error fails open and retires both without asking. #}
     <form method="post" action="/ui/ops/pairs/{{ p.id }}/discard"
           data-a="{{ p.a_title }}" data-b="{{ p.b_title }}"
-          onsubmit="return confirm('Retire “' + this.dataset.a + '” and “' + this.dataset.b + '” from results? You can undo this from Housekeeping.')">
+          onsubmit="return confirm('Retire “' + this.dataset.a + '” and “' + this.dataset.b + '” from results? You can undo this from Insights.')">
       <button class="btn btn-sm {% if p.vacuous %}btn-accent{% endif %}" type="submit">Discard both</button>
     </form>
     <form method="post" action="/ui/ops/pairs/{{ p.id }}/dismiss">

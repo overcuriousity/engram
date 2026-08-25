@@ -4234,6 +4234,57 @@ mod tests {
     /// Housekeeping is Insights now. The old door stays a door: it is in
     /// bookmarks, in the quiet link at the bottom of the page, and in at least
     /// one runbook — a 404 there is a broken promise, not a tidy-up.
+    /// Two words for one thing, switched between without a rule. This picks
+    /// the one already doing most of the work; the URLs keep theirs, because a
+    /// path is not addressed to the reader.
+    #[tokio::test]
+    async fn a_source_is_called_a_source_everywhere_a_person_reads_it() {
+        let core = crate::core::test_support::test_core().await;
+        // `ingest_capture` answers with an `IngestOutcome`; the corpus id is
+        // the field on it, not the value itself.
+        let id = core
+            .ingest_capture(crate::core::ingest::Capture::new(
+                "LevelDB tombstones survive compaction longer than the manual admits.",
+                "ui",
+            ))
+            .await
+            .unwrap()
+            .id;
+        let (app, cookie) = app_for(core).await;
+
+        let corpus = get(&app, &format!("/ui/corpora/{id}"), &cookie).await;
+        assert!(
+            !corpus.contains("Corpus — engram"),
+            "the page a person reads does not say corpus"
+        );
+        assert!(corpus.contains("Source — engram"), "it says source");
+        assert!(
+            !corpus.contains("Raw corpus"),
+            "nor in the card over the text itself"
+        );
+        assert!(
+            corpus.contains("/ui/corpora/"),
+            "and the URL is untouched, because a path is not addressed to anyone"
+        );
+
+        let settings = get(&app, "/ui/settings", &cookie).await;
+        assert!(!settings.contains(">Mint<"), "Mint is a word about coins");
+        assert!(
+            settings.contains(">Create<"),
+            "the button says what it does"
+        );
+
+        let ext = get(&app, "/extension/install", &cookie).await;
+        assert!(
+            !ext.contains("Housekeeping → API tokens"),
+            "Housekeeping is retired and tokens were never there anyway"
+        );
+        assert!(
+            ext.contains("Settings → API tokens"),
+            "named where they are"
+        );
+    }
+
     #[tokio::test]
     async fn housekeeping_moved_to_insights_and_the_old_door_still_opens() {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
@@ -10335,7 +10386,7 @@ mod tests {
                 .await
                 .unwrap();
             let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", c.id)).await;
-            assert!(page.contains("Written from this corpus"), "{page}");
+            assert!(page.contains("Written from this source"), "{page}");
             assert!(page.contains(&m.id), "{page}");
         }
     }
