@@ -613,6 +613,36 @@ mod tests {
         body_of(res).await
     }
 
+    /// Five headings answered with a zero make a base with nothing wrong with
+    /// it look like a backlog — the same reasoning the housekeeping summary
+    /// already gives for collapsing its own empties into one sentence.
+    #[tokio::test]
+    async fn insights_over_an_empty_base_is_one_line_and_a_way_back() {
+        let core = crate::core::test_support::test_core().await;
+        let html = insights(core).await;
+        assert!(
+            html.contains("Nothing is held yet"),
+            "one honest line about an empty base: {html}"
+        );
+        assert!(
+            !html.contains("What this memory is like"),
+            "no measures over nothing"
+        );
+        assert!(
+            html.contains(r#"href="/ui""#),
+            "and a way back to the one place there is anything to do"
+        );
+        // Only the measures are gated. A gap is a question the base could not
+        // answer, which is exactly what an empty base produces, and the sweeps
+        // run whether or not anything was ever captured — a page-wide guard
+        // would hide both. What is noisy rather than absent goes behind the
+        // disclosure at the foot instead.
+        assert!(
+            html.contains("Housekeeping"),
+            "what the machine is doing is true of an empty base too"
+        );
+    }
+
     /// The measures read what the base already recorded.
     #[tokio::test]
     async fn the_measures_read_what_the_base_already_recorded() {
@@ -640,6 +670,13 @@ mod tests {
     async fn an_unjudged_base_says_so_rather_than_reporting_zero() {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
+        // Something held, because the measures are gated on that now: a base
+        // with nothing in it has nothing to measure at all, and the rule this
+        // test pins is the narrower one about a base that has content but no
+        // verdicts on it.
+        core.ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
         let html = insights(core).await;
         assert!(html.contains("Nothing judged yet"), "{html}");
         assert!(

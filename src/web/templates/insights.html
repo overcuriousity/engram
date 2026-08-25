@@ -2,6 +2,20 @@
 {% block title %}Insights — engram{% endblock %}
 {% block regions %}regions-table{% endblock %}
 {% block content %}
+{# A base with nothing in it has nothing to measure, and three panels of
+   zeros make a healthy empty base read as a broken full one. Only the
+   measures: a gap is a question the base could not answer, which is exactly
+   what an empty base produces, and the sweeps and the queue run whether or not
+   anything has been captured — hiding the page would hide all of that. What is
+   noisy rather than absent lives behind the disclosure at the foot. #}
+{% if held.corpora == 0 %}
+<div class="empty">
+  <h2>Nothing is held yet</h2>
+  <p class="muted">This page measures what the base holds and lists what needs
+    you. The measures wait on there being something in it.</p>
+  <p><a class="btn btn-ghost btn-sm" href="/ui">Back to the box</a></p>
+</div>
+{% else %}
 {# ── What this memory is like ──────────────────────────────────────────────
    Aggregates over tables that already exist. Nothing here embeds anything or
    calls a model, which is what makes the page cheap enough to open whenever.
@@ -52,6 +66,7 @@
     {% endif %}
   </div>
 </div>
+{% endif %}
 
 {# Work waiting on a person, first: this is the only thing on the page that
    asks for anything. Everything below it is reference. #}
