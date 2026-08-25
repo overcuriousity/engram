@@ -83,6 +83,20 @@ pub struct Tenants {
     /// registered user by name. Without this the full collection scroll behind
     /// `heal_store_drift` rode along with each of those.
     first_opened: Mutex<HashSet<String>>,
+    /// The in-memory working state each subject keeps across eviction.
+    ///
+    /// Kept here and not on the `Core` it is handed to, because the `Core` is
+    /// the thing that goes away: `open` builds a fresh one on every cache miss,
+    /// so a sitting living there lasted exactly as long as its tenant's place
+    /// in the LRU. Past `store.max_open_tenants` active users that meant search
+    /// and ask carrying nothing for whoever was evicted between two requests,
+    /// against a `config.example.toml` that says eviction is transparent. See
+    /// `core::Working`.
+    ///
+    /// Unlike `provisioning` and `first_opened`, entries here *are* removed:
+    /// `Working::is_idle` says when nobody is serving the subject and nothing
+    /// warm is left to keep, and `working_for` drops those as it goes.
+    working: Mutex<HashMap<String, crate::core::Working>>,
     /// Whether this registry holds one tenant that answers for every subject.
     /// See `Tenants::single`.
     solo: bool,
@@ -107,6 +121,7 @@ impl Tenants {
             open: Mutex::new((HashMap::new(), Vec::new())),
             first_opened: Mutex::new(HashSet::new()),
             provisioning: Mutex::new(HashMap::new()),
+            working: Mutex::new(HashMap::new()),
             solo: false,
         }
     }
@@ -137,6 +152,22 @@ impl Tenants {
 
     pub fn open_count(&self) -> usize {
         self.open.lock().map(|g| g.0.len()).unwrap_or(0)
+    }
+
+    /// How many subjects the registry is holding working memory for. For the
+    /// test that says that map is bounded; see `working_for`.
+    #[cfg(test)]
+    pub fn working_count(&self) -> usize {
+        self.working.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Whether this subject's working memory is still being held.
+    #[cfg(test)]
+    pub fn working_holds(&self, subject: &str) -> bool {
+        self.working
+            .lock()
+            .map(|m| m.contains_key(subject))
+            .unwrap_or(false)
     }
 
     /// A registry that serves exactly one already-open tenant, whoever asks.
@@ -234,9 +265,30 @@ impl Tenants {
             .vectors
             .open(&self.alias(&user), self.cfg.infer.embed.dim)
             .await?;
-        let core = Core::from_config(&self.cfg, vectors, store);
+        let core =
+            Core::from_config_with(&self.cfg, vectors, store, self.working_for(&user.subject));
         self.on_first_open(&core, &user.subject, trigger);
         Ok(Tenant { core, user })
+    }
+
+    /// This subject's working memory, surviving however many times the registry
+    /// has opened and evicted them.
+    ///
+    /// A poisoned map costs the sitting and nothing else: the caller gets fresh
+    /// state, which is what it would have had before this existed.
+    ///
+    /// Departed subjects are dropped on the way past. Without that this map is
+    /// a row per subject the process has ever opened — small rows, but the cap
+    /// exists precisely because an instance may have far more users than it
+    /// holds bases for. A row is dropped only when no `Core` is still holding
+    /// it and no sitting in it is still warm, so the eviction this whole field
+    /// exists to survive never takes one.
+    fn working_for(&self, subject: &str) -> crate::core::Working {
+        let Ok(mut map) = self.working.lock() else {
+            return crate::core::Working::default();
+        };
+        map.retain(|s, w| s == subject || !w.is_idle());
+        map.entry(subject.to_string()).or_default().clone()
     }
 
     /// Whether this is the first time this process has opened `subject`.
@@ -453,6 +505,66 @@ mod tests {
         let again = t.get_or_provision("sub-a", None).await.unwrap();
         assert_eq!(again.user.slug, crate::store::control::slug_for("sub-a"));
         assert_eq!(t.control().users().await.unwrap().len(), 3);
+    }
+
+    /// The sitting is what "eviction is transparent" has to mean to be worth
+    /// saying: stored data was never at risk, and the working memory search and
+    /// ask carry was, because `open` built a fresh `Core` on every cache miss.
+    #[tokio::test]
+    async fn an_evicted_tenant_comes_back_mid_sitting() {
+        let (t, _dir) = test_tenants(1).await;
+        let a = t.get_or_provision("sub-a", None).await.unwrap();
+        a.core.sittings.queried("sid-1", "how to mount", 100, 1800);
+
+        // Somebody else's request takes the only slot.
+        t.get_or_provision("sub-b", None).await.unwrap();
+        assert_eq!(t.open_count(), 1);
+
+        let again = t.get_or_provision("sub-a", None).await.unwrap();
+        assert_eq!(
+            again.core.sittings.read("sid-1", 200, 1800).queries,
+            vec!["how to mount".to_string()],
+            "the sitting went out with the tenant's place in the LRU"
+        );
+    }
+
+    /// And the bound on that, so holding working memory across eviction is not
+    /// a row per subject the process has ever served.
+    ///
+    /// A subject is dropped one open later than it becomes idle, and that is
+    /// deliberate rather than missed: `working_for` runs while the registry
+    /// still holds the tenant it is about to evict, so the first open after an
+    /// eviction still sees the outgoing `Core` holding its own state. The next
+    /// one sweeps it. The map is bounded either way, which is all this is for.
+    #[tokio::test]
+    async fn a_subject_with_nothing_warm_left_is_dropped_from_the_working_map() {
+        let (t, _dir) = test_tenants(1).await;
+        let a = t.get_or_provision("sub-a", None).await.unwrap();
+        a.core.sittings.queried("sid-1", "how to mount", 100, 1800);
+        drop(a);
+
+        t.get_or_provision("sub-b", None).await.unwrap();
+        assert!(t.working_holds("sub-a"), "a live sitting is not idle");
+
+        // The sitting goes cold. `read` is what expires it, as it would on any
+        // request that carried it.
+        let a = t.get_or_provision("sub-a", None).await.unwrap();
+        assert!(
+            a.core
+                .sittings
+                .read("sid-1", 100_000, 1800)
+                .queries
+                .is_empty()
+        );
+        drop(a);
+
+        t.get_or_provision("sub-b", None).await.unwrap();
+        t.get_or_provision("sub-c", None).await.unwrap();
+        assert!(
+            !t.working_holds("sub-a"),
+            "a subject nobody is serving, with nothing warm left, was kept"
+        );
+        assert_eq!(t.working_count(), 2);
     }
 
     /// `open` is a cache miss, not a first sight. Past the cap it runs again

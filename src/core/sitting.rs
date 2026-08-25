@@ -65,6 +65,20 @@ pub struct Sittings {
 }
 
 impl Sittings {
+    /// Whether any sitting is being kept at all.
+    ///
+    /// Expired entries count: `with` drops what has gone cold on the next write
+    /// from any session, so a map that still holds rows nobody has come back to
+    /// is not holding working memory. Read by `Working::is_idle`, which is what
+    /// lets the registry drop a departed subject's state instead of keeping a
+    /// row per subject the process has ever opened.
+    pub fn is_empty(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+
     /// This sitting opened an artifact.
     pub fn touched(&self, session: &str, artifact_id: &str, at: i64, idle_secs: i64) {
         self.with(session, at, idle_secs, |s| {

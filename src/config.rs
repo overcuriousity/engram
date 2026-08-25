@@ -688,7 +688,12 @@ pub struct StoreConfig {
     pub dir: String,
     /// How many tenants may be open at once. An open tenant costs a SQLite
     /// pool and a background queue; the rest are opened on demand, and
-    /// eviction is transparent because the next request reopens the same file.
+    /// eviction is transparent because the next request reopens the same file
+    /// — and, through `Tenants::working_for`, over the same sitting. Reopening
+    /// the file was never the whole of that promise: the working memory search
+    /// and ask carry lives in the `Core` the cache miss rebuilds, so until it
+    /// was held across eviction this cap was visible to any user unlucky
+    /// enough to be evicted between two requests. See `core::Working`.
     pub max_open_tenants: usize,
 }
 

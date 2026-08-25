@@ -37,7 +37,9 @@ path = "engram.db"
 
 # How many users' bases may be open at once. An open tenant costs a SQLite pool
 # and a background queue; the rest are opened on demand, and eviction is
-# transparent — the next request or claim reopens the same file.
+# transparent — the next request or claim reopens the same file, and the
+# evicted user's live sitting is handed back to it, so what search and ask
+# carry does not depend on how many other people are reading right now.
 # max_open_tenants = 32
 
 # ── Adoption ─────────────────────────────────────────────────────────────────

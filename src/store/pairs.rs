@@ -164,6 +164,34 @@ pub struct ArtifactPair {
     pub merged_into: Option<String>,
 }
 
+/// What one supersession did to the questions still open about its loser.
+///
+/// Two counts and not one, because `follow_supersession` has two outcomes and
+/// both of them are work: a pair moves onto the winner, or it settles `Stale`
+/// because there is nowhere to move it to. Returning only `moved` is what left
+/// `jobs::consolidate`'s repair pass reporting `{"repaired":0,"staled":0}` after
+/// a tick that had drained a backlog of the second kind — and `jobs::did_work`
+/// reads that report and nothing else, so the sweep doubled its backoff while
+/// there was still work in front of it. The same mistake `Outcome.reaped`
+/// records for the passes beside it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Followed {
+    /// Pairs repointed at the winner.
+    pub moved: u64,
+    /// Pairs taken off the queue because the question the supersession left
+    /// cannot be moved anywhere — see the four cases above.
+    pub staled: u64,
+}
+
+impl Followed {
+    /// Rows this supersession settled one way or the other. What a caller
+    /// asking "did anything happen" wants, and what a caller logging what it
+    /// moved does not.
+    pub fn settled(&self) -> u64 {
+        self.moved + self.staled
+    }
+}
+
 pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
     ArtifactPair {
         id: r.get("id"),
@@ -724,9 +752,9 @@ impl Store {
     ///
     /// `score` is left alone and is now stale, exactly as in
     /// `repoint_open_pairs`: it orders the judge queue and gates nothing here.
-    pub async fn follow_supersession(&self, loser: &str, winner: &str) -> Result<u64> {
+    pub async fn follow_supersession(&self, loser: &str, winner: &str) -> Result<Followed> {
         if loser == winner {
-            return Ok(0);
+            return Ok(Followed::default());
         }
         let rows = sqlx::query(
             "SELECT * FROM artifact_pairs
@@ -738,7 +766,7 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut moved = 0u64;
+        let mut out = Followed::default();
         for p in rows.iter().map(row_to_pair) {
             let other = if p.a_id == loser {
                 p.b_id.clone()
@@ -752,6 +780,7 @@ impl Store {
                     Some("the supersession of these two answered this"),
                 )
                 .await?;
+                out.staled += 1;
                 continue;
             }
             if p.obsolete_id.as_deref() == Some(loser) {
@@ -761,6 +790,7 @@ impl Store {
                     Some("the artifact this proposed hiding is already hidden"),
                 )
                 .await?;
+                out.staled += 1;
                 continue;
             }
             if p.state == PairState::Vacuous {
@@ -773,6 +803,7 @@ impl Store {
                     ),
                 )
                 .await?;
+                out.staled += 1;
                 continue;
             }
             if let Some(existing) = self.pair_between(&other, winner).await? {
@@ -793,6 +824,7 @@ impl Store {
                     Some("a pair between these two already exists"),
                 )
                 .await?;
+                out.staled += 1;
                 continue;
             }
             let (a, b) = if other.as_str() <= winner {
@@ -832,9 +864,9 @@ impl Store {
                 .execute(&self.pool)
                 .await?;
             }
-            moved += 1;
+            out.moved += 1;
         }
-        Ok(moved)
+        Ok(out)
     }
 
     /// Settle `Stale` every open pair naming an artifact that is no longer in
@@ -2076,7 +2108,7 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
 
-        assert_eq!(s.follow_supersession(loser, winner).await.unwrap(), 1);
+        assert_eq!(s.follow_supersession(loser, winner).await.unwrap().moved, 1);
 
         let open = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
         assert_eq!(open.len(), 1);
@@ -2095,7 +2127,13 @@ mod tests {
         let (loser, winner) = two_artifacts(&s).await;
         s.record_pair(&loser, &winner, 0.91).await.unwrap();
 
-        s.follow_supersession(&loser, &winner).await.unwrap();
+        let f = s.follow_supersession(&loser, &winner).await.unwrap();
+        // Counted as what it is. Reported as `moved` alone, a tick that settled
+        // nothing but rows like this one told `jobs::did_work` it had found
+        // nothing at all, and the sweep doubled its wait with a backlog of them
+        // still in front of it.
+        assert_eq!((f.moved, f.staled), (0, 1));
+        assert_eq!(f.settled(), 1);
 
         assert!(
             s.pairs_by_state(PairState::Pending, 10)
@@ -2328,7 +2366,7 @@ mod tests {
         );
 
         // And the repair, on this tick or a later one, still moves it.
-        assert_eq!(s.follow_supersession(loser, winner).await.unwrap(), 1);
+        assert_eq!(s.follow_supersession(loser, winner).await.unwrap().moved, 1);
         let moved = s.get_pair(id).await.unwrap();
         assert_eq!(moved.state, PairState::Contradiction);
         assert!(
@@ -2479,7 +2517,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(s.follow_supersession(loser, winner).await.unwrap(), 0);
+        assert_eq!(
+            s.follow_supersession(loser, winner)
+                .await
+                .unwrap()
+                .settled(),
+            0
+        );
 
         let kept = s.get_pair(id).await.unwrap();
         assert_eq!(kept.state, PairState::NoConflict);

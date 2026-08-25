@@ -476,8 +476,25 @@ impl Store {
     /// been ready for one instant looking, to `age_background`, like one that
     /// has been waiting all period.
     pub async fn arm_now(&self, stage: Stage, target_kind: &str, target_id: &str) -> Result<()> {
+        // The backoff count first, and on its own statement, because it is the
+        // one thing here that is true of a row in *any* state. The two
+        // statements below cover a sleeping row and a closed one; a row a
+        // worker is inside matches neither, and that is not a rare case for a
+        // periodic unit — it is a capture landing while the sweep it concerns
+        // is running. Left to them, `rearm_periodic_with` read the count this
+        // arming was supposed to have cleared and re-armed the sweep at the
+        // doubled wait, with the new data already in the base.
         sqlx::query(
-            "UPDATE jobs SET run_after = 0, class = ?, created_at = ?, empty_runs = 0
+            "UPDATE jobs SET empty_runs = 0
+              WHERE subject = ? AND stage = ? AND target_id = ?",
+        )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_id)
+        .execute(&self.control.pool)
+        .await?;
+        sqlx::query(
+            "UPDATE jobs SET run_after = 0, class = ?, created_at = ?
               WHERE subject = ? AND stage = ? AND target_id = ?
                 AND state = 'pending' AND run_after > 0",
         )

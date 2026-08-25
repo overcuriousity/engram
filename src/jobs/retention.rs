@@ -17,13 +17,29 @@ use crate::error::Result;
 pub struct Report {
     /// Searches and questions dropped for being past `retain_days`.
     pub expired: u64,
-    pub clusters: usize,
+    pub standing: Standing,
     pub named: usize,
     pub removed: usize,
     /// Situations dropped for being past `store::context::RETAIN_DAYS`.
     pub contexts: u64,
     /// Interactions dropped for being past the same window.
     pub interactions: u64,
+}
+
+/// What the base holds, as opposed to what this pass did to it.
+///
+/// Nested, and the nesting is the point: `jobs::did_work` reads the flat
+/// numbers of a report and calls any non-zero one work. `clusters` is a
+/// standing count — `gaps::sweep` returns how many gap clusters exist, which is
+/// why the log line beside it prints only when `named` or `removed` says
+/// something happened — so at the top level it made every run over a base with
+/// any gaps at all report work, and the empty-run backoff never engaged for
+/// this sweep. Recorded in `sweep_runs.detail` all the same, for a person
+/// reading the history.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct Standing {
+    /// Gap clusters the base holds after this pass, named or not.
+    pub clusters: usize,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -68,7 +84,7 @@ pub async fn run(core: &Core) -> Result<Report> {
                         "knowledge gaps regrouped"
                     );
                 }
-                report.clusters = r.clusters;
+                report.standing.clusters = r.clusters;
                 report.named = r.named;
                 report.removed = r.removed;
             }

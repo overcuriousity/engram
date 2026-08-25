@@ -406,10 +406,17 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             // Hiding the loser behind it is not the alternative: the answer
             // would disappear from results altogether.
             if !live(winner.clone()).await? {
+                // `Stale` and not `Dismissed`, for the reason `PairState::Stale`
+                // gives: a lifecycle event took the winner out of results, and
+                // nobody answered anything. `Dismissed` is an operator's
+                // decision and binding forever — `record_pair` is `INSERT OR
+                // IGNORE` and `reopen_stale_pairs` only reopens `'stale'` — so
+                // filing it here would bury the duplicate permanently the
+                // moment someone deprecated the winner and reactivated it.
                 return settle(
                     core,
                     &s.pair,
-                    PairState::Dismissed,
+                    PairState::Stale,
                     Some("the surviving artifact left results before this could be applied"),
                 )
                 .await;
@@ -863,6 +870,22 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "the pair is still pending, so the same call will be spent again"
+        );
+        assert_eq!(
+            core.store.get_pair(pair_id).await.unwrap().state,
+            PairState::Stale,
+            "a lifecycle event settled the pair as though a person had decided it"
+        );
+
+        // The property `Stale` buys, and the reason it is not `Dismissed`:
+        // putting the winner back puts the question back. `record_pair` is
+        // `INSERT OR IGNORE`, so a `Dismissed` row here would have buried this
+        // duplicate for the life of the base with nothing saying why.
+        core.reactivate(&winner).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(pair_id).await.unwrap().state,
+            PairState::Pending,
+            "reactivating the survivor left the duplicate buried"
         );
     }
 

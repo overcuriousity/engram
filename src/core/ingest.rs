@@ -799,8 +799,13 @@ impl Core {
         // which the sweep's repair pass
         // (`jobs::consolidate::follow_supersessions`) moves on the next tick.
         match self.store.follow_supersession(loser_id, winner_id).await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(pairs = n, winner_id, "moved open pairs onto the winner"),
+            Ok(f) if f.settled() == 0 => {}
+            Ok(f) => tracing::info!(
+                moved = f.moved,
+                staled = f.staled,
+                winner_id,
+                "settled the open pairs the superseded artifact left"
+            ),
             Err(e) => {
                 tracing::warn!(loser_id, winner_id, error = %e, "could not move the loser's open pairs")
             }

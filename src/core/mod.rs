@@ -40,6 +40,49 @@ pub struct QueryCache {
     entries: std::collections::VecDeque<(String, Vec<f32>)>,
 }
 
+/// The in-memory working state one subject keeps, independent of any `Core`.
+///
+/// Both fields are documented on `Core` as "shared by every clone", and for the
+/// life of one `Core` they are. The registry is what broke that: `Tenants` caps
+/// how many bases it holds open and builds a fresh `Core::from_config` on every
+/// cache miss, so a user evicted between two requests came back with an empty
+/// sitting and a cold query cache — search and ask carrying nothing, on an
+/// instance whose own `config.example.toml` says eviction is transparent.
+///
+/// Held by subject in `Tenants` and handed back on reopen, which is what makes
+/// that sentence true. Nothing here is persistent state: a sitting exists only
+/// while it is warm and a cached embedding is a saved call, so losing this to a
+/// restart is nothing, and losing it to the cap was a working memory that
+/// silently stopped working past `store.max_open_tenants` active users.
+#[derive(Clone)]
+pub struct Working {
+    pub sittings: Arc<crate::core::sitting::Sittings>,
+    pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
+}
+
+impl Default for Working {
+    fn default() -> Self {
+        Working {
+            sittings: Arc::new(Default::default()),
+            query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+        }
+    }
+}
+
+impl Working {
+    /// Whether this is worth keeping for a subject nobody is serving.
+    ///
+    /// Read by the registry to drop the entries of users who have gone away,
+    /// so holding working memory across eviction does not turn into a map with
+    /// a row per subject the process has ever seen. A sitting is the whole of
+    /// what would be missed — `Sittings` expires its own entries as they go
+    /// cold — and a query cache without one is a handful of saved embeddings
+    /// for a search nobody is running.
+    pub fn is_idle(&self) -> bool {
+        Arc::strong_count(&self.sittings) == 1 && self.sittings.is_empty()
+    }
+}
+
 impl QueryCache {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -130,7 +173,8 @@ pub struct Core {
     /// recommendation tests set a fixed one so a seventh Friday at 14:52
     /// exists on demand. Nothing else in the tree reads it.
     pub clock: crate::core::context::Clock,
-    /// Shared by every clone of `Core`, like the background queue.
+    /// Shared by every clone of `Core`, like the background queue, and across
+    /// the tenant registry's evictions — see `Working`.
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
     /// Thresholds and budgets for duplicate hygiene. Read on the capture path
     /// and by the sweep, so it lives here rather than being passed down.
@@ -172,7 +216,9 @@ pub struct Core {
     pub ui: crate::config::UiConfig,
     /// Every live sitting, keyed by web session. Shared by every clone of
     /// `Core`, like the background queue — a per-clone map would be a per-clone
-    /// working memory, which is no working memory at all.
+    /// working memory, which is no working memory at all. Shared across the
+    /// tenant registry's evictions too, for the same reason and by the same
+    /// argument: see `Working`.
     pub sittings: Arc<crate::core::sitting::Sittings>,
     /// The pacer every inference call passes through. Shared by every clone,
     /// because a per-clone gate would pace nothing: the point is one queue of
@@ -208,6 +254,20 @@ impl Core {
     /// does — a benchmark against a differently wired core measures the wrong
     /// program.
     pub fn from_config(cfg: &Config, vectors: Arc<dyn VectorStore>, store: Store) -> Core {
+        Core::from_config_with(cfg, vectors, store, Working::default())
+    }
+
+    /// `from_config`, over working memory that already exists.
+    ///
+    /// The registry's door. See `Working`: a reopened tenant is the same user
+    /// mid-sitting, and building this state fresh is what made the cap visible
+    /// to them.
+    pub fn from_config_with(
+        cfg: &Config,
+        vectors: Arc<dyn VectorStore>,
+        store: Store,
+        working: Working,
+    ) -> Core {
         // Chunk size is capped by what the embedder accepts, with headroom for
         // token-count estimation error.
         let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
@@ -259,7 +319,7 @@ impl Core {
             counter: Arc::new(TokenCounter),
             background: Arc::new(Background::default()),
             clock: crate::core::context::Clock::System,
-            query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+            query_cache: working.query_cache,
             consolidate: cfg.consolidate.clone(),
             ranking: Arc::new(std::sync::RwLock::new(
                 crate::core::ranking::RankingParams::from_vector(&cfg.vector),
@@ -277,7 +337,7 @@ impl Core {
             sitting: cfg.sitting.clone(),
             recommend: cfg.recommend.clone(),
             ui: cfg.ui.clone(),
-            sittings: Arc::new(Default::default()),
+            sittings: working.sittings,
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
             )),

@@ -332,6 +332,14 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
 /// numbers, so any non-zero one is work, and a report that gains a field keeps
 /// working without being told about this.
 ///
+/// Only the *flat* numbers. A count nested one level down is read by nobody
+/// here, and that is the escape hatch a report uses for a standing count — a
+/// number saying what exists rather than what this pass did. Left flat, such a
+/// count claims work on every run over unchanged data and the backoff never
+/// engages at all, which is how the retention and context sweeps each woke a
+/// dormant base every interval to report the clusters it already had. See
+/// `retention::Standing` and `context::Standing`.
+///
 /// An unreadable report is not work. Claiming otherwise would reset the backoff
 /// on a base where nothing is happening, which is the one case the backoff is
 /// for.
@@ -1075,14 +1083,91 @@ mod tests {
         assert_eq!(empty, 0);
     }
 
+    /// The case the sentence above did not cover, and the one a busy base hits
+    /// most: the capture lands while the sweep it concerns is running. That row
+    /// is neither sleeping nor closed, so neither of `arm_now`'s guarded
+    /// statements matched it and the count it was meant to clear survived — the
+    /// sweep finished a moment later, read it, and re-armed at the doubled wait
+    /// with the new data already in the base.
+    #[tokio::test]
+    async fn data_arriving_mid_sweep_cancels_the_backoff_too() {
+        let core = sweeping_core().await;
+        let base = crate::core::background::periodic_period(&core, Stage::Retention)
+            .unwrap()
+            .as_secs() as i64;
+        for _ in 0..5 {
+            sweep_finds(&core, Stage::Retention, false).await;
+        }
+
+        // The worker is inside the unit: the row is `running`, which is neither
+        // of the two states `arm_now` guards on. Set here rather than through
+        // `claim_job`, which would not hand out a row still sleeping behind the
+        // backoff this test just built.
+        sqlx::query("UPDATE jobs SET state = 'running' WHERE stage = ?")
+            .bind(Stage::Retention.as_str())
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
+
+        core.store
+            .arm_now(Stage::Retention, "collection", "collection")
+            .await
+            .unwrap();
+
+        // And the sweep finishes, having found nothing — it started before the
+        // capture landed. This run still waits the plain period, because the
+        // count of consecutive empty runs is about a base where nothing is
+        // happening and something just did.
+        sweep_finds(&core, Stage::Retention, false).await;
+        assert!(waits_about(&core, Stage::Retention, base).await);
+    }
+
     #[test]
     fn a_sweep_did_work_when_any_of_its_counts_moved() {
         // Read off the counts the account already writes, rather than each
         // sweep learning to say so: a report that gains a field keeps working.
-        assert!(!did_work(r#"{"expired":0,"clusters":0}"#));
-        assert!(did_work(r#"{"expired":0,"clusters":3}"#));
-        assert!(!did_work("{}"), "a sweep that reported nothing found nothing");
+        assert!(!did_work(r#"{"expired":0,"named":0}"#));
+        assert!(did_work(r#"{"expired":0,"named":3}"#));
+        assert!(
+            !did_work("{}"),
+            "a sweep that reported nothing found nothing"
+        );
         assert!(!did_work("not json"), "an unreadable report is not a claim of work");
+
+        // A count one level down is a standing count and never work. Flat, the
+        // retention sweep's `clusters` — how many gap clusters the base holds,
+        // not how many this pass touched — claimed work on every run over any
+        // base with a gap in it, which is precisely the dormant base the
+        // backoff exists for.
+        assert!(!did_work(r#"{"expired":0,"standing":{"clusters":3}}"#));
+        assert!(did_work(r#"{"expired":1,"standing":{"clusters":3}}"#));
+
+        let quiet = serde_json::to_string(&crate::jobs::retention::Report {
+            standing: crate::jobs::retention::Standing { clusters: 12 },
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!did_work(&quiet), "{quiet}");
+
+        // Same shape, and worse: `context::run` is a full recompute, so all
+        // three of its standing counts are non-zero on every run over unchanged
+        // data and the sweep could never report an empty run at all.
+        let recomputed = serde_json::to_string(&crate::jobs::context::Report {
+            standing: crate::jobs::context::Standing {
+                events: 40,
+                profiled: 6,
+                clusters: 9,
+            },
+            cleared: 0,
+        })
+        .unwrap();
+        assert!(!did_work(&recomputed), "{recomputed}");
+        let cleared = serde_json::to_string(&crate::jobs::context::Report {
+            cleared: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(did_work(&cleared), "a profile that decayed away is work");
 
         // The consolidation sweep's repair passes had no field in its report,
         // so a tick that moved hundreds of pairs onto the artifacts that could

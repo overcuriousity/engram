@@ -287,10 +287,18 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // is out of results is a question nobody can answer, and it would otherwise
     // sit on the review queue until someone pressed a button that fails.
     match follow_supersessions(core).await {
-        Ok(0) => {}
-        Ok(n) => {
-            out.repaired = n;
-            tracing::info!(pairs = n, "moved pairs a supersession had left behind");
+        Ok(f) if f.settled() == 0 => {}
+        Ok(f) => {
+            out.repaired = f.moved;
+            // Into the same field the pass below adds to, because it is the same
+            // statement about the same queue: a pair settled `Stale` for want of
+            // anywhere to move it is one nobody can act on either.
+            out.staled += f.staled;
+            tracing::info!(
+                moved = f.moved,
+                staled = f.staled,
+                "settled the pairs a supersession had left behind"
+            );
         }
         Err(e) => tracing::warn!(error = %e, "could not move the pairs a supersession left behind"),
     }
@@ -307,7 +315,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     match core.store.stale_unreachable_pairs().await {
         Ok(0) => {}
         Ok(n) => {
-            out.staled = n;
+            out.staled += n;
             tracing::info!(pairs = n, "took pairs nobody can act on off the queue");
         }
         Err(e) => tracing::warn!(error = %e, "could not settle the pairs nobody can act on"),
@@ -432,12 +440,18 @@ pub async fn run(core: &Core) -> Result<Outcome> {
 /// Bounded per sweep, like every other pass here. The work is finite — each
 /// supersession is repaired once — so a base with a long backlog drains over a
 /// few ticks instead of holding one sweep open.
-async fn follow_supersessions(core: &Core) -> Result<u64> {
-    let mut moved = 0u64;
+async fn follow_supersessions(core: &Core) -> Result<crate::store::pairs::Followed> {
+    let mut out = crate::store::pairs::Followed::default();
     for (loser, winner) in core.store.supersessions_with_open_pairs(200).await? {
-        moved += core.store.follow_supersession(&loser, &winner).await?;
+        let f = core.store.follow_supersession(&loser, &winner).await?;
+        out.moved += f.moved;
+        // Counted, not dropped. A pair this pass could only settle `Stale` is a
+        // row it took off a queue nobody could act on, which is as much work as
+        // moving one — and the report these two land in is the only thing
+        // `jobs::did_work` reads.
+        out.staled += f.staled;
     }
-    Ok(moved)
+    Ok(out)
 }
 
 /// Decide which pending pairs are worth a model call, and arm one unit each.

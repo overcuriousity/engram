@@ -77,13 +77,36 @@ pub struct Cluster {
 /// What one run did.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Report {
-    /// Opens that found a situation to be encoded from.
-    pub events: usize,
-    /// Artifacts that came out of this run with at least one situation.
-    pub profiled: usize,
-    pub clusters: usize,
+    pub standing: Standing,
     /// Artifacts whose every situation had decayed away.
+    ///
+    /// The one count here that is work: a profile that existed before this run
+    /// and does not after it. Everything else this run touched, it rewrote to
+    /// what was already there.
     pub cleared: usize,
+}
+
+/// What the pass saw and re-derived, as opposed to what it changed.
+///
+/// Nested, and the nesting is what makes the empty-run backoff reachable for
+/// this sweep: `jobs::did_work` calls any non-zero flat number work, and all
+/// three of these are non-zero on every run over unchanged data. `run` is a
+/// full recompute — it reads every in-window event, re-clusters it and writes
+/// the same rows back — so `events`, `profiled` and `clusters` describe the
+/// window rather than the run, and at the top level they held the sweep at its
+/// configured period for the life of a dormant base.
+///
+/// Backing off is safe here only because a new open cancels the wait:
+/// `Core::record_context_event` arms this unit, which is what stops a
+/// situation written during a long backoff from waiting the rest of it out.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct Standing {
+    /// Opens in the window that had a situation to encode from.
+    pub events: usize,
+    /// Artifacts left with at least one situation after this run.
+    pub profiled: usize,
+    /// Clusters written across those artifacts.
+    pub clusters: usize,
 }
 
 /// One deterministic pass, in event order.
@@ -343,7 +366,7 @@ pub async fn run(core: &Core) -> Result<Report> {
                 at,
                 bundle: raw,
             });
-        report.events += 1;
+        report.standing.events += 1;
     }
 
     // Slots are numbered per *artifact*, not per (scope, artifact): the
@@ -415,8 +438,8 @@ pub async fn run(core: &Core) -> Result<Report> {
             .set_context_vectors(&artifact_id, vectors)
             .await?;
 
-        report.profiled += 1;
-        report.clusters += rows.len();
+        report.standing.profiled += 1;
+        report.standing.clusters += rows.len();
     }
 
     for artifact_id in stale {
@@ -571,9 +594,9 @@ mod tests {
         seed_six_fridays(&core, &aid).await;
 
         let r = run(&core).await.unwrap();
-        assert_eq!(r.events, 6);
-        assert_eq!(r.profiled, 1);
-        assert_eq!(r.clusters, 1);
+        assert_eq!(r.standing.events, 6);
+        assert_eq!(r.standing.profiled, 1);
+        assert_eq!(r.standing.clusters, 1);
 
         let stored = core
             .store
@@ -617,7 +640,10 @@ mod tests {
         }
 
         let after = run(&core).await.unwrap();
-        assert_eq!(after.events, before.events, "not one of them counted");
+        assert_eq!(
+            after.standing.events, before.standing.events,
+            "not one of them counted"
+        );
         let weight_after = core
             .store
             .context_clusters_of(std::slice::from_ref(&aid))
@@ -651,7 +677,7 @@ mod tests {
         later.clock = crate::core::context::Clock::Fixed(FRIDAY_SEVENTH + 365 * 86_400);
         let r = run(&later).await.unwrap();
         assert_eq!(r.cleared, 1);
-        assert_eq!(r.profiled, 0);
+        assert_eq!(r.standing.profiled, 0);
         assert!(
             core.store
                 .context_clusters_of(std::slice::from_ref(&aid))
@@ -684,8 +710,11 @@ mod tests {
                 .unwrap();
         }
         let r = run(&core).await.unwrap();
-        assert_eq!(r.events, 6, "no context event, and they still count");
-        assert_eq!(r.clusters, 1);
+        assert_eq!(
+            r.standing.events, 6,
+            "no context event, and they still count"
+        );
+        assert_eq!(r.standing.clusters, 1);
     }
 
     #[tokio::test]
@@ -731,7 +760,7 @@ mod tests {
         seed_six_fridays(&core, &aid).await;
 
         let r = run(&core).await.unwrap();
-        assert_eq!(r.events, 0);
+        assert_eq!(r.standing.events, 0);
         assert!(
             core.store
                 .context_clusters_of(std::slice::from_ref(&aid))
