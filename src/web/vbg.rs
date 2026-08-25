@@ -166,11 +166,19 @@ use serde::{Deserialize, Serialize};
 pub struct SampleResponse {
     pub points: Vec<[f32; 3]>,
     pub count: usize,
-    /// What this cloud is a picture of: the account, and how many vectors it
-    /// held. The client stores it beside the points and sends it back as
-    /// `have`; an answer of `unchanged` means the snapshot it is holding is
-    /// still a picture of this store, and anything else replaces it.
-    pub tag: String,
+    /// What this cloud is a picture of: the account, the generation of the
+    /// store, and how many vectors it held. The client stores it beside the
+    /// points and sends it back as `have`; an answer of `unchanged` means the
+    /// snapshot it is holding is still a picture of this store, and anything
+    /// else replaces it.
+    ///
+    /// `None` when the store could not be asked at all. That is not the same
+    /// answer as a tag that fails to match: a tag says what the store *is*,
+    /// and an outage has no standing to say anything. The client hides the
+    /// canvas for the load and leaves its snapshot alone, rather than throwing
+    /// away a picture that is very probably still accurate because Qdrant was
+    /// unreachable for ten seconds.
+    pub tag: Option<String>,
     /// Set when `have` named the cloud the store still has. `points` is empty
     /// in that answer — the client already has them — and this is what says so,
     /// rather than an empty list, which means the opposite: draw nothing.
@@ -207,14 +215,30 @@ pub struct SampleQuery {
     pub have: Option<String>,
 }
 
-/// The tag for a store with `count` vectors in it, under this account.
+/// The tag for a store with `count` vectors in it, under this account, at this
+/// generation of the backing collection.
 ///
 /// The slug is in it because the snapshot lives in `localStorage`, which is
 /// per browser and not per account: without it, signing a second account in on
 /// the same machine matched the first one's tag whenever the two bases happened
 /// to be the same size, and drew one person's cloud for the other.
-fn tag_for(slug: &str, count: u64) -> String {
-    format!("{slug}:{count}")
+///
+/// The revision is in it because a count alone is blind to any change that
+/// preserves it. A `--reindex` re-embeds the same artifacts into a fresh
+/// generation and lands on the same number of points, so the tag matched, the
+/// answer said `unchanged`, and every browser holding a snapshot went on
+/// drawing the old projection of vectors that had all been replaced. A store
+/// with no notion of a generation reports `None` and the tag stays as it was.
+///
+/// One gap survives on purpose: a delete-and-recapture that arrives at exactly
+/// the same count within one generation still reads as unchanged. Catching
+/// that needs a digest of the contents rather than a cheap count, which is
+/// more than a decorative backdrop is worth.
+fn tag_for(slug: &str, revision: Option<&str>, count: u64) -> String {
+    match revision {
+        Some(rev) => format!("{slug}:{rev}:{count}"),
+        None => format!("{slug}:{count}"),
+    }
 }
 
 /// The backdrop's one door. A failure answers an empty cloud rather than an
@@ -228,7 +252,7 @@ fn tag_for(slug: &str, count: u64) -> String {
 /// be skipped on most page loads.
 pub async fn sample(tenant: Tenant, Query(q): Query<SampleQuery>) -> Result<Response> {
     let cfg = &tenant.core.ui.background;
-    let empty = |tag: String| SampleResponse {
+    let nothing = |tag: Option<String>| SampleResponse {
         points: vec![],
         count: 0,
         tag,
@@ -237,26 +261,35 @@ pub async fn sample(tenant: Tenant, Query(q): Query<SampleQuery>) -> Result<Resp
     if !cfg.enabled {
         // A tag of its own, so a client holding a cloud from before the
         // backdrop was turned off is told to drop it rather than kept in step
-        // with a store it is no longer allowed to draw.
-        return Ok(no_store(empty("off".into())));
+        // with a store it is no longer allowed to draw. It is a real tag and
+        // not `None` because the client caches it: a disabled backdrop should
+        // settle into one tiny answer per load, not re-ask the question as
+        // though the store had failed to reply.
+        return Ok(no_store(nothing(Some("off".into()))));
     }
-    let count = match tenant.core.vectors.count().await {
-        Ok(n) => n,
-        Err(e) => {
-            tracing::warn!(error = %e, "vector background count failed");
-            // A tag that can never match, so the outage takes the picture down
-            // for as long as it lasts and gives it back on the first load
-            // after: a decorative cloud must not outlive the store it claims
-            // to be a picture of.
-            return Ok(no_store(empty("unavailable".into())));
-        }
-    };
-    let tag = tag_for(&tenant.user.slug, count);
+    // Both cheap, and neither depends on the other, so they go together: the
+    // pair is what makes the tag, and the whole point of the tag is that the
+    // expensive half below can be skipped on most page loads.
+    let (count, revision) =
+        match tokio::try_join!(tenant.core.vectors.count(), tenant.core.vectors.revision()) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(error = %e, "vector background count failed");
+                // No tag at all rather than one that cannot match. A tag that
+                // cannot match tells the client its snapshot is wrong, and the
+                // client throws it away — so a brief outage used to wipe the
+                // cached cloud out of every browser that happened to load a page
+                // during it, and charge each of them a full scroll afterwards.
+                // Saying nothing takes the picture down for this load only.
+                return Ok(no_store(nothing(None)));
+            }
+        };
+    let tag = tag_for(&tenant.user.slug, revision.as_deref(), count);
     if q.have.as_deref() == Some(tag.as_str()) {
         return Ok(no_store(SampleResponse {
             points: vec![],
             count: count as usize,
-            tag,
+            tag: Some(tag),
             unchanged: true,
         }));
     }
@@ -264,15 +297,20 @@ pub async fn sample(tenant: Tenant, Query(q): Query<SampleQuery>) -> Result<Resp
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "vector background sample failed");
-            return Ok(no_store(empty("unavailable".into())));
+            return Ok(no_store(nothing(None)));
         }
     };
     let vectors: Vec<Vec<f32>> = sampled.into_iter().map(|(_, v)| v).collect();
     let points = project_3d(&vectors);
+    // The tag rides along even when the projection came back with nothing —
+    // a store whose vectors are all off the modal width, say. That answer is
+    // as stable as any other, and without a tag to cache the client re-ran a
+    // full `sample_size` scroll, dense vectors and all, on every single page
+    // load for as long as the store stayed that way.
     Ok(no_store(SampleResponse {
         count: points.len(),
         points,
-        tag,
+        tag: Some(tag),
         unchanged: false,
     }))
 }
@@ -283,6 +321,38 @@ mod tests {
 
     fn radius(p: &[f32; 3]) -> f32 {
         (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
+    }
+
+    #[test]
+    fn a_reindex_at_the_same_size_still_changes_the_tag() {
+        // The whole reason the revision is in there. A `--reindex` re-embeds
+        // the same artifacts into a fresh generation and lands on the same
+        // number of points, so a count-only tag matched, the answer said
+        // `unchanged`, and every browser kept drawing vectors that had all
+        // been replaced.
+        assert_ne!(
+            tag_for("ada", Some("engram_v1"), 4200),
+            tag_for("ada", Some("engram_v2"), 4200)
+        );
+    }
+
+    #[test]
+    fn two_accounts_of_the_same_size_do_not_share_a_tag() {
+        // The snapshot lives in `localStorage`, which is per browser and not
+        // per account: without the slug, signing a second account in on the
+        // same machine drew the first one's cloud.
+        assert_ne!(
+            tag_for("ada", Some("engram_v1"), 4200),
+            tag_for("bob", Some("engram_v1"), 4200)
+        );
+    }
+
+    #[test]
+    fn a_store_with_no_generation_still_gets_a_tag_that_tracks_its_size() {
+        // The memory store has no alias to resolve. It reports no revision,
+        // and the tag falls back to what it did before.
+        assert_eq!(tag_for("ada", None, 7), "ada:7");
+        assert_ne!(tag_for("ada", None, 7), tag_for("ada", None, 8));
     }
 
     #[test]

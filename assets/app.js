@@ -1383,9 +1383,10 @@
   // ── Vector background ───────────────────────────────────────────────────
   // A slow monochrome rotation of the store's own vectors, projected to 3-D
   // on the server (random projection, fixed seed). Decorative, and held to a
-  // decoration's budget: one fetch every few hours, a 12 fps ceiling, no
-  // loop at all under prefers-reduced-motion, and silence on every failure —
-  // a picture of the database may never take the page down with it.
+  // decoration's budget: one revalidation per load, a few bytes of it
+  // whenever the store has not moved, a 12 fps ceiling, no loop at all under
+  // prefers-reduced-motion, and silence on every failure — a picture of the
+  // database may never take the page down with it.
   function vectorBg() {
     var CACHE_KEY = 'engram.vbg';
 
@@ -1394,10 +1395,10 @@
     //
     // It is also where the snapshot is dropped. Every other key this file
     // writes is a local preference; this one is server data — a projection of
-    // one account's store, good for six hours — and `/auth/logout` clears the
-    // cookie and nothing else. Without this, signing out and signing a second
-    // account in on the same browser redrew the first one's cloud straight
-    // from `localStorage`, with no authorization anywhere on the path.
+    // one account's store — and `/auth/logout` clears the cookie and nothing
+    // else. Without this, signing out and signing a second account in on the
+    // same browser redrew the first one's cloud straight from `localStorage`,
+    // with no authorization anywhere on the path.
     if (!document.querySelector('.topbar')) {
       try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
       return;
@@ -1621,8 +1622,13 @@
       } catch (e) {}
     }
 
-    function drop() {
-      try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
+    // The canvas comes down, the snapshot stays. Used wherever there is
+    // nothing to draw *this* load without that being a verdict on what is in
+    // storage: a store the server could not reach, a backdrop switched off, a
+    // projection that came back empty. Whatever is stored is revalidated on
+    // the next load anyway, so throwing it away here buys nothing and costs a
+    // full refetch.
+    function hide() {
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
     }
 
@@ -1634,8 +1640,15 @@
     // saying the store still matches, or the cloud that replaces it.
     var cached = null;
     try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) {}
-    var have = cached && typeof cached.tag === 'string' && usable(cached.points)
-      ? cached.tag : null;
+    // An empty point list is a snapshot like any other — of a store with
+    // nothing drawable in it — and its tag is worth sending. Without that,
+    // "there is nothing to draw" was the one answer the client could never
+    // cache, so an instance with the backdrop off, or a store whose vectors
+    // are all off the modal width, re-ran the whole question on every page
+    // load and never once got to skip it.
+    var stored = cached && Array.isArray(cached.points)
+      && (cached.points.length === 0 || usable(cached.points));
+    var have = stored && typeof cached.tag === 'string' ? cached.tag : null;
 
     var url = '/api/v1/vectors/sample';
     if (have) url += '?have=' + encodeURIComponent(have);
@@ -1646,17 +1659,26 @@
     fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (!data) { drop(); return; }
-        if (data.unchanged && have) { start(cached.points); return; }
+        // No answer, or an answer with no tag in it: the store could not be
+        // asked, so nothing here is a statement about the cloud in storage.
+        // A tag that fails to match is the statement; its absence is not.
+        if (!data || typeof data.tag !== 'string') { hide(); return; }
+        if (data.unchanged && have) {
+          if (cached.points.length) start(cached.points); else hide();
+          return;
+        }
         var pts = usable(data.points) ? data.points : [];
-        if (!pts.length) { drop(); return; }
+        // Stored before the length is looked at, so that "nothing to draw"
+        // is remembered under its own tag and the next load is the cheap
+        // exchange rather than another full sample.
         keep(pts, data.tag);
+        if (!pts.length) { hide(); return; }
         start(pts);
       })
       .catch(function () {
         // The network, not the store: nothing here says the cloud is wrong, so
         // the snapshot is left where it is for the next load to revalidate.
-        if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+        hide();
       });
   }
 

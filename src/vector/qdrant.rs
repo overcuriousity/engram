@@ -629,9 +629,6 @@ impl QdrantVectors {
         Ok(())
     }
 
-    /// Point a new alias name at whatever this one currently serves, and drop
-    /// the old name.
-    ///
     /// Point the alias at `collection`, replacing any previous target. Qdrant
     /// applies both actions in one transaction, so no request ever observes an
     /// alias that resolves to nothing.
@@ -2023,6 +2020,15 @@ impl VectorStore for QdrantVectors {
 
     async fn count(&self) -> Result<u64> {
         self.exact_count(&self.alias).await
+    }
+
+    /// The physical collection the alias resolves to right now — `{alias}_v3`
+    /// and so on. Read live rather than resolved once at startup: `--reindex`
+    /// runs as its own process and repoints the alias underneath a server that
+    /// is already up, so a target cached at boot would report the generation
+    /// that has just been replaced.
+    async fn revision(&self) -> Result<Option<String>> {
+        self.resolve_alias().await
     }
 }
 
