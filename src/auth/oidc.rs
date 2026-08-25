@@ -57,10 +57,18 @@ impl Default for PendingStore {
     }
 }
 
-/// Who may sign in. An empty allowlist denies everyone by design: without it,
-/// every account the identity provider knows about could read the knowledge
-/// base.
+/// Who may sign in.
+///
+/// The default is open: with all three lists empty, anyone the identity
+/// provider authenticates is admitted. The provider is the gate — engram does
+/// not keep a second one — and a deployment that wants a narrower door lists
+/// subjects, emails or groups here, at which point membership of any one list
+/// is required.
 pub fn is_allowed(cfg: &OidcConfig, subject: &str, email: Option<&str>, groups: &[String]) -> bool {
+    if cfg.allowed_subs.is_empty() && cfg.allowed_emails.is_empty() && cfg.allowed_groups.is_empty()
+    {
+        return true;
+    }
     if cfg.allowed_subs.iter().any(|s| s == subject) {
         return true;
     }
@@ -165,17 +173,6 @@ impl OidcClient {
     pub async fn discover(cfg: &OidcConfig) -> Result<OidcClient> {
         use openidconnect::IssuerUrl;
         use openidconnect::core::CoreProviderMetadata;
-
-        if cfg.allowed_subs.is_empty()
-            && cfg.allowed_emails.is_empty()
-            && cfg.allowed_groups.is_empty()
-        {
-            return Err(Error::Validation(
-                "auth.oidc has an empty allowlist: set allowed_subs, allowed_emails or \
-                 allowed_groups, otherwise every account in your identity provider could sign in"
-                    .into(),
-            ));
-        }
 
         // Two clients, because the two kinds of request carry different things.
         //
@@ -403,14 +400,30 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_allowlist_denies_everyone() {
-        // Defaulting open would hand the knowledge base to every account in
-        // the identity provider.
-        assert!(!is_allowed(
+    fn an_empty_allowlist_admits_whoever_the_provider_authenticated() {
+        // The provider is the gate. Listing nothing means every account it
+        // signs in may sign in here, which is what a deployment whose identity
+        // provider already holds the right membership asks for.
+        assert!(is_allowed(
             &cfg(&[], &[]),
             "sub-1",
             Some("me@example.com"),
             &[]
+        ));
+    }
+
+    #[test]
+    fn one_populated_list_closes_the_door_on_everyone_else() {
+        // The lists are only permissive while all three are empty: naming a
+        // single subject must not leave the other two lists reading as
+        // "anyone", or a narrowing edit would silently change nothing.
+        let c = cfg(&["sub-1"], &[]);
+        assert!(!is_allowed(&c, "sub-2", Some("me@example.com"), &[]));
+        assert!(!is_allowed(
+            &c,
+            "sub-2",
+            None,
+            &["engram-users".to_string()]
         ));
     }
 

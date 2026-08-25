@@ -1672,6 +1672,9 @@ pub struct OidcConfig {
     pub redirect_url: String,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
+    /// Subjects admitted by name. Empty, with the other two lists empty as
+    /// well, admits everyone the provider authenticates — see
+    /// [`crate::auth::oidc::is_allowed`].
     #[serde(default)]
     pub allowed_subs: Vec<String>,
     #[serde(default)]

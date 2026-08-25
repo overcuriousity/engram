@@ -155,8 +155,11 @@ file and a collection; it does not cost a thread pool.
 Set `auth.mode = "oidc"`. The first request from an unseen subject provisions
 that user — a row, a database, a collection. There is no registration UI and no
 password management: the identity provider owns accounts, and engram owns
-nothing but the mapping. `auth.mode = "local"` stays a development shortcut, and
-provisions one tenant keyed on the configured username.
+nothing but the mapping. Anyone the provider authenticates is admitted; the
+optional `allowed_subs`, `allowed_emails` and `allowed_groups` narrow that to a
+list when a deployment wants a second gate. `auth.mode = "local"` stays a
+development shortcut, and provisions one tenant keyed on the configured
+username.
 
 Three keys under `[store]`, all optional:
 

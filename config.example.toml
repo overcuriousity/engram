@@ -365,8 +365,10 @@ mode = "local"
 username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 
-# Production. The allowlist is mandatory: leaving all three lists empty denies
-# everyone rather than admitting every account your identity provider knows.
+# Production. The three allow-lists below are optional filters, and all three
+# are empty by default: whoever your identity provider authenticates may sign
+# in. Fill any one of them in to narrow that, and a subject then has to match
+# at least one entry across the three.
 # [auth.oidc]
 # issuer_url = "https://idp.example/realms/main"
 # client_id = "engram"
