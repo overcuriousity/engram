@@ -133,6 +133,16 @@ struct WorkspaceTemplate {
     /// fragment is what the results endpoint returns when the box is emptied
     /// — one account of the idle state, however it is reached.
     idle: String,
+    /// Whether the base holds anything at all.
+    ///
+    /// Onboarding here is a property of an empty base rather than of a new
+    /// user: no flag is stored, nothing is dismissed, and the same page serves
+    /// someone who has just arrived and someone who has just deleted
+    /// everything. Two of the three verbs cannot work with nothing held —
+    /// search returns nothing and ask can only abstain — so the page offers
+    /// the one that can, and the rest appears when there is something for it
+    /// to act on.
+    held: bool,
 }
 
 /// Everything every door renders, before the door says what it opened for.
@@ -174,6 +184,11 @@ async fn base_template(
             .map_err(|e| crate::error::Error::Internal(e.to_string()))?,
         false => String::new(),
     };
+    // The slimmest read there is, and the same one the idle rail takes. Asked
+    // unconditionally because the deep-link path renders no idle rail and
+    // still has to know: a search URL against an empty base is a page that
+    // must not offer Ask either.
+    let (corpora, _) = tenant.core.store.held_brief().await?;
     Ok(WorkspaceTemplate {
         judge_pending: crate::web::state::judge_pending(tenant).await,
         ask_enabled: crate::web::state::ask_enabled(tenant),
@@ -188,6 +203,7 @@ async fn base_template(
         prefill_question: String::new(),
         open_with,
         idle,
+        held: corpora > 0,
     })
 }
 
@@ -740,6 +756,74 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{uri}");
         body_of(res).await
+    }
+
+    /// Two of the three verbs cannot work on a base with nothing in it, and a
+    /// list with nothing in it has nothing to move through. A disabled button
+    /// is a promise the page cannot keep and seven shortcuts are a wall; both
+    /// are absent until there is something for them to act on.
+    #[tokio::test]
+    async fn an_empty_base_offers_only_the_verb_that_can_work() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let empty = body_of(res).await;
+
+        assert!(
+            !empty.contains(r#"data-verb="ask""#),
+            "Ask can only abstain on an empty base, so the door is not there"
+        );
+        assert!(
+            !empty.contains(r#"class="keyhint""#),
+            "seven shortcuts for moving through a list with nothing in it"
+        );
+        assert!(
+            empty.contains("Paste anything worth keeping"),
+            "the placeholder names the one verb that can work"
+        );
+
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let held = body_of(res).await;
+
+        assert!(
+            held.contains(r#"data-verb="ask""#),
+            "one source is enough to have something to ask about"
+        );
+        assert!(
+            held.contains(r#"class="keyhint""#),
+            "and something to move through"
+        );
+        assert!(
+            held.contains("Describe the situation"),
+            "the placeholder goes back to naming all three verbs"
+        );
     }
 
     fn answer_fixture(dropped: usize) -> String {

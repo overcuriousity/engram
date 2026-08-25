@@ -79,8 +79,8 @@
      only thing left saying what the box is for. app.js swaps them. #}
   <textarea class="box" name="q" rows="1"
             aria-label="Search, ask, or capture"
-            placeholder="Describe the situation, ask a question, or paste anything worth keeping…"
-            data-placeholder-narrow="Ask, search, or paste to keep…"
+            placeholder="{% if held %}Describe the situation, ask a question, or paste anything worth keeping…{% else %}Paste anything worth keeping — a note, an article, a chunk of a chat.{% endif %}"
+            data-placeholder-narrow="{% if held %}Ask, search, or paste to keep…{% else %}Paste anything worth keeping…{% endif %}"
             aria-describedby="box-hint">{{ q }}</textarea>
 {# The file, when there is one. It used to be an always-open drop zone and a
      staged box under it — two places for one idea, on a page that grew a row as
@@ -121,7 +121,7 @@
      which a staged file disarms: the box is that file's note by then, and a
      note is not a question to spend a model call on. #}
   <div class="verbs">
-    {% if ask_enabled %}
+    {% if ask_enabled && held %}
     <button class="btn btn-accent" type="button" data-verb="ask" disabled>Ask</button>
     {% endif %}
     <button class="btn" type="button" data-verb="capture" disabled>Capture</button>
@@ -223,6 +223,7 @@
 {# Taught once. A shortcut nobody is told about is a shortcut nobody uses, and
    a hint that cannot be dismissed is a banner. Hidden until app.js decides
    there is a keyboard to use it with. #}
+{% if held %}
 <p class="keyhint" hidden>
   <kbd>/</kbd> box{% if ask_enabled %} <kbd>Ctrl</kbd><kbd>↵</kbd> ask{% endif %}
   <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd> keep
@@ -230,6 +231,7 @@
   <kbd>s</kbd> hide source <kbd>r</kbd> reading
   <button type="button" class="btn btn-ghost btn-sm" data-dismiss-hint>Got it</button>
 </p>
+{% endif %}
 </div>
 
 {# The rail holds what the current act produced, and says which act that was.

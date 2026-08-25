@@ -10185,7 +10185,17 @@ mod tests {
 
     #[tokio::test]
     async fn with_an_ask_model_the_verb_is_there() {
-        let (app, cookie) = app_with_session().await;
+        let (app, cookie, core) = app_session_and_core().await;
+        // Something held, because there are two conditions on the door now and
+        // this test is about the other one. An empty base hides Ask whatever
+        // the configuration says — it can only abstain — so without a capture
+        // here the assertion below would pass or fail for the wrong reason.
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
         let page = get_body(&app, &cookie, "/ui").await;
         // A button on the box, not a link in the nav. Ask stopped being a
         // place to go the moment the box learned to do it — but the rule the
