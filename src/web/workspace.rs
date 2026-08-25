@@ -883,6 +883,33 @@ mod tests {
         );
     }
 
+    /// The receipt now shows the queue, and the queue speaks in statuses — a
+    /// row reading "segmenting 3/7" over a paste is the first thing a new
+    /// reader sees and the last thing they can interpret. A tooltip would not
+    /// reach them: the camera path is the phone's, and a phone has no hover.
+    #[tokio::test]
+    async fn the_receipt_says_what_the_work_below_it_means() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/capture")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("text=LevelDB+tombstones+survive+compaction."))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(
+            html.contains("searchable once it settles"),
+            "the receipt says what the row under it is counting towards: {html}"
+        );
+    }
+
     fn answer_fixture(dropped: usize) -> String {
         askama::Template::render(&AnswerTemplate {
             answer: "<p>An answer.</p>".into(),

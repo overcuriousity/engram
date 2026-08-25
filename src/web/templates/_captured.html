@@ -37,4 +37,12 @@
    so an idle receipt costs one request and then none — the same contract it
    already honours on Insights, which is why it is included rather than
    reimplemented. #}
+{# And what the row under it means. The queue speaks in statuses — a badge
+   reading "segmenting 3/7" is exact and is the first thing a new reader meets,
+   with nothing anywhere saying what it is counting towards. Said here rather
+   than in the fragment because the fragment also serves Insights, where the
+   sentence would be a line of explanation nobody needed twice; and said in the
+   page rather than in a `title`, because the camera path is the phone's and a
+   phone has no hover. #}
+<p class="muted hint">Reading it now — searchable once it settles.</p>
 <div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
