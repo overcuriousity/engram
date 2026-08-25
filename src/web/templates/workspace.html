@@ -175,8 +175,24 @@
     </div>
     {% endif %}
   </div>
-  <p id="box-hint" class="muted hint">A sentence or a whole paragraph finds
-    more than keywords do — paste what you are looking at.</p>
+  {# Two hints, because the two states need different sentences. With something
+     held, the useful thing to say is how to phrase a query — a whole sentence
+     embeds better than the two nouns from it a reader would otherwise type.
+     With nothing held there is no query to phrase, and the useful thing to say
+     is what this is and whose it is. The second half is not decoration: an
+     operator arriving through an identity provider never sees the login card,
+     so this is the only place the application introduces itself, and the
+     boundary is the question a person actually has before pasting their own
+     notes onto a server somebody else runs. #}
+  <p id="box-hint" class="muted hint">
+    {%- if held -%}
+    A sentence or a whole paragraph finds more than keywords do — paste what you
+    are looking at.
+    {%- else -%}
+    engram keeps what you paste in your own words and finds it again by meaning,
+    not by keywords. This base is yours: nobody else can search it.
+    {%- endif -%}
+  </p>
 </form>
 
 
@@ -299,8 +315,19 @@
      full reload. app.js clears the ask remnants when this fills, and clears
      this when an Ask starts, so the pane still shows one act at a time. #}
   <div id="pane-content">
-    <p id="pane-idle" class="muted">Search to see an artifact here, beside the
-      lines it came from.</p>
+    {# With something held this names where an artifact will appear. With
+       nothing held it named a search that cannot be run, which is an
+       instruction to do the one thing the page has just been arranged to
+       prevent. It says what will happen to the first paste instead. #}
+    <p id="pane-idle" class="muted">
+      {%- if held -%}
+      Search to see an artifact here, beside the lines it came from.
+      {%- else -%}
+      Whatever you paste is split into passages and embedded so it can be found
+      by meaning. The original is kept exactly as you wrote it, and every result
+      can be read beside it.
+      {%- endif -%}
+    </p>
   </div>
 </div>
 {% endblock %}

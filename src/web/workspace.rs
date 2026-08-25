@@ -826,6 +826,31 @@ mod tests {
         );
     }
 
+    /// An OIDC user never sees the login card, so the tagline and the privacy
+    /// boundary have to be said where the eye already is — under the box, not
+    /// on a settings page nobody opens before pasting.
+    #[tokio::test]
+    async fn an_empty_base_says_what_this_is_and_whose_it_is() {
+        let html = workspace("/ui").await;
+        assert!(
+            html.contains("finds it again by meaning"),
+            "what the application does, in one clause"
+        );
+        assert!(
+            html.contains("nobody else can search it"),
+            "and the boundary, which is what a person wants before pasting \
+             their own notes onto someone else's server"
+        );
+        assert!(
+            !html.contains("Search to see an artifact here"),
+            "an instruction that cannot be followed on an empty base"
+        );
+        assert!(
+            html.contains("kept exactly as you wrote it"),
+            "the pane says what will happen to the first thing pasted"
+        );
+    }
+
     fn answer_fixture(dropped: usize) -> String {
         askama::Template::render(&AnswerTemplate {
             answer: "<p>An answer.</p>".into(),
