@@ -43,7 +43,12 @@
    and a Judge-queue row for a paragraph nobody was looking for; /ui/ask?q=
    puts a question in it and got a search instead of the thing named on the
    door. Both now land filled and still, which is what a prefill is. #}
-<form id="box-form" hx-get="/ui/search/results" hx-target="#results" hx-swap="innerHTML"
+{# `data-held` is how app.js knows the page it is standing in was rendered for
+   an empty base, and so that the first capture that stores has to fetch
+   `/ui/held` and swap the four regions that are now wrong. Cleared to `1` once
+   that has happened, so a second capture fetches nothing. #}
+<form id="box-form" data-held="{% if held %}1{% else %}0{% endif %}"
+      hx-get="/ui/search/results" hx-target="#results" hx-swap="innerHTML"
       hx-sync="this:replace"
       hx-trigger="change from:#kind-chips,
                   input[!event.isComposing] changed delay:120ms from:textarea[name=q],
@@ -79,8 +84,17 @@
      only thing left saying what the box is for. app.js swaps them. #}
   <textarea class="box" name="q" rows="1"
             aria-label="Search, ask, or capture"
-            placeholder="Describe the situation, ask a question, or paste anything worth keeping…"
-            data-placeholder-narrow="Ask, search, or paste to keep…"
+            placeholder="{% if held %}Describe the situation, ask a question, or paste anything worth keeping…{% else %}Paste anything worth keeping — a note, an article, a chunk of a chat.{% endif %}"
+            data-placeholder-narrow="{% if held %}Ask, search, or paste to keep…{% else %}Paste anything worth keeping…{% endif %}"
+            {%- if !held %}
+            {# The sentences this box will use once the base stops being empty,
+               carried on the element rather than swapped in. The rest of the
+               held state arrives out-of-band (see `_held.html`), but replacing
+               a textarea takes the caret, the selection and anything typed
+               since with it — so app.js reads these two across instead. #}
+            data-placeholder-held="Describe the situation, ask a question, or paste anything worth keeping…"
+            data-placeholder-held-narrow="Ask, search, or paste to keep…"
+            {%- endif %}
             aria-describedby="box-hint">{{ q }}</textarea>
 {# The file, when there is one. It used to be an always-open drop zone and a
      staged box under it — two places for one idea, on a page that grew a row as
@@ -121,10 +135,14 @@
      which a staged file disarms: the box is that file's note by then, and a
      note is not a question to spend a model call on. #}
   <div class="verbs">
-    {% if ask_enabled %}
-    <button class="btn btn-accent" type="button" data-verb="ask" disabled>Ask</button>
-    {% endif %}
-    <button class="btn" type="button" data-verb="capture" disabled>Capture</button>
+    {# Both carry the reason they are dead. app.js clears `disabled` the moment
+       there is something to act on, so the title only ever describes the state
+       that renders it — and a permanently grey button with no stated reason is
+       indistinguishable from a broken one. Ask is in a partial because it also
+       arrives out-of-band on the first capture; see `_held.html`. #}
+    {% include "_ask_verb.html" %}
+    <button class="btn" type="button" data-verb="capture" disabled
+            title="Type or attach something first">Capture</button>
     {# The invitation to a file, present from first paint. It lived inside the
        staged box for four commits — a box hidden until a file was staged —
        so the only way to stage one was a drag nobody was told about. Built
@@ -174,9 +192,19 @@
       {% endfor %}
     </div>
     {% endif %}
+    {# The accepted types, in the page rather than only on the label's `title`,
+       which a pointer reads and nothing else does. Last in the row and given a
+       full basis by the stylesheet, so the buttons, the spacer and the chips
+       keep the one line they are laid out for and this sits under them.
+
+       It carries `hint`, which means the phone hides it along with the rest of
+       the prose in this bar. That is the bar's own rule and it is right: a
+       phone has about six hundred pixels of height and the results are what
+       they are for. Nothing is lost there — the picker a phone opens names
+       what it will accept itself, and the input keeps its `aria-label`. #}
+    <span class="muted hint attach-types">{% if vision_enabled %}A .txt file, a PDF or an image{% else %}A .txt file or a PDF{% endif %} — or drop one anywhere on the page.</span>
   </div>
-  <p id="box-hint" class="muted hint">A sentence or a whole paragraph finds
-    more than keywords do — paste what you are looking at.</p>
+  {% include "_box_hint.html" %}
 </form>
 
 
@@ -220,16 +248,7 @@
      hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
 {% endif %}
 
-{# Taught once. A shortcut nobody is told about is a shortcut nobody uses, and
-   a hint that cannot be dismissed is a banner. Hidden until app.js decides
-   there is a keyboard to use it with. #}
-<p class="keyhint" hidden>
-  <kbd>/</kbd> box{% if ask_enabled %} <kbd>Ctrl</kbd><kbd>↵</kbd> ask{% endif %}
-  <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd> keep
-  <kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open
-  <kbd>s</kbd> hide source <kbd>r</kbd> reading
-  <button type="button" class="btn btn-ghost btn-sm" data-dismiss-hint>Got it</button>
-</p>
+{% include "_keyhint.html" %}
 </div>
 
 {# The rail holds what the current act produced, and says which act that was.
@@ -297,8 +316,7 @@
      full reload. app.js clears the ask remnants when this fills, and clears
      this when an Ask starts, so the pane still shows one act at a time. #}
   <div id="pane-content">
-    <p id="pane-idle" class="muted">Search to see an artifact here, beside the
-      lines it came from.</p>
+    {% include "_pane_idle.html" %}
   </div>
 </div>
 {% endblock %}

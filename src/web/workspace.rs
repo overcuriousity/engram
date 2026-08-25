@@ -42,6 +42,8 @@ pub fn routes() -> Router<AppState> {
         // The capture door. GET is the workspace with the box filled; POST is
         // what the button on it and the browser extension both send.
         .route("/ui/capture", get(capture_door).post(capture_submit))
+        // The held-state regions, out of band. See `held_regions`.
+        .route("/ui/held", get(held_regions))
         // The ask door, and the two-request stream behind it: the POST parks
         // the question and hands back an id, and an `EventSource` spends it.
         .route("/ui/ask", get(ask_door).post(ask_submit))
@@ -133,6 +135,59 @@ struct WorkspaceTemplate {
     /// fragment is what the results endpoint returns when the box is emptied
     /// — one account of the idle state, however it is reached.
     idle: String,
+    /// Whether the base holds anything at all.
+    ///
+    /// Onboarding here is a property of an empty base rather than of a new
+    /// user: no flag is stored, nothing is dismissed, and the same page serves
+    /// someone who has just arrived and someone who has just deleted
+    /// everything. Two of the three verbs cannot work with nothing held —
+    /// search returns nothing and ask can only abstain — so the page offers
+    /// the one that can, and the rest appears when there is something for it
+    /// to act on.
+    held: bool,
+    /// Always false here: the shared partials this page renders inline —
+    /// `_ask_verb.html`, `_keyhint.html`, `_box_hint.html`, `_pane_idle.html`
+    /// — mark themselves `hx-swap-oob` for the other caller, `HeldTemplate`,
+    /// which swaps the same four regions into a page already on screen.
+    oob: bool,
+}
+
+/// The four regions that read differently once the base stops being empty,
+/// rendered for an out-of-band swap into a workspace that is already open.
+///
+/// The page is built once. A capture posts to `/ui/capture` and swaps a
+/// receipt; the rail refresh swaps `#results`. Nothing else moves — so the
+/// paste that ends an empty base left the whole page still arranged for one,
+/// which is the state onboarding exists to leave. Fetched by app.js on the
+/// first capture that stores, and only that one.
+///
+/// The same partials the workspace includes, so the two accounts of what the
+/// held state says cannot drift apart.
+#[derive(Template)]
+#[template(path = "_held.html")]
+struct HeldTemplate {
+    ask_enabled: bool,
+    /// True by definition: this fragment exists only for the transition into
+    /// it. The field is here because the partials branch on it.
+    held: bool,
+    /// True by definition, for the same reason.
+    oob: bool,
+}
+
+/// Serves `HeldTemplate`, and only where something really is held: a page that
+/// asked for this before its capture stored would swap in an Ask verb over a
+/// base that still cannot answer.
+async fn held_regions(tenant: Tenant) -> Result<Response> {
+    let (corpora, _) = tenant.core.store.held_brief().await?;
+    if corpora == 0 {
+        return Err(crate::error::Error::NotFound);
+    }
+    Ok(HtmlTemplate(HeldTemplate {
+        ask_enabled: crate::web::state::ask_enabled(&tenant),
+        held: true,
+        oob: true,
+    })
+    .into_response())
 }
 
 /// Everything every door renders, before the door says what it opened for.
@@ -174,6 +229,11 @@ async fn base_template(
             .map_err(|e| crate::error::Error::Internal(e.to_string()))?,
         false => String::new(),
     };
+    // The slimmest read there is, and the same one the idle rail takes. Asked
+    // unconditionally because the deep-link path renders no idle rail and
+    // still has to know: a search URL against an empty base is a page that
+    // must not offer Ask either.
+    let (corpora, _) = tenant.core.store.held_brief().await?;
     Ok(WorkspaceTemplate {
         judge_pending: crate::web::state::judge_pending(tenant).await,
         ask_enabled: crate::web::state::ask_enabled(tenant),
@@ -188,6 +248,8 @@ async fn base_template(
         prefill_question: String::new(),
         open_with,
         idle,
+        held: corpora > 0,
+        oob: false,
     })
 }
 
@@ -713,6 +775,19 @@ async fn ask_door(tenant: Tenant, Query(p): Query<AskPrefill>) -> Result<Respons
     if !tenant.core.asks() {
         return Err(crate::error::Error::NotFound);
     }
+    // Nothing held, no Ask button — `base_template` sets `held = false` and the
+    // template renders no `[data-verb="ask"]`, so this door used to answer 200
+    // with the question sitting in a box that has no way to send it and no
+    // word about why. Reachable: `_gaps.html` renders "ask again" from
+    // recorded searches, which outlive a purge of what they searched.
+    //
+    // Sent to the plain page rather than 404'd, because the question survives
+    // the redirect and search is the one verb an empty base can still honour.
+    let (corpora, _) = tenant.core.store.held_brief().await?;
+    if corpora == 0 {
+        let q: String = url::form_urlencoded::byte_serialize(p.q.as_bytes()).collect();
+        return Ok(axum::response::Redirect::to(&format!("/ui?q={q}")).into_response());
+    }
     let t = base_template(&tenant, p.q, String::new(), "ask").await?;
     Ok(HtmlTemplate(t).into_response())
 }
@@ -740,6 +815,389 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{uri}");
         body_of(res).await
+    }
+
+    /// The same, over a base holding one source.
+    ///
+    /// The ask door only opens where something is held: with nothing stored
+    /// the workspace renders no Ask verb, so the door redirects rather than
+    /// answer with a question in a box that has no way to send it.
+    async fn workspace_held(uri: &str) -> String {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        body_of(res).await
+    }
+
+    /// Two of the three verbs cannot work on a base with nothing in it, and a
+    /// list with nothing in it has nothing to move through. A disabled button
+    /// is a promise the page cannot keep and seven shortcuts are a wall; both
+    /// are absent until there is something for them to act on.
+    #[tokio::test]
+    async fn an_empty_base_offers_only_the_verb_that_can_work() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let empty = body_of(res).await;
+
+        assert!(
+            !empty.contains(r#"data-verb="ask""#),
+            "Ask can only abstain on an empty base, so the door is not there"
+        );
+        assert!(
+            !empty.contains(r#"class="keyhint""#),
+            "seven shortcuts for moving through a list with nothing in it"
+        );
+        assert!(
+            empty.contains("Paste anything worth keeping"),
+            "the placeholder names the one verb that can work"
+        );
+
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let held = body_of(res).await;
+
+        assert!(
+            held.contains(r#"data-verb="ask""#),
+            "one source is enough to have something to ask about"
+        );
+        assert!(
+            held.contains(r#"class="keyhint""#),
+            "and something to move through"
+        );
+        assert!(
+            held.contains("Describe the situation"),
+            "the placeholder goes back to naming all three verbs"
+        );
+    }
+
+    /// An OIDC user never sees the login card, so the tagline and the privacy
+    /// boundary have to be said where the eye already is — under the box, not
+    /// on a settings page nobody opens before pasting.
+    #[tokio::test]
+    async fn an_empty_base_says_what_this_is_and_whose_it_is() {
+        let html = workspace("/ui").await;
+        assert!(
+            html.contains("finds it again by meaning"),
+            "what the application does, in one clause"
+        );
+        assert!(
+            html.contains("nobody else can search it"),
+            "and the boundary, which is what a person wants before pasting \
+             their own notes onto someone else's server"
+        );
+        assert!(
+            !html.contains("Search to see an artifact here"),
+            "an instruction that cannot be followed on an empty base"
+        );
+        assert!(
+            html.contains("kept exactly as you wrote it"),
+            "the pane says what will happen to the first thing pasted"
+        );
+    }
+
+    /// The gap between "captured" and "searchable" is a background job, and it
+    /// was invisible: a one-line receipt, then silence, then a search that
+    /// finds nothing. The queue fragment already reports the work and already
+    /// stops polling when it settles — it was only ever rendered on Insights.
+    #[tokio::test]
+    async fn the_capture_receipt_shows_the_work_that_is_still_running() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/capture")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("text=LevelDB+tombstones+survive+compaction."))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains(r#"hx-get="/ui/queue""#),
+            "the receipt fetches the queue that reports the work"
+        );
+        assert!(
+            html.contains(r#"hx-trigger="load""#),
+            "on load, so the progress is there without a second press"
+        );
+    }
+
+    /// The receipt now shows the queue, and the queue speaks in statuses — a
+    /// row reading "segmenting 3/7" over a paste is the first thing a new
+    /// reader sees and the last thing they can interpret. A tooltip would not
+    /// reach them: the camera path is the phone's, and a phone has no hover.
+    #[tokio::test]
+    async fn the_receipt_says_what_the_work_below_it_means() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/capture")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("text=LevelDB+tombstones+survive+compaction."))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(
+            html.contains("searchable once it settles"),
+            "the receipt says what the row under it is counting towards: {html}"
+        );
+    }
+
+    /// A capture that stored nothing must not promise that something is being
+    /// read. Both the "searchable once it settles" line and the queue it polls
+    /// sat outside the branch, so a duplicate said "nothing was processed a
+    /// second time" and then, in the next sentence, that it was being read —
+    /// over a queue row that would sit parked at zero artifacts forever.
+    #[tokio::test]
+    async fn a_receipt_for_a_paste_nothing_processed_promises_no_processing() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let post = |app: axum::Router, cookie: String| async move {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/ui/capture")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from("text=LevelDB+tombstones+survive+compaction."))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            body_of(res).await
+        };
+
+        let first = post(app.clone(), cookie.clone()).await;
+        assert!(
+            first.contains("searchable once it settles") && first.contains(r#"hx-get="/ui/queue""#),
+            "the ordinary path still reports the work it started: {first}"
+        );
+
+        let again = post(app, cookie).await;
+        assert!(
+            again.contains("nothing was processed a second time"),
+            "the second paste of the same text is a duplicate: {again}"
+        );
+        assert!(
+            !again.contains("searchable once it settles"),
+            "and a duplicate must not say it is being read: {again}"
+        );
+        assert!(
+            !again.contains(r#"hx-get="/ui/queue""#),
+            "nor poll a queue that will never move for it: {again}"
+        );
+    }
+
+    /// The page is rendered once. Nothing re-renders it after a capture — the
+    /// receipt swaps into the pane and the rail refreshes — so the paste that
+    /// ended an empty base left the whole workspace still arranged for one.
+    /// `/ui/held` is what app.js swaps over that.
+    #[tokio::test]
+    async fn the_first_capture_can_redress_a_page_built_for_an_empty_base() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let empty = workspace("/ui").await;
+        assert!(
+            empty.contains(r#"data-held="0""#),
+            "the page says it was built for an empty base: {empty}"
+        );
+        assert!(
+            empty.contains(r#"data-placeholder-held="Describe the situation"#),
+            "and carries the sentence its box will use once something is held, \
+             because swapping a textarea would take the caret with it: {empty}"
+        );
+
+        // Nothing held, nothing to swap: an Ask verb over a base that cannot
+        // answer is the promise this whole state exists to avoid.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/held")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/held")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let held = body_of(res).await;
+        for region in [
+            r#"id="ask-verb-slot""#,
+            r#"id="keyhint-slot""#,
+            r#"id="box-hint""#,
+            r#"id="pane-idle""#,
+        ] {
+            assert!(held.contains(region), "{region} is not in the swap: {held}");
+        }
+        assert_eq!(
+            held.matches(r#"hx-swap-oob="true""#).count(),
+            4,
+            "every region names its own target, or it lands nowhere: {held}"
+        );
+        assert!(
+            held.contains(r#"data-verb="ask""#) && held.contains(r#"class="keyhint""#),
+            "the two controls an empty base withholds: {held}"
+        );
+        assert!(
+            held.contains("Search to see an artifact here"),
+            "and the hints for the state it is now in: {held}"
+        );
+    }
+
+    /// A question in a box with no way to send it. `held = false` renders no
+    /// Ask verb, so this door used to answer 200 with the question prefilled,
+    /// no button, and no word about why — reachable from a gap's "ask again",
+    /// which outlives a purge of what it was asked about.
+    #[tokio::test]
+    async fn the_ask_door_over_an_empty_base_sends_the_question_somewhere_it_works() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/ask?q=why+did+the+reindex+fail")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let to = res.headers()["location"].to_str().unwrap().to_string();
+        assert!(
+            to.starts_with("/ui?q="),
+            "sent to the one verb an empty base can honour: {to}"
+        );
+        assert!(
+            to.contains("why") && to.contains("reindex"),
+            "with the question still in it: {to}"
+        );
+    }
+
+    /// A button that is dead on arrival and says nothing about why reads as a
+    /// broken application rather than as a control waiting for its input.
+    #[tokio::test]
+    async fn a_disabled_verb_says_what_it_is_waiting_for() {
+        let html = workspace("/ui").await;
+        assert!(
+            html.contains(r#"title="Type or attach something first""#),
+            "the disabled verb names what it wants: {html}"
+        );
+        // The element, not the phrase: the same sentence is already on the
+        // label's `title`, so asserting the words alone would pass on a page
+        // where the only copy of them is the tooltip this exists to replace.
+        assert!(
+            html.contains(r#"class="muted hint attach-types""#),
+            "and Attach names its types where a finger can read them, not only \
+             in a tooltip: {html}"
+        );
+    }
+
+    /// Results appear beside a person who pressed nothing. The old hint
+    /// explained how to phrase a query, which is true and is not the thing
+    /// they do not know.
+    #[tokio::test]
+    async fn the_box_says_that_typing_is_already_searching() {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(
+            html.contains("Typing searches"),
+            "the one thing a first-time user cannot deduce from the page: {html}"
+        );
     }
 
     fn answer_fixture(dropped: usize) -> String {
@@ -1265,7 +1723,7 @@ mod tests {
     async fn an_ask_in_flight_offers_a_way_to_stop_it() {
         // Fifty seconds signalled by a small grey "thinking…" beside the
         // button, and nothing on the page to end it with.
-        let html = workspace("/ui/ask").await;
+        let html = workspace_held("/ui/ask").await;
         assert!(html.contains(r#"id="ask-stop""#), "{html}");
     }
 
@@ -1275,7 +1733,7 @@ mod tests {
         // seconds, restating the prompt's own constraints verbatim — "Answer
         // *only* using the provided knowledge-base excerpts" — above the empty
         // space where the answer was going to be.
-        let html = workspace("/ui/ask").await;
+        let html = workspace_held("/ui/ask").await;
         assert!(html.contains("ask-reasoning-box"), "{html}");
         assert!(
             !html.contains("<details open")

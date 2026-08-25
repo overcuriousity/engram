@@ -613,6 +613,112 @@ mod tests {
         body_of(res).await
     }
 
+    /// Five headings answered with a zero make a base with nothing wrong with
+    /// it look like a backlog — the same reasoning the housekeeping summary
+    /// already gives for collapsing its own empties into one sentence.
+    #[tokio::test]
+    async fn insights_over_an_empty_base_is_one_line_and_a_way_back() {
+        let core = crate::core::test_support::test_core().await;
+        let html = insights(core).await;
+        assert!(
+            html.contains("Nothing is held yet"),
+            "one honest line about an empty base: {html}"
+        );
+        assert!(
+            !html.contains("What this memory is like"),
+            "no measures over nothing"
+        );
+        assert!(
+            html.contains(r#"href="/ui""#),
+            "and a way back to the one place there is anything to do"
+        );
+        // Only the measures are gated. A gap is a question the base could not
+        // answer, which is exactly what an empty base produces, and the sweeps
+        // run whether or not anything was ever captured — a page-wide guard
+        // would hide both. What is noisy rather than absent goes behind the
+        // disclosure at the foot instead.
+        assert!(
+            html.contains("What the machine is doing"),
+            "what the machine is doing is true of an empty base too"
+        );
+    }
+
+    /// A closed disclosure with a neutral summary is not a report. The sweep
+    /// failures and the last-error column are the only surfaces that say a
+    /// background pipeline has fallen over, and once they moved in here an
+    /// instance whose every embed job had failed for a week looked from the
+    /// fold exactly like one with nothing to say.
+    #[tokio::test]
+    async fn a_failing_pipeline_is_not_something_the_page_keeps_to_itself() {
+        let core = crate::core::test_support::test_core().await;
+        let quiet = insights(core).await;
+        assert!(
+            quiet.contains(r#"<details class="machine">"#),
+            "with nothing wrong the readout stays folded away: {quiet}"
+        );
+
+        let core = crate::core::test_support::test_core().await;
+        core.store
+            .record_sweep_run(
+                "consolidate",
+                crate::store::now(),
+                "failed",
+                r#"{"error":"the endpoint was down"}"#,
+            )
+            .await
+            .unwrap();
+        let html = insights(core).await;
+
+        assert!(
+            html.contains(r#"<details class="machine" open>"#),
+            "a failing sweep opens the readout that reports it: {html}"
+        );
+        let summary = html
+            .split_once(r#"<details class="machine" open>"#)
+            .expect("the disclosure exists")
+            .1
+            .split_once("</summary>")
+            .expect("and has a summary")
+            .0;
+        assert!(
+            summary.contains("1 failed"),
+            "and says so on the line that survives the fold: {summary}"
+        );
+    }
+
+    /// Two questions, one page: what is in my memory and what needs me, versus
+    /// what is the machine doing. The second is operator-grade — stage ids,
+    /// target ids, raw error strings — and every user sees this page now.
+    #[tokio::test]
+    async fn the_machines_own_readout_is_behind_a_disclosure() {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        let html = insights(core).await;
+
+        let (above, inside) = html
+            .split_once(r#"<details class="machine">"#)
+            .expect("the disclosure exists");
+
+        assert!(
+            above.contains("What this memory is like"),
+            "what is held stays above the fold"
+        );
+        // The counts sentence rather than a heading: the section carries the
+        // disclosure's own name now, so the summary is the heading and the
+        // body is what it was always for.
+        assert!(
+            !above.contains("embedded."),
+            "the machine's own readout does not"
+        );
+        assert!(inside.contains("embedded."), "it is inside the disclosure");
+        assert!(
+            !html.contains(r#"<details class="machine" open"#),
+            "and closed: nobody opened this page to read job counts"
+        );
+    }
+
     /// The measures read what the base already recorded.
     #[tokio::test]
     async fn the_measures_read_what_the_base_already_recorded() {
@@ -640,6 +746,13 @@ mod tests {
     async fn an_unjudged_base_says_so_rather_than_reporting_zero() {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
+        // Something held, because the measures are gated on that now: a base
+        // with nothing in it has nothing to measure at all, and the rule this
+        // test pins is the narrower one about a base that has content but no
+        // verdicts on it.
+        core.ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
         let html = insights(core).await;
         assert!(html.contains("Nothing judged yet"), "{html}");
         assert!(

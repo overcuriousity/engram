@@ -13,6 +13,9 @@
   // fetch had not landed yet, `/ui/context/seen` never went and a real
   // impression fell out of both halves of the hit rate.
   var VERB_SYNC = 'engram:verbsync';
+  // Fired on the box once the base has stopped being empty and the held
+  // state has been swapped in. See `syncHeld`.
+  var HELD_SYNC = 'engram:held';
 
   // Registering the worker is what makes the browser offer to install engram
   // rather than bookmark it. Guarded on both the API and a secure context,
@@ -203,10 +206,13 @@
   function askDriver() {
     var form = document.getElementById('box-form');
     if (!form) return;
-    // No model, no button, no driver. The server renders no Ask verb where
-    // `Core::asks` is false, and this is the other end of that.
-    var askBtn = form.querySelector('[data-verb="ask"]');
-    if (!askBtn) return;
+    // The press is delegated, rather than bound to the button found here.
+    // There are two states with no Ask verb in the page — an install with no
+    // model, and a base with nothing held — and only the second one ends: the
+    // verb arrives out-of-band on the first capture (see `syncHeld`), long
+    // after this runs, and a driver that had returned at this line left it
+    // dead. Nothing below fires until a press that reaches the button, so
+    // arming the driver where there is no model costs nothing.
     var box = form.querySelector('textarea[name="q"]');
     if (!box) return;
     var live = document.getElementById('ask-live');
@@ -462,7 +468,11 @@
       });
     }
 
-    askBtn.addEventListener('click', function (e) {
+    form.addEventListener('click', function (e) {
+      var askBtn = e.target.closest ? e.target.closest('[data-verb="ask"]') : null;
+      // `disabled` is checked as well as matched: a disabled button fires no
+      // click of its own, but it is inside a form that does.
+      if (!askBtn || askBtn.disabled) return;
       e.preventDefault();
       var q = box.value;
       if (!q.trim()) return;
@@ -576,6 +586,46 @@
     if (id === dwell.id) return;
     flushDwell();
     if (id) { dwell.id = id; dwell.since = Date.now(); }
+  }
+
+  // ── The end of the empty base ─────────────────────────────────────────────
+  //
+  // The workspace is rendered once. A capture posts to `/ui/capture` and swaps
+  // a receipt, and the rail refresh swaps `#results` — nothing else on the page
+  // moves. So the paste that ends an empty base left the whole page still
+  // arranged for one: no Ask verb, no shortcut row, a box hint introducing the
+  // application and a pane saying what will happen to the first capture, all
+  // of it describing a state the operator had just left, until a reload nobody
+  // had a reason to perform.
+  //
+  // `/ui/held` returns those four regions as out-of-band swaps, written from
+  // the same partials the page itself includes, so there is one author for
+  // what the held state says. The placeholders are not among them and ride the
+  // textarea instead — see the box's `HELD_SYNC` listener.
+  //
+  // Runs at most once: `data-held` is written before the request goes, so the
+  // second capture of a session asks for nothing.
+  function syncHeld() {
+    var form = document.getElementById('box-form');
+    if (!form || form.getAttribute('data-held') !== '0') return;
+    form.setAttribute('data-held', '1');
+    // `swap: "none"` because every region in the answer names its own target.
+    // A `target` is still required, and the form is the one element here that
+    // is certain to exist.
+    htmx.ajax('GET', '/ui/held', { target: form, swap: 'none' })
+      // A capture that stored and a page that failed to redress itself is
+      // still a capture that stored: the receipt stands, and the state is
+      // re-armed so the next one tries again rather than the page staying
+      // wrong for the session.
+      .catch(function () { form.setAttribute('data-held', '0'); })
+      .then(function () {
+        if (form.getAttribute('data-held') !== '1') return;
+        var box = form.querySelector('textarea[name="q"]');
+        if (box) box.dispatchEvent(new Event(HELD_SYNC, { bubbles: true }));
+        // The shortcut row arrived hidden, as it always does. This is what
+        // decides whether there is a keyboard to show it to.
+        keyHint();
+      });
   }
 
   // Shown until it is dismissed, then never again on this browser. Not shown
@@ -948,6 +998,15 @@
         : (narrow.matches ? short : wide);
     }
     narrow.addEventListener('change', fitPlaceholder);
+    // And the two sentences an empty base's box will use once something is
+    // held, carried on the element by the template. Read across here rather
+    // than swapped in with the rest of the held state: replacing a textarea
+    // takes the caret, the selection and anything typed since with it.
+    box.addEventListener(HELD_SYNC, function () {
+      wide = box.getAttribute('data-placeholder-held') || wide;
+      short = box.getAttribute('data-placeholder-held-narrow') || short;
+      fitPlaceholder();
+    });
     fitPlaceholder();
 
     sync();
@@ -1150,6 +1209,10 @@
             box.value = '';
             box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
             refreshRail();
+            // A photo or a PDF ends an empty base exactly as a paste does, and
+            // this path never goes near `/ui/capture` — without this the first
+            // capture of a phone-only base left the page arranged for nothing.
+            syncHeld();
           } else {
             // It never left. Put it back where it was, so the fix is a second
             // press rather than a second trip to the camera.
@@ -1272,6 +1335,9 @@
         box.value = '';
         box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
         refreshRail();
+        // The base may have just stopped being empty. Asked after the box is
+        // cleared, so the placeholder this uncovers is the one that lands.
+        syncHeld();
       });
     }
     verb.addEventListener('click', function (e) {

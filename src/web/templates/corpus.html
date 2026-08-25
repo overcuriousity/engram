@@ -1,5 +1,5 @@
 {% extends "layout.html" %}
-{% block title %}Corpus — engram{% endblock %}
+{% block title %}Source — engram{% endblock %}
 {% block content %}
 <div class="row" style="margin-bottom:1rem">
   <span class="badge {{ badge }}">{{ status }}</span>
@@ -29,7 +29,7 @@
   </form>
   {% endif %}
   <form method="post" action="/ui/corpora/{{ id }}/delete" style="display:inline"
-        onsubmit="return confirm('Delete this corpus and all its artifacts?')">
+        onsubmit="return confirm('Delete this source and all its artifacts?')">
     <button class="btn btn-sm btn-danger" type="submit">Delete</button>
   </form>
 </div>
@@ -131,7 +131,7 @@
    joined back together, or a photo the vision model has not read yet. #}
 <div class="card">
   <div class="card-head">
-    <span class="card-title">{% if restored %}Restored artifacts{% else if image %}Transcription{% else %}Raw corpus{% endif %}</span>
+    <span class="card-title">{% if restored %}Restored artifacts{% else if image %}Transcription{% else %}Raw source{% endif %}</span>
   </div>
   {% if lines_empty %}
   {# Only a photo is waiting on the vision model. Any other capture with no
@@ -195,7 +195,7 @@
 {# A merged or synthesized artifact belongs to every corpus it drew from — its
    origins are its roots' corpora, derived from lineage, never stored — and
    this capture is one of them. #}
-<h3>Written from this corpus</h3>
+<h3>Written from this source</h3>
 <p class="muted">
   Model-written artifacts with a source here. Each lists what it was written
   from on its own page.

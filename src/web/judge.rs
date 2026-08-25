@@ -927,6 +927,39 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    /// The nav named a role. The page asks a real cognitive task and never
+    /// said why it was worth doing — and the number on Insights is exactly
+    /// what it is worth: recall@10 and MRR are read off these verdicts.
+    #[tokio::test]
+    async fn the_nav_names_the_task_and_the_page_says_why_it_matters() {
+        // The entry exists only where searches are actually being recorded —
+        // an installation that records none has nothing to review and is
+        // offered no destination for it.
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/judge")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains("Review searches"),
+            "the nav names the task, not a role: {html}"
+        );
+        assert!(
+            html.contains("your own searches, coming back unlabelled"),
+            "and the page says what it is asking for: {html}"
+        );
+    }
+
     /// The gate, from the outside: a signed-in user without the grant.
     ///
     /// Eleven routes, because the grant covers the router and not a page —
@@ -2270,7 +2303,7 @@ mod tests {
         let (app, cookie, _core, _) = judge_app(0, &[]).await;
         let body = get(&app, "/ui/judge", &cookie).await;
         assert!(
-            body.to_lowercase().contains("nothing to judge"),
+            body.to_lowercase().contains("nothing to review"),
             "an empty queue must say so"
         );
     }

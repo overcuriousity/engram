@@ -1,0 +1,13 @@
+{# With something held this names where an artifact will appear. With nothing
+   held it named a search that cannot be run, which is an instruction to do the
+   one thing the page has just been arranged to prevent. It says what will
+   happen to the first paste instead. #}
+<p id="pane-idle" class="muted"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {%- if held -%}
+  Search to see an artifact here, beside the lines it came from.
+  {%- else -%}
+  Whatever you paste is split into passages and embedded so it can be found
+  by meaning. The original is kept exactly as you wrote it, and every result
+  can be read beside it.
+  {%- endif -%}
+</p>

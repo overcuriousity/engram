@@ -5,8 +5,15 @@
 {# Everything true about this installation rather than about what is in it.
    The two were one page, which meant scrolling past every merge and every
    hidden artifact to revoke a token. Reachable from the same quiet line on
-   Housekeeping, and no more advertised than it is. #}
+   Insights, and no more advertised than it is. #}
 <p class="crumb"><a href="/ui">engram</a> › Settings</p>
+
+{# Said plainly, on the page where account things live. Every user has held
+   their own database and their own collection since #52, and no page said so
+   — which leaves the one question a person actually has before pasting their
+   own notes onto a server somebody else runs unanswered everywhere. #}
+<p class="muted">Signed in as <span class="mono">{{ account }}</span>. This base
+  is yours alone — no other account can search it.</p>
 
 <h3>Browser extension</h3>
 {# The extension mints its own token through /ui/pair, so it needs nothing from
@@ -20,18 +27,18 @@ reading, and search from a panel beside it.</p>
 <form hx-post="/ui/ops/tokens" hx-target="#token-result" hx-swap="innerHTML"
       class="row" style="margin-bottom:1rem">
   <input class="input" name="name" placeholder="Token name, e.g. claude-code" style="max-width:20rem">
-  <button class="btn btn-accent" type="submit">Mint</button>
+  <button class="btn btn-accent" type="submit">Create</button>
 </form>
 
 {# Column headings over no rows is a table pretending to have some — the same
    thing the decide list names at its top: five headings answered with "None."
    made an empty base look like a backlog. #}
 {% if tokens.is_empty() %}
-<p class="muted">No tokens yet. Mint one to let Claude Code, Claude Desktop or
+<p class="muted">No tokens yet. Create one to let Claude Code, Claude Desktop or
   anything else on the API read and write this base without your session.</p>
 {% else %}
 <table class="grid">
-  <thead><tr><th>Name</th><th>Minted by</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
+  <thead><tr><th>Name</th><th>Created by</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
   <tbody>
   {% for t in tokens %}
     <tr>
@@ -71,7 +78,7 @@ reading, and search from a panel beside it.</p>
    page for things that are true about the installation. #}
 <p class="muted">
   Searches are being recorded — {{ f.captured }} captured, {{ f.pending }} unjudged.
-  {% if f.pending > 0 %}<a href="/ui/judge">Judge them</a>{% endif %}
+  {% if f.pending > 0 %}<a href="/ui/judge">Review them</a>{% endif %}
 </p>
 {# Counted here beside the searches because one purge takes both. The judged
    count is what the button below destroys and what nothing can reproduce: a
@@ -85,7 +92,7 @@ reading, and search from a panel beside it.</p>
 {% when None %}
 {% endmatch %}
 <form method="post" action="/ui/ops/feedback/purge"
-      onsubmit="return confirm('Delete every captured search and every recorded question, with every verdict given on one, and every pursuit and what was opened? The judged questions cannot be recovered — they are what the ask harness is measured against.')">
+      onsubmit="return confirm('Delete every recorded search and question, and every verdict given on one? The judged ones cannot be recovered — they are what the retrieval figure is measured from.')">
   <button class="btn btn-sm btn-danger" type="submit">Delete all captured searches, questions and pursuits</button>
 </form>
 {% when None %}
