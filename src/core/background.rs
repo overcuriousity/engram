@@ -227,7 +227,8 @@ const REPAIR_INTERVAL_HOURS: u64 = 1;
 /// find, on almost every base, nothing.
 const STORE_DRIFT_INTERVAL_HOURS: u64 = 24;
 
-/// How many background units may be promoted on one repair tick.
+/// How many of *one tenant's* background units may be promoted on one repair
+/// tick.
 ///
 /// A constant rather than a setting, and small on purpose. Ageing exists so
 /// that a unit which has waited goes ahead of a fresh capture (§4.4), and that
@@ -237,6 +238,12 @@ const STORE_DRIFT_INTERVAL_HOURS: u64 = 24;
 /// pasted, which is the head-of-line wait the class column exists to end.
 /// Twenty at a time keeps that wait bounded; the rest are still worked as
 /// background, and the next tick takes the next twenty.
+///
+/// Per tenant, because the wait it bounds is per tenant: what a person may have
+/// pasted is in front of their own promotions and nobody else's. Shared across
+/// the instance it was the same number however many people used it, so the
+/// guarantee thinned out as users were added — and, taken oldest-first over the
+/// whole table, the tenant with the deepest backlog spent all of it.
 const AGE_PER_TICK: i64 = 20;
 
 /// Finish what a crash left half-done, now and every `REPAIR_INTERVAL_HOURS`,
@@ -285,8 +292,10 @@ pub fn spawn_repair_ticker(
                 }
                 _ = tick.tick() => repair_every_tenant(&tenants).await,
                 _ = drift_tick.tick() => {
-                    for core in open_every_tenant(&tenants).await {
-                        reconcile_stores_once(&core).await;
+                    for subject in every_subject(&tenants).await {
+                        if let Some(core) = open_for_pass(&tenants, &subject).await {
+                            reconcile_stores_once(&core).await;
+                        }
                     }
                 }
             }
@@ -296,65 +305,97 @@ pub fn spawn_repair_ticker(
 }
 
 /// The instance-wide half of a repair tick, then the per-tenant half.
+///
+/// One base is open at a time. The pass used to open every registered user up
+/// front and hold the whole set for its duration, which on an instance with any
+/// number of users is a SQLite pool and a vector client each, all live at once,
+/// every hour and again at boot — with `store.max_open_tenants` bounding the
+/// registry and nothing at all bounding this. Opening inside the loop makes the
+/// walk's cost its own rather than the instance's.
 pub(crate) async fn repair_every_tenant(tenants: &crate::tenants::Tenants) {
-    repair_control_once(tenants.control(), tenants.config()).await;
-    for core in open_every_tenant(tenants).await {
-        repair_once(&core).await;
+    repair_control_once(tenants.control()).await;
+    let older_than = age_threshold(tenants.config());
+    for subject in every_subject(tenants).await {
+        // Before the open, because it does not need the base: ageing is a
+        // statement about that subject's rows in the control database.
+        match tenants
+            .control()
+            .age_background(&subject, older_than, AGE_PER_TICK)
+            .await
+        {
+            Ok(n) if n > 0 => {
+                tracing::info!(subject = %subject, aged = n, "background units have waited long enough")
+            }
+            Err(e) => {
+                tracing::warn!(subject = %subject, error = %e, "could not age the units that have been waiting")
+            }
+            _ => {}
+        }
+        if let Some(core) = open_for_pass(tenants, &subject).await {
+            repair_once(&core).await;
+        }
     }
 }
 
-/// Every registered user's core, opened.
+/// Every registered subject.
 ///
-/// A tenant that cannot be opened is logged and left out rather than stopping
-/// the pass for everybody else; the next tick tries again. Registered users and
-/// not the open registry, because a base nobody has touched since boot is
-/// exactly the one whose interrupted work nothing else will find.
-async fn open_every_tenant(tenants: &crate::tenants::Tenants) -> Vec<crate::core::Core> {
-    let users = match tenants.control().users().await {
-        Ok(u) => u,
+/// Registered users and not the open registry, because a base nobody has
+/// touched since boot is exactly the one whose interrupted work nothing else
+/// will find.
+async fn every_subject(tenants: &crate::tenants::Tenants) -> Vec<String> {
+    match tenants.control().users().await {
+        Ok(u) => u.into_iter().map(|u| u.subject).collect(),
         Err(e) => {
             tracing::warn!(error = %e, "could not list the users to repair; retrying on the next pass");
-            return Vec::new();
-        }
-    };
-    let mut out = Vec::with_capacity(users.len());
-    for u in users {
-        match tenants.get(&u.subject).await {
-            Ok(t) => out.push(t.core),
-            Err(e) => {
-                tracing::warn!(subject = %u.subject, error = %e, "could not open a base to repair it")
-            }
+            Vec::new()
         }
     }
-    out
+}
+
+/// One base, opened for the length of one pass over it and dropped after.
+///
+/// `get_transient` and not `get`: a walk over the whole user table must not
+/// decide what the fixed-size registry holds, or the hourly tick ends with
+/// every actually-active tenant evicted in favour of whichever users the walk
+/// happened to reach last. A tenant that cannot be opened is logged and left
+/// out rather than stopping the pass for everybody else; the next tick tries
+/// again.
+async fn open_for_pass(
+    tenants: &crate::tenants::Tenants,
+    subject: &str,
+) -> Option<crate::core::Core> {
+    match tenants.get_transient(subject).await {
+        Ok(t) => Some(t.core),
+        Err(e) => {
+            tracing::warn!(subject = %subject, error = %e, "could not open a base to repair it");
+            None
+        }
+    }
+}
+
+/// How old a waiting background unit has to be to be promoted.
+///
+/// Saturating for the same reason `periodic_period` is: `age_after_mins` comes
+/// out of `config.toml`, and a large enough value panics in debug and wraps in
+/// release, leaving an `older_than` that ages rows which have not waited at
+/// all. `0` is not a way to switch ageing off — it means every waiting unit is
+/// old enough, so the classes stop dividing anything, which is the behaviour
+/// from before the column existed.
+fn age_threshold(cfg: &crate::config::Config) -> i64 {
+    crate::store::now().saturating_sub(cfg.schedule.age_after_mins.max(0).saturating_mul(60))
 }
 
 /// The repairs that are about the queue rather than about anyone's knowledge.
 ///
 /// One control database, so one pass — not one per tenant. `reclaim_stuck` and
-/// `age_background` are already instance-wide queries, and running them per
-/// user would ask the same question as many times as there are users and act
-/// on the first answer.
-pub(crate) async fn repair_control_once(
-    control: &crate::store::control::Control,
-    cfg: &crate::config::Config,
-) {
+/// `purge_expired_sessions` are questions about the whole table, and running
+/// them per user would ask the same thing as many times as there are users and
+/// act on the first answer. Ageing is not one of those and no longer lives
+/// here: it is a per-tenant budget, so it runs in the per-tenant loop.
+pub(crate) async fn repair_control_once(control: &crate::store::control::Control) {
     match control.reclaim_stuck(crate::jobs::STUCK_AFTER_SECS).await {
         Ok(n) if n > 0 => tracing::info!(reclaimed = n, "requeued jobs left running by a dead process"),
         Err(e) => tracing::warn!(error = %e, "could not requeue jobs left running"),
-        _ => {}
-    }
-    // Saturating for the same reason `periodic_period` is: `age_after_mins`
-    // comes out of `config.toml`, and a large enough value panics in debug and
-    // wraps in release, leaving an `older_than` that ages rows which have not
-    // waited at all. `0` is not a way to switch ageing off — it means every
-    // waiting unit is old enough, so the classes stop dividing anything, which
-    // is the behaviour from before the column existed.
-    let older_than =
-        crate::store::now().saturating_sub(cfg.schedule.age_after_mins.max(0).saturating_mul(60));
-    match control.age_background(older_than, AGE_PER_TICK).await {
-        Ok(n) if n > 0 => tracing::info!(aged = n, "background units have waited long enough"),
-        Err(e) => tracing::warn!(error = %e, "could not age the units that have been waiting"),
         _ => {}
     }
     match control.purge_expired_sessions().await {
@@ -485,13 +526,92 @@ mod tests {
             .await
             .unwrap();
 
-        repair_control_once(tenants.control(), tenants.config()).await;
+        repair_control_once(tenants.control()).await;
 
         let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state = 'pending'")
             .fetch_one(&tenants.control().pool)
             .await
             .unwrap();
         assert_eq!(pending, 2, "one tenant's stuck work was left running");
+    }
+
+    /// Ageing is a per-tenant budget, not one budget the instance shares out.
+    ///
+    /// Shared, `AGE_PER_TICK` was the same twenty however many people used the
+    /// instance — ten users past the threshold got two promotions an hour each
+    /// — and oldest-first over the whole table meant the tenant with the
+    /// deepest backlog took all of it and the others got none.
+    #[tokio::test]
+    async fn every_tenant_gets_its_own_ageing_budget() {
+        let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
+        // More waiting units each than one tick may promote, and `a`'s are all
+        // older than `b`'s — which under one shared budget is exactly what let
+        // `a` spend the lot.
+        for (t, base) in [(&a, 10_000i64), (&b, 5_000)] {
+            for i in 0..(AGE_PER_TICK + 5) {
+                t.core
+                    .store
+                    .enqueue(
+                        crate::store::jobs::Stage::Dedupe,
+                        "artifact",
+                        &format!("x{i}"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("UPDATE jobs SET created_at = ? WHERE subject = ?")
+                .bind(crate::store::now() - base)
+                .bind(&t.user.subject)
+                .execute(&tenants.control().pool)
+                .await
+                .unwrap();
+        }
+
+        repair_every_tenant(&tenants).await;
+
+        for t in [&a, &b] {
+            let promoted: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE subject = ? AND class = 0")
+                    .bind(&t.user.subject)
+                    .fetch_one(&tenants.control().pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                promoted, AGE_PER_TICK,
+                "{} got {promoted} of its own budget of {AGE_PER_TICK}",
+                t.user.subject
+            );
+        }
+    }
+
+    /// A walk over every registered user must not decide what the registry
+    /// holds. Opening each tenant through `get` did: the pass ended with the
+    /// last `max_open_tenants` users it happened to reach resident and whoever
+    /// was actually being served evicted behind them.
+    #[tokio::test]
+    async fn a_repair_pass_does_not_evict_the_tenant_somebody_is_using() {
+        let (tenants, _dir) = crate::tenants::test_support::test_tenants(1).await;
+        for s in ["sub-a", "sub-b", "sub-c"] {
+            tenants.get_or_provision(s, None).await.unwrap();
+        }
+        // `sub-a` is the one in use, and so the one the registry holds. It is
+        // also the *first* the walk reaches, which is what makes this a test:
+        // through `get`, every later user displaced it in turn and the pass
+        // ended holding whoever it happened to visit last.
+        tenants.get("sub-a").await.unwrap();
+        assert!(tenants.is_open("sub-a"));
+
+        repair_every_tenant(&tenants).await;
+
+        assert_eq!(
+            tenants.open_count(),
+            1,
+            "the pass left more bases open than the cap allows"
+        );
+        assert!(
+            tenants.is_open("sub-a"),
+            "the pass evicted the tenant in use in favour of one it walked past"
+        );
     }
     use super::*;
     use std::sync::atomic::AtomicBool;

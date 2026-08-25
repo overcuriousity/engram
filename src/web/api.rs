@@ -1319,16 +1319,19 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::OK);
-        // The header, not the client's `localStorage`, is what actually holds
-        // the fetch budget: a browser that cannot write storage has nothing
-        // else stopping it from re-running the scroll on every page load.
+        // Never a `max-age`. One URL answers with a different tenant's contents
+        // depending on who is signed in, and an HTTP cache is keyed on the URL
+        // alone — so a held answer is the previous account's cloud drawn for
+        // the next one, and nothing can reach into a browser cache to drop it.
+        // `refresh_secs` and the client's `localStorage` hold the budget
+        // instead, because that is the layer sign-out can clear.
         let cache = res.headers()[header::CACHE_CONTROL]
             .to_str()
             .unwrap()
             .to_string();
         assert!(
-            cache.starts_with("private, max-age=") && !cache.ends_with("=0"),
-            "the sample must be cacheable by the browser: {cache}"
+            cache.contains("no-store") && !cache.contains("max-age"),
+            "a tenant's cloud must not be held in a browser cache: {cache}"
         );
         let body = json_of(res).await;
         let pts = body["points"].as_array().expect("points is an array");

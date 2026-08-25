@@ -840,16 +840,28 @@ impl Control {
     /// class the order is `attempts, seq, id` and they were all armed first.
     /// An aged unit going ahead of a fresh capture is the promise (§4.4) and
     /// stays; the whole queue doing it at once is not.
-    pub async fn age_background(&self, older_than: i64, limit: i64) -> Result<u64> {
+    ///
+    /// Per tenant, and `limit` is that tenant's whole budget.
+    ///
+    /// Instance-wide it was one budget shared by everybody, which is the same
+    /// starvation this promotes units to end, moved up a level: ten users past
+    /// the threshold at once got two promotions an hour each, a hundred got a
+    /// fifth of one, and the guarantee the class column exists for thinned out
+    /// in proportion to how many people used the instance. Oldest-first over
+    /// the whole table made it worse than the average suggests — one tenant
+    /// with a deep backlog is *always* the oldest, so it took the entire budget
+    /// and everyone else waited on it.
+    pub async fn age_background(&self, subject: &str, older_than: i64, limit: i64) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE jobs SET class = 0
               WHERE id IN (
                 SELECT id FROM jobs
-                 WHERE state = 'pending' AND class = 1
+                 WHERE subject = ? AND state = 'pending' AND class = 1
                    AND max(created_at, run_after) < ?
                  ORDER BY max(created_at, run_after)
                  LIMIT ?)",
         )
+        .bind(subject)
         .bind(older_than)
         .bind(limit)
         .execute(&self.pool)
@@ -872,10 +884,13 @@ impl Store {
 
     /// Promote this tenant's background units that have waited long enough.
     ///
-    /// Instance-wide underneath, like the claim: ageing is about the queue as a
-    /// whole. Kept here because the tests drive it through a single base.
+    /// Scoped to this store's own subject: unlike the claim, ageing is about
+    /// one person's queue, and `limit` is what that person gets. Kept here
+    /// because the tests drive it through a single base.
     pub async fn age_background(&self, older_than: i64, limit: i64) -> Result<u64> {
-        self.control.age_background(older_than, limit).await
+        self.control
+            .age_background(&self.subject, older_than, limit)
+            .await
     }
 
     /// Claim one of *this* tenant's units.

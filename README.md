@@ -175,6 +175,13 @@ engram --revoke-judge sub-abc123
 engram --delete-user  sub-abc123         # row, credentials, file and alias, behind a typed yes
 ```
 
+`--delete-user` drops the Qdrant collections first and refuses to go any
+further if it cannot reach them: the alias name is derived from the subject, so
+a collection left behind is not merely orphaned — the next time that person
+signs in, the surviving alias is adopted and the deleted account comes back with
+every vector it had. Nothing is deleted when it stops that way, so the fix is to
+bring Qdrant back and run it again.
+
 The judge grant gates the whole of `/ui/judge`, which is also the only route in
 the tree that writes `config.toml` — applying a tuning recommendation moves the
 instance's ranking parameters, so it is not something every account should

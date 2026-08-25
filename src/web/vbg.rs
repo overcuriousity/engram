@@ -135,11 +135,13 @@ use serde::Serialize;
 
 /// How long a snapshot that could not be taken is allowed to stand.
 ///
-/// The good answer is cached for the configured refresh window, but an outage
-/// must not blank the backdrop for six hours behind a browser cache nobody can
-/// reach into. A minute is long enough to stop a reload storm and short enough
-/// that the picture comes back on its own.
-const FAILURE_MAX_AGE: u64 = 60;
+/// The good answer is kept for the configured refresh window, but an outage
+/// must not blank the backdrop for six hours. A minute is long enough to stop
+/// a reload storm and short enough that the picture comes back on its own.
+///
+/// Carried in the body rather than in a header, like every other budget this
+/// endpoint sets — see `no_store`.
+const FAILURE_REFRESH_SECS: u64 = 60;
 
 #[derive(Serialize)]
 pub struct SampleResponse {
@@ -150,11 +152,25 @@ pub struct SampleResponse {
     pub refresh_secs: u64,
 }
 
-/// `private`, never `public`: the cloud is a projection of one installation's
-/// own contents, and a shared cache has no business holding it.
-fn cached(body: SampleResponse, max_age: u64) -> Response {
+/// `no-store`, and deliberately not a `max-age` of any length.
+///
+/// This is one URL that answers with a different tenant's contents depending on
+/// who is signed in, and an HTTP cache is keyed on the URL alone. `private` was
+/// never enough: it only says *whose* cache may hold the answer, and the
+/// browser's own cache is exactly the one that outlives a sign-out. Two people
+/// sharing a machine had the second one's backdrop drawn from the first one's
+/// store for as long as the refresh window ran — six hours, by default.
+///
+/// The client's `localStorage` snapshot is what holds the budget instead, which
+/// is the layer that can actually be invalidated: `app.js` drops it on sign-out
+/// for precisely this reason, and nothing can reach into a browser cache to do
+/// the same. `refresh_secs` in the body is what that snapshot is kept for. The
+/// cost of the change is a browser where `setItem` throws — a private window, a
+/// full quota — paying one sample scroll per page load, and that is the right
+/// side to be wrong on.
+fn no_store(body: SampleResponse) -> Response {
     (
-        [(header::CACHE_CONTROL, format!("private, max-age={max_age}"))],
+        [(header::CACHE_CONTROL, "private, no-store".to_string())],
         Json(body),
     )
         .into_response()
@@ -164,12 +180,12 @@ fn cached(body: SampleResponse, max_age: u64) -> Response {
 /// error: the picture is decorative, and a decoration must never take a page
 /// down with it.
 ///
-/// Every answer carries a `Cache-Control`, which is what actually holds the
-/// budget the module claims. The client's `localStorage` snapshot is the first
-/// line and it is not a guarantee — a private window, a full quota or a
-/// storage-blocking setting makes `setItem` throw, and without a header on the
-/// response every page load in that browser would re-run a scroll of
-/// `sample_size` points with their dense vectors attached.
+/// Every answer carries `refresh_secs`, which is what actually holds the budget
+/// the module claims: the client keeps its own snapshot for that long. It is
+/// not a guarantee — a private window, a full quota or a storage-blocking
+/// setting makes `setItem` throw, and in such a browser every page load re-runs
+/// a scroll of `sample_size` points with their dense vectors attached. That is
+/// the price of `no_store`, and the reason it is worth paying is there.
 pub async fn sample(tenant: Tenant) -> Result<Response> {
     let cfg = &tenant.core.ui.background;
     let empty = || SampleResponse {
@@ -178,27 +194,30 @@ pub async fn sample(tenant: Tenant) -> Result<Response> {
         refresh_secs: cfg.refresh_secs,
     };
     if !cfg.enabled {
-        // Cached like any other answer: an operator who turned the backdrop
-        // off should not go on paying a request per page load for it.
-        return Ok(cached(empty(), cfg.refresh_secs));
+        // Kept like any other answer: an operator who turned the backdrop off
+        // should not go on paying a request per page load for it.
+        return Ok(no_store(empty()));
     }
     let sampled = match tenant.core.vectors.sample(cfg.sample_size).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "vector background sample failed");
-            return Ok(cached(empty(), FAILURE_MAX_AGE));
+            // The short window, in the one place that still has a window: the
+            // client must not hold an empty cloud for the configured six hours
+            // because Qdrant was briefly unreachable.
+            return Ok(no_store(SampleResponse {
+                refresh_secs: FAILURE_REFRESH_SECS,
+                ..empty()
+            }));
         }
     };
     let vectors: Vec<Vec<f32>> = sampled.into_iter().map(|(_, v)| v).collect();
     let points = project_3d(&vectors);
-    Ok(cached(
-        SampleResponse {
-            count: points.len(),
-            points,
-            refresh_secs: cfg.refresh_secs,
-        },
-        cfg.refresh_secs,
-    ))
+    Ok(no_store(SampleResponse {
+        count: points.len(),
+        points,
+        refresh_secs: cfg.refresh_secs,
+    }))
 }
 
 #[cfg(test)]

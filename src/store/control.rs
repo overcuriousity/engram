@@ -160,6 +160,26 @@ impl Control {
                 }
             }
         }
+        for (table, column, ddl) in ADDITIVE {
+            let key = format!("{table}.{column}");
+            let Some(i) = missing.iter().position(|m| *m == key) else {
+                continue;
+            };
+            sqlx::raw_sql(ddl)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+            tracing::info!(column = %key, "added a column the control schema expects");
+            missing.remove(i);
+        }
+        if !missing.is_empty() {
+            return Err(crate::error::Error::Store(format!(
+                "the control database is older than the schema: {} missing. \
+                 Recreate it, or add the columns by hand.",
+                missing.join(", ")
+            )));
+        }
+
         // The mirror of `ADDITIVE`, and rarer: a column this schema used to
         // have and no longer does. `CREATE TABLE IF NOT EXISTS` cannot take one
         // away, and a leftover `NOT NULL` column with no default is not inert —
@@ -171,6 +191,16 @@ impl Control {
         // `provision` and by a `touch` no production path ever called, listed
         // by nothing and read by nothing, so what this drops is a column whose
         // every value was the row's own `created_at`.
+        //
+        // After the refusal and not before it, which is the whole reason this
+        // sits down here rather than beside `ADDITIVE`. A drop is the one step
+        // in this function that cannot be undone: a control database missing
+        // some *other* column has to come out of a refused migration exactly as
+        // it went in, so that the operator can put the previous binary back.
+        // Dropping first and refusing second takes `last_seen_at` away from a
+        // base the old binary's `provision` still names, which strands them on
+        // both sides. `ADDITIVE` may run before the refusal because adding a
+        // column with a default is invisible to a binary that does not know it.
         const REMOVED: [(&str, &str, &str); 1] = [(
             "users",
             "last_seen_at",
@@ -192,25 +222,6 @@ impl Control {
                 .await
                 .map_err(|e| crate::error::Error::Store(e.to_string()))?;
             tracing::info!(column = %format!("{table}.{column}"), "dropped a column the control schema no longer has");
-        }
-        for (table, column, ddl) in ADDITIVE {
-            let key = format!("{table}.{column}");
-            let Some(i) = missing.iter().position(|m| *m == key) else {
-                continue;
-            };
-            sqlx::raw_sql(ddl)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
-            tracing::info!(column = %key, "added a column the control schema expects");
-            missing.remove(i);
-        }
-        if !missing.is_empty() {
-            return Err(crate::error::Error::Store(format!(
-                "the control database is older than the schema: {} missing. \
-                 Recreate it, or add the columns by hand.",
-                missing.join(", ")
-            )));
         }
 
         sqlx::raw_sql(SCHEMA)
@@ -364,35 +375,45 @@ impl Control {
         states: &[&str],
         max_attempts: Option<i64>,
     ) -> Result<std::collections::HashSet<String>> {
-        if targets.is_empty() {
-            return Ok(Default::default());
+        let mut found = std::collections::HashSet::new();
+        // Chunked well under SQLITE_MAX_VARIABLE_NUMBER, which is 999 on the
+        // builds that predate 3.32, for the same reason `stale_unreachable_pairs`
+        // and `stranded_merges` are. The callers here decide the length: the
+        // relate backstop hands over a window of `limit * 8` ids — four thousand
+        // for the one production call — and `pending_artifacts_are_isolated`
+        // hands over every pending chunk of a source, which nothing bounds at
+        // all. Unchunked, both fail outright with `too many SQL variables` on
+        // such a build, and both fail *quietly*: the backstop is a repair pass
+        // that only logs, so it would simply never run again.
+        for chunk in targets.chunks(500) {
+            // Every placeholder here is a count, never a value: the ids are bound.
+            let holes = vec!["?"; chunk.len()].join(", ");
+            let mut sql = format!(
+                "SELECT target_id FROM jobs
+                  WHERE subject = ? AND stage = ? AND target_id IN ({holes})"
+            );
+            if !states.is_empty() {
+                let s = vec!["?"; states.len()].join(", ");
+                sql.push_str(&format!(" AND state IN ({s})"));
+            }
+            if max_attempts.is_some() {
+                sql.push_str(" AND attempts < ?");
+            }
+            let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql))
+                .bind(subject)
+                .bind(stage.as_str());
+            for t in chunk {
+                q = q.bind(t);
+            }
+            for st in states {
+                q = q.bind(*st);
+            }
+            if let Some(n) = max_attempts {
+                q = q.bind(n);
+            }
+            found.extend(q.fetch_all(&self.pool).await?);
         }
-        // Every placeholder here is a count, never a value: the ids are bound.
-        let holes = vec!["?"; targets.len()].join(", ");
-        let mut sql = format!(
-            "SELECT target_id FROM jobs
-              WHERE subject = ? AND stage = ? AND target_id IN ({holes})"
-        );
-        if !states.is_empty() {
-            let s = vec!["?"; states.len()].join(", ");
-            sql.push_str(&format!(" AND state IN ({s})"));
-        }
-        if max_attempts.is_some() {
-            sql.push_str(" AND attempts < ?");
-        }
-        let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql))
-            .bind(subject)
-            .bind(stage.as_str());
-        for t in targets {
-            q = q.bind(t);
-        }
-        for st in states {
-            q = q.bind(*st);
-        }
-        if let Some(n) = max_attempts {
-            q = q.bind(n);
-        }
-        Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
+        Ok(found)
     }
 
     /// How many of this tenant's units at `stage` are still going to run.
@@ -563,6 +584,95 @@ mod tests {
         assert_ne!(a, slug_for("https://idp.example/sub|1235"));
         assert_eq!(a.len(), 16);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// The mirror of the tenant side's "must not have applied half the file".
+    ///
+    /// A drop is the one irreversible step in `migrate`, so a control database
+    /// that is refused has to come out of it exactly as it went in — otherwise
+    /// the operator cannot put the previous binary back either, and both
+    /// directions are broken at once.
+    #[tokio::test]
+    async fn a_refused_migration_must_not_have_dropped_a_column() {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        // An older `users`: it still has `last_seen_at`, which this schema
+        // drops, and it does not yet have `can_judge`, which this schema
+        // refuses over.
+        sqlx::raw_sql(
+            "CREATE TABLE users (
+               subject TEXT PRIMARY KEY, email TEXT, slug TEXT NOT NULL UNIQUE,
+               created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let control = Control { pool };
+
+        let err = control.migrate().await.unwrap_err().to_string();
+        assert!(
+            err.contains("older than the schema") && err.contains("users.can_judge"),
+            "the operator has to be told which column is missing: {err}"
+        );
+
+        let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('users')")
+            .fetch_all(&control.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(
+            have.iter().any(|c| c == "last_seen_at"),
+            "a refused migration dropped a column anyway, so the previous \
+             binary's `provision` can no longer run either: {have:?}"
+        );
+    }
+
+    /// The relate backstop hands over `limit * 8` ids — four thousand for its
+    /// one production call — and `pending_artifacts_are_isolated` hands over
+    /// however many chunks a source has. Unchunked, both fail with `too many
+    /// SQL variables` on a SQLite older than 3.32, and the backstop fails
+    /// silently: it is a repair pass that only logs, so it would simply stop
+    /// running.
+    #[tokio::test]
+    async fn asking_about_more_targets_than_sqlite_takes_parameters_for() {
+        let c = Control::memory().await.unwrap();
+        c.provision("sub-1", None).await.unwrap();
+        let targets: Vec<String> = (0..4000).map(|i| format!("a{i}")).collect();
+        // Every tenth one armed, so the answer is a filter and not a constant.
+        for t in targets.iter().step_by(10) {
+            crate::store::jobs::enqueue_with(
+                &c,
+                "sub-1",
+                crate::store::jobs::Stage::Relate,
+                "artifact",
+                t,
+            )
+            .await
+            .unwrap();
+        }
+
+        let armed = c
+            .targets_with_jobs(
+                "sub-1",
+                crate::store::jobs::Stage::Relate,
+                &targets,
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(armed.len(), 400, "the answer lost rows across the chunks");
+        assert!(armed.contains("a0") && armed.contains("a3990"));
+        assert!(!armed.contains("a1"));
     }
 
     #[tokio::test]

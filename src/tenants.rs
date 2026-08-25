@@ -154,6 +154,17 @@ impl Tenants {
         self.open.lock().map(|g| g.0.len()).unwrap_or(0)
     }
 
+    /// Whether this subject is one the registry currently holds open. For the
+    /// test that says a whole-table pass does not change that; see
+    /// `get_transient`.
+    #[cfg(test)]
+    pub fn is_open(&self, subject: &str) -> bool {
+        self.open
+            .lock()
+            .map(|g| g.0.contains_key(subject))
+            .unwrap_or(false)
+    }
+
     /// How many subjects the registry is holding working memory for. For the
     /// test that says that map is bounded; see `working_for`.
     #[cfg(test)]
@@ -253,6 +264,39 @@ impl Tenants {
         Ok(tenant)
     }
 
+    /// The same base, opened for a pass that walks *every* registered user.
+    ///
+    /// Two things `get` does that a whole-table walk must not. It holds the
+    /// tenant in the registry, and the registry is a fixed-size LRU: a pass
+    /// over five hundred users ends with the last `max_open_tenants` of them
+    /// resident — the last by `created_at`, which is an arbitrary set — and
+    /// every tenant somebody was actually using evicted behind it. And it bumps
+    /// recency for the ones already open, so even the survivors come out of the
+    /// pass ordered by the walk rather than by use.
+    ///
+    /// So: an open tenant is reused exactly as it is, without being touched,
+    /// and a closed one is opened and handed over without being kept. The
+    /// caller holds it for as long as it takes to repair that one base and then
+    /// drops it, which is what keeps the number of live SQLite pools and vector
+    /// clients at one rather than at one per registered user.
+    ///
+    /// The price is that a pass over a cold base opens and closes it every
+    /// tick. That is the cost every cache miss already paid, and the
+    /// alternative is letting an hourly repair decide what the instance keeps
+    /// in memory.
+    pub async fn get_transient(&self, subject: &str) -> Result<Tenant> {
+        if let Some(t) = self.cached_quiet(subject) {
+            return Ok(t);
+        }
+        let lock = self.provisioning_lock(subject);
+        let _guard = lock.lock().await;
+        if let Some(t) = self.cached_quiet(subject) {
+            return Ok(t);
+        }
+        let user = self.control.user(subject).await?.ok_or(Error::NotFound)?;
+        self.open(user, Trigger::Background).await
+    }
+
     async fn open(&self, user: User, trigger: Trigger) -> Result<Tenant> {
         std::fs::create_dir_all(&self.cfg.store.dir)
             .map_err(|e| Error::Store(format!("could not make {}: {e}", self.cfg.store.dir)))?;
@@ -344,6 +388,16 @@ impl Tenants {
                 tracing::warn!(error = %e, "could not reconcile the two stores; the next pass retries");
             }
         });
+    }
+
+    /// `cached`, without the recency bump. For a caller that is passing
+    /// through rather than serving somebody — see `get_transient`.
+    fn cached_quiet(&self, subject: &str) -> Option<Tenant> {
+        let g = self.open.lock().ok()?;
+        if self.solo {
+            return g.0.values().next().cloned();
+        }
+        g.0.get(subject).cloned()
     }
 
     fn cached(&self, subject: &str) -> Option<Tenant> {

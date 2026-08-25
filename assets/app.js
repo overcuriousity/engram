@@ -1588,7 +1588,11 @@
         }
       }
     }
-    fetch('/api/v1/vectors/sample', { credentials: 'same-origin' })
+    // `cache: 'no-store'` as well as the response's own header. The header is
+    // what stops a *new* answer being held; this is what stops an answer some
+    // earlier build let the browser keep — a six-hour `max-age` snapshot of
+    // whoever was signed in then — being replayed to whoever is signed in now.
+    fetch('/api/v1/vectors/sample', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (!data) { canvas.parentNode.removeChild(canvas); return; }

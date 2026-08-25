@@ -109,3 +109,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 DROP INDEX IF EXISTS idx_jobs_claim2;
 CREATE INDEX IF NOT EXISTS idx_jobs_claim3  ON jobs(state, class, attempts, seq, id, run_after);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+-- Ageing, which asks one tenant at a time. `idx_jobs_claim3` leads on `state`
+-- and cannot narrow to a subject at all, so without this the hourly pass walks
+-- every waiting background unit on the instance once per registered user.
+CREATE INDEX IF NOT EXISTS idx_jobs_age ON jobs(subject, state, class);

@@ -376,7 +376,19 @@ async fn run_account_command(
         .await
         {
             Ok(v) => v.drop_collection().await?,
-            Err(e) => tracing::warn!(error = %e, "could not reach Qdrant to drop the alias"),
+            // Not a warning. The alias name is a pure function of the subject,
+            // so a collection left behind is not merely orphaned: the next time
+            // that person signs in, `ensure_collection` finds the surviving
+            // alias and adopts it, and the deleted account comes back with
+            // every vector it had behind a fresh, empty database. Leaving the
+            // user row in place is the recoverable outcome — the operator fixes
+            // Qdrant and runs the command again.
+            Err(e) => {
+                return Err(Error::Validation(format!(
+                    "could not reach Qdrant to drop {alias}: {e}. \
+                     Nothing was deleted; try again once Qdrant is reachable."
+                )));
+            }
         }
         control.delete_user(subject).await?;
         for ext in ["", "-wal", "-shm"] {
