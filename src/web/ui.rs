@@ -1,7 +1,7 @@
-use crate::tenants::Tenant;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::corpora::CorpusStatus;
+use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
@@ -784,10 +784,7 @@ struct TokenCreatedTemplate {
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn gap_dismiss(
-    tenant: Tenant,
-    Path((kind, id)): Path<(String, String)>,
-) -> Result<Response> {
+async fn gap_dismiss(tenant: Tenant, Path((kind, id)): Path<(String, String)>) -> Result<Response> {
     let kind = crate::store::gaps::GapKind::parse(&kind)
         .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
     tenant.core.store.dismiss_gap(kind, &id).await?;
@@ -853,15 +850,13 @@ struct ContextForm {
 /// fragment. Recording happens even when nothing is recommended — a base that
 /// has learned nothing yet is exactly the one that most needs its situations
 /// written down.
-async fn context_offer(
-    tenant: Tenant,
-    Form(f): Form<ContextForm>,
-) -> Result<Response> {
+async fn context_offer(tenant: Tenant, Form(f): Form<ContextForm>) -> Result<Response> {
     if !tenant.core.recommends() {
         return Ok(HtmlTemplate(ContextTemplate::default()).into_response());
     }
     let bundle = crate::core::context::parse_bundle(&f.bundle);
-    tenant.core
+    tenant
+        .core
         .record_context_event(&f.bundle, &bundle, Some(&tenant.user.subject));
 
     // A recommendation that cannot be computed is not worth a 500: the area is
@@ -921,15 +916,18 @@ struct SeenForm {
 /// word would appear on Ops as a fifth rung of a four-rung ladder. The
 /// artifact must exist. Neither failure is worth a status code, because
 /// nothing is waiting on the answer.
-async fn context_seen(
-    tenant: Tenant,
-    Form(f): Form<SeenForm>,
-) -> Result<Response> {
+async fn context_seen(tenant: Tenant, Form(f): Form<SeenForm>) -> Result<Response> {
     use crate::core::recommend::Rung;
     let Some(rung) = Rung::parse(&f.rung) else {
         return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
     };
-    if tenant.core.store.get_artifact(&f.artifact_id).await.is_err() {
+    if tenant
+        .core
+        .store
+        .get_artifact(&f.artifact_id)
+        .await
+        .is_err()
+    {
         return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
     }
     tenant.core.record_recommendation(
@@ -1110,7 +1108,12 @@ pub(crate) async fn search_results(
     }
     // Read into a local: a lock guard living inside the call expression would
     // still be held across the await, and a future holding one is not `Send`.
-    let cap = tenant.core.ranking.read().expect("ranking lock").per_source_cap;
+    let cap = tenant
+        .core
+        .ranking
+        .read()
+        .expect("ranking lock")
+        .per_source_cap;
     let (hits, t) = tenant
         .core
         .search_with(
@@ -1503,7 +1506,8 @@ async fn reread_uncovered_ui(
         // would throw away artifacts that may have been edited, tagged or
         // verified since, for lines that were never the problem.
         tenant.core.store.reset_segment(&cid, w.idx, true).await?;
-        tenant.core
+        tenant
+            .core
             .store
             .enqueue(
                 crate::store::jobs::Stage::SegmentWindow,
@@ -1528,16 +1532,15 @@ async fn artifact_dwell(
     Path(aid): Path<String>,
     Form(f): Form<DwellForm>,
 ) -> Result<Response> {
-    tenant.core.record_dwell(&aid, f.secs, Some(&tenant.user.subject));
+    tenant
+        .core
+        .record_dwell(&aid, f.secs, Some(&tenant.user.subject));
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
 /// Undo a promotion: the window's passages back in results, what the
 /// promotion wrote retired, the window `verbatim` again.
-async fn unpromote_ui(
-    tenant: Tenant,
-    Path((cid, idx)): Path<(String, i64)>,
-) -> Result<Response> {
+async fn unpromote_ui(tenant: Tenant, Path((cid, idx)): Path<(String, i64)>) -> Result<Response> {
     tenant.core.undo_promotion(&cid, idx).await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
@@ -1790,9 +1793,14 @@ async fn put_artifact(
     if f.text.trim().is_empty() {
         return Err(Error::Validation("chunk text is empty".into()));
     }
-    tenant.core.store.update_artifact_text(&cid, &f.text).await?;
+    tenant
+        .core
+        .store
+        .update_artifact_text(&cid, &f.text)
+        .await?;
     // The stored vector describes wording that no longer exists.
-    tenant.core
+    tenant
+        .core
         .store
         .enqueue(crate::store::jobs::Stage::Embed, "artifact", &cid)
         .await?;
@@ -1807,10 +1815,7 @@ async fn put_artifact(
     .into_response())
 }
 
-async fn delete_corpus_ui(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-) -> Result<Response> {
+async fn delete_corpus_ui(tenant: Tenant, Path(cid): Path<String>) -> Result<Response> {
     tenant.core.delete_corpus(&cid).await?;
     Ok(Redirect::to("/ui/capture").into_response())
 }
@@ -2178,10 +2183,7 @@ async fn settings(tenant: Tenant) -> Result<Response> {
 
 /// Take a merge back: what it replaced returns, the merge is retired, and the
 /// pairs behind it are dismissed so the sweep does not simply redo it.
-async fn undo_merge_ui(
-    tenant: Tenant,
-    Path(aid): Path<String>,
-) -> Result<Response> {
+async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> Result<Response> {
     crate::jobs::merge::undo(&tenant.core, &aid).await?;
     Ok(Redirect::to("/ui/insights").into_response())
 }
@@ -2239,10 +2241,7 @@ async fn mint_token(
     Ok(HtmlTemplate(TokenCreatedTemplate { token: plaintext }).into_response())
 }
 
-async fn revoke_token_ui(
-    tenant: Tenant,
-    Path(tid): Path<String>,
-) -> Result<Response> {
+async fn revoke_token_ui(tenant: Tenant, Path(tid): Path<String>) -> Result<Response> {
     // Scoped to the caller. An id-only revoke is a button that kills anyone
     // else's extension pairing, and an unknown id and someone else's id have to
     // answer alike or the 404 becomes an oracle.
@@ -2260,7 +2259,10 @@ async fn resolve_near_dupe_ui(
     Path(cid): Path<String>,
     Form(form): Form<ResolveForm>,
 ) -> Result<Response> {
-    tenant.core.resolve_near_duplicate(&cid, form.action).await?;
+    tenant
+        .core
+        .resolve_near_duplicate(&cid, form.action)
+        .await?;
     Ok(Redirect::to("/ui/insights").into_response())
 }
 
@@ -2331,7 +2333,8 @@ async fn dismiss_pair_ui(
     Path(pid): Path<i64>,
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
-    tenant.core
+    tenant
+        .core
         .store
         .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
         .await?;
@@ -2420,7 +2423,8 @@ async fn apply_pair_supersede_ui(
     // The judge's explanation is carried through rather than dropped: it is the
     // only record of why this supersede was applied, and `set_pair_state`
     // writes `detail` unconditionally, so passing `None` would null it.
-    tenant.core
+    tenant
+        .core
         .store
         .set_pair_state(
             pid,
@@ -2791,7 +2795,11 @@ async fn dismiss_link(
     tenant: Tenant,
     Path((artifact_id, other_id)): Path<(String, String)>,
 ) -> Result<Response> {
-    tenant.core.store.dismiss_link(&artifact_id, &other_id).await?;
+    tenant
+        .core
+        .store
+        .dismiss_link(&artifact_id, &other_id)
+        .await?;
     // The row swaps itself out and leaves the pane alone, so the artifact you
     // were reading is still on screen afterwards.
     Ok(axum::response::Html(String::new()).into_response())
@@ -2799,10 +2807,7 @@ async fn dismiss_link(
 
 /// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
 /// beside its source lines and decided the warning was noise.
-async fn mark_artifact_reviewed(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-) -> Result<Response> {
+async fn mark_artifact_reviewed(tenant: Tenant, Path(cid): Path<String>) -> Result<Response> {
     // For an orphaned merge, "reviewed" means accepted as a merge of what
     // remains — recorded on source_count, or the next sweep re-flags it and
     // the operator's judgement lasts one tick.

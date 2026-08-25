@@ -190,7 +190,6 @@ impl Store {
         Ok(())
     }
 
-
     /// Fresh in-memory database with the schema applied, for the tests.
     ///
     /// Builds its own in-memory control database too, so a test that only
@@ -428,9 +427,13 @@ mod tests {
             ..Default::default()
         };
 
-        let store = Store::connect(&cfg, control::Control::memory().await.unwrap(), TEST_SUBJECT)
-            .await
-            .unwrap();
+        let store = Store::connect(
+            &cfg,
+            control::Control::memory().await.unwrap(),
+            TEST_SUBJECT,
+        )
+        .await
+        .unwrap();
         let tables: Vec<(String,)> =
             sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
                 .fetch_all(&store.pool)

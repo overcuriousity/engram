@@ -191,10 +191,7 @@ async fn base_template(
     })
 }
 
-async fn page(
-    tenant: Tenant,
-    Query(p): Query<UiSearchParams>,
-) -> Result<Response> {
+async fn page(tenant: Tenant, Query(p): Query<UiSearchParams>) -> Result<Response> {
     let t = base_template(&tenant, p.q, p.category.unwrap_or_default(), "").await?;
     Ok(HtmlTemplate(t).into_response())
 }
@@ -236,10 +233,7 @@ struct CapturedTemplate {
     near_dupe_percent: i64,
 }
 
-async fn capture_submit(
-    tenant: Tenant,
-    Form(f): Form<CaptureForm>,
-) -> Result<Response> {
+async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Response> {
     // An answer the operator chose to keep is still a paste, and is stored as
     // one — the same pipeline, the same synthesis, no special case downstream.
     // What differs is only the trace: the origin says a model wrote it, and the
@@ -290,10 +284,7 @@ async fn capture_submit(
 /// anything about the three pages having folded into one. A prefill that names
 /// an ask nobody recorded is not an error worth a page for: the box is simply
 /// empty, which is what an ordinary visit looks like.
-async fn capture_door(
-    tenant: Tenant,
-    Query(p): Query<CapturePrefill>,
-) -> Result<Response> {
+async fn capture_door(tenant: Tenant, Query(p): Query<CapturePrefill>) -> Result<Response> {
     let prefilled = match &p.from_ask {
         Some(id) => tenant.core.store.ask_event(id).await?,
         None => None,
@@ -588,7 +579,12 @@ fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
 }
 
 async fn ask_verdict_bar(tenant: &Tenant, id: &str, oob: bool) -> Result<String> {
-    let ev = tenant.core.store.ask_event(id).await?.ok_or(Error::NotFound)?;
+    let ev = tenant
+        .core
+        .store
+        .ask_event(id)
+        .await?
+        .ok_or(Error::NotFound)?;
     AskVerdictTemplate {
         event_id: ev.id,
         verdict: ev.verdict.map(verdict_label),
@@ -652,10 +648,7 @@ async fn ask_carried(
 /// The answer as the model wrote it, not as the operator retyped it: an
 /// operator who wants to edit first has `edit first` beside this, which is the
 /// old path unchanged.
-async fn ask_keep(
-    tenant: Tenant,
-    Path(id): Path<String>,
-) -> Result<Response> {
+async fn ask_keep(tenant: Tenant, Path(id): Path<String>) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
         return Err(Error::NotFound);
@@ -664,7 +657,12 @@ async fn ask_keep(
     // is where the answer lives. A question that retention has already taken
     // has nothing left to keep, and saying so is better than storing an empty
     // source or an unprovenanced one.
-    let ev = tenant.core.store.ask_event(&id).await?.ok_or(Error::NotFound)?;
+    let ev = tenant
+        .core
+        .store
+        .ask_event(&id)
+        .await?
+        .ok_or(Error::NotFound)?;
     let out = tenant
         .core
         .ingest_capture(
@@ -711,10 +709,7 @@ struct CarriedForm {
 /// it bridged. It existed because a query typed on the rail and then retyped
 /// into ask was the cost of two pages with nothing carried between them —
 /// there is one box now, and the query is already in it.
-async fn ask_door(
-    tenant: Tenant,
-    Query(p): Query<AskPrefill>,
-) -> Result<Response> {
+async fn ask_door(tenant: Tenant, Query(p): Query<AskPrefill>) -> Result<Response> {
     if !tenant.core.asks() {
         return Err(crate::error::Error::NotFound);
     }

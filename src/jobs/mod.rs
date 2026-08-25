@@ -175,9 +175,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::ArmDedupe
             | Stage::Context,
             _,
-        ) => run_accounted(core, job.stage)
-            .await
-            .map(|w| did_work = w),
+        ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
     };
 
     match result {
@@ -873,7 +871,11 @@ mod tests {
             let store = t.core.store.clone();
             async move { store.sweep_runs_since(0, 10).await.unwrap().len() }
         };
-        assert_eq!(ran(&a).await, 1, "the sweep did not run for the tenant that armed it");
+        assert_eq!(
+            ran(&a).await,
+            1,
+            "the sweep did not run for the tenant that armed it"
+        );
         assert_eq!(ran(&b).await, 0, "another tenant's base was touched");
     }
 
@@ -1079,7 +1081,10 @@ mod tests {
             .await
             .unwrap();
         let (run_after, empty) = pending_row(&core, Stage::Retention).await;
-        assert_eq!(run_after, 0, "arm_now already pulls a sleeping unit forward");
+        assert_eq!(
+            run_after, 0,
+            "arm_now already pulls a sleeping unit forward"
+        );
         assert_eq!(empty, 0);
     }
 
@@ -1132,7 +1137,10 @@ mod tests {
             !did_work("{}"),
             "a sweep that reported nothing found nothing"
         );
-        assert!(!did_work("not json"), "an unreadable report is not a claim of work");
+        assert!(
+            !did_work("not json"),
+            "an unreadable report is not a claim of work"
+        );
 
         // A count one level down is a standing count and never work. Flat, the
         // retention sweep's `clusters` — how many gap clusters the base holds,

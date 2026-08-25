@@ -328,7 +328,12 @@ async fn page(tenant: Tenant) -> Result<Response> {
     // One past the cap, so the page can say it is capped rather than truncate
     // in silence — a table that stops at 25 with nothing said reads as a table
     // of everything there is.
-    for c in tenant.core.store.superseded_artifacts(TABLE_CAP + 1).await? {
+    for c in tenant
+        .core
+        .store
+        .superseded_artifacts(TABLE_CAP + 1)
+        .await?
+    {
         let winner_id = c.superseded_by.clone().unwrap_or_default();
         let winner_title = match tenant.core.store.get_artifact(&winner_id).await {
             Ok(w) => title_of(&w),
@@ -375,7 +380,12 @@ async fn page(tenant: Tenant) -> Result<Response> {
     let mut generated = Vec::new();
     let gen_chunks = tenant.core.store.synthesized_artifacts(TABLE_CAP).await?;
     let gen_ids: Vec<String> = gen_chunks.iter().map(|c| c.id.clone()).collect();
-    let gen_roots = tenant.core.store.roots_of(&gen_ids).await.unwrap_or_default();
+    let gen_roots = tenant
+        .core
+        .store
+        .roots_of(&gen_ids)
+        .await
+        .unwrap_or_default();
     for c in gen_chunks {
         let sources = source_rows(
             &tenant.core.store,

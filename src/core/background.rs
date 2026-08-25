@@ -394,7 +394,10 @@ fn age_threshold(cfg: &crate::config::Config) -> i64 {
 /// here: it is a per-tenant budget, so it runs in the per-tenant loop.
 pub(crate) async fn repair_control_once(control: &crate::store::control::Control) {
     match control.reclaim_stuck(crate::jobs::STUCK_AFTER_SECS).await {
-        Ok(n) if n > 0 => tracing::info!(reclaimed = n, "requeued jobs left running by a dead process"),
+        Ok(n) if n > 0 => tracing::info!(
+            reclaimed = n,
+            "requeued jobs left running by a dead process"
+        ),
         Err(e) => tracing::warn!(error = %e, "could not requeue jobs left running"),
         _ => {}
     }

@@ -9,12 +9,12 @@
 //! the ranking buried can still be confirmed. That is the only way a ranking
 //! failure leaves a record instead of passing as a shrug.
 
-use crate::tenants::Tenant;
-use crate::web::tenant::CanJudge;
 use crate::error::Result;
 use crate::store::feedback::{PendingEvent, Stats, Verdict};
+use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
+use crate::web::tenant::CanJudge;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Path, State};
@@ -467,10 +467,7 @@ async fn read_artifact(
 /// enough to misfire; without this, a slipped digit is a wrong pair scored as
 /// truth forever. The event comes back to the card it was on rather than to
 /// whatever now heads the queue.
-async fn undo(
-    CanJudge(tenant): CanJudge,
-    Path(event_id): Path<String>,
-) -> Result<Response> {
+async fn undo(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
     use axum::response::IntoResponse;
     // The event may have expired between the verdict and the second thoughts.
     // The store says so now rather than reporting a write it did not make; here
@@ -528,7 +525,8 @@ async fn hit(
     // recorded: the card comes back so the answer can be given again against
     // something the benchmark will still be able to hold.
     if !artifact.in_results() {
-        return card_again(&tenant,
+        return card_again(
+            &tenant,
             &event_id,
             "that one is deprecated or superseded, so the benchmark can't hold it. \
              Pick what answers this now, or call it a gap.",
@@ -544,32 +542,27 @@ async fn hit(
         .rank_in_event(&event_id, &f.artifact_id)
         .await?;
     let before = tenant.core.store.feedback_stats().await?;
-    tenant.core.store.judge_hit(&event_id, &f.artifact_id).await?;
+    tenant
+        .core
+        .store
+        .judge_hit(&event_id, &f.artifact_id)
+        .await?;
     card_after(&tenant, before, rank, Verdict::Hit, &event_id).await
 }
 
-async fn gap(
-    CanJudge(tenant): CanJudge,
-    Path(event_id): Path<String>,
-) -> Result<Response> {
+async fn gap(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
     let before = tenant.core.store.feedback_stats().await?;
     tenant.core.store.judge(&event_id, Verdict::Gap).await?;
     card_after(&tenant, before, None, Verdict::Gap, &event_id).await
 }
 
-async fn discard(
-    CanJudge(tenant): CanJudge,
-    Path(event_id): Path<String>,
-) -> Result<Response> {
+async fn discard(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
     let before = tenant.core.store.feedback_stats().await?;
     tenant.core.store.judge(&event_id, Verdict::Discard).await?;
     card_after(&tenant, before, None, Verdict::Discard, &event_id).await
 }
 
-async fn skip(
-    CanJudge(tenant): CanJudge,
-    Path(event_id): Path<String>,
-) -> Result<Response> {
+async fn skip(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
     tenant.core.store.skip_event(&event_id).await?;
     next_card(CanJudge(tenant)).await
 }
@@ -602,10 +595,7 @@ struct AssignTemplate {
     searched: bool,
 }
 
-async fn assign(
-    CanJudge(tenant): CanJudge,
-    Path(event_id): Path<String>,
-) -> Result<Response> {
+async fn assign(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
     use axum::response::IntoResponse;
     // By id, not by "whichever is next to judge": a capture landing between the
     // card being drawn and this click would otherwise win the ordering and
@@ -763,15 +753,20 @@ fn rank_str(r: Option<usize>) -> String {
 }
 
 async fn tune_view(tenant: &Tenant, flash: &str) -> Result<TuneView> {
-    let rec = tenant.core.store.open_recommendation().await?.map(|run| Rec {
-        line: describe(&run),
-        diff: run
-            .diff
-            .iter()
-            .map(|d| format!("{} — {} → {}", d.query, rank_str(d.base), rank_str(d.new)))
-            .collect(),
-        id: run.id,
-    });
+    let rec = tenant
+        .core
+        .store
+        .open_recommendation()
+        .await?
+        .map(|run| Rec {
+            line: describe(&run),
+            diff: run
+                .diff
+                .iter()
+                .map(|d| format!("{} — {} → {}", d.query, rank_str(d.base), rank_str(d.new)))
+                .collect(),
+            id: run.id,
+        });
     // Only where a sweep has actually run and come back empty. Before the
     // first one there is nothing to explain, and a line explaining nothing is
     // one more thing on a page that has enough.
@@ -841,7 +836,8 @@ async fn tune_apply(
     // page may offer.
     let open = tenant.core.store.open_recommendation().await?;
     if open.as_ref().is_none_or(|o| o.id != run.id) {
-        return tune_fragment(&tenant,
+        return tune_fragment(
+            &tenant,
             "that sweep is not an open recommendation — nothing was changed.",
         )
         .await;
@@ -855,7 +851,8 @@ async fn tune_apply(
         // the recommendation stays open and can be applied once the file can
         // be written.
         tracing::warn!(error = %e, path = %st.config_path.display(), "config.toml not written");
-        return tune_fragment(&tenant,
+        return tune_fragment(
+            &tenant,
             "config.toml could not be written, so nothing was applied. \
              The recommendation is still here.",
         )
@@ -888,14 +885,16 @@ async fn tune_apply(
             tune_fragment(&tenant, &line).await
         }
         Ok(false) => {
-            tune_fragment(&tenant,
+            tune_fragment(
+                &tenant,
                 "that sweep had already been applied — nothing changed.",
             )
             .await
         }
         Err(e) => {
             tracing::error!(error = %e, run = %run_id, "applied run not stamped");
-            tune_fragment(&tenant,
+            tune_fragment(
+                &tenant,
                 "these settings are live and written to config.toml, but the run could not be \
                  recorded as applied — it may be offered again.",
             )
@@ -1030,8 +1029,7 @@ mod tests {
         // of this that is about the nav needs one.
         core.learn.enabled = true;
         let control = core.store.control.clone();
-        let (app, cookie) =
-            crate::web::test_support::app_with_cookie_ungranted(core).await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie_ungranted(core).await;
         assert_eq!(
             status_of(&app, &cookie, "GET", "/ui/judge").await,
             StatusCode::FORBIDDEN

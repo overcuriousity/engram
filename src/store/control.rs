@@ -310,13 +310,15 @@ impl Control {
     /// `false` when there is no such subject, so the grant CLI can say so
     /// rather than report success on a typo nobody will ever log in as.
     pub async fn set_can_judge(&self, subject: &str, on: bool) -> Result<bool> {
-        Ok(sqlx::query("UPDATE users SET can_judge = ? WHERE subject = ?")
-            .bind(i64::from(on))
-            .bind(subject)
-            .execute(&self.pool)
-            .await?
-            .rows_affected()
-            > 0)
+        Ok(
+            sqlx::query("UPDATE users SET can_judge = ? WHERE subject = ?")
+                .bind(i64::from(on))
+                .bind(subject)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                > 0,
+        )
     }
 
     /// Remove a user and everything in the control plane that speaks for them:
@@ -521,11 +523,10 @@ impl Control {
             // contents. `running` comes across as `pending` with its
             // `claimed_at` dropped, which is what `reclaim_stuck` would make of
             // it: the process holding it is the one that stopped.
-            for r in sqlx::query(
-                "SELECT * FROM jobs WHERE state IN ('pending', 'running') ORDER BY id",
-            )
-            .fetch_all(&old)
-            .await?
+            for r in
+                sqlx::query("SELECT * FROM jobs WHERE state IN ('pending', 'running') ORDER BY id")
+                    .fetch_all(&old)
+                    .await?
             {
                 let stage: String = r.get("stage");
                 let class = r.try_get::<i64, _>("class").unwrap_or_else(|_| {
@@ -569,9 +570,7 @@ impl Control {
             let _ = sqlx::query(sql).bind(subject).execute(&self.pool).await;
         }
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -865,7 +864,10 @@ mod tests {
         .unwrap();
 
         let control = Control { pool };
-        control.migrate().await.expect("an additive column is added");
+        control
+            .migrate()
+            .await
+            .expect("an additive column is added");
         let n: i64 = sqlx::query_scalar("SELECT count(empty_runs) FROM jobs")
             .fetch_one(&control.pool)
             .await
@@ -938,7 +940,11 @@ mod tests {
             .await
             .unwrap();
         }
-        for (target, state) in [("c-live", "pending"), ("c-held", "running"), ("c-old", "done")] {
+        for (target, state) in [
+            ("c-live", "pending"),
+            ("c-held", "running"),
+            ("c-old", "done"),
+        ] {
             sqlx::query(
                 "INSERT INTO jobs (stage, target_kind, target_id, state, attempts, created_at, seq, class)
                  VALUES ('synthesize', 'corpus', ?, ?, 2, 11, 3, 0)",
@@ -1086,8 +1092,12 @@ mod tests {
     #[tokio::test]
     async fn two_tenant_stores_can_share_one_control_database() {
         let control = Control::memory().await.unwrap();
-        let a = crate::store::Store::memory_with(control.clone()).await.unwrap();
-        let b = crate::store::Store::memory_with(control.clone()).await.unwrap();
+        let a = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap();
+        let b = crate::store::Store::memory_with(control.clone())
+            .await
+            .unwrap();
         a.control.provision("sub-a", None).await.unwrap();
         b.control.provision("sub-b", None).await.unwrap();
         assert_eq!(control.users().await.unwrap().len(), 3);

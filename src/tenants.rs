@@ -456,7 +456,11 @@ pub mod test_support {
         cfg.store.max_open_tenants = cap;
         let control = Control::memory().await.unwrap();
         (
-            Arc::new(Tenants::new(Arc::new(cfg), control, Arc::new(MemoryFactory))),
+            Arc::new(Tenants::new(
+                Arc::new(cfg),
+                control,
+                Arc::new(MemoryFactory),
+            )),
             dir,
         )
     }
@@ -485,7 +489,11 @@ pub mod test_support {
         cfg.store.dir = dir.path().to_string_lossy().to_string();
         let control = Control::memory().await.unwrap();
         (
-            Arc::new(Tenants::new(Arc::new(cfg), control, Arc::new(BrokenFactory))),
+            Arc::new(Tenants::new(
+                Arc::new(cfg),
+                control,
+                Arc::new(BrokenFactory),
+            )),
             dir,
         )
     }

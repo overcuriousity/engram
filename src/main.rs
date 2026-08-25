@@ -181,7 +181,9 @@ where
         Ok(Some(u)) => u,
         Ok(None) => {
             let _ = control.delete_user(subject).await;
-            return Err(Error::Store("the user just provisioned is not there".into()));
+            return Err(Error::Store(
+                "the user just provisioned is not there".into(),
+            ));
         }
         Err(e) => {
             let _ = control.delete_user(subject).await;
@@ -192,7 +194,10 @@ where
     // Before the file moves, so a failure here has nothing to put back. What
     // the old database holds about the person using it does not travel with
     // the rename: those three tables live in the control plane now.
-    let carried = match control.carry_over_single_user(&cfg.store.path, subject).await {
+    let carried = match control
+        .carry_over_single_user(&cfg.store.path, subject)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             control.discard_carried_over(subject).await;
@@ -563,8 +568,7 @@ async fn main() -> anyhow::Result<()> {
     // the thing it recovers.
     let repair =
         engram::core::background::spawn_repair_ticker(tenants.clone(), shutdown_rx.clone());
-    let mut handles =
-        engram::jobs::Worker::spawn(tenants.clone(), cfg.server.workers, shutdown_rx);
+    let mut handles = engram::jobs::Worker::spawn(tenants.clone(), cfg.server.workers, shutdown_rx);
     // Joined with the workers so shutdown waits for it too, rather than
     // leaving a task the runtime drops mid-enqueue.
     handles.push(repair);
@@ -617,13 +621,15 @@ async fn main() -> anyhow::Result<()> {
 mod startup_tests {
     use super::*;
 
-
     use engram::store::control::Control;
 
     /// Adoption without the Qdrant half. The alias rename is passed in so this
     /// can run without a vector store; what is being tested here is the row,
     /// the file and the guard, and the rename's own failure has its own test.
-    async fn adopt_dry(cfg: &Config, control: &Control) -> Result<Option<engram::store::control::User>> {
+    async fn adopt_dry(
+        cfg: &Config,
+        control: &Control,
+    ) -> Result<Option<engram::store::control::User>> {
         adopt(cfg, control, |_alias| async { Ok(()) }).await
     }
 
@@ -687,7 +693,10 @@ mod startup_tests {
         let control = Control::memory().await.unwrap();
         let cfg = adopting_config(dir.path(), Some("sub-1"));
         assert!(adopt_dry(&cfg, &control).await.unwrap().is_none());
-        assert!(control.users().await.unwrap().is_empty(), "no row was left behind");
+        assert!(
+            control.users().await.unwrap().is_empty(),
+            "no row was left behind"
+        );
     }
 
     /// A half-adopted install that boots is worse than one that refuses: it
@@ -761,11 +770,10 @@ mod startup_tests {
             control.get_session("sid-1").await.unwrap().is_some(),
             "the browser that was open got signed out"
         );
-        let queued: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE subject = 'sub-1'")
-                .fetch_one(&control.pool)
-                .await
-                .unwrap();
+        let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE subject = 'sub-1'")
+            .fetch_one(&control.pool)
+            .await
+            .unwrap();
         assert_eq!(queued, 1, "work queued at shutdown was dropped");
     }
 

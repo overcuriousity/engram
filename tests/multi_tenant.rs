@@ -22,7 +22,9 @@ use tower::ServiceExt;
 /// empty collection — which would make isolation look perfect for the wrong
 /// reason.
 struct MemoryFactory {
-    made: std::sync::Mutex<std::collections::HashMap<String, Arc<engram::vector::memory::MemoryVectors>>>,
+    made: std::sync::Mutex<
+        std::collections::HashMap<String, Arc<engram::vector::memory::MemoryVectors>>,
+    >,
 }
 
 #[async_trait::async_trait]
@@ -123,7 +125,9 @@ async fn get(app: &axum::Router, who: &Signed, path: &str) -> axum::response::Re
 }
 
 async fn json(res: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 22).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+        .await
+        .unwrap();
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 
@@ -264,7 +268,11 @@ async fn a_tenant_that_was_evicted_comes_back_with_its_data() {
     ));
 
     let a = tenants.get_or_provision("sub-a", None).await.unwrap();
-    let captured = a.core.ingest("something a wrote down", "web", None).await.unwrap();
+    let captured = a
+        .core
+        .ingest("something a wrote down", "web", None)
+        .await
+        .unwrap();
     drop(a);
 
     tenants.get_or_provision("sub-b", None).await.unwrap();

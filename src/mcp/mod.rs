@@ -568,7 +568,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_requires_a_bearer_token() {
         let core = crate::core::test_support::test_core().await;
-        let state = crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await;
+        let state =
+            crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await;
         let res = crate::web::router(state)
             .oneshot(
                 Request::builder()

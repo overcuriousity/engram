@@ -126,8 +126,8 @@ pub fn project_3d(vectors: &[Vec<f32>]) -> Vec<[f32; 3]> {
     out
 }
 
-use crate::tenants::Tenant;
 use crate::error::Result;
+use crate::tenants::Tenant;
 use axum::Json;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};

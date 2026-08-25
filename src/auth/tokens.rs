@@ -1,7 +1,7 @@
 use super::Identity;
 use crate::error::{Error, Result};
-use crate::store::control::Control;
 use crate::store::auth::ApiToken;
+use crate::store::control::Control;
 use argon2::Argon2;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};

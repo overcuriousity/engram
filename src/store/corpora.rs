@@ -322,7 +322,8 @@ impl Store {
         // up. See `jobs::enqueue_with` for the failure this order leaves
         // instead, which is the recoverable one.
         if let Followup::Queue(stage) = followup {
-            super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", &src.id).await?;
+            super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", &src.id)
+                .await?;
         }
         Ok(Insertion::Created(src))
     }
@@ -383,7 +384,8 @@ impl Store {
         // gives: a claim that lands before the status write is visible is a
         // unit closed against a corpus the worker cannot see.
         if let Followup::Queue(stage) = followup {
-            super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", corpus_id).await?;
+            super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", corpus_id)
+                .await?;
         }
         Ok(())
     }
@@ -604,7 +606,14 @@ impl Store {
         tx.commit().await?;
         // The commit first: the corpus and its attachment have to be visible
         // before anything can claim the unit that reads them.
-        super::jobs::enqueue_with(&self.control, &self.subject, reading.stage, "corpus", &src.id).await?;
+        super::jobs::enqueue_with(
+            &self.control,
+            &self.subject,
+            reading.stage,
+            "corpus",
+            &src.id,
+        )
+        .await?;
         Ok(Insertion::Created(src))
     }
 

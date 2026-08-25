@@ -261,7 +261,16 @@ pub(crate) async fn enqueue_with(
     target_kind: &str,
     target_id: &str,
 ) -> Result<()> {
-    upsert_job_with(control, subject, stage, target_kind, target_id, 0, Guard::Any).await
+    upsert_job_with(
+        control,
+        subject,
+        stage,
+        target_kind,
+        target_id,
+        0,
+        Guard::Any,
+    )
+    .await
 }
 
 async fn upsert_job_with(
@@ -532,16 +541,14 @@ impl Store {
     /// The `seq` a job currently carries, so a unit that re-arms itself can
     /// climb rather than re-entering at the front of its batch.
     pub async fn job_seq(&self, stage: Stage, target_id: &str) -> Result<Option<i64>> {
-        Ok(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT seq FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
-            )
-                .bind(&self.subject)
-                .bind(stage.as_str())
-                .bind(target_id)
-                .fetch_optional(&self.control.pool)
-                .await?,
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT seq FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
         )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_id)
+        .fetch_optional(&self.control.pool)
+        .await?)
     }
 
     /// Is anything going to run this unit? `Some` for a row that is queued or
@@ -615,12 +622,11 @@ impl Store {
     }
 
     pub async fn job_counts(&self) -> Result<Vec<(String, i64)>> {
-        let rows = sqlx::query(
-            "SELECT state, COUNT(*) AS n FROM jobs WHERE subject = ? GROUP BY state",
-        )
-            .bind(&self.subject)
-            .fetch_all(&self.control.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT state, COUNT(*) AS n FROM jobs WHERE subject = ? GROUP BY state")
+                .bind(&self.subject)
+                .fetch_all(&self.control.pool)
+                .await?;
         Ok(rows.iter().map(|r| (r.get("state"), r.get("n"))).collect())
     }
 
@@ -682,9 +688,9 @@ impl Store {
         let row = sqlx::query(
             "SELECT MIN(created_at) AS oldest FROM jobs WHERE subject = ? AND state = 'pending'",
         )
-            .bind(&self.subject)
-            .fetch_one(&self.control.pool)
-            .await?;
+        .bind(&self.subject)
+        .fetch_one(&self.control.pool)
+        .await?;
         let oldest: Option<i64> = row.get("oldest");
         Ok(oldest.map(|t| (now() - t).max(0)))
     }
@@ -696,7 +702,6 @@ impl Store {
 /// any one tenant: one pool of workers serves everybody, so these run without
 /// a subject and `claim_job` reports the one it found.
 impl Control {
-
     /// Atomic claim. The UPDATE ... WHERE id = (SELECT ...) RETURNING form runs
     /// as one statement under SQLite's write lock, so two workers can never
     /// take the same row.
@@ -759,7 +764,6 @@ impl Control {
         }))
     }
 
-
     pub async fn complete_job(&self, id: i64) -> Result<()> {
         sqlx::query(
             "UPDATE jobs SET state = 'done', last_error = NULL, claimed_at = NULL WHERE id = ?",
@@ -769,7 +773,6 @@ impl Control {
         .await?;
         Ok(())
     }
-
 
     /// Put a job back in the queue with a delay.
     ///
@@ -790,7 +793,6 @@ impl Control {
         Ok(())
     }
 
-
     /// Rows left 'running' by a crashed process. Called once at startup.
     pub async fn reclaim_stuck(&self, older_than_secs: i64) -> Result<u64> {
         let res = sqlx::query(
@@ -802,7 +804,6 @@ impl Control {
         .await?;
         Ok(res.rows_affected())
     }
-
 
     /// A background unit that has waited long enough becomes foreground.
     ///
@@ -1689,7 +1690,9 @@ mod tests {
             .unwrap()
             .for_subject("sub-b");
 
-        a.enqueue(Stage::Embed, "corpus", "shared-id").await.unwrap();
+        a.enqueue(Stage::Embed, "corpus", "shared-id")
+            .await
+            .unwrap();
         assert!(a.live_job(Stage::Embed, "shared-id").await.unwrap());
         assert!(!b.live_job(Stage::Embed, "shared-id").await.unwrap());
     }
@@ -1761,9 +1764,15 @@ mod tests {
             .unwrap()
             .for_subject("sub-b");
 
-        a.enqueue(Stage::Consolidate, "collection", "collection").await.unwrap();
-        b.enqueue(Stage::Consolidate, "collection", "collection").await.unwrap();
-        a.delete_job(Stage::Consolidate, "collection").await.unwrap();
+        a.enqueue(Stage::Consolidate, "collection", "collection")
+            .await
+            .unwrap();
+        b.enqueue(Stage::Consolidate, "collection", "collection")
+            .await
+            .unwrap();
+        a.delete_job(Stage::Consolidate, "collection")
+            .await
+            .unwrap();
 
         assert!(!a.live_job(Stage::Consolidate, "collection").await.unwrap());
         assert!(b.live_job(Stage::Consolidate, "collection").await.unwrap());

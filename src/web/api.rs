@@ -1,7 +1,7 @@
-use crate::tenants::Tenant;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::jobs::{FailedJob, Stage};
+use crate::tenants::Tenant;
 use crate::web::state::AppState;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -493,10 +493,7 @@ async fn upload_image(
 /// The bytes as uploaded, whatever they are. The image door's `?original=1`
 /// answers the same thing for a photo and stays where it is; this is the name
 /// that does not lie about a PDF.
-async fn get_file(
-    tenant: Tenant,
-    Path(id): Path<String>,
-) -> Result<axum::response::Response> {
+async fn get_file(tenant: Tenant, Path(id): Path<String>) -> Result<axum::response::Response> {
     use axum::response::IntoResponse;
     let Some((mime, bytes)) = tenant.core.store.attachment_original(&id).await? else {
         return Err(Error::NotFound);
@@ -568,7 +565,8 @@ async fn list_corpora(
     Query(p): Query<ListParams>,
 ) -> Result<Json<Vec<crate::store::corpora::Corpus>>> {
     Ok(Json(
-        tenant.core
+        tenant
+            .core
             .store
             .list_corpora(p.limit.clamp(1, 200), p.offset.max(0))
             .await?,
@@ -582,19 +580,13 @@ pub struct CorpusDetail {
     pub chunks: Vec<crate::store::artifacts::Chunk>,
 }
 
-async fn get_corpus(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-) -> Result<Json<CorpusDetail>> {
+async fn get_corpus(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<CorpusDetail>> {
     let source = tenant.core.store.get_corpus(&cid).await?;
     let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
     Ok(Json(CorpusDetail { source, chunks }))
 }
 
-async fn delete_corpus(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-) -> Result<StatusCode> {
+async fn delete_corpus(tenant: Tenant, Path(cid): Path<String>) -> Result<StatusCode> {
     tenant.core.delete_corpus(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -623,14 +615,15 @@ async fn resolve_near_dupe(
     Path(cid): Path<String>,
     Json(body): Json<ResolveBody>,
 ) -> Result<Json<serde_json::Value>> {
-    tenant.core.resolve_near_duplicate(&cid, body.action).await?;
+    tenant
+        .core
+        .resolve_near_duplicate(&cid, body.action)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// What consolidation has decided and what it is still asking about.
-async fn consolidation(
-    tenant: Tenant,
-) -> Result<Json<serde_json::Value>> {
+async fn consolidation(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     use crate::store::pairs::PairState;
     Ok(Json(serde_json::json!({
         "superseded": tenant.core.store.superseded_artifacts(100).await?,
@@ -780,7 +773,9 @@ async fn stale(
     tenant: Tenant,
     Query(p): Query<StaleParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
-    Ok(Json(tenant.core.stale_candidates(p.limit.unwrap_or(20)).await?))
+    Ok(Json(
+        tenant.core.stale_candidates(p.limit.unwrap_or(20)).await?,
+    ))
 }
 
 async fn ask(
@@ -792,7 +787,10 @@ async fn ask(
         return Err(Error::NotFound);
     }
     Ok(Json(
-        tenant.core.ask(&req, crate::store::feedback::Door::Api).await?,
+        tenant
+            .core
+            .ask(&req, crate::store::feedback::Door::Api)
+            .await?,
     ))
 }
 
@@ -819,7 +817,9 @@ async fn get_artifact(
     // belong to, because a bearer token is not a conversation. Written after
     // the read succeeds — a 404 engaged nothing.
     tenant.core.mark_artifact_seen(&cid);
-    tenant.core.record_interaction(&cid, None, Some(&tenant.user.subject));
+    tenant
+        .core
+        .record_interaction(&cid, None, Some(&tenant.user.subject));
     Ok(Json(chunk))
 }
 
@@ -867,13 +867,15 @@ async fn patch_artifact(
         tenant.core.store.update_artifact_text(&cid, t).await?;
     }
     if let Some(t) = &title {
-        tenant.core
+        tenant
+            .core
             .store
             .update_artifact_title(&cid, t.as_deref())
             .await?;
     }
     if let Some(c) = &category {
-        tenant.core
+        tenant
+            .core
             .store
             .update_artifact_category(&cid, c.as_deref())
             .await?;
@@ -884,7 +886,8 @@ async fn patch_artifact(
 
     let chunk = tenant.core.store.get_artifact(&cid).await?;
     if revectorize {
-        tenant.core
+        tenant
+            .core
             .store
             .enqueue(Stage::Embed, "artifact", &cid)
             .await?;
@@ -895,7 +898,8 @@ async fn patch_artifact(
         // Only when there is a point to rewrite: for a chunk still waiting to
         // be embedded, this would be a request Qdrant accepts and applies to
         // nothing, and the pending job writes the whole payload anyway.
-        tenant.core
+        tenant
+            .core
             .vectors
             .set_payload(&crate::vector::VectorPayload {
                 artifact_id: chunk.id.clone(),
@@ -918,10 +922,7 @@ async fn patch_artifact(
     Ok(Json(chunk))
 }
 
-async fn delete_artifact(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-) -> Result<StatusCode> {
+async fn delete_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<StatusCode> {
     // Both stores, in the order that survives an interruption — see
     // `Core::delete_artifact`, which the UI button posts to as well.
     tenant.core.delete_artifact(&cid).await?;

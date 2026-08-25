@@ -1136,7 +1136,11 @@ impl Store {
         // already past it is found on the next lap.
         let next = match rows.last() {
             Some(r) if (rows.len() as i64) == window => {
-                format!("{}:{}", r.get::<i64, _>("created_at"), r.get::<String, _>("id"))
+                format!(
+                    "{}:{}",
+                    r.get::<i64, _>("created_at"),
+                    r.get::<String, _>("id")
+                )
             }
             _ => String::new(),
         };

@@ -6,14 +6,14 @@
 //! browser's own auth-flow window opens this page, and the redirect carries
 //! the token back into the extension that started the flow.
 
-use crate::tenants::Tenant;
 use crate::error::{Error, Result};
+use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
 use askama::Template;
 use axum::Form;
 use axum::Router;
-use axum::extract::{Query};
+use axum::extract::Query;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;

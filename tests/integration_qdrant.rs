@@ -2074,7 +2074,10 @@ async fn two_tenants_get_two_collections_behind_two_aliases() {
             )
             .await
             .unwrap();
-        let ids: Vec<&str> = hits.iter().map(|h| h.payload.artifact_id.as_str()).collect();
+        let ids: Vec<&str> = hits
+            .iter()
+            .map(|h| h.payload.artifact_id.as_str())
+            .collect();
         assert_eq!(ids, vec![mine], "expected only {mine}, got {ids:?}");
         assert!(!ids.contains(&theirs));
     }
@@ -2106,7 +2109,9 @@ async fn renaming_an_alias_carries_the_collection_across_untouched() {
 
     before.rename_alias("engram_it_adopt_to").await.unwrap();
 
-    let after = QdrantVectors::connect(&cfg("engram_it_adopt_to")).await.unwrap();
+    let after = QdrantVectors::connect(&cfg("engram_it_adopt_to"))
+        .await
+        .unwrap();
     assert_eq!(
         after.resolve_alias().await.unwrap().as_deref(),
         Some(collection.as_str()),
@@ -2125,7 +2130,10 @@ async fn renaming_an_alias_carries_the_collection_across_untouched() {
         )
         .await
         .unwrap();
-    assert_eq!(hits[0].payload.artifact_id, "kept", "the points did not come across");
+    assert_eq!(
+        hits[0].payload.artifact_id, "kept",
+        "the points did not come across"
+    );
 
     after.drop_collection().await.unwrap();
 }
