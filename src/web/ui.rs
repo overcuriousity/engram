@@ -2130,7 +2130,9 @@ async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
         .core
         .store
         .control
-        .list_tokens()
+        // This user's, not the instance's: `api_tokens` is one table for
+        // everybody now.
+        .list_tokens(&tenant.user.subject)
         .await?
         .into_iter()
         .map(|t| TokenRow {
@@ -2241,7 +2243,10 @@ async fn revoke_token_ui(
     tenant: Tenant,
     Path(tid): Path<String>,
 ) -> Result<Response> {
-    crate::auth::tokens::revoke(&tenant.core.store.control, &tid).await?;
+    // Scoped to the caller. An id-only revoke is a button that kills anyone
+    // else's extension pairing, and an unknown id and someone else's id have to
+    // answer alike or the 404 becomes an oracle.
+    crate::auth::tokens::revoke(&tenant.core.store.control, &tid, &tenant.user.subject).await?;
     Ok(Redirect::to("/ui/settings").into_response())
 }
 

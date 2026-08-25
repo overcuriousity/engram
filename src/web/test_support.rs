@@ -55,7 +55,6 @@ async fn granted_user(core: &Core, can_judge: bool) -> crate::store::control::Us
         slug: crate::store::control::slug_for(subject),
         can_judge,
         created_at: 0,
-        last_seen_at: 0,
     }
 }
 

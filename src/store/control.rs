@@ -32,7 +32,6 @@ pub struct User {
     pub slug: String,
     pub can_judge: bool,
     pub created_at: i64,
-    pub last_seen_at: i64,
 }
 
 impl User {
@@ -43,7 +42,6 @@ impl User {
             slug: r.get("slug"),
             can_judge: r.get::<i64, _>("can_judge") != 0,
             created_at: r.get("created_at"),
-            last_seen_at: r.get("last_seen_at"),
         }
     }
 }
@@ -162,6 +160,39 @@ impl Control {
                 }
             }
         }
+        // The mirror of `ADDITIVE`, and rarer: a column this schema used to
+        // have and no longer does. `CREATE TABLE IF NOT EXISTS` cannot take one
+        // away, and a leftover `NOT NULL` column with no default is not inert —
+        // it fails every `INSERT` that stopped naming it, which here is the one
+        // in `provision`, so the next person to sign in on an upgraded instance
+        // gets a 500 at the door.
+        //
+        // Only for a column nothing reads. `users.last_seen_at` was written by
+        // `provision` and by a `touch` no production path ever called, listed
+        // by nothing and read by nothing, so what this drops is a column whose
+        // every value was the row's own `created_at`.
+        const REMOVED: [(&str, &str, &str); 1] = [(
+            "users",
+            "last_seen_at",
+            "ALTER TABLE users DROP COLUMN last_seen_at",
+        )];
+        for (table, column, ddl) in REMOVED {
+            let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
+                .bind(table)
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .map(|r| r.get::<String, _>("name"))
+                .collect();
+            if !have.iter().any(|h| h.eq_ignore_ascii_case(column)) {
+                continue;
+            }
+            sqlx::raw_sql(ddl)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+            tracing::info!(column = %format!("{table}.{column}"), "dropped a column the control schema no longer has");
+        }
         for (table, column, ddl) in ADDITIVE {
             let key = format!("{table}.{column}");
             let Some(i) = missing.iter().position(|m| *m == key) else {
@@ -228,20 +259,18 @@ impl Control {
         Ok(())
     }
 
-
     /// Idempotent by construction. Two concurrent first requests for the same
     /// unseen subject both run this: `INSERT OR IGNORE` means one row, and the
     /// `SELECT` afterwards means both callers get it.
     pub async fn provision(&self, subject: &str, email: Option<&str>) -> Result<User> {
         let now = super::now();
         sqlx::query(
-            "INSERT OR IGNORE INTO users (subject, email, slug, can_judge, created_at, last_seen_at)
-             VALUES (?, ?, ?, 0, ?, ?)",
+            "INSERT OR IGNORE INTO users (subject, email, slug, can_judge, created_at)
+             VALUES (?, ?, ?, 0, ?)",
         )
         .bind(subject)
         .bind(email)
         .bind(slug_for(subject))
-        .bind(now)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -279,13 +308,40 @@ impl Control {
             > 0)
     }
 
+    /// Remove a user and everything in the control plane that speaks for them:
+    /// their sessions, their API tokens, and — through `jobs`' foreign key —
+    /// their queued work.
+    ///
+    /// The credentials go with the row and not after it. `sessions` and
+    /// `api_tokens` carry no foreign key to `users`, so deleting only the user
+    /// left every unrevoked token working: `tokens::verify` scans
+    /// `active_tokens` without asking whether that subject still exists, and
+    /// the `Tenant` extractor behind it calls `get_or_provision` — which puts
+    /// the row back, recreates the database file, and re-creates the Qdrant
+    /// collection. The account the operator had just deleted came back, empty
+    /// and still authenticated.
+    ///
+    /// One transaction, so a failure part-way through cannot leave live
+    /// credentials for a user that is gone. The three statements run in that
+    /// order for the same reason: credentials first, identity last.
     pub async fn delete_user(&self, subject: &str) -> Result<bool> {
-        Ok(sqlx::query("DELETE FROM users WHERE subject = ?")
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM sessions WHERE subject = ?")
             .bind(subject)
-            .execute(&self.pool)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM api_tokens WHERE subject = ?")
+            .bind(subject)
+            .execute(&mut *tx)
+            .await?;
+        let gone = sqlx::query("DELETE FROM users WHERE subject = ?")
+            .bind(subject)
+            .execute(&mut *tx)
             .await?
             .rows_affected()
-            > 0)
+            > 0;
+        tx.commit().await?;
+        Ok(gone)
     }
 
     /// Which of `targets` this tenant has a job for at `stage`.
@@ -493,17 +549,6 @@ impl Control {
         }
     }
 
-    /// Last seen, for `--list-users`. Deliberately not a policy input:
-    /// dormancy is handled by the sweeps backing off when they find nothing,
-    /// not by a cutoff on this column.
-    pub async fn touch(&self, subject: &str) -> Result<()> {
-        sqlx::query("UPDATE users SET last_seen_at = ? WHERE subject = ?")
-            .bind(super::now())
-            .bind(subject)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
 }
 
 
@@ -563,13 +608,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn last_seen_moves_and_created_at_does_not() {
+    async fn deleting_a_user_takes_their_credentials_with_it() {
+        // `sessions` and `api_tokens` carry no foreign key to `users`, so a
+        // delete that took only the row left every unrevoked token working —
+        // and `tokens::verify` does not ask whether the subject still exists.
+        // The `Tenant` extractor behind it calls `get_or_provision`, which puts
+        // the row back and recreates the database file and the collection: the
+        // account the operator had just deleted, back, empty, and still
+        // authenticated.
+        let c = Control::memory().await.unwrap();
+        c.provision("sub-1", None).await.unwrap();
+        c.provision("sub-2", None).await.unwrap();
+        let (_, doomed) = crate::auth::tokens::mint(&c, "laptop", "sub-1", None)
+            .await
+            .unwrap();
+        let (_, spared) = crate::auth::tokens::mint(&c, "laptop", "sub-2", None)
+            .await
+            .unwrap();
+        c.insert_session("sid-1", "sub-1", None, 3600)
+            .await
+            .unwrap();
+        c.insert_session("sid-2", "sub-2", None, 3600)
+            .await
+            .unwrap();
+
+        assert!(c.delete_user("sub-1").await.unwrap());
+
+        assert!(matches!(
+            crate::auth::tokens::verify(&c, &doomed).await,
+            Err(crate::error::Error::Unauthorized)
+        ));
+        assert!(c.get_session("sid-1").await.unwrap().is_none());
+
+        // The other tenant is untouched, which is the whole point of scoping
+        // the delete rather than clearing the tables.
+        assert_eq!(
+            crate::auth::tokens::verify(&c, &spared)
+                .await
+                .unwrap()
+                .subject,
+            "sub-2"
+        );
+        assert!(c.get_session("sid-2").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn provisioning_again_does_not_move_created_at() {
         let c = Control::memory().await.unwrap();
         let before = c.provision("sub-1", None).await.unwrap();
-        c.touch("sub-1").await.unwrap();
-        let after = c.user("sub-1").await.unwrap().unwrap();
+        let after = c.provision("sub-1", None).await.unwrap();
         assert_eq!(before.created_at, after.created_at);
-        assert!(after.last_seen_at >= before.last_seen_at);
     }
 
     /// A pool with nothing in it, so a test can put an older schema there.
@@ -608,6 +696,42 @@ mod tests {
     /// The exception, and the same one `Store::migrate` makes: a column added
     /// beside the others with a default no existing row needs to have been
     /// written with is added, not refused.
+    /// The mirror of the additive case: a column the schema used to have and no
+    /// longer does has to go, or the `INSERT` in `provision` that stopped naming
+    /// it fails against a leftover `NOT NULL` with no default — which presents
+    /// as a 500 at the door for the next person to sign in after an upgrade.
+    #[tokio::test]
+    async fn a_control_database_still_holding_last_seen_at_loses_it() {
+        let pool = empty_pool().await;
+        sqlx::raw_sql(
+            "CREATE TABLE users (
+               subject TEXT PRIMARY KEY, email TEXT, slug TEXT NOT NULL UNIQUE,
+               can_judge INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let control = Control { pool };
+        control
+            .migrate()
+            .await
+            .expect("the stale column is dropped");
+        control
+            .provision("sub-1", None)
+            .await
+            .expect("a sign-in still provisions");
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('users')")
+            .fetch_all(&control.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(!cols.iter().any(|c| c == "last_seen_at"), "{cols:?}");
+    }
+
     #[tokio::test]
     async fn a_queue_from_before_the_backoff_counter_gains_the_column() {
         let pool = empty_pool().await;

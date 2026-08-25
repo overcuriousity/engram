@@ -47,6 +47,19 @@ pub struct Outcome {
     /// Pairs this sweep armed a judge unit for. The calls happen later, one
     /// unit at a time, so this counts what was asked for rather than answered.
     pub judged: usize,
+    /// Pairs the cap had refused, put back on the queue.
+    pub reopened: u64,
+    /// Pairs moved off an artifact a supersession hid and onto the one that
+    /// stands for it.
+    pub repaired: u64,
+    /// Pairs taken off the queue because nobody can act on them.
+    pub staled: u64,
+    /// Counted because `jobs::did_work` reads this report and nothing else to
+    /// decide whether the sweep found anything. A tick that repaired hundreds
+    /// of pairs but superseded and judged none reported `{"superseded":0,
+    /// "judged":0}` — "no work" — and doubled its backoff toward the 24-hour
+    /// ceiling while the backlog it was draining sat there.
+    pub reaped: usize,
 }
 
 /// Disjoint-set over artifact ids, so a run of near-identical pairs collapses
@@ -235,11 +248,14 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // The opposite failure: a merge that will never be embedded. Its pairs
     // are already settled, its roots were never superseded, and its only
     // signal was a forever-retrying embed job.
+    let mut out = Outcome::default();
     match core.store.stranded_merges(50).await {
         Ok(stranded) => {
             for id in stranded {
                 if let Err(e) = crate::jobs::merge::reap_stranded(core, &id).await {
                     tracing::warn!(merged = %id, error = %e, "could not reap a stranded merge");
+                } else {
+                    out.reaped += 1;
                 }
             }
         }
@@ -260,7 +276,10 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // cheaper than the machinery a one-shot would need.
     match core.store.reopen_oversized().await {
         Ok(0) => {}
-        Ok(n) => tracing::info!(pairs = n, "reopened pairs the fan-in cap had refused"),
+        Ok(n) => {
+            out.reopened = n;
+            tracing::info!(pairs = n, "reopened pairs the fan-in cap had refused");
+        }
         Err(e) => tracing::warn!(error = %e, "could not reopen the pairs the cap refused"),
     }
 
@@ -269,7 +288,10 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // sit on the review queue until someone pressed a button that fails.
     match follow_supersessions(core).await {
         Ok(0) => {}
-        Ok(n) => tracing::info!(pairs = n, "moved pairs a supersession had left behind"),
+        Ok(n) => {
+            out.repaired = n;
+            tracing::info!(pairs = n, "moved pairs a supersession had left behind");
+        }
         Err(e) => tracing::warn!(error = %e, "could not move the pairs a supersession left behind"),
     }
 
@@ -284,11 +306,12 @@ pub async fn run(core: &Core) -> Result<Outcome> {
     // queue.
     match core.store.stale_unreachable_pairs().await {
         Ok(0) => {}
-        Ok(n) => tracing::info!(pairs = n, "took pairs nobody can act on off the queue"),
+        Ok(n) => {
+            out.staled = n;
+            tracing::info!(pairs = n, "took pairs nobody can act on off the queue");
+        }
         Err(e) => tracing::warn!(error = %e, "could not settle the pairs nobody can act on"),
     }
-
-    let mut out = Outcome::default();
 
     // Group everything near-identical first, and only then decide who wins.
     //

@@ -41,10 +41,13 @@ impl engram::tenants::VectorFactory for MemoryFactory {
     }
 }
 
-/// One signed-in user: who they are, and the bearer token that says so.
+/// One signed-in user: who they are, the bearer token that says so, and the id
+/// of the row behind it — which is what the token routes are addressed by, and
+/// so what a cross-tenant press would have to name.
 struct Signed {
     subject: String,
     token: String,
+    token_id: String,
 }
 
 /// The real router over a real two-tenant registry, and a token each.
@@ -70,12 +73,13 @@ async fn two_tenant_app() -> (axum::Router, Signed, Signed, tempfile::TempDir) {
     let mut signed = Vec::new();
     for subject in ["sub-a", "sub-b"] {
         tenants.get_or_provision(subject, None).await.unwrap();
-        let (_, token) = engram::auth::tokens::mint(&control, "test", subject, None)
+        let (row, token) = engram::auth::tokens::mint(&control, "test", subject, None)
             .await
             .unwrap();
         signed.push(Signed {
             subject: subject.to_string(),
             token,
+            token_id: row.id,
         });
     }
     let b = signed.pop().unwrap();
@@ -270,5 +274,99 @@ async fn a_tenant_that_was_evicted_comes_back_with_its_data() {
     assert!(
         a_again.core.store.get_corpus(&captured.id).await.is_ok(),
         "a reopened tenant lost what it had written"
+    );
+}
+
+/// Read a response body as text, for the pages that answer in HTML.
+async fn text(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+#[tokio::test]
+async fn settings_lists_this_tenants_tokens_and_not_the_others() {
+    // `api_tokens` used to live in the single user's own database, where "every
+    // row" and "my rows" were the same set. It is one instance-wide table now,
+    // and an unfiltered listing puts every tenant's token ids, names,
+    // user-agents and last-used times on whoever opened Settings.
+    let (app, a, b, _dir) = two_tenant_app().await;
+    let page = text(get(&app, &a, "/ui/settings").await).await;
+    assert!(
+        page.contains(&a.token_id),
+        "the settings page did not list the caller's own token"
+    );
+    assert!(
+        !page.contains(&b.token_id),
+        "the settings page listed another tenant's token"
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_cannot_revoke_the_others_token() {
+    // Worse than the listing it used to be paired with: the route took the id
+    // straight to an `UPDATE ... WHERE id = ?`, so one press killed another
+    // tenant's extension pairing. Their token has to keep working.
+    let (app, a, b, _dir) = two_tenant_app().await;
+    let res = send(
+        &app,
+        &a,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/ui/ops/tokens/{}/revoke", b.token_id))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "another tenant's token id was accepted"
+    );
+    // The same answer a made-up id gets, or the route enumerates token ids.
+    let invented = send(
+        &app,
+        &a,
+        Request::builder()
+            .method("POST")
+            .uri("/ui/ops/tokens/01JZZZZZZZZZZZZZZZZZZZZZZZ/revoke")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(invented.status(), StatusCode::NOT_FOUND);
+
+    assert_eq!(
+        get(&app, &b, "/api/v1/corpora").await.status(),
+        StatusCode::OK,
+        "the other tenant's token stopped working"
+    );
+}
+
+#[tokio::test]
+async fn a_tenant_can_revoke_its_own_token() {
+    // The other half: scoping the revoke must not have closed the door on the
+    // person it belongs to.
+    let (app, a, _b, _dir) = two_tenant_app().await;
+    let res = send(
+        &app,
+        &a,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/ui/ops/tokens/{}/revoke", a.token_id))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        res.status().is_redirection(),
+        "revoking one's own token answered {}",
+        res.status()
+    );
+    assert_eq!(
+        get(&app, &a, "/api/v1/corpora").await.status(),
+        StatusCode::UNAUTHORIZED,
+        "the revoked token still works"
     );
 }

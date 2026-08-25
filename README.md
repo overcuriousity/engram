@@ -172,15 +172,17 @@ Three keys under `[store]`, all optional:
 engram --list-users                      # subject, slug, email, judge grant
 engram --grant-judge  sub-abc123
 engram --revoke-judge sub-abc123
-engram --delete-user  sub-abc123         # row, file and alias, behind a typed yes
+engram --delete-user  sub-abc123         # row, credentials, file and alias, behind a typed yes
 ```
 
 The judge grant gates the whole of `/ui/judge`, which is also the only route in
 the tree that writes `config.toml` — applying a tuning recommendation moves the
 instance's ranking parameters, so it is not something every account should
 reach. There is no admin role; the flag is granted out of band, per user, and
-takes effect on the next request rather than on a restart. The raw form works
-too:
+takes effect on the next request rather than on a restart — the Judge entry in
+the nav appears on the same request the route opens on, because both read the
+column rather than the copy of the row the registry is holding. The raw form
+works too:
 
 ```bash
 sqlite3 engram-control.db "UPDATE users SET can_judge = 1 WHERE subject = '…'"

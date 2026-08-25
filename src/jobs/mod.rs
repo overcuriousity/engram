@@ -1083,6 +1083,18 @@ mod tests {
         assert!(did_work(r#"{"expired":0,"clusters":3}"#));
         assert!(!did_work("{}"), "a sweep that reported nothing found nothing");
         assert!(!did_work("not json"), "an unreadable report is not a claim of work");
+
+        // The consolidation sweep's repair passes had no field in its report,
+        // so a tick that moved hundreds of pairs onto the artifacts that could
+        // answer them still said `{"superseded":0,"judged":0}` — "no work" —
+        // and doubled its backoff toward the 24-hour ceiling with the backlog
+        // it was draining still there.
+        let repairing = serde_json::to_string(&crate::jobs::consolidate::Outcome {
+            repaired: 180,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(did_work(&repairing), "{repairing}");
     }
 
     #[tokio::test]

@@ -52,7 +52,9 @@ struct Args {
     #[arg(long, value_name = "SUBJECT")]
     revoke_judge: Option<String>,
     /// Remove SUBJECT: the row, the database file, and the Qdrant alias. The
-    /// queue rows go with the row, through ON DELETE CASCADE.
+    /// queue rows go with the row, through ON DELETE CASCADE; the sessions and
+    /// API tokens go with it too, or a token nobody revoked would provision the
+    /// account straight back.
     #[arg(long, value_name = "SUBJECT")]
     delete_user: Option<String>,
 }
@@ -348,6 +350,7 @@ async fn run_account_command(
         let alias = format!("{}_{}", cfg.vector.collection, user.slug);
         println!("this removes, permanently:");
         println!("  the user row for {subject}, and every queued job with it");
+        println!("  every session and API token that subject holds");
         println!("  {}", db.display());
         println!("  the Qdrant alias {alias}, and every generation behind it");
         print!("type yes to go ahead: ");

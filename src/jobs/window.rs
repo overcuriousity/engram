@@ -331,9 +331,17 @@ pub(crate) async fn settle(core: &Core, corpus_id: &str) -> Result<()> {
 /// row alone: a failed query is not an answer, and the caller decides what to do
 /// about not having one.
 async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
+    // `subject` as well as the target, like every other query on this table.
+    // Corpus ids are ULIDs and a cross-tenant collision is not a thing that
+    // happens today, which is exactly why an unfiltered read here would stay
+    // wrong quietly: the queue is instance-wide, and the invariant the control
+    // schema states — no query on it written without a tenant filter — is only
+    // worth anything if it has no exceptions.
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT attempts FROM jobs WHERE stage = 'segment_window' AND target_id = ?",
+        "SELECT attempts FROM jobs
+          WHERE subject = ? AND stage = 'segment_window' AND target_id = ?",
     )
+    .bind(&core.store.subject)
     .bind(unit_target(corpus_id, idx))
     .fetch_optional(&core.store.control.pool)
     .await?
@@ -551,6 +559,56 @@ pub(crate) fn proposed_to_new(
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn a_windows_attempts_are_read_from_this_tenants_row_only() {
+        // The queue is one instance-wide table, and this was the last
+        // production query on it written without a `subject` predicate. ULID
+        // corpus ids make a collision impractical, which is exactly why it
+        // would have stayed wrong quietly — the invariant the control schema
+        // states is only worth something if it has no exceptions.
+        let core = crate::core::test_support::test_core().await;
+        let src = core
+            .store
+            .insert_corpus("a document", "web", None)
+            .await
+            .unwrap();
+        let target = unit_target(&src.id, 0);
+
+        // The other tenant's row first, so an unfiltered `fetch_optional` finds
+        // it before ours.
+        core.store
+            .control
+            .provision("someone-else", None)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
+             VALUES ('someone-else', 'segment_window', 'segment', ?, 'pending', 4, 0, 0, 0, 0)",
+        )
+        .bind(&target)
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
+
+        core.store
+            .enqueue_seq(
+                crate::store::jobs::Stage::SegmentWindow,
+                "segment",
+                &target,
+                0,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET attempts = 2 WHERE subject = ? AND target_id = ?")
+            .bind(&core.store.subject)
+            .bind(&target)
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(attempts_for(&core, &src.id, 0).await.unwrap(), 2);
+    }
     use super::*;
     use crate::core::test_support::test_core;
 

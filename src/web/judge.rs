@@ -1025,7 +1025,10 @@ mod tests {
     /// And the other way round, for the same reason.
     #[tokio::test]
     async fn granting_the_judge_opens_the_door_without_a_restart() {
-        let core = crate::core::test_support::test_core().await;
+        let mut core = crate::core::test_support::test_core().await;
+        // The nav entry is gated on a capture log existing at all, so the half
+        // of this that is about the nav needs one.
+        core.learn.enabled = true;
         let control = core.store.control.clone();
         let (app, cookie) =
             crate::web::test_support::app_with_cookie_ungranted(core).await;
@@ -1042,6 +1045,28 @@ mod tests {
         assert_eq!(
             status_of(&app, &cookie, "GET", "/ui/judge").await,
             StatusCode::OK
+        );
+
+        // And the nav says so. The gate read the live column while the nav read
+        // `Tenant.user.can_judge` — the row as it was at open time — so
+        // `engram --grant-judge`, which prints that the user may now judge, put
+        // no link anywhere until their core fell out of the LRU. On an instance
+        // under its cap that is never, and a route nothing leads to is a route
+        // only the operator knows about.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            body_of(res).await.contains("/ui/judge"),
+            "the grant opened the door and left no sign of it"
         );
     }
 

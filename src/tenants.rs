@@ -60,10 +60,22 @@ pub struct Tenants {
     /// tens, and a dependency for a linear scan over thirty-two entries is not
     /// a trade worth making.
     open: Mutex<(HashMap<String, Tenant>, Vec<String>)>,
-    /// One provisioning at a time, so two first requests racing cannot both
-    /// create the collection. `INSERT OR IGNORE` makes the row safe on its
-    /// own; this is what makes the Qdrant call safe.
-    provisioning: tokio::sync::Mutex<()>,
+    /// One provisioning at a time *per subject*, so two first requests racing
+    /// cannot both create the same collection. `INSERT OR IGNORE` makes the row
+    /// safe on its own; this is what makes the Qdrant call safe.
+    ///
+    /// Per subject and not one lock for the registry, because the section it
+    /// guards contains `open()` and `open()` contains a Qdrant round trip: a
+    /// single lock meant every worker's cache miss queued behind whichever
+    /// unrelated tenant happened to be opening, on a path that runs on every
+    /// eviction and once per user per repair tick. Two people opening two
+    /// different bases were never the race this exists for.
+    ///
+    /// Entries are never removed. There is one per subject the process has
+    /// opened, which is bounded by the user table, and dropping one the moment
+    /// it looks unused is how two callers end up holding two different mutexes
+    /// for the same subject.
+    provisioning: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Subjects whose once-per-process opening work has already been done.
     ///
     /// `open` runs on every cache *miss* and not once per process: a registry
@@ -94,7 +106,7 @@ impl Tenants {
             vectors,
             open: Mutex::new((HashMap::new(), Vec::new())),
             first_opened: Mutex::new(HashSet::new()),
-            provisioning: tokio::sync::Mutex::new(()),
+            provisioning: Mutex::new(HashMap::new()),
             solo: false,
         }
     }
@@ -159,12 +171,26 @@ impl Tenants {
         t
     }
 
+    /// The lock that serialises opening this one subject. See `provisioning`.
+    ///
+    /// A poisoned map is not a reason to open the same collection twice, so a
+    /// caller that finds one gets a private mutex and proceeds alone — which is
+    /// the same exclusion it would have had if it were the only caller, and the
+    /// only thing left to offer once the map cannot be read.
+    fn provisioning_lock(&self, subject: &str) -> Arc<tokio::sync::Mutex<()>> {
+        match self.provisioning.lock() {
+            Ok(mut m) => m.entry(subject.to_string()).or_default().clone(),
+            Err(_) => Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
     /// The web door: an authenticated subject, provisioned on first sight.
     pub async fn get_or_provision(&self, subject: &str, email: Option<&str>) -> Result<Tenant> {
         if let Some(t) = self.cached(subject) {
             return Ok(t);
         }
-        let _guard = self.provisioning.lock().await;
+        let lock = self.provisioning_lock(subject);
+        let _guard = lock.lock().await;
         // Checked again under the lock: the racing caller may have finished
         // while this one waited for it.
         if let Some(t) = self.cached(subject) {
@@ -185,7 +211,8 @@ impl Tenants {
         if let Some(t) = self.cached(subject) {
             return Ok(t);
         }
-        let _guard = self.provisioning.lock().await;
+        let lock = self.provisioning_lock(subject);
+        let _guard = lock.lock().await;
         if let Some(t) = self.cached(subject) {
             return Ok(t);
         }

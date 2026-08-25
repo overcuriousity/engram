@@ -20,8 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
   -- `engram --grant-judge`; there is no role model behind it and no page that
   -- sets it.
   can_judge    INTEGER NOT NULL DEFAULT 0,
-  created_at   INTEGER NOT NULL,
-  last_seen_at INTEGER NOT NULL
+  created_at   INTEGER NOT NULL
 );
 
 -- ── Auth ─────────────────────────────────────────────────────────────────────
