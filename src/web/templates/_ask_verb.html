@@ -1,0 +1,16 @@
+{# The Ask verb, in a slot that is always there.
+
+   Two callers: the workspace renders it inline, and `_held.html` swaps it in
+   out-of-band the moment the base stops being empty. The wrapper is what makes
+   the second one possible — htmx needs an element with this id already in the
+   page to swap against, and the button itself is absent on an empty base. #}
+<span id="ask-verb-slot"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {%- if ask_enabled && held -%}
+  {# Carries the reason it is dead. app.js clears `disabled` the moment there
+     is something to act on, so the title only ever describes the state that
+     renders it — and a permanently grey button with no stated reason is
+     indistinguishable from a broken one. #}
+  <button class="btn btn-accent" type="button" data-verb="ask" disabled
+          title="Type or attach something first">Ask</button>
+  {%- endif -%}
+</span>

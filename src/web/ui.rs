@@ -3736,6 +3736,29 @@ mod tests {
         (app, cookie)
     }
 
+    /// One source, so the base is not empty.
+    ///
+    /// The ask door only opens over a held base — with nothing stored it
+    /// redirects to the plain page, because the workspace renders no Ask verb
+    /// there and the door would be a question in a box with no way to send it.
+    /// Every test below that wants the ask *page* wants a base with something
+    /// in it first.
+    async fn hold_something(core: &crate::core::Core) {
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+    }
+
+    /// A session over a base holding one source. See `hold_something`.
+    async fn app_holding_something() -> (axum::Router, String) {
+        let (app, cookie, core) = app_session_and_core().await;
+        hold_something(&core).await;
+        (app, cookie)
+    }
+
     async fn app_session_and_core() -> (axum::Router, String, crate::core::Core) {
         let core = crate::core::test_support::test_core().await;
         let handle = core.clone();
@@ -3930,7 +3953,9 @@ mod tests {
     /// after was the one thing it did not do.
     #[tokio::test]
     async fn the_ask_door_fills_the_one_box_and_runs_nothing_on_arrival() {
-        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        let core = crate::core::test_support::test_core().await;
+        hold_something(&core).await;
+        let (app, cookie) = app_for(core).await;
         let html = get(&app, "/ui/ask?q=why+did+the+reindex+fail", &cookie).await;
         assert!(
             html.contains("why did the reindex fail"),
@@ -5331,7 +5356,32 @@ mod tests {
                 .await
                 .unwrap();
         }
-        app_with_cookie(core).await
+        // Searches were recorded against something. Without a source the ask
+        // door redirects, and a test walking the nav across every page would
+        // be walking one that is not there.
+        let handle = core.clone();
+        let out = app_with_cookie(core).await;
+        hold_something(&handle).await;
+        out
+    }
+
+    /// One name for one destination. The nav entry, the tab and the empty
+    /// state were renamed together and two in-page links were left behind, so
+    /// "Judge some" on Insights and "Judge them" on Settings landed on a page
+    /// that called itself something else in all three of the places a reader
+    /// looks to confirm they arrived.
+    #[tokio::test]
+    async fn every_link_to_the_review_screen_calls_it_what_it_calls_itself() {
+        let (app, cookie) = app_recording_searches(3).await;
+        for page in ["/ui/insights", "/ui/settings", "/ui/judge"] {
+            let html = flat(&get(&app, page, &cookie).await);
+            for stale in ["Judge some", "Judge them", ">Judge<"] {
+                assert!(
+                    !html.contains(stale),
+                    "{page} still calls the review screen \"{stale}\""
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -8700,7 +8750,8 @@ mod tests {
     async fn a_question_the_operator_arrived_with_is_never_overwritten() {
         // A gap's "ask again" is a question they chose. The sitting fills an
         // empty box and nothing else.
-        let (app, cookie, _core) = app_session_and_core().await;
+        let (app, cookie, core) = app_session_and_core().await;
+        hold_something(&core).await;
         get_body(&app, &cookie, "/ui/search/results?q=something%20else").await;
 
         let ask = get_body(&app, &cookie, "/ui/ask?q=the%20one%20I%20clicked").await;
@@ -9477,6 +9528,7 @@ mod tests {
         // Every one of them starts at the shell's left edge, which is what
         // stops the content column moving as you navigate.
         let (app, cookie, core) = app_session_and_core().await;
+        hold_something(&core).await;
 
         let search = get_body(&app, &cookie, "/ui/search").await;
         assert!(
@@ -9541,7 +9593,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_ask_page_prefills_a_question_from_the_query_string() {
-        let (app, cookie) = app_with_session().await;
+        let (app, cookie) = app_holding_something().await;
         let page = get_body(&app, &cookie, "/ui/ask?q=mount+an+E01").await;
         // A textarea carries its value as content rather than as an
         // attribute, which is the one visible consequence of the box being a
@@ -9695,7 +9747,7 @@ mod tests {
             "the stamp is not a hash of the assets it stamps"
         );
 
-        let (app, cookie) = app_with_session().await;
+        let (app, cookie) = app_holding_something().await;
         let page = get_body(&app, &cookie, "/ui/ask").await;
         assert!(
             page.contains(&format!("/assets/app.js?v={want}")),
@@ -9864,7 +9916,7 @@ mod tests {
             "the driver looks up almost nothing, so this test checks almost nothing: {wanted:?}"
         );
 
-        let (app, cookie) = app_with_session().await;
+        let (app, cookie) = app_holding_something().await;
         let page = get_body(&app, &cookie, "/ui/ask").await;
         for id in wanted {
             assert!(

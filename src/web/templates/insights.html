@@ -59,7 +59,7 @@
     {# Nothing judged yet. A 0.00 here would read as a score rather than as an
        absence, which is the one thing this figure must never do. #}
     <p class="measure-sub">Nothing judged yet — {{ f.captured }} search{% if f.captured != 1 %}es{% endif %} recorded.
-      <a href="/ui/judge">Judge some</a> and the number appears.</p>
+      <a href="/ui/judge">Review some</a> and the number appears.</p>
     {% endif %}
     {% else %}
     <p class="measure-sub">Not recording searches, so there is nothing to measure.</p>
@@ -333,8 +333,16 @@
    offers the machine here, closed. A disclosure rather than a second page: a
    route would need a handler, a link and an empty state of its own to draw the
    same line. #}
-<details class="machine">
-  <summary><h2>What the machine is doing</h2></summary>
+{# Open, and said on the summary, when something in here is going wrong. The
+   sweep failures and the last-error column are the only surfaces that report a
+   background pipeline falling over, and behind a closed disclosure with a
+   neutral summary an instance whose every embed job has failed for a week
+   looks exactly like one with nothing to say. A count on the summary is the
+   smallest thing that survives the fold. #}
+<details class="machine"{% if last_day_failures > 0 || !retrying.is_empty() %} open{% endif %}>
+  <summary><h2>What the machine is doing</h2>{% if last_day_failures > 0 %}
+    <span class="flag">{{ last_day_failures }} failed</span>{% endif %}{% if !retrying.is_empty() %}
+    <span class="muted">{{ retrying.len() }} retrying</span>{% endif %}</summary>
 
 
 {# The counts as a sentence rather than as `done: 17`-style badges: this is a

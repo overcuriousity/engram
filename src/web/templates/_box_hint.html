@@ -1,0 +1,18 @@
+{# Two hints, because the two states need different sentences. With something
+   held, the useful thing to say is how to phrase a query — a whole sentence
+   embeds better than the two nouns from it a reader would otherwise type.
+   With nothing held there is no query to phrase, and the useful thing to say
+   is what this is and whose it is. The second half is not decoration: an
+   operator arriving through an identity provider never sees the login card,
+   so this is the only place the application introduces itself, and the
+   boundary is the question a person actually has before pasting their own
+   notes onto a server somebody else runs. #}
+<p id="box-hint" class="muted hint"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {%- if held -%}
+  Typing searches as you go. A sentence or a whole paragraph finds more than
+  keywords do — paste what you are looking at.
+  {%- else -%}
+  engram keeps what you paste in your own words and finds it again by meaning,
+  not by keywords. This base is yours: nobody else can search it.
+  {%- endif -%}
+</p>

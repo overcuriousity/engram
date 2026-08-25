@@ -28,7 +28,6 @@
 {% else %}
 <p class="muted" role="status">Captured —
   <a href="/ui/corpora/{{ id }}">view source</a>.</p>
-{% endif %}
 {# The work the press started, reported by the fragment that already knows how.
    The gap between a paste landing and that paste being searchable is a
    background job, and it was invisible from here: this receipt, then silence,
@@ -46,3 +45,4 @@
    phone has no hover. #}
 <p class="muted hint">Reading it now — searchable once it settles.</p>
 <div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
+{% endif %}

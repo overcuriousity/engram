@@ -1,0 +1,21 @@
+{# Everything the workspace renders differently once the base stops being
+   empty, as out-of-band swaps.
+
+   The page is rendered once and never again: a capture posts to `/ui/capture`
+   and swaps a receipt, and the rail refresh swaps `#results`. Nothing else on
+   the page moves — so the first paste of a new base left the workspace still
+   arranged for an empty one, with no Ask verb, no shortcut row, and hints
+   describing a first capture that had already happened, until a manual reload.
+   These are the four regions that were wrong, fetched by app.js on the first
+   capture that stores and swapped where they stand.
+
+   The same partials the workspace itself includes, rendered with `held` true,
+   so the two cannot come to disagree about what the held state says.
+
+   The placeholders are not here: swapping the textarea would take the caret,
+   the selection and anything typed since with it, so app.js carries those two
+   sentences over from `data-placeholder-held*` instead. #}
+{% include "_ask_verb.html" %}
+{% include "_keyhint.html" %}
+{% include "_box_hint.html" %}
+{% include "_pane_idle.html" %}

@@ -643,6 +643,49 @@ mod tests {
         );
     }
 
+    /// A closed disclosure with a neutral summary is not a report. The sweep
+    /// failures and the last-error column are the only surfaces that say a
+    /// background pipeline has fallen over, and once they moved in here an
+    /// instance whose every embed job had failed for a week looked from the
+    /// fold exactly like one with nothing to say.
+    #[tokio::test]
+    async fn a_failing_pipeline_is_not_something_the_page_keeps_to_itself() {
+        let core = crate::core::test_support::test_core().await;
+        let quiet = insights(core).await;
+        assert!(
+            quiet.contains(r#"<details class="machine">"#),
+            "with nothing wrong the readout stays folded away: {quiet}"
+        );
+
+        let core = crate::core::test_support::test_core().await;
+        core.store
+            .record_sweep_run(
+                "consolidate",
+                crate::store::now(),
+                "failed",
+                r#"{"error":"the endpoint was down"}"#,
+            )
+            .await
+            .unwrap();
+        let html = insights(core).await;
+
+        assert!(
+            html.contains(r#"<details class="machine" open>"#),
+            "a failing sweep opens the readout that reports it: {html}"
+        );
+        let summary = html
+            .split_once(r#"<details class="machine" open>"#)
+            .expect("the disclosure exists")
+            .1
+            .split_once("</summary>")
+            .expect("and has a summary")
+            .0;
+        assert!(
+            summary.contains("1 failed"),
+            "and says so on the line that survives the fold: {summary}"
+        );
+    }
+
     /// Two questions, one page: what is in my memory and what needs me, versus
     /// what is the machine doing. The second is operator-grade — stage ids,
     /// target ids, raw error strings — and every user sees this page now.
