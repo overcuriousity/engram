@@ -851,6 +851,38 @@ mod tests {
         );
     }
 
+    /// The gap between "captured" and "searchable" is a background job, and it
+    /// was invisible: a one-line receipt, then silence, then a search that
+    /// finds nothing. The queue fragment already reports the work and already
+    /// stops polling when it settles — it was only ever rendered on Insights.
+    #[tokio::test]
+    async fn the_capture_receipt_shows_the_work_that_is_still_running() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/capture")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("text=LevelDB+tombstones+survive+compaction."))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            html.contains(r#"hx-get="/ui/queue""#),
+            "the receipt fetches the queue that reports the work"
+        );
+        assert!(
+            html.contains(r#"hx-trigger="load""#),
+            "on load, so the progress is there without a second press"
+        );
+    }
+
     fn answer_fixture(dropped: usize) -> String {
         askama::Template::render(&AnswerTemplate {
             answer: "<p>An answer.</p>".into(),

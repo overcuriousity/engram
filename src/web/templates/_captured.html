@@ -29,3 +29,12 @@
 <p class="muted" role="status">Captured —
   <a href="/ui/corpora/{{ id }}">view source</a>.</p>
 {% endif %}
+{# The work the press started, reported by the fragment that already knows how.
+   The gap between a paste landing and that paste being searchable is a
+   background job, and it was invisible from here: this receipt, then silence,
+   then a search that finds nothing and reads as data loss. `_queue.html`
+   carries its own polling trigger and drops it the moment nothing is moving,
+   so an idle receipt costs one request and then none — the same contract it
+   already honours on Insights, which is why it is included rather than
+   reimplemented. #}
+<div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
