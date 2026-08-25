@@ -1245,7 +1245,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Consumes: `CanJudge` (Task 5).
 - Produces: no new API. Every handler in `judge_router` takes `CanJudge(t): CanJudge`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test]
@@ -1296,21 +1296,21 @@ async fn the_config_writing_route_is_behind_the_same_gate() {
 
 Add `router_ungranted` to `test_support.rs`: identical to `router` with `can_judge: false`.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cargo test --lib web::judge`
 Expected: FAIL — routes answer 200, and `router_ungranted` does not exist.
 
-- [ ] **Step 3: Swap the extractor in every judge handler**
+- [x] **Step 3: Swap the extractor in every judge handler**
 
 For each of the eleven handlers, `t: Tenant` becomes `CanJudge(t): CanJudge`. The bodies do not change.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --lib web::judge`
 Expected: PASS, including the existing judge tests, which run under the granted fixture.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 cargo clippy --all-targets -- -D warnings
@@ -1336,7 +1336,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   - `async fn run_one(tenants: &Tenants) -> Result<bool>`
   - `spawn_repair_ticker(tenants: Arc<Tenants>, shutdown) -> JoinHandle<()>`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[tokio::test]
@@ -1366,12 +1366,12 @@ async fn a_job_for_a_deleted_user_is_dropped_rather_than_retried() {
 
 Add `crate::tenants::test_support::two_tenants()` returning `(Arc<Tenants>, Tenant, Tenant)` over one in-memory `Control`, a `TempDir`, and `MemoryVectors`.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test --lib jobs::`
 Expected: FAIL to compile — `run_one` takes a `&Core`.
 
-- [ ] **Step 3: Rewrite the claim path**
+- [x] **Step 3: Rewrite the claim path**
 
 ```rust
 /// Claim one unit and run it, whoever it belongs to.
@@ -1402,7 +1402,7 @@ pub async fn run_one(tenants: &crate::tenants::Tenants) -> Result<bool> {
 
 `run_job(&core, job)` is the existing body of `run_one` from the point it has a `Job`. `Worker::spawn` takes `Arc<Tenants>` and passes `&tenants` to `run_one`.
 
-- [ ] **Step 4: Make the repair ticker instance-wide**
+- [x] **Step 4: Make the repair ticker instance-wide**
 
 ```rust
 /// Finish what a crash left half-done, for every tenant.
@@ -1423,12 +1423,12 @@ Inside the tick, replace the single-core body with a loop over `tenants.control(
 
 Move the `heal_store_drift` spawn from `startup_checks` into `Tenants::open`, after the `Core` is built.
 
-- [ ] **Step 5: Run the suite**
+- [x] **Step 5: Run the suite**
 
 Run: `cargo test`
 Expected: PASS.
 
-- [ ] **Step 6: Lint and commit**
+- [x] **Step 6: Lint and commit**
 
 ```bash
 cargo clippy --all-targets -- -D warnings
@@ -1456,7 +1456,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   - `async fn adopt(cfg: &Config, control: &Control) -> Result<Option<User>>`
   - CLI flags: `--user <SUBJECT>` on `--reindex`, `--export-eval`, `--recompute-coverage`; new `--list-users`, `--grant-judge <SUBJECT>`, `--revoke-judge <SUBJECT>`, `--delete-user <SUBJECT>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test]
@@ -1493,12 +1493,12 @@ async fn adoption_does_nothing_without_a_subject_to_adopt_for() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cargo test --bin engram startup_tests`
 Expected: FAIL to compile — `cannot find function adopt`.
 
-- [ ] **Step 3: Write adoption**
+- [x] **Step 3: Write adoption**
 
 ```rust
 /// Take over a single-user installation, once.
@@ -1569,7 +1569,7 @@ async fn adopt(cfg: &Config, control: &Control) -> Result<Option<User>> {
     }
 ```
 
-- [ ] **Step 4: Rewrite `main`**
+- [x] **Step 4: Rewrite `main`**
 
 Boot opens the control database only:
 
@@ -1624,12 +1624,12 @@ The four new flags:
 
 `--delete-user` prints what it is about to remove and requires a typed `yes` on stdin before doing it.
 
-- [ ] **Step 5: Run the suite**
+- [x] **Step 5: Run the suite**
 
 Run: `cargo test`
 Expected: PASS.
 
-- [ ] **Step 6: Lint and commit**
+- [x] **Step 6: Lint and commit**
 
 ```bash
 cargo clippy --all-targets -- -D warnings
@@ -1659,7 +1659,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   - `Control::arm_periodic_with_backoff(&self, subject, stage, target_kind, target_id, run_after: i64, empty_runs: i64) -> Result<()>`, and its `Store` delegate
   - `core.schedule.backoff_max_hours` is reachable already: `Core` carries `pub schedule: ScheduleConfig` at `src/core/mod.rs:163`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test(start_paused = true)]
@@ -1722,12 +1722,12 @@ async fn new_data_cancels_the_backoff() {
 
 `pending_row` is a test helper reading the `jobs` row for a stage out of `core.store.control.pool`.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `cargo test --lib jobs::`
 Expected: FAIL — `rearm_periodic_with` does not exist, `backoff_max_hours` is not a field.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// How long until this sweep runs again.
@@ -1771,12 +1771,12 @@ async fn rearm_periodic_with(core: &Core, stage: Stage, target: &str, did_work: 
 
 `arm_periodic_with_backoff` is `arm_periodic` with `empty_runs = ?` added to both the insert and the `DO UPDATE SET`; `arm_now` sets `empty_runs = 0` alongside `run_after = 0`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --lib jobs::`
 Expected: PASS, four new tests.
 
-- [ ] **Step 5: Lint and commit**
+- [x] **Step 5: Lint and commit**
 
 ```bash
 cargo clippy --all-targets -- -D warnings
@@ -1804,7 +1804,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Consumes: everything.
 - Produces: nothing consumed by later tasks.
 
-- [ ] **Step 1: Write the isolation test**
+- [x] **Step 1: Write the isolation test**
 
 ```rust
 //! Two tenants over the real router. Everything else in the suite runs one
@@ -1847,16 +1847,16 @@ async fn a_capture_by_one_tenant_queues_work_only_for_them() {
 
 Write `two_tenant_app()` in the same file: one `Control::memory()`, a `TempDir` for `store.dir`, `MemoryVectors` per tenant, and an `AppState` whose `Tenants` provisions both subjects. Drive requests with two distinct session cookies.
 
-- [ ] **Step 2: Run to verify it fails, then passes**
+- [x] **Step 2: Run to verify it fails, then passes**
 
 Run: `cargo test --test multi_tenant`
 Expected: FAIL first if any handler is still reading a shared core — that is the point of the test. Then PASS.
 
-- [ ] **Step 3: Add the Qdrant case**
+- [x] **Step 3: Add the Qdrant case**
 
 In `tests/integration_qdrant.rs`, add a test that provisions two tenants against the live Qdrant, writes one point each, and asserts each alias resolves to a different collection and each search returns only its own point. This is the one part alias-per-tenant that `MemoryVectors` cannot cover.
 
-- [ ] **Step 4: Document the operator half**
+- [x] **Step 4: Document the operator half**
 
 In `README.md`, add a "Multiple users" section covering: `auth.mode = "oidc"` provisions on first login; `store.control_path`, `store.dir`, `store.max_open_tenants`; adoption via `migrate.adopt_subject` and that it fires once; `--list-users`, `--grant-judge`, `--revoke-judge`, `--delete-user`; that `--reindex`, `--export-eval` and `--recompute-coverage` need `--user`; the raw SQL fallback:
 
@@ -1868,12 +1868,12 @@ and a **Backup** subsection: a backup is now the control database plus every fil
 
 Add the same keys, commented, to `config.example.toml`.
 
-- [ ] **Step 5: Run everything**
+- [x] **Step 5: Run everything**
 
 Run: `cargo test && cargo clippy --all-targets -- -D warnings`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tests README.md config.example.toml

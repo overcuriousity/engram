@@ -1,14 +1,10 @@
-# Multi-user tenancy — handoff, 2026-08-24
+# Multi-user tenancy — done, 2026-08-25
 
-**Branch:** `multi-user-tenancy`, five commits off `master` (`f0e3bdf`).
-**State:** Tasks 1–5 of 10 done. `cargo test` green: **1793 passed, 0 failed.**
+**Branch:** `multi-user-tenancy`, ten commits off `master` (`f0e3bdf`).
+**State:** all ten tasks done. `cargo test` green: **1819 across six binaries,
+0 failed**. `cargo clippy --all-targets -- -D warnings` clean.
 **Spec:** `docs/superpowers/specs/2026-08-24-multi-user-tenancy-design.md`
-**Plan:** `docs/superpowers/plans/2026-08-24-multi-user-tenancy.md` — Tasks 6–10 are still to do and are written out step by step.
-
-Read the spec first. It carries the *why*, including what was considered and
-rejected; the plan carries the steps.
-
-## What is done
+**Plan:** `docs/superpowers/plans/2026-08-24-multi-user-tenancy.md`
 
 | # | Task | Commit |
 |---|------|--------|
@@ -17,128 +13,109 @@ rejected; the plan carries the steps.
 | 3 | One job queue in control, keyed by `subject` | `c28e09e` |
 | 4 | Tenant registry | `a3fa45c` |
 | 5 | `Tenant` extractor; `core` removed from `AppState` | `bbbbdad` |
+| — | The warning backlog task 5 left | `76239fa` |
+| 6 | The judge gate | `ea0d7c6` |
+| 7 | Workers claim globally | `f3e74f9` |
+| 8 | Boot, adoption, CLI | `ef32558` |
+| 9 | Empty-run backoff | `e842eb3` |
+| 10 | Isolation tests and docs | `5a06225` |
 
-The architecture is in place and the app compiles and passes its whole suite as
-a single-tenant instance running through the multi-tenant machinery. What is
-missing is the judge gate, the worker dispatch, the real boot path, the
-backoff, and the end-to-end isolation test.
+`BOOT_SUBJECT` is gone. The server is actually multi-user.
 
-## What is left
+## Deviations in tasks 6–10, and why
 
-**Task 6 — the judge gate.** The smallest remaining task and a good warm-up.
-`CanJudge` already exists (`src/web/tenant.rs`) and already returns 403 when
-`users.can_judge` is 0. Nothing uses it yet: swap `tenant: Tenant` for
-`CanJudge(tenant): CanJudge` in the eleven handlers of `judge_router`
-(`src/web/judge.rs:921-931`). `judge_pending` already returns `None` for an
-ungranted user, so the nav entry disappears on its own.
-`test_support::router_ungranted` is written and waiting for a caller.
+1. **`run_one` was not replaced, it was joined.** The plan had `run_one` take a
+   `&Tenants`. It has ~40 callers, all of them test helpers driving a capture to
+   completion, and "take *this base's* next step" is a real operation with a
+   query already written for it (`Store::claim_job`). So `run_any(&Tenants)` is
+   the worker's door — global claim, resolve the subject, dispatch — and
+   `run_one(&Core)` stayed as the per-tenant one. Same guarantee, no churn.
 
-**Task 7 — workers claim globally.** `Control::claim_job` already returns
-`(subject, Job)`. `run_one` in `src/jobs/mod.rs` still takes a `&Core` and
-throws the subject away (`let Some((_subject, job)) = ...`). It needs to take
-`&Tenants`, resolve the subject through `Tenants::get`, and drop a job whose
-user was deleted rather than retrying it. `spawn_repair_ticker` in
-`src/core/background.rs` needs to iterate `control.users()`.
+2. **The repair tick has two halves, not one.** The plan said to loop over users
+   calling `reclaim_stuck`, `age_background` and `arm_missing_periodic` against
+   each. The first two are already instance-wide queries on one control
+   database; running them per user asks the same question N times and acts on
+   the first answer. `repair_control_once` runs them once per tick, and
+   `repair_once` runs the genuinely per-tenant passes for each user. Session
+   expiry joined them, having lost its home when `startup_checks` shrank.
 
-**Task 8 — boot, adoption, CLI.** `src/main.rs` currently runs the whole server
-as one hardcoded subject, `BOOT_SUBJECT = "single-user"`, provisioned at
-startup, with `Tenants::single` around it. **This is interim scaffolding and is
-the most important thing to replace.** It is marked as such in the source.
-Task 8 in the plan replaces it with the control-only boot, `adopt()`, and the
-`--user` / `--grant-judge` / `--revoke-judge` / `--list-users` /
-`--delete-user` flags.
+3. **`embed_recipe_check` moved to `src/tenants.rs`,** not just its call site.
+   `main.rs` had the only copy and the binary is a separate crate, so leaving it
+   there would have meant two definitions. It is `pub` and runs from
+   `Tenants::on_first_open`, on the tenant's background queue alongside
+   `heal_store_drift` — a first request must not wait out a collection scroll.
 
-**Task 9 — empty-run backoff.** Untouched, except that the `empty_runs` column
-already exists in `control_schema.sql`, so the schema step is done.
+4. **`adopt` takes the alias rename as a parameter.** The plan called
+   `QdrantVectors::connect` inside it, which would have made every adoption test
+   need a live Qdrant. The three things that decide whether adoption is *safe*
+   are the guard, the row and the file, and none of them needs a vector store to
+   be wrong. `main` passes the real rename; the tests pass a closure. The
+   rename's own behaviour has a live case in `integration_qdrant.rs`.
 
-**Task 10 — isolation tests and docs.** Untouched.
+5. **Adoption moves the WAL sidecars too,** and rolls them back with the file.
+   A `-wal` left behind is a committed write that never reaches the base it was
+   written for, which reads afterwards as data that was there yesterday.
 
-## Deviations from the plan, and why
+6. **`--delete-user` drops the generations, not only the alias.** The spec says
+   "the alias"; an alias per tenant means nothing else points at what is behind
+   it, so stopping at the alias would leave a deleted user's vectors on disk for
+   ever. The confirmation prompt says which it is doing.
 
-1. **`Store` kept its job methods** rather than delegating into `impl Control`
-   for all 21. They run against `self.control.pool` and bind `self.subject`.
-   Same guarantee — every queue query binds a subject — at a fraction of the
-   churn. Only the genuinely instance-wide ones (`claim_job`, `complete_job`,
-   `fail_job`, `reclaim_stuck`, `age_background`) live on `Control`.
-   `Store::claim_job` also exists, claiming only that tenant's work: 93 test
-   call sites use it, and "take this base's next step" is a real operation.
+7. **The backoff tests do not use tokio's paused clock,** though the plan said
+   to. A paused clock makes sqlx's pool time out acquiring its first connection
+   — the acquire timeout fires before any real work can happen. The tests never
+   sleep, so wall clock costs them a second of imprecision against periods
+   measured in minutes, and they assert within a two-second tolerance.
 
-2. **Four production queries are no longer joins.** They filtered `artifacts`
-   by `NOT EXISTS (SELECT 1 FROM jobs …)`, which cannot cross two databases.
-   They now ask the tenant for candidates and `Control::targets_with_jobs`
-   which are spoken for:
-   - `Store::pending_artifacts_are_isolated` (`src/store/artifacts.rs`)
-   - `Store::list_unrelated_artifact_ids` (same file)
-   - `Store::stranded_merges` (`src/store/lineage.rs`)
-   - the `judge_queue` count (`src/store/links.rs`), now `Control::live_count`
+8. **`test_support::router_ungranted` was deleted rather than called.** It could
+   not have a caller: the judge gate is only reachable by someone signed in, and
+   a bare router carries no session. `app_with_cookie_ungranted` replaces it —
+   the same fixture with a real session and the grant withheld, which is the
+   only difference the gate is allowed to be answering.
 
-   **The two with a `LIMIT` over-fetch 8× before filtering**, because the limit
-   has to apply after the queue test. That factor is a guess. It is the one
-   place in this work where behaviour, not just structure, changed — worth a
-   look under real data, and worth saying out loud in the PR.
+9. **`Tenants::single` is now test-only.** Local mode goes through the real
+   registry: its subject is the configured username, so one account provisions
+   one tenant like anybody else.
 
-3. **`meta` stays per tenant**, against what the spec's first draft said. It
-   holds the sweep cursors `EVENTS_AFTER`, `JUDGED_AFTER` and `PURSUIT_AFTER`;
-   sharing it would let one tenant's association sweep step over another's
-   unprocessed events. The spec was corrected before the plan was written.
+## Worth a look before merging
 
-4. **`Store::migrate`'s `backfill_job_class` moved to `Control::migrate`**,
-   since the rows it corrects are no longer in the tenant database.
+- **The 8× over-fetch from task 2's deviation** (see git history for the
+  previous handoff): `Store::pending_artifacts_are_isolated` and
+  `list_unrelated_artifact_ids` over-fetch eightfold before filtering, because
+  the queue test cannot be a join across two databases any more. The factor is a
+  guess and is the one place in this work where behaviour, not just structure,
+  changed. Check it under real data.
 
-5. **`TEST_SUBJECT` is `"user-1"`**, not something tidier, because that is the
-   subject the web fixtures have always signed in as. The identity at the door
-   and the owner of the rows behind it have to be one person.
+- **Two wall-clock-sensitive tests flake under heavy load**, roughly one full
+  `cargo test --lib` run in ten while a build or clippy is competing for the
+  machine. Neither is new code and neither reproduces in isolation:
+  - `jobs::associate::tests::a_strong_cross_corpus_link_is_armed_for_the_judge_exactly_once`
+    — link decay is computed against `store::now()`, so a slow run decays the
+    weight below the arming threshold.
+  - `jobs::tests::a_refused_window_backs_off_further_every_time_it_is_refused`
+    — reads `run_after - now()`, which shrinks by however long the read took.
 
-6. **`Tenants::single` answers for any subject** (`solo: true`). That is what
-   `auth.mode = "local"` is — one account, one base — and the local username is
-   not the same string as the subject the data was written under. Isolation is
-   never tested through it: `tenants::test_support::test_tenants` builds a real
-   registry, and the cross-tenant tests use that.
+  Seventeen pre-change runs were clean and two of about twenty post-change runs
+  were not, so this branch perturbs the timing rather than causing it. Both want
+  an injected clock rather than a tolerance; that is its own change.
 
-7. **`Config::test_default()` is not behind `cfg(test)`.** The binary's own
-   tests compile this crate as a dependency, where that flag is not set.
+- **`config.toml` in the repo root is stale** and no longer loads —
+  `infer.ask.tier` and `infer.synthesize.tier` are missing. Unrelated to this
+  branch (it predates it), but it means `./engram` with no `--config` fails in a
+  working tree. `config.example.toml` is current and was verified with
+  `--print-config`.
 
-8. **MCP builds one service per tenant**, cached in `mcp_router`, rather than
-   one per process. `StreamableHttpService` is constructed with the tools, and
-   the tools hold a `Core`, so a single service would have been one user's data
-   behind everyone's bearer token. Each tenant also gets its own
-   `LocalSessionManager`, which is what an MCP session should be.
-
-## Known rough edges
-
-- **84 build warnings**, almost all `unused variable: st`: 70 handlers still
-  take `State(st): State<AppState>` they no longer read. Harmless, noisy,
-  and a five-minute mechanical pass — remove the extractor where the body
-  never touches `st`. Also 8 now-unused `use crate::auth::Identity`.
-- **`BOOT_SUBJECT` in `src/main.rs`** — see Task 8 above. The server is not
-  actually multi-user until that is replaced.
-- **No clippy on this machine.** `cargo` is `/usr/bin/cargo` with no rustup, so
-  `cargo clippy` does not exist and every task was gated on `cargo test` alone.
-  `sudo dnf install clippy`, then run it over the whole branch before the PR.
-- **`heal_store_drift`** still runs from `startup_checks` against the one boot
-  core. Task 7 moves it into `Tenants::open` so it runs per tenant, lazily.
-
-## How to verify where you are
+## What to run
 
 ```
-git log --oneline master..HEAD     # five commits
-cargo test                         # 1793 passed, 0 failed
-cargo build 2>&1 | grep -c warning # 84, all cosmetic
+cargo test                                    # 1819, 0 failed
+cargo clippy --all-targets -- -D warnings     # clean
+cargo test --test integration_qdrant -- --ignored two_tenants_get_two_collections
+cargo test --test integration_qdrant -- --ignored renaming_an_alias
 ```
 
-The tenancy tests worth reading first, because they say what the machine is
-supposed to do:
-
-- `src/tenants.rs` — `racing_first_requests_provision_once`,
-  `opening_past_the_cap_evicts_the_least_recently_used`,
-  `a_tenants_data_goes_in_its_own_file`
-- `src/store/jobs.rs` — `two_tenants_do_not_see_each_others_jobs`,
-  `the_same_target_id_in_two_tenants_is_two_jobs`,
-  `claiming_says_whose_job_it_is`,
-  `deleting_a_user_takes_their_queue_with_them`
-- `src/store/mod.rs` — `a_fresh_file_database_gets_the_whole_schema` now
-  asserts that `users`, `sessions`, `api_tokens` and `jobs` are **absent** from
-  a tenant database.
+The last two need a Qdrant on `:6333` and are the half `MemoryVectors` cannot
+cover.
 
 ## The one thing to keep hold of
 
