@@ -10,7 +10,7 @@
 //! failure leaves a record instead of passing as a shrug.
 
 use crate::tenants::Tenant;
-use crate::auth::Identity;
+use crate::web::tenant::CanJudge;
 use crate::error::Result;
 use crate::store::feedback::{PendingEvent, Stats, Verdict};
 use crate::web::auth_routes::HtmlTemplate;
@@ -322,7 +322,7 @@ async fn pulse_of(tenant: &Tenant, stats: &Stats, delta: String, prev: i64) -> R
     })
 }
 
-async fn page(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
+async fn page(State(st): State<AppState>, CanJudge(tenant): CanJudge) -> Result<Response> {
     use axum::response::IntoResponse;
     let stats = tenant.core.store.feedback_stats().await?;
     let misses = if stats.judged >= MISS_LIST_AT {
@@ -349,7 +349,7 @@ async fn page(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
 /// The figures ride inside the card, so they are always rendered — leaving them
 /// out would blank the bar rather than leave it alone. What is left out is the
 /// movement: `delta` is empty, and every animation on this fragment keys on it.
-async fn next_card(tenant: Tenant) -> Result<Response> {
+async fn next_card(CanJudge(tenant): CanJudge) -> Result<Response> {
     use axum::response::IntoResponse;
     let stats = tenant.core.store.feedback_stats().await?;
     Ok(HtmlTemplate(CardTemplate {
@@ -451,7 +451,7 @@ async fn card_again(tenant: &Tenant, event_id: &str, line: &str) -> Result<Respo
 /// purpose, and a detail view that leaked it would undo the whole arrangement.
 async fn read_artifact(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(artifact_id): Path<String>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
@@ -470,7 +470,7 @@ async fn read_artifact(
 /// whatever now heads the queue.
 async fn undo(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
@@ -509,7 +509,7 @@ pub struct HitForm {
 
 async fn hit(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
     axum::extract::Form(f): axum::extract::Form<HitForm>,
 ) -> Result<Response> {
@@ -553,7 +553,7 @@ async fn hit(
 
 async fn gap(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     let before = tenant.core.store.feedback_stats().await?;
@@ -563,7 +563,7 @@ async fn gap(
 
 async fn discard(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     let before = tenant.core.store.feedback_stats().await?;
@@ -573,11 +573,11 @@ async fn discard(
 
 async fn skip(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     tenant.core.store.skip_event(&event_id).await?;
-    next_card(tenant).await
+    next_card(CanJudge(tenant)).await
 }
 
 // ── The "none of these" path ────────────────────────────────────────────────
@@ -610,7 +610,7 @@ struct AssignTemplate {
 
 async fn assign(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
@@ -641,7 +641,7 @@ pub struct AssignQuery {
 
 async fn assign_results(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
     axum::extract::Query(p): axum::extract::Query<AssignQuery>,
 ) -> Result<Response> {
@@ -836,7 +836,7 @@ async fn tune_fragment(tenant: &Tenant, line: &str) -> Result<Response> {
 /// their server is doing.
 async fn tune_apply(
     State(st): State<AppState>,
-    tenant: Tenant,
+    CanJudge(tenant): CanJudge,
     Path(run_id): Path<String>,
 ) -> Result<Response> {
     let Some(run) = tenant.core.store.eval_run(&run_id).await? else {
@@ -935,6 +935,96 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// The gate, from the outside: a signed-in user without the grant.
+    ///
+    /// Eleven routes, because the grant covers the router and not a page —
+    /// `/ui/judge/tune/{run_id}/apply` is the only door in the tree that
+    /// writes `config.toml`, and it is inside this one.
+    async fn ungranted_app() -> (axum::Router, String) {
+        crate::web::test_support::app_with_cookie_ungranted(
+            crate::core::test_support::test_core().await,
+        )
+        .await
+    }
+
+    async fn status_of(app: &axum::Router, cookie: &str, method: &str, path: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn an_ungranted_user_is_refused_at_every_judge_route() {
+        let (app, cookie) = ungranted_app().await;
+        for path in ["/ui/judge", "/ui/judge/next", "/ui/judge/read/a1"] {
+            assert_eq!(
+                status_of(&app, &cookie, "GET", path).await,
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+        for path in ["/ui/judge/j1/assign", "/ui/judge/j1/assign/results"] {
+            assert_eq!(
+                status_of(&app, &cookie, "GET", path).await,
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+        for path in [
+            "/ui/judge/tune/r1/apply",
+            "/ui/judge/j1/hit",
+            "/ui/judge/j1/gap",
+            "/ui/judge/j1/discard",
+            "/ui/judge/j1/skip",
+            "/ui/judge/j1/undo",
+        ] {
+            assert_eq!(
+                status_of(&app, &cookie, "POST", path).await,
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ungranted_user_gets_no_judge_entry_in_the_nav() {
+        let (app, cookie) = ungranted_app().await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_of(res).await;
+        assert!(
+            !body.contains("/ui/judge"),
+            "an ungranted user was shown the door"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_config_writing_route_is_behind_the_same_gate() {
+        let (app, cookie) = ungranted_app().await;
+        assert_eq!(
+            status_of(&app, &cookie, "POST", "/ui/judge/tune/r1/apply").await,
+            StatusCode::FORBIDDEN
+        );
+    }
 
     #[test]
     fn a_judge_card_names_nothing_untitled_and_leaks_no_markdown() {

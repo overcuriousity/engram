@@ -105,10 +105,25 @@ pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
     (app, cookie)
 }
 
+/// The same, for a signed-in user who has not been granted the judge. The
+/// session is real; only the grant is missing, which is the only thing the
+/// gate is allowed to be answering.
+pub async fn app_with_cookie_ungranted(core: Core) -> (axum::Router, String) {
+    let (app, cookie, _) = app_with_state_as(core, false).await;
+    (app, cookie)
+}
+
 /// `app_with_cookie`, plus the state behind it — what a test needs when it has
 /// to read something a handler wrote outside the database, such as the
 /// configuration file the apply path rewrites.
 pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::state::AppState) {
+    app_with_state_as(core, true).await
+}
+
+async fn app_with_state_as(
+    core: Core,
+    can_judge: bool,
+) -> (axum::Router, String, crate::web::state::AppState) {
     let cid = crate::store::new_id();
     core.store
         .control
@@ -120,7 +135,7 @@ pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::st
         subject: crate::store::TEST_SUBJECT.into(),
         email: None,
         slug: crate::store::control::slug_for(crate::store::TEST_SUBJECT),
-        can_judge: true,
+        can_judge,
         created_at: 0,
         last_seen_at: 0,
     };
