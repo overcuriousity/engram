@@ -5305,8 +5305,8 @@ mod tests {
         for page in ["/ui/search", "/ui/capture", "/ui/ask", "/ui/insights"] {
             let html = flat(&get(&app, page, &cookie).await);
             assert!(
-                html.contains(r#"<a href="/ui/judge">Judge"#),
-                "{page} offers no way to judge"
+                html.contains(r#"<a href="/ui/judge">Review searches"#),
+                "{page} offers no way to review searches"
             );
             assert!(
                 html.contains(r#"<span class="badge badge-accent">3</span>"#),
@@ -5322,7 +5322,7 @@ mod tests {
         // invitation to a screen that has no work on it.
         let (app, cookie) = app_recording_searches(0).await;
         let html = flat(&get(&app, "/ui/search", &cookie).await);
-        assert!(html.contains(r#"<a href="/ui/judge">Judge"#));
+        assert!(html.contains(r#"<a href="/ui/judge">Review searches"#));
         assert!(
             !html.contains(r#"badge-accent">0<"#),
             "an empty queue was badged"

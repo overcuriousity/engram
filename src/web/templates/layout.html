@@ -62,7 +62,7 @@
          screen that has to be visited often for the dataset to grow. The count
          is the whole invitation: an empty queue asks for nothing. #}
       {% if let Some(n) = judge_pending %}
-      <a href="/ui/judge">Judge{% if n > &0 %}
+      <a href="/ui/judge">Review searches{% if n > &0 %}
         <span class="badge badge-accent">{{ n }}</span>{% endif %}</a>
       {% endif %}
       {# What is true about this installation, and what needs a person: the
@@ -107,7 +107,7 @@
        count is not the point — that anything is waiting is. #}
     {% if let Some(n) = judge_pending %}
     <a href="/ui/judge">
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>Judge{% if n > &0 %}
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>Review{% if n > &0 %}
       <span class="tab-dot" aria-label="{{ n }} waiting"></span>{% endif %}</a>
     {% endif %}
     <a href="/ui/insights">
