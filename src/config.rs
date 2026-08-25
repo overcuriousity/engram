@@ -1649,9 +1649,24 @@ pub struct OidcConfig {
     pub redirect_url: String,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
+    /// Admit everyone the identity provider authenticates, with no list to
+    /// name them in.
+    ///
+    /// Off by default, and deliberately something an operator has to write
+    /// down. A first request from a subject engram has never seen provisions a
+    /// tenant — a control row, a SQLite file and a Qdrant collection — so
+    /// against a provider that lets anyone self-register, an open door is
+    /// unbounded resource creation by strangers. Nothing else in the path caps
+    /// it. Setting this says the provider's own registration is the gate and
+    /// that is understood.
+    ///
+    /// Ignored when any of the three lists below is non-empty: a listed
+    /// deployment already has a narrower door than this could open.
+    #[serde(default)]
+    pub open_registration: bool,
     /// Subjects admitted by name. Empty, with the other two lists empty as
-    /// well, admits everyone the provider authenticates — see
-    /// [`crate::auth::oidc::is_allowed`].
+    /// well, admits everyone the provider authenticates only when
+    /// `open_registration` says so — see [`crate::auth::oidc::is_allowed`].
     #[serde(default)]
     pub allowed_subs: Vec<String>,
     #[serde(default)]

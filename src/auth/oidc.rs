@@ -59,15 +59,22 @@ impl Default for PendingStore {
 
 /// Who may sign in.
 ///
-/// The default is open: with all three lists empty, anyone the identity
-/// provider authenticates is admitted. The provider is the gate — engram does
-/// not keep a second one — and a deployment that wants a narrower door lists
-/// subjects, emails or groups here, at which point membership of any one list
-/// is required.
+/// A deployment names its people in one of the three lists, and membership of
+/// any one of them admits. The provider is the gate for *authentication* —
+/// engram does not keep a second one — but who that gate is allowed to let
+/// through is still engram's to say, because a subject arriving for the first
+/// time gets a tenant provisioned for it: a control row, a database file and a
+/// vector collection.
+///
+/// With all three lists empty nobody is admitted unless
+/// `open_registration` is set, which is the deployment saying in writing that
+/// the provider's own registration is the door. Startup refuses a
+/// configuration that is silent on the question rather than picking either
+/// answer on the operator's behalf — see `validate_auth` in `main.rs`.
 pub fn is_allowed(cfg: &OidcConfig, subject: &str, email: Option<&str>, groups: &[String]) -> bool {
     if cfg.allowed_subs.is_empty() && cfg.allowed_emails.is_empty() && cfg.allowed_groups.is_empty()
     {
-        return true;
+        return cfg.open_registration;
     }
     if cfg.allowed_subs.iter().any(|s| s == subject) {
         return true;
@@ -378,6 +385,7 @@ mod tests {
             client_secret: Some("s".into()),
             redirect_url: "https://engram.example/auth/callback".into(),
             scopes: vec!["openid".into()],
+            open_registration: false,
             allowed_subs: subs.iter().map(|s| s.to_string()).collect(),
             allowed_emails: emails.iter().map(|s| s.to_string()).collect(),
             allowed_groups: groups.iter().map(|s| s.to_string()).collect(),
@@ -400,16 +408,35 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_allowlist_admits_whoever_the_provider_authenticated() {
-        // The provider is the gate. Listing nothing means every account it
-        // signs in may sign in here, which is what a deployment whose identity
-        // provider already holds the right membership asks for.
-        assert!(is_allowed(
+    fn an_empty_allowlist_admits_nobody_on_its_own() {
+        // Naming nobody is not the same as naming everybody. It used to be:
+        // three empty lists admitted whoever the provider authenticated, and
+        // every new subject arriving got a tenant provisioned for it.
+        assert!(!is_allowed(
             &cfg(&[], &[]),
             "sub-1",
             Some("me@example.com"),
             &[]
         ));
+    }
+
+    #[test]
+    fn open_registration_is_what_opens_an_empty_allowlist() {
+        // The deployment whose identity provider already holds the right
+        // membership, saying so in writing.
+        let mut c = cfg(&[], &[]);
+        c.open_registration = true;
+        assert!(is_allowed(&c, "sub-1", Some("me@example.com"), &[]));
+    }
+
+    #[test]
+    fn a_populated_list_outranks_open_registration() {
+        // A deployment that both lists people and leaves the flag on has
+        // already stated the narrower intent; the flag must not widen it back.
+        let mut c = cfg(&["sub-1"], &[]);
+        c.open_registration = true;
+        assert!(is_allowed(&c, "sub-1", None, &[]));
+        assert!(!is_allowed(&c, "sub-2", None, &[]));
     }
 
     #[test]

@@ -62,10 +62,39 @@ struct Args {
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
     match cfg.auth.mode {
         AuthMode::Oidc => {
-            if cfg.auth.oidc.is_none() {
+            let Some(oidc) = &cfg.auth.oidc else {
                 return Err(Error::Validation(
                     "auth.mode = \"oidc\" but no [auth.oidc] block".into(),
                 ));
+            };
+            // Refused at startup rather than answered either way at the first
+            // login. An empty allowlist used to mean "everyone", and everyone
+            // is not a small word here: the first request from a subject
+            // engram has never seen provisions a tenant, so against a provider
+            // with open self-registration that is a stranger creating a
+            // database and a vector collection, with no cap anywhere on the
+            // path. Silently closing it instead would lock a working
+            // deployment out of its own instance on upgrade, which is why
+            // neither reading is guessed.
+            let listed = !oidc.allowed_subs.is_empty()
+                || !oidc.allowed_emails.is_empty()
+                || !oidc.allowed_groups.is_empty();
+            if !listed && !oidc.open_registration {
+                return Err(Error::Validation(
+                    "[auth.oidc] names nobody who may sign in. List the people this instance is \
+                     for in `allowed_subs`, `allowed_emails` or `allowed_groups` — or, if the \
+                     identity provider is the only gate you want, set `open_registration = true`. \
+                     Be aware that an open instance provisions a tenant for every subject the \
+                     provider authenticates, so a provider that allows self-registration allows \
+                     strangers to create databases here."
+                        .into(),
+                ));
+            }
+            if !listed {
+                tracing::warn!(
+                    "auth.oidc.open_registration is set: every subject the identity provider \
+                     authenticates gets a tenant provisioned on first request"
+                );
             }
         }
         AuthMode::Local => {
@@ -495,6 +524,53 @@ mod startup_tests {
         cfg.auth.mode = AuthMode::Oidc;
         cfg.auth.oidc = None;
         assert!(validate_auth(&cfg, false).is_err());
+    }
+
+    #[test]
+    fn oidc_mode_refuses_a_config_that_names_nobody() {
+        // Neither reading is guessed. Reading it as "everyone" hands a tenant
+        // — a control row, a database file and a vector collection — to every
+        // subject the provider authenticates; reading it as "nobody" locks a
+        // working deployment out of its own instance on upgrade. So it is a
+        // startup error until an operator says which one they meant.
+        let mut cfg = Config::test_default();
+        cfg.auth.mode = AuthMode::Oidc;
+        cfg.auth.oidc = Some(oidc_cfg());
+        assert!(validate_auth(&cfg, false).is_err());
+    }
+
+    #[test]
+    fn oidc_mode_passes_once_somebody_is_named() {
+        let mut cfg = Config::test_default();
+        cfg.auth.mode = AuthMode::Oidc;
+        let mut oidc = oidc_cfg();
+        oidc.allowed_emails = vec!["me@example.com".into()];
+        cfg.auth.oidc = Some(oidc);
+        assert!(validate_auth(&cfg, false).is_ok());
+    }
+
+    #[test]
+    fn oidc_mode_passes_when_the_open_door_is_asked_for_in_writing() {
+        let mut cfg = Config::test_default();
+        cfg.auth.mode = AuthMode::Oidc;
+        let mut oidc = oidc_cfg();
+        oidc.open_registration = true;
+        cfg.auth.oidc = Some(oidc);
+        assert!(validate_auth(&cfg, false).is_ok());
+    }
+
+    fn oidc_cfg() -> engram::config::OidcConfig {
+        engram::config::OidcConfig {
+            issuer_url: "https://idp.example".into(),
+            client_id: "engram".into(),
+            client_secret: Some("s".into()),
+            redirect_url: "https://engram.example/auth/callback".into(),
+            scopes: vec!["openid".into()],
+            open_registration: false,
+            allowed_subs: vec![],
+            allowed_emails: vec![],
+            allowed_groups: vec![],
+        }
     }
 
     #[test]

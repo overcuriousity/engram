@@ -343,16 +343,22 @@ mode = "local"
 username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 
-# Production. The three allow-lists below are optional filters, and all three
-# are empty by default: whoever your identity provider authenticates may sign
-# in. Fill any one of them in to narrow that, and a subject then has to match
-# at least one entry across the three.
+# Production. Name the people this instance is for in the three allow-lists
+# below; a subject has to match at least one entry across the three. Leaving
+# all three empty is refused at startup rather than read as "everyone",
+# because a subject admitted for the first time gets a tenant provisioned for
+# it — a control row, a database file and a vector collection. If the identity
+# provider really is the only gate you want, say so with
+# `open_registration = true` and understand what it means: a provider that
+# allows self-registration then allows strangers to create databases here, and
+# nothing on the path caps how many.
 # [auth.oidc]
 # issuer_url = "https://idp.example/realms/main"
 # client_id = "engram"
 # client_secret = "..."          # prefer ENGRAM__AUTH__OIDC__CLIENT_SECRET
 # redirect_url = "https://engram.example/auth/callback"
 # scopes = ["openid", "profile", "email"]
+# open_registration = false      # true only with the caveat above understood
 # allowed_subs = ["sub-abc123"]
 # allowed_emails = ["you@example.com"]
 # Membership in any of these groups also admits a subject. Requires the

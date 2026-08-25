@@ -155,11 +155,16 @@ file and a collection; it does not cost a thread pool.
 Set `auth.mode = "oidc"`. The first request from an unseen subject provisions
 that user — a row, a database, a collection. There is no registration UI and no
 password management: the identity provider owns accounts, and engram owns
-nothing but the mapping. Anyone the provider authenticates is admitted; the
-optional `allowed_subs`, `allowed_emails` and `allowed_groups` narrow that to a
-list when a deployment wants a second gate. `auth.mode = "local"` stays a
-development shortcut, and provisions one tenant keyed on the configured
-username.
+nothing but the mapping. Who may sign in is still engram's to say, and it has
+to be said: list the people the instance is for in `allowed_subs`,
+`allowed_emails` or `allowed_groups`, and a subject matching any one entry is
+admitted. A configuration naming nobody is refused at startup rather than read
+as naming everybody — because provisioning is what admission costs, and against
+a provider that allows self-registration, an open instance is a stranger
+creating a database and a vector collection here, with nothing capping how many
+times. A deployment that genuinely wants the provider to be the only gate says
+so with `open_registration = true`. `auth.mode = "local"` stays a development
+shortcut, and provisions one tenant keyed on the configured username.
 
 Three keys under `[store]`, all optional:
 
