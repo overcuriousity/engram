@@ -312,10 +312,18 @@ impl Store {
             })?;
             return Ok(Insertion::Existing(existing));
         }
+        tx.commit().await?;
+        // After the commit and never before it. The queue is a second database
+        // and takes no part in this transaction, so a unit armed first is
+        // claimable first: a worker that gets there inside the window reads a
+        // corpus that is not visible yet, and `Error::NotFound` on a claimed
+        // job means "the target was deleted" — which closes the unit for good
+        // and leaves the capture at `raw` with nothing that will ever pick it
+        // up. See `jobs::enqueue_with` for the failure this order leaves
+        // instead, which is the recoverable one.
         if let Followup::Queue(stage) = followup {
             super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", &src.id).await?;
         }
-        tx.commit().await?;
         Ok(Insertion::Created(src))
     }
 
@@ -337,17 +345,18 @@ impl Store {
     }
 
     /// Write a follow-up onto a corpus that already has a row — the same three
-    /// outcomes `insert_corpus_with_signature` writes beside a new one, and for
-    /// the same reason: status and job in one transaction.
+    /// outcomes `insert_corpus_with_signature` writes beside a new one, and in
+    /// the same order: the status commits, then the unit is armed.
     ///
     /// The path here is the one an image takes. Its row is written at capture
     /// and its text only exists once the vision stage has read it, so the fork
     /// between "queue this for synthesis" and "park it beside what it looks
-    /// like" happens long after the insert. Left as two statements, a process
-    /// that died between them left the corpus `raw` with no job: the reclaimed
-    /// Describe unit sees a status it is done with and returns, and `reconcile`
-    /// passes over a corpus that has no windows. The read had been paid for and
-    /// nothing would ever pick it up again.
+    /// like" happens long after the insert. The two writes were once one
+    /// transaction, which the queue moving to a second database ended: SQLite
+    /// promises nothing across two of them, so what is left is a choice of
+    /// which way round to be interrupted. Status first is the recoverable one
+    /// — a corpus with no unit is what `jobs/reconcile.rs` looks for, while a
+    /// unit with no visible corpus is one a worker closes as deleted.
     pub async fn apply_followup(&self, corpus_id: &str, followup: Followup) -> Result<()> {
         let (status, near_dupe_of, near_dupe_score) = match &followup {
             Followup::Park { of, similarity } => (
@@ -369,10 +378,13 @@ impl Store {
         .bind(corpus_id)
         .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+        // The commit first, for the reason `insert_corpus_with_signature`
+        // gives: a claim that lands before the status write is visible is a
+        // unit closed against a corpus the worker cannot see.
         if let Followup::Queue(stage) = followup {
             super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", corpus_id).await?;
         }
-        tx.commit().await?;
         Ok(())
     }
 
@@ -589,8 +601,10 @@ impl Store {
         }
         super::attachments::insert_attachment_with(&mut *tx, &attachment.for_corpus(&src.id))
             .await?;
-        super::jobs::enqueue_with(&self.control, &self.subject, reading.stage, "corpus", &src.id).await?;
         tx.commit().await?;
+        // The commit first: the corpus and its attachment have to be visible
+        // before anything can claim the unit that reads them.
+        super::jobs::enqueue_with(&self.control, &self.subject, reading.stage, "corpus", &src.id).await?;
         Ok(Insertion::Created(src))
     }
 

@@ -1086,23 +1086,61 @@ impl Store {
     /// Live, embedded artifacts whose `Relate` unit was never armed — the
     /// backstop for an arming that failed after the embed committed. A row
     /// survives its completion, so "no job at all" is exactly "never asked".
+    ///
+    /// Walked in windows behind a cursor, rather than always from the oldest
+    /// artifact forward. The "never asked" test lives in the other database
+    /// now, so it cannot be a `WHERE` clause any more and the `LIMIT` has to be
+    /// applied after it — which means a fixed window over the *oldest* rows,
+    /// and on any base with a history that window is entirely artifacts asked
+    /// about long ago. Every pass would filter all of them out, return nothing,
+    /// and look at exactly the same rows an hour later: a backstop permanently
+    /// blind to everything behind the window, which is everything that has
+    /// been captured since. The cursor is what makes the pass move.
+    ///
+    /// Reaching the end clears it, so the walk wraps and nothing is out of
+    /// reach for longer than one lap. It advances to the end of the window
+    /// examined and not to the last id returned, so a pass always makes
+    /// progress even when the whole window was already armed; a window holding
+    /// more unarmed artifacts than the caller asked for leaves the remainder
+    /// to the next lap, which is what a backstop is for.
     pub async fn list_unrelated_artifact_ids(&self, limit: usize) -> Result<Vec<String>> {
-        // Over-fetched, then filtered against the queue: the `LIMIT` has to be
-        // applied after the "never related" test, and that test now lives in a
-        // different database. The factor is a guess at how many of the oldest
-        // artifacts already have a relate unit; the caller asks again next
-        // sweep if it came back short.
+        const CURSOR: &str = "repair.relate_backstop_after";
+        // Over-fetched against the caller's limit, for the reason it always
+        // was: an unknown share of any window is already armed.
+        let window = (limit as i64).saturating_mul(8).max(1);
+        let after = self.meta_get(CURSOR).await?.and_then(|s| {
+            let (at, id) = s.split_once(':')?;
+            Some((at.parse::<i64>().ok()?, id.to_string()))
+        });
+        let (ts, from) = match &after {
+            Some((ts, id)) => (*ts, id.as_str()),
+            None => (i64::MIN, ""),
+        };
         let rows = sqlx::query(
-            "SELECT a.id FROM artifacts a
+            "SELECT a.id, a.created_at FROM artifacts a
               WHERE a.status = 'active' AND a.superseded_by IS NULL
                 AND a.embed_state = 'embedded'
                 AND a.provenance <> 'passage'
-              ORDER BY a.created_at
+                AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
+              ORDER BY a.created_at ASC, a.id ASC
               LIMIT ?",
         )
-        .bind((limit as i64).saturating_mul(8))
+        .bind(ts)
+        .bind(ts)
+        .bind(from)
+        .bind(window)
         .fetch_all(&self.pool)
         .await?;
+        // A short window is the end of the walk: start again from the oldest
+        // next time, so an artifact that lost its unit while the cursor was
+        // already past it is found on the next lap.
+        let next = match rows.last() {
+            Some(r) if (rows.len() as i64) == window => {
+                format!("{}:{}", r.get::<i64, _>("created_at"), r.get::<String, _>("id"))
+            }
+            _ => String::new(),
+        };
+        self.meta_set(CURSOR, &next).await?;
         let candidates: Vec<String> = rows.iter().map(|r| r.get::<String, _>("id")).collect();
         let armed = self
             .control
@@ -1790,6 +1828,83 @@ mod tests {
         }
         let ids = s.list_unrelated_artifact_ids(10).await.unwrap();
         assert_eq!(ids, vec![c[0].id.clone()]);
+    }
+
+    /// The backstop has to be able to see past its own window.
+    ///
+    /// A relate row survives its completion — that is the whole mechanism, "no
+    /// job at all" meaning "never asked" — so on a base with any history the
+    /// oldest artifacts are all armed. A fixed window over them comes back
+    /// empty every pass, for ever, and everything behind it is out of reach.
+    #[tokio::test]
+    async fn the_relate_backstop_walks_past_a_window_that_is_already_armed() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made: Vec<_> = (0..12).map(|i| nc(i, "text")).collect();
+        for a in s.insert_artifacts(&src.id, &made).await.unwrap() {
+            s.mark_embedded(&a.id, "fake", 0).await.unwrap();
+        }
+        // In the order the walk takes them, so "the first window" means
+        // something whatever ids were minted.
+        let ordered: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM artifacts ORDER BY created_at, id")
+                .fetch_all(&s.pool)
+                .await
+                .unwrap();
+        let (behind, armed) = ordered.split_last().unwrap();
+        for id in armed {
+            s.enqueue(crate::store::jobs::Stage::Relate, "artifact", id)
+                .await
+                .unwrap();
+        }
+
+        // A limit of one is a window of eight, and all eight are armed.
+        assert!(
+            s.list_unrelated_artifact_ids(1).await.unwrap().is_empty(),
+            "the first window holds nothing to arm"
+        );
+        assert_eq!(
+            s.list_unrelated_artifact_ids(1).await.unwrap(),
+            vec![behind.clone()],
+            "the walk never moved past the window it started in"
+        );
+    }
+
+    /// And the walk wraps: an artifact that loses its unit while the cursor is
+    /// already past it is found on the next lap rather than never.
+    #[tokio::test]
+    async fn the_relate_backstop_starts_over_when_it_runs_out() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made: Vec<_> = (0..3).map(|i| nc(i, "text")).collect();
+        let ids: Vec<String> = s
+            .insert_artifacts(&src.id, &made)
+            .await
+            .unwrap()
+            .iter()
+            .map(|a| a.id.clone())
+            .collect();
+        for id in &ids {
+            s.mark_embedded(id, "fake", 0).await.unwrap();
+            s.enqueue(crate::store::jobs::Stage::Relate, "artifact", id)
+                .await
+                .unwrap();
+        }
+        assert!(s.list_unrelated_artifact_ids(8).await.unwrap().is_empty());
+
+        // The arming that went missing, behind a cursor that has already been
+        // everywhere.
+        sqlx::query("DELETE FROM jobs WHERE target_id = ?")
+            .bind(&ids[0])
+            .execute(&s.control.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.list_unrelated_artifact_ids(8).await.unwrap(),
+            vec![ids[0].clone()],
+            "the walk did not start over"
+        );
     }
 
     #[tokio::test]

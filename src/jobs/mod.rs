@@ -65,7 +65,27 @@ pub async fn run_any(tenants: &crate::tenants::Tenants) -> Result<bool> {
             tenants.control().complete_job(job.id).await?;
             return Ok(true);
         }
-        Err(e) => return Err(e),
+        // Anything else is a fault of this moment rather than of the row: a
+        // Qdrant that will not answer, a file that will not open. The claim
+        // above already happened, so returning here would leave the unit
+        // `running` with nobody holding it — one attempt spent, no
+        // `last_error`, and nothing until the hourly `reclaim_stuck` notices.
+        // Put it back on the queue at the ordinary backoff, which is what
+        // every other failure in this module does, and then let the worker
+        // loop log and pause on the error rather than spinning through the
+        // whole queue one claim at a time while the endpoint is down.
+        Err(e) => {
+            tracing::warn!(
+                subject = %subject,
+                error = %e,
+                "could not open the base this unit belongs to; requeueing it"
+            );
+            tenants
+                .control()
+                .fail_job(job.id, job.attempts, &e.to_string())
+                .await?;
+            return Err(e);
+        }
     };
     run_dispatched(&core, job, Some(&subject)).await
 }
@@ -884,6 +904,52 @@ mod tests {
         assert!(
             !run_any(&tenants).await.unwrap(),
             "it was closed, not left to be claimed again"
+        );
+    }
+
+    /// The claim happens before the tenant is resolved, so a base that will
+    /// not open leaves a row somebody has already taken. Left there, it is
+    /// `running` with nobody holding it: no backoff, no `last_error`, one
+    /// attempt spent, and nothing until the hourly `reclaim_stuck` — which
+    /// during an outage is every unit in the queue, drained into a state a
+    /// worker cannot see.
+    #[tokio::test]
+    async fn a_unit_whose_base_will_not_open_goes_back_on_the_queue() {
+        use sqlx::Row;
+        let (tenants, _dir) = crate::tenants::test_support::unopenable_tenants().await;
+        tenants.control().provision("sub-a", None).await.unwrap();
+        crate::store::jobs::enqueue_with(
+            tenants.control(),
+            "sub-a",
+            Stage::Relate,
+            "artifact",
+            "art-1",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            run_any(&tenants).await.is_err(),
+            "the outage has to reach the worker loop, which is what makes it pause"
+        );
+
+        let row = sqlx::query("SELECT state, attempts, run_after, last_error FROM jobs")
+            .fetch_one(&tenants.control().pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<String, _>("state"),
+            "pending",
+            "the claim was abandoned in `running`"
+        );
+        assert_eq!(row.get::<i64, _>("attempts"), 1);
+        assert!(
+            row.get::<i64, _>("run_after") > crate::store::now(),
+            "requeued with no backoff at all"
+        );
+        assert!(
+            row.get::<Option<String>, _>("last_error").is_some(),
+            "nothing on the row says why it did not run"
         );
     }
 

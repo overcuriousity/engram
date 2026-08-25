@@ -10057,7 +10057,7 @@ mod tests {
     }
 
     async fn ask_state_over(core: crate::core::Core) -> AppState {
-        crate::web::test_support::state_over(core, crate::config::AuthMode::Local)
+        crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await
     }
 
     /// A router and a session over a state the caller still holds, so a test

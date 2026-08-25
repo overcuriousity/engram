@@ -79,12 +79,14 @@
 
 ## Worth a look before merging
 
-- **The 8× over-fetch from task 2's deviation** (see git history for the
-  previous handoff): `Store::pending_artifacts_are_isolated` and
-  `list_unrelated_artifact_ids` over-fetch eightfold before filtering, because
-  the queue test cannot be a join across two databases any more. The factor is a
-  guess and is the one place in this work where behaviour, not just structure,
-  changed. Check it under real data.
+- ~~**The 8× over-fetch from task 2's deviation**~~ — resolved. The factor was
+  not a tuning question but a correctness one: a relate row survives its
+  completion, so on any base past `8 × limit` artifacts the oldest window is
+  entirely armed and `list_unrelated_artifact_ids` returned empty for ever,
+  blind to everything behind it. It now walks the base behind a cursor in
+  `meta` and wraps at the end, so the factor is only a batch size.
+  `stranded_merges` had the same shape over a set that empties itself, and is
+  now paged instead of over-fetched.
 
 - **Two wall-clock-sensitive tests flake under heavy load**, roughly one full
   `cargo test --lib` run in ten while a build or clippy is competing for the

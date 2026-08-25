@@ -200,10 +200,21 @@ row with the judge granted, and renames the existing Qdrant alias onto
 it, so nothing re-embeds and the generation history `--reindex` walks is
 preserved.
 
+Three tables do not travel with the file, because they moved to the control
+database: `api_tokens`, `sessions` and `jobs`. Adoption copies them across under
+the adopting subject, so existing API tokens keep working — the browser
+extension's included — the browser you had open stays signed in, and work that
+was queued when the old process stopped resumes. Expired sessions and finished
+jobs are not carried; a claimed job comes across as pending, since the process
+that was holding it is the one that stopped. The originals stay in the moved
+file, unread, in case you want to look at them.
+
 It is guarded on the `users` table being empty, so it fires exactly once and
-cannot go off on a running instance however the file is edited afterwards. If
-the alias rename fails the file move is rolled back, because a half-adopted
-install that boots reads as a base whose searches have gone empty.
+cannot go off on a running instance however the file is edited afterwards. Every
+step that can fail is either before the user row is written or rolled back with
+it — the file move, the alias rename, the copy above — because a half-adopted
+install that boots reads as a base whose searches have gone empty, and a user
+row left behind is one that turns adoption off for good.
 
 ### Backup
 

@@ -42,7 +42,24 @@ impl FromRequestParts<AppState> for CanJudge {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let t = Tenant::from_request_parts(parts, state).await?;
-        if !t.user.can_judge {
+        // The column, not the copy of it the registry is holding.
+        //
+        // `Tenant.user` is the row as it read at open time, and an open tenant
+        // outlives a grant: `engram --revoke-judge` is a second process writing
+        // the control database, with nothing to tell this one. Left on the
+        // snapshot, a revoked user kept the judge — and with it the only route
+        // in the tree that writes `config.toml` — until their core happened to
+        // fall out of the LRU, which on an instance under its cap is never.
+        //
+        // One indexed read on the control database, and only on this door. The
+        // hot paths keep the snapshot, which is what the cache is for.
+        let live = state
+            .tenants
+            .control()
+            .user(&t.user.subject)
+            .await?
+            .ok_or(Error::Forbidden)?;
+        if !live.can_judge {
             return Err(Error::Forbidden);
         }
         Ok(CanJudge(t))

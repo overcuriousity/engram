@@ -13,7 +13,7 @@ use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::store::Store;
 use crate::store::control::{Control, User};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// One user's data: the core that reads and writes it, and who they are.
@@ -64,9 +64,26 @@ pub struct Tenants {
     /// create the collection. `INSERT OR IGNORE` makes the row safe on its
     /// own; this is what makes the Qdrant call safe.
     provisioning: tokio::sync::Mutex<()>,
+    /// Subjects whose once-per-process opening work has already been done.
+    ///
+    /// `open` runs on every cache *miss* and not once per process: a registry
+    /// at its cap evicts and reopens, and the repair ticker walks every
+    /// registered user by name. Without this the full collection scroll behind
+    /// `heal_store_drift` rode along with each of those.
+    first_opened: Mutex<HashSet<String>>,
     /// Whether this registry holds one tenant that answers for every subject.
     /// See `Tenants::single`.
     solo: bool,
+}
+
+/// Who is opening a tenant, which decides how much rides along with it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// Somebody is at the door waiting for their own base.
+    Request,
+    /// A worker claiming a unit, or the repair ticker walking the whole user
+    /// table. Nobody is waiting, and there may be a hundred of these in a row.
+    Background,
 }
 
 impl Tenants {
@@ -76,6 +93,7 @@ impl Tenants {
             control,
             vectors,
             open: Mutex::new((HashMap::new(), Vec::new())),
+            first_opened: Mutex::new(HashSet::new()),
             provisioning: tokio::sync::Mutex::new(()),
             solo: false,
         }
@@ -153,7 +171,7 @@ impl Tenants {
             return Ok(t);
         }
         let user = self.control.provision(subject, email).await?;
-        let tenant = self.open(user).await?;
+        let tenant = self.open(user, Trigger::Request).await?;
         self.remember(tenant.clone());
         Ok(tenant)
     }
@@ -172,12 +190,12 @@ impl Tenants {
             return Ok(t);
         }
         let user = self.control.user(subject).await?.ok_or(Error::NotFound)?;
-        let tenant = self.open(user).await?;
+        let tenant = self.open(user, Trigger::Background).await?;
         self.remember(tenant.clone());
         Ok(tenant)
     }
 
-    async fn open(&self, user: User) -> Result<Tenant> {
+    async fn open(&self, user: User, trigger: Trigger) -> Result<Tenant> {
         std::fs::create_dir_all(&self.cfg.store.dir)
             .map_err(|e| Error::Store(format!("could not make {}: {e}", self.cfg.store.dir)))?;
         let store_cfg = crate::config::StoreConfig {
@@ -190,8 +208,17 @@ impl Tenants {
             .open(&self.alias(&user), self.cfg.infer.embed.dim)
             .await?;
         let core = Core::from_config(&self.cfg, vectors, store);
-        self.on_first_open(&core);
+        self.on_first_open(&core, &user.subject, trigger);
         Ok(Tenant { core, user })
+    }
+
+    /// Whether this is the first time this process has opened `subject`.
+    /// Answers `true` exactly once per subject per process.
+    fn claim_first_open(&self, subject: &str) -> bool {
+        self.first_opened
+            .lock()
+            .map(|mut seen| seen.insert(subject.to_string()))
+            .unwrap_or(false)
     }
 
     /// What used to happen at boot, for the one base there was.
@@ -202,15 +229,32 @@ impl Tenants {
     /// users would otherwise mean a hundred full collection scrolls before the
     /// port opens.
     ///
+    /// Two guards keep that promise, and the name of this function is the
+    /// first of them. `open` is a cache *miss*, not a first sight: a registry
+    /// at its cap reopens the tenant it evicted an hour ago, so without
+    /// `claim_first_open` this would be per eviction rather than per process.
+    /// The second is `trigger`. The repair ticker opens every registered user
+    /// by name, and its first tick fires at boot — precisely the hundred
+    /// scrolls this is written to avoid, arriving through the back door. Only
+    /// a request scrolls; the ticker has `reconcile_stores_once` on its own
+    /// much longer period for the same work, over the same users.
+    ///
     /// On the background queue, not awaited. A first request must not wait out
     /// a scroll of the whole collection, and a base that cannot be reconciled
     /// is still a base its owner can read.
-    fn on_first_open(&self, core: &Core) {
+    fn on_first_open(&self, core: &Core, subject: &str, trigger: Trigger) {
+        if !self.claim_first_open(subject) {
+            return;
+        }
         let core = core.clone();
         let cfg = self.cfg.clone();
+        let reconcile = trigger == Trigger::Request;
         core.background.clone().spawn(async move {
             if let Err(e) = embed_recipe_check(&core, &cfg).await {
                 tracing::warn!(error = %e, "could not check the embedding recipe");
+            }
+            if !reconcile {
+                return;
             }
             // The two stores hold complementary halves of the same artifact and
             // are written separately, so either can end up with an entry the
@@ -284,6 +328,35 @@ pub mod test_support {
         )
     }
 
+    /// A registry whose vector store will not open.
+    ///
+    /// What a Qdrant outage looks like from inside the process: the row is
+    /// there, the file is there, and `open` fails anyway. Registered users are
+    /// the caller's to provision through `control()`, because provisioning
+    /// through the registry is one of the things that cannot work here.
+    pub async fn unopenable_tenants() -> (Arc<Tenants>, tempfile::TempDir) {
+        struct BrokenFactory;
+        #[async_trait::async_trait]
+        impl VectorFactory for BrokenFactory {
+            async fn open(
+                &self,
+                _alias: &str,
+                _dim: usize,
+            ) -> Result<Arc<dyn crate::vector::VectorStore>> {
+                Err(Error::Vector("qdrant is down".into()))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("scratch tenant dir");
+        let mut cfg = Config::test_default();
+        cfg.store.dir = dir.path().to_string_lossy().to_string();
+        let control = Control::memory().await.unwrap();
+        (
+            Arc::new(Tenants::new(Arc::new(cfg), control, Arc::new(BrokenFactory))),
+            dir,
+        )
+    }
+
     /// Two provisioned tenants over one queue.
     pub async fn two_tenants() -> (Arc<Tenants>, Tenant, Tenant, tempfile::TempDir) {
         let (tenants, dir) = test_tenants(8).await;
@@ -353,6 +426,29 @@ mod tests {
         let again = t.get_or_provision("sub-a", None).await.unwrap();
         assert_eq!(again.user.slug, crate::store::control::slug_for("sub-a"));
         assert_eq!(t.control().users().await.unwrap().len(), 3);
+    }
+
+    /// `open` is a cache miss, not a first sight. Past the cap it runs again
+    /// for a tenant this process has already opened — and what rides along
+    /// with it is a scroll of the whole collection.
+    #[tokio::test]
+    async fn the_first_open_work_is_claimed_once_per_process_however_often_a_tenant_reopens() {
+        let (t, _dir) = test_tenants(1).await;
+        t.get_or_provision("sub-a", None).await.unwrap();
+        // Evict it, then open it again.
+        t.get_or_provision("sub-b", None).await.unwrap();
+        assert_eq!(t.open_count(), 1);
+        t.get_or_provision("sub-a", None).await.unwrap();
+
+        assert!(
+            !t.claim_first_open("sub-a"),
+            "reopening an evicted tenant asked for the collection scroll again"
+        );
+        assert!(
+            !t.claim_first_open("sub-b"),
+            "the other tenant's first open was not recorded either"
+        );
+        assert!(t.claim_first_open("sub-c"), "a tenant never opened");
     }
 
     #[tokio::test]

@@ -988,6 +988,63 @@ mod tests {
         }
     }
 
+    /// The grant is a column, not a copy of one.
+    ///
+    /// `engram --revoke-judge` is a second process writing the control
+    /// database. The registry is holding a `User` it read when the tenant was
+    /// opened, and a tenant on an instance under its cap is never evicted — so
+    /// a gate reading that snapshot would keep letting a revoked user through
+    /// for the life of the process, `/ui/judge/tune/{run}/apply` included.
+    #[tokio::test]
+    async fn revoking_the_grant_shuts_the_door_on_the_next_request() {
+        let core = crate::core::test_support::test_core().await;
+        let control = core.store.control.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        assert_eq!(
+            status_of(&app, &cookie, "GET", "/ui/judge").await,
+            StatusCode::OK
+        );
+
+        control
+            .set_can_judge(crate::store::TEST_SUBJECT, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            status_of(&app, &cookie, "GET", "/ui/judge").await,
+            StatusCode::FORBIDDEN,
+            "the revoke waited for an eviction that never comes"
+        );
+        assert_eq!(
+            status_of(&app, &cookie, "POST", "/ui/judge/tune/r1/apply").await,
+            StatusCode::FORBIDDEN,
+            "a revoked user could still write config.toml"
+        );
+    }
+
+    /// And the other way round, for the same reason.
+    #[tokio::test]
+    async fn granting_the_judge_opens_the_door_without_a_restart() {
+        let core = crate::core::test_support::test_core().await;
+        let control = core.store.control.clone();
+        let (app, cookie) =
+            crate::web::test_support::app_with_cookie_ungranted(core).await;
+        assert_eq!(
+            status_of(&app, &cookie, "GET", "/ui/judge").await,
+            StatusCode::FORBIDDEN
+        );
+
+        control
+            .set_can_judge(crate::store::TEST_SUBJECT, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            status_of(&app, &cookie, "GET", "/ui/judge").await,
+            StatusCode::OK
+        );
+    }
+
     #[tokio::test]
     async fn an_ungranted_user_gets_no_judge_entry_in_the_nav() {
         let (app, cookie) = ungranted_app().await;

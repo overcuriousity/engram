@@ -248,6 +248,12 @@ enum Guard {
 /// guarantee is gone: a crash between the commit and this leaves a corpus with
 /// no queued job. `jobs/reconcile.rs` is what finds it — "a process killed
 /// between two writes" is the case its module doc opens with.
+///
+/// Which fixes the order every caller has to use: **commit first, arm after**.
+/// The other way round the unit is claimable before its target is visible, and
+/// a claimed unit whose target is not there is not a race to a worker — it is
+/// a deletion, closed with `complete_job` so it never runs again. One order
+/// leaves work a sweep can find; the other loses it silently.
 pub(crate) async fn enqueue_with(
     control: &crate::store::control::Control,
     subject: &str,

@@ -17,15 +17,8 @@ use axum::response::Response;
 /// The user it registers holds the judge grant. A router alone cannot express
 /// the ungranted case, because the gate is only reachable by someone signed
 /// in — see `app_with_cookie_ungranted`, which carries a session.
-pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
-    let user = crate::store::control::User {
-        subject: crate::store::TEST_SUBJECT.into(),
-        email: None,
-        slug: crate::store::control::slug_for(crate::store::TEST_SUBJECT),
-        can_judge: true,
-        created_at: 0,
-        last_seen_at: 0,
-    };
+pub async fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
+    let user = granted_user(&core, true).await;
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
     let tenants = std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user));
     crate::web::router(crate::web::state::AppState {
@@ -43,18 +36,34 @@ pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Ro
     })
 }
 
-/// An `AppState` over one already-open tenant, for the tests that need to hold
-/// the state rather than only the router.
-pub fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web::state::AppState {
-    let cfg = std::sync::Arc::new(crate::config::Config::test_default());
-    let user = crate::store::control::User {
-        subject: crate::store::TEST_SUBJECT.into(),
+/// The registered user, with the grant written where the judge gate reads it.
+///
+/// Both places: the `User` the registry hands to a handler, and the row in the
+/// control database the gate consults on every judge request. They have to
+/// agree, and the row is the one that decides — see `web::tenant::CanJudge`.
+async fn granted_user(core: &Core, can_judge: bool) -> crate::store::control::User {
+    let subject = crate::store::TEST_SUBJECT;
+    core.store.control.provision(subject, None).await.ok();
+    core.store
+        .control
+        .set_can_judge(subject, can_judge)
+        .await
+        .expect("write the judge grant");
+    crate::store::control::User {
+        subject: subject.into(),
         email: None,
-        slug: crate::store::control::slug_for(crate::store::TEST_SUBJECT),
-        can_judge: true,
+        slug: crate::store::control::slug_for(subject),
+        can_judge,
         created_at: 0,
         last_seen_at: 0,
-    };
+    }
+}
+
+/// An `AppState` over one already-open tenant, for the tests that need to hold
+/// the state rather than only the router.
+pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web::state::AppState {
+    let cfg = std::sync::Arc::new(crate::config::Config::test_default());
+    let user = granted_user(&core, true).await;
     crate::web::state::AppState {
         tenants: std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user)),
         config: cfg,
@@ -122,14 +131,7 @@ async fn app_with_state_as(
         .await
         .unwrap();
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
-    let user = crate::store::control::User {
-        subject: crate::store::TEST_SUBJECT.into(),
-        email: None,
-        slug: crate::store::control::slug_for(crate::store::TEST_SUBJECT),
-        can_judge,
-        created_at: 0,
-        last_seen_at: 0,
-    };
+    let user = granted_user(&core, can_judge).await;
     let state = crate::web::state::AppState {
         tenants: std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user)),
         config: cfg,
@@ -155,7 +157,7 @@ pub async fn app_with_token(core: Core) -> (axum::Router, String) {
     let (_, token) = crate::auth::tokens::mint(&core.store.control, "test", "user-1", None)
         .await
         .unwrap();
-    (router(core, None), token)
+    (router(core, None).await, token)
 }
 
 pub async fn body_of(res: Response) -> String {

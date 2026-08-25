@@ -269,9 +269,12 @@ pub fn spawn_repair_ticker(
     tokio::spawn(async move {
         let period = std::time::Duration::from_secs(REPAIR_INTERVAL_HOURS * 3600);
         let mut tick = tokio::time::interval(period);
-        // Not from now: a tenant reconciles its two stores on its first open.
-        // An interval that fired immediately would scroll the whole collection
-        // a second time for an answer the process just computed.
+        // Not from now: a tenant reconciles its two stores the first time
+        // somebody asks for it, so an interval that fired immediately would
+        // scroll the whole collection a second time for an answer the process
+        // just computed. Opening a tenant from *here* deliberately does not
+        // reconcile it — see `Tenants::on_first_open` — which is what keeps
+        // this pass from turning the first tick into one scroll per user.
         let drift_period = std::time::Duration::from_secs(STORE_DRIFT_INTERVAL_HOURS * 3600);
         let mut drift_tick =
             tokio::time::interval_at(tokio::time::Instant::now() + drift_period, drift_period);

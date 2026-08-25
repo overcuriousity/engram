@@ -245,6 +245,7 @@ mod tests {
                 password_hash: crate::auth::local::hash_password("hunter2").unwrap(),
             }),
         )
+        .await
     }
 
     fn form(uri: &str, body: &str) -> Request<Body> {
@@ -435,7 +436,7 @@ mod tests {
     #[tokio::test]
     async fn the_local_login_form_is_refused_in_oidc_mode() {
         let core = crate::core::test_support::test_core().await;
-        let state = crate::web::test_support::state_over(core, crate::config::AuthMode::Oidc);
+        let state = crate::web::test_support::state_over(core, crate::config::AuthMode::Oidc).await;
         let res = crate::web::router(state)
             .oneshot(form("/auth/login", "username=dev&password=hunter2"))
             .await

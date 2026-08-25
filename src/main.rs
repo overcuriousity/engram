@@ -127,15 +127,21 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
 /// renamed rather than the collections behind it: nothing re-embeds, and the
 /// generation history the reindex path depends on is preserved.
 ///
-/// The file move is rolled back if the rename fails, and the user row with it.
-/// A half-adopted install that boots is worse than one that refuses, because it
-/// presents as a base whose searches have gone empty rather than as an error
-/// anybody can read.
+/// Everything after the user row is rolled back if a later step fails, and the
+/// row with it. A half-adopted install that boots is worse than one that
+/// refuses, because it presents as a base whose searches have gone empty
+/// rather than as an error anybody can read — and worse than that, a user row
+/// left behind is one that makes `users` non-empty, which is the guard above.
+/// The next boot would then skip adoption in silence and start an empty base
+/// beside the operator's real one, for ever. So the order below puts every
+/// step that can fail for an ordinary reason — a directory that cannot be
+/// made, a database that cannot be read — either before the row is written or
+/// behind a rollback that removes it.
 ///
 /// The rename is passed in rather than performed here so that this can be
-/// tested without a Qdrant: the three steps that decide whether adoption is
-/// safe are the guard, the row and the file, and none of them needs a vector
-/// store to be up in order to be wrong.
+/// tested without a Qdrant: the steps that decide whether adoption is safe are
+/// the guard, the row, the file and what came out of it, and none of them needs
+/// a vector store to be up in order to be wrong.
 async fn adopt<F, Fut>(
     cfg: &Config,
     control: &engram::store::control::Control,
@@ -156,19 +162,49 @@ where
         return Ok(None);
     }
 
+    // Before the row, not after it: this fails on a read-only mount or a
+    // permission, and a failure between the row and here left the row.
+    std::fs::create_dir_all(&cfg.store.dir)
+        .map_err(|e| Error::Store(format!("could not make {}: {e}", cfg.store.dir)))?;
+
     control.provision(subject, None).await?;
     // The operator adopting an installation is the person who has been using
     // it, and judging is the one thing they could do before and would silently
     // stop being able to do after.
-    control.set_can_judge(subject, true).await?;
-    let user = control
-        .user(subject)
-        .await?
-        .ok_or_else(|| Error::Store("the user just provisioned is not there".into()))?;
-    std::fs::create_dir_all(&cfg.store.dir)
-        .map_err(|e| Error::Store(format!("could not make {}: {e}", cfg.store.dir)))?;
+    if let Err(e) = control.set_can_judge(subject, true).await {
+        let _ = control.delete_user(subject).await;
+        return Err(e);
+    }
+    let user = match control.user(subject).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            let _ = control.delete_user(subject).await;
+            return Err(Error::Store("the user just provisioned is not there".into()));
+        }
+        Err(e) => {
+            let _ = control.delete_user(subject).await;
+            return Err(e);
+        }
+    };
+
+    // Before the file moves, so a failure here has nothing to put back. What
+    // the old database holds about the person using it does not travel with
+    // the rename: those three tables live in the control plane now.
+    let carried = match control.carry_over_single_user(&cfg.store.path, subject).await {
+        Ok(c) => c,
+        Err(e) => {
+            control.discard_carried_over(subject).await;
+            let _ = control.delete_user(subject).await;
+            return Err(Error::Store(format!(
+                "could not carry {} into the control database: {e}",
+                cfg.store.path
+            )));
+        }
+    };
+
     let new = std::path::Path::new(&cfg.store.dir).join(format!("{}.db", user.slug));
     if let Err(e) = std::fs::rename(old, &new) {
+        control.discard_carried_over(subject).await;
         let _ = control.delete_user(subject).await;
         return Err(Error::Store(format!(
             "could not move {} to {}: {e}",
@@ -197,10 +233,19 @@ where
                 format!("{}{ext}", old.display()),
             );
         }
+        control.discard_carried_over(subject).await;
         let _ = control.delete_user(subject).await;
         return Err(e);
     }
     tracing::info!(subject, slug = %user.slug, "adopted the single-user base");
+    if !carried.is_empty() {
+        tracing::info!(
+            api_tokens = carried.tokens,
+            sessions = carried.sessions,
+            jobs = carried.jobs,
+            "carried the single-user auth and queue rows into the control database"
+        );
+    }
     Ok(Some(user))
 }
 
@@ -282,8 +327,9 @@ async fn run_account_command(
         if !control.set_can_judge(subject, true).await? {
             return Err(Error::Validation(format!("no such user: {subject}")));
         }
-        // No restart: the grant is read off the row by the extractor on every
-        // request, and the registry caches the core rather than the user.
+        // No restart, and no wait for a cache to turn over: the judge gate
+        // reads this column on every request rather than the copy of the row
+        // the registry is holding. See `web::tenant::CanJudge`.
         println!("{subject} may now judge, and write config.toml through /ui/judge");
         return Ok(true);
     }
@@ -291,6 +337,8 @@ async fn run_account_command(
         if !control.set_can_judge(subject, false).await? {
             return Err(Error::Validation(format!("no such user: {subject}")));
         }
+        // Takes effect on their next request, for the reason above: the gate
+        // reads the column and not the registry's copy of it.
         println!("{subject} may no longer judge");
         return Ok(true);
     }
@@ -650,6 +698,104 @@ mod startup_tests {
             control.users().await.unwrap().is_empty(),
             "a user row was left with no base behind it"
         );
+    }
+
+    /// The row is the guard. A step that fails after it is written and does
+    /// not take it back out makes `users` non-empty for ever, and the next
+    /// boot then skips adoption in silence: an empty base beside the
+    /// operator's real one, with nothing anywhere saying why.
+    #[tokio::test]
+    async fn a_failure_before_the_file_moves_leaves_no_user_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let mut cfg = adopting_config(dir.path(), Some("sub-1"));
+        single_user_base(&cfg, &control).await;
+        // A tenant directory that cannot be made, because its parent is a file.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        cfg.store.dir = blocker.join("users").to_string_lossy().into();
+
+        assert!(adopt_dry(&cfg, &control).await.is_err());
+        assert!(
+            control.users().await.unwrap().is_empty(),
+            "a user row was left behind, and it is what turns adoption off"
+        );
+        assert!(
+            std::path::Path::new(&cfg.store.path).exists(),
+            "nothing should have moved"
+        );
+    }
+
+    /// What the rename does not carry: the three tables that moved to the
+    /// control plane. Without this the upgrade quietly invalidates every API
+    /// token and drops whatever was queued when the old process stopped.
+    #[tokio::test]
+    async fn adoption_carries_the_tokens_sessions_and_queued_work_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = Control::memory().await.unwrap();
+        let cfg = adopting_config(dir.path(), Some("sub-1"));
+        single_user_base(&cfg, &control).await;
+        legacy_auth_rows(&cfg.store.path).await;
+
+        adopt_dry(&cfg, &control).await.unwrap().expect("adopted");
+
+        let tokens = control.active_tokens().await.unwrap();
+        assert_eq!(tokens.len(), 1, "the extension's token stopped working");
+        assert_eq!(tokens[0].subject, "sub-1");
+        assert!(
+            control.get_session("sid-1").await.unwrap().is_some(),
+            "the browser that was open got signed out"
+        );
+        let queued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE subject = 'sub-1'")
+                .fetch_one(&control.pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 1, "work queued at shutdown was dropped");
+    }
+
+    /// A token, a session and a queued unit, written the way the single-user
+    /// build wrote them: in the tenant database, with no `subject` on the job.
+    async fn legacy_auth_rows(path: &str) {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::from_str(&format!("sqlite://{path}")).unwrap())
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE sessions (
+               id TEXT PRIMARY KEY, subject TEXT NOT NULL, email TEXT,
+               expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE api_tokens (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL,
+               subject TEXT NOT NULL, created_at INTEGER NOT NULL,
+               last_used_at INTEGER, revoked_at INTEGER, user_agent TEXT);
+             CREATE TABLE jobs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL,
+               target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+               state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+               run_after INTEGER NOT NULL DEFAULT 0, last_error TEXT, claimed_at INTEGER,
+               created_at INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0,
+               class INTEGER NOT NULL DEFAULT 0, UNIQUE(stage, target_id));
+             INSERT INTO api_tokens (id, name, token_hash, subject, created_at)
+               VALUES ('tok-1', 'extension', 'hash', 'dev', 10);
+             INSERT INTO jobs (stage, target_kind, target_id)
+               VALUES ('synthesize', 'corpus', 'c-1');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, subject, email, expires_at, created_at)
+             VALUES ('sid-1', 'dev', NULL, ?, 10)",
+        )
+        .bind(engram::store::now() + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
     }
 
     /// A second instance, or an operator editing the file after the fact.

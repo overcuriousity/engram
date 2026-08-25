@@ -276,14 +276,25 @@ fn service_config(
     StreamableHttpServerConfig::default().with_allowed_hosts(hosts)
 }
 
-/// One MCP service per tenant, built on first use and kept.
+/// One MCP service per tenant, built on first use and kept — up to the same
+/// cap the tenant registry holds cores to.
 ///
 /// `StreamableHttpService` is constructed with the tools it will serve, and the
 /// tools hold a `Core` — so a single service is a single user's data, and the
 /// door has to pick the right one before the request reaches it. Building one
 /// per tenant also gives each user their own `LocalSessionManager`, which is
 /// what an MCP session ought to be: one client talking to one base.
-type TenantServices = std::sync::Mutex<
+///
+/// Holding a `Core` is also why this map cannot only grow. A `Core` is a SQLite
+/// pool and a vector client, and an entry keyed by subject with nothing that
+/// removes it keeps both alive for the life of the process — for every person
+/// who has ever opened `/mcp`, however long ago, and regardless of
+/// `store.max_open_tenants`, which is the number that is supposed to bound what
+/// an instance holds open. So: a recency list beside the map, and the same cap.
+///
+/// Evicting a service ends the MCP sessions it was tracking; a client that
+/// comes back initializes a new one, which is the ordinary reconnect path.
+type TenantServices = std::sync::Mutex<(
     std::collections::HashMap<
         String,
         rmcp::transport::streamable_http_server::StreamableHttpService<
@@ -291,12 +302,14 @@ type TenantServices = std::sync::Mutex<
             rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
         >,
     >,
->;
+    Vec<String>,
+)>;
 
 fn service_for(
     services: &TenantServices,
     tenant: &crate::tenants::Tenant,
     public_host: Option<String>,
+    cap: usize,
 ) -> rmcp::transport::streamable_http_server::StreamableHttpService<
     PkdbTools,
     rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
@@ -304,8 +317,11 @@ fn service_for(
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
-    let mut map = services.lock().expect("mcp services");
-    map.entry(tenant.user.subject.clone())
+    let subject = tenant.user.subject.clone();
+    let mut g = services.lock().expect("mcp services");
+    let (map, order) = &mut *g;
+    let svc = map
+        .entry(subject.clone())
         .or_insert_with(|| {
             let core = tenant.core.clone();
             StreamableHttpService::new(
@@ -314,11 +330,24 @@ fn service_for(
                 service_config(public_host),
             )
         })
-        .clone()
+        .clone();
+    order.retain(|s| *s != subject);
+    order.push(subject);
+    // The caller's own entry was just moved to the back, so it is never the
+    // one dropped here.
+    while map.len() > cap.max(1) {
+        let Some(oldest) = order.first().cloned() else {
+            break;
+        };
+        order.remove(0);
+        map.remove(&oldest);
+    }
+    svc
 }
 
 pub fn mcp_router(state: AppState) -> Router<AppState> {
     let public_host = state.auth.oidc.as_ref().and_then(|o| o.public_host());
+    let cap = state.config.store.max_open_tenants;
     let services: std::sync::Arc<TenantServices> = Default::default();
 
     Router::new()
@@ -330,7 +359,7 @@ pub fn mcp_router(state: AppState) -> Router<AppState> {
                     let public_host = public_host.clone();
                     async move {
                         use tower::Service;
-                        let mut svc = service_for(&services, &tenant, public_host);
+                        let mut svc = service_for(&services, &tenant, public_host, cap);
                         svc.call(req).await
                     }
                 },
@@ -345,6 +374,24 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// A `Core` per entry — a SQLite pool and a vector client — so a map that
+    /// only ever grows holds one of each for every person who has ever opened
+    /// `/mcp`, whatever `store.max_open_tenants` says an instance holds open.
+    #[tokio::test]
+    async fn the_service_map_holds_no_more_tenants_than_the_registry_does() {
+        let (_t, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
+        let services: TenantServices = Default::default();
+        service_for(&services, &a, None, 1);
+        service_for(&services, &b, None, 1);
+
+        let g = services.lock().unwrap();
+        assert_eq!(g.0.len(), 1, "the map grew past the cap");
+        assert!(
+            g.0.contains_key(&b.user.subject),
+            "the tenant that just asked was the one dropped"
+        );
+    }
 
     fn search_hit(title: Option<&str>, text: &str) -> SearchResult {
         SearchResult {
@@ -416,7 +463,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_requires_a_bearer_token() {
         let core = crate::core::test_support::test_core().await;
-        let state = crate::web::test_support::state_over(core, crate::config::AuthMode::Local);
+        let state = crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await;
         let res = crate::web::router(state)
             .oneshot(
                 Request::builder()
