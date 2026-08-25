@@ -17,10 +17,6 @@ bind = "127.0.0.1:8080"
 workers = 1
 
 [store]
-# The single-user database. Read by adoption alone (see [migrate] below), and
-# meaningless once anyone is registered. A fresh install never touches it.
-path = "engram.db"
-
 # The control database: who the users are, their sessions and API tokens, and
 # the one instance-wide job queue. Everything about people and scheduling
 # rather than about knowledge. Created on first run.
@@ -41,24 +37,6 @@ path = "engram.db"
 # evicted user's live sitting is handed back to it, so what search and ask
 # carry does not depend on how many other people are reading right now.
 # max_open_tenants = 32
-
-# ── Adoption ─────────────────────────────────────────────────────────────────
-# Hand an existing single-user installation to its first real user, once.
-#
-# Set this to the OIDC subject of whoever has been using the base, start
-# engram, and it moves store.path to store.dir/{slug}.db, writes the user row
-# with the judge granted, and renames the existing Qdrant alias onto
-# {vector.collection}_{slug}. The alias moves rather than the collections
-# behind it, so nothing re-embeds and the generation history is preserved.
-#
-# It is guarded on the users table being empty, so it fires exactly once and
-# cannot go off on a running instance however this file is edited afterwards.
-# If the alias rename fails the file move is rolled back: a half-adopted
-# install that boots reads as a base whose searches have gone empty, which is
-# worse than one that refuses. Leave the key set or remove it; both are no-ops
-# on the second boot.
-# [migrate]
-# adopt_subject = "sub-abc123"
 
 [vector]
 # Qdrant base URL. Its REST API, not the gRPC port: 6333 locally, or whatever

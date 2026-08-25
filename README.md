@@ -203,31 +203,6 @@ sqlite3 engram-control.db "UPDATE users SET can_judge = 1 WHERE subject = '…'"
 than a default: defaulting to an arbitrary tenant is how the wrong collection
 gets reindexed.
 
-### Adopting an existing single-user base
-
-Set `migrate.adopt_subject` to the OIDC subject of whoever has been using it and
-start engram. It moves `store.path` to `{store.dir}/{slug}.db`, writes the user
-row with the judge granted, and renames the existing Qdrant alias onto
-`{vector.collection}_{slug}`. The alias moves rather than the collections behind
-it, so nothing re-embeds and the generation history `--reindex` walks is
-preserved.
-
-Three tables do not travel with the file, because they moved to the control
-database: `api_tokens`, `sessions` and `jobs`. Adoption copies them across under
-the adopting subject, so existing API tokens keep working — the browser
-extension's included — the browser you had open stays signed in, and work that
-was queued when the old process stopped resumes. Expired sessions and finished
-jobs are not carried; a claimed job comes across as pending, since the process
-that was holding it is the one that stopped. The originals stay in the moved
-file, unread, in case you want to look at them.
-
-It is guarded on the `users` table being empty, so it fires exactly once and
-cannot go off on a running instance however the file is edited afterwards. Every
-step that can fail is either before the user row is written or rolled back with
-it — the file move, the alias rename, the copy above — because a half-adopted
-install that boots reads as a base whose searches have gone empty, and a user
-row left behind is one that turns adoption off for good.
-
 ### Backup
 
 A backup is the control database **plus** every file under `store.dir`, taken
@@ -362,7 +337,7 @@ style = "tei"
 |---|---|
 | `server.bind` | Listen address. Default `127.0.0.1:8080`. |
 | `server.workers` | Background job workers. One is right for a single local GPU. |
-| `store.path` | SQLite file. **Back this up.** |
+| `store.control_path` / `store.dir` | The control database, and the directory holding one `{slug}.db` per user. **Back both up, together.** |
 | `vector.url` / `vector.collection` / `vector.api_key` | Qdrant REST URL, and the alias the data lives behind as `{name}_v1`, `_v2`, … |
 | `vector.recency_weight` / `recency_half_life_days` / `pinned_boost` / `weak_below` | Ranking: how much age counts against a hit (0.05 / 180 days), the boost for a `pinned` tag (0.15), and the cosine under which a hit is labelled loose (0.35). |
 | `infer.tiers.<name>.*` | A named chat endpoint: `base_url`, `model`, `api_key`, `context_tokens`, `max_output_tokens`, `timeout_secs`, `reasoning_effort`, `ceiling_param`, `structured_output`. |
