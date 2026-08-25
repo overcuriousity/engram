@@ -35,6 +35,24 @@ pub struct Config {
     pub recommend: RecommendConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub migrate: MigrateConfig,
+}
+
+/// The one-time move from a single-user installation into a tenant.
+///
+/// Its own block rather than a key under `[store]`, because it describes an
+/// event and not a setting: it is read once, on the first boot with an empty
+/// `users` table, and means nothing on every boot after that.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MigrateConfig {
+    /// The OIDC subject to hand `store.path` and the existing Qdrant alias to.
+    ///
+    /// Whoever has been using this base. Adoption is guarded on `users` being
+    /// empty, so this cannot fire on a running multi-user instance however the
+    /// file is edited afterwards.
+    pub adopt_subject: Option<String>,
 }
 
 /// What the two supplied-from-outside capture paths are allowed to cost.
@@ -2249,6 +2267,7 @@ impl Config {
             sitting: SittingConfig::default(),
             recommend: RecommendConfig::default(),
             ui: UiConfig::default(),
+            migrate: MigrateConfig::default(),
         }
     }
 }

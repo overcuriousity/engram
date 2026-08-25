@@ -97,6 +97,14 @@ impl Tenants {
         format!("{}_{}", self.cfg.vector.collection, user.slug)
     }
 
+    /// Every tenant currently held open, for shutdown to drain.
+    pub fn open_tenants(&self) -> Vec<Tenant> {
+        self.open
+            .lock()
+            .map(|g| g.0.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn open_count(&self) -> usize {
         self.open.lock().map(|g| g.0.len()).unwrap_or(0)
     }
