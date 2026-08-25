@@ -579,11 +579,23 @@ pub struct ScheduleConfig {
     /// Ops is how the guess gets checked, since a sweep whose runs thin out is
     /// visible there rather than silent.
     pub age_after_mins: i64,
+    /// The ceiling on how long a sweep that keeps finding nothing waits.
+    ///
+    /// A base with nothing to do wakes, queries, finds nothing and sleeps
+    /// again — for ever, by construction, once per interval per sweep per
+    /// tenant. Each consecutive empty run doubles the wait up to this, and any
+    /// new data cancels it outright, because every producer already calls
+    /// `arm_now`. So the cost of being wrong here is bounded on both sides: a
+    /// sweep on a quiet base runs late, never not at all.
+    pub backoff_max_hours: u64,
 }
 
 impl Default for ScheduleConfig {
     fn default() -> Self {
-        Self { age_after_mins: 60 }
+        Self {
+            age_after_mins: 60,
+            backoff_max_hours: 24,
+        }
     }
 }
 

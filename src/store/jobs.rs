@@ -397,6 +397,58 @@ impl Store {
         Ok(())
     }
 
+    /// `arm_periodic`, carrying the count of consecutive runs that found
+    /// nothing.
+    ///
+    /// A separate method rather than a fifth argument on `arm_periodic`,
+    /// because the two say different things: `arm_periodic` is the repair
+    /// pass putting a missing sweep back, and knows nothing about how the last
+    /// run went, while this is a sweep that has just finished saying so.
+    pub async fn arm_periodic_with_backoff(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        run_after: i64,
+        empty_runs: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class, empty_runs)
+             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, ?)
+             ON CONFLICT(subject, stage, target_id) DO UPDATE SET
+               state = 'pending', attempts = 0, run_after = excluded.run_after,
+               last_error = NULL, claimed_at = NULL,
+               created_at = excluded.created_at, class = excluded.class,
+               empty_runs = excluded.empty_runs
+             WHERE jobs.state IN ('done', 'failed')",
+        )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(run_after)
+        .bind(now())
+        .bind(stage.class())
+        .bind(empty_runs)
+        .execute(&self.control.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// How many consecutive runs of this unit have found nothing. Zero when
+    /// there is no row, which is the same answer a first run gets.
+    pub async fn empty_runs(&self, stage: Stage, target_id: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT empty_runs FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
+        )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_id)
+        .fetch_optional(&self.control.pool)
+        .await?
+        .unwrap_or(0))
+    }
+
     /// This unit has just become worth running: let it go now.
     ///
     /// Two statements, because there are two cases and neither is the other's.

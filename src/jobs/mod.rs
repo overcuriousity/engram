@@ -126,6 +126,10 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         core.store.complete_job(job.id).await?;
         return Ok(true);
     }
+    // Only a sweep answers this, and only a sweep is asked: `did_work`
+    // governs how long until the next *periodic* run, and a unit that is not
+    // periodic has none.
+    let mut did_work = false;
     let result = match (job.stage, job.target_kind.as_str()) {
         (Stage::Synthesize | Stage::Enrich, _) => synthesize::plan(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
@@ -151,7 +155,9 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::ArmDedupe
             | Stage::Context,
             _,
-        ) => run_accounted(core, job.stage).await,
+        ) => run_accounted(core, job.stage)
+            .await
+            .map(|w| did_work = w),
     };
 
     match result {
@@ -163,7 +169,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             if job.stage == Stage::Embed && job.target_kind == "corpus" {
                 embed::rearm_if_more(core, &job.target_id).await?;
             }
-            rearm_periodic(core, &job).await;
+            rearm_periodic(core, &job, did_work).await;
             arm_successor(core, &job).await;
             Ok(true)
         }
@@ -262,7 +268,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
 /// is written here rather than beside `complete_job`: a failed sweep stays
 /// queued behind a backoff, and that is a retry of the same unit rather than a
 /// run that never happened.
-async fn run_accounted(core: &Core, stage: Stage) -> Result<()> {
+async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
     let started_at = crate::store::now();
     let outcome = match stage {
         Stage::Consolidate => consolidate::run(core).await.and_then(detail),
@@ -296,7 +302,27 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<()> {
     {
         tracing::warn!(stage = stage.as_str(), error = %e, "could not record what the sweep did");
     }
-    outcome.map(|_| ())
+    outcome.map(|d| did_work(&d))
+}
+
+/// Whether a sweep's own account says it did anything.
+///
+/// Read off the counts it already writes into `sweep_runs.detail` rather than
+/// each sweep learning to answer separately: every report is a flat object of
+/// numbers, so any non-zero one is work, and a report that gains a field keeps
+/// working without being told about this.
+///
+/// An unreadable report is not work. Claiming otherwise would reset the backoff
+/// on a base where nothing is happening, which is the one case the backoff is
+/// for.
+fn did_work(detail: &str) -> bool {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(detail)
+    else {
+        return false;
+    };
+    map.values()
+        .filter_map(serde_json::Value::as_f64)
+        .any(|n| n != 0.0)
 }
 
 /// The counts a sweep returned, as the JSON the account stores.
@@ -319,17 +345,47 @@ fn detail<T: serde::Serialize>(report: T) -> Result<String> {
 /// A sweep switched off since it was armed re-arms as nothing: `periodic_period`
 /// returns `None`, the row stays closed, and the repair pass will not put it
 /// back either, because it is no longer in `periodic_units`.
-async fn rearm_periodic(core: &Core, job: &Job) {
-    let Some(period) = crate::core::background::periodic_period(core, job.stage) else {
+async fn rearm_periodic(core: &Core, job: &Job, did_work: bool) {
+    rearm_periodic_with(core, job.stage, &job.target_id, did_work).await;
+}
+
+/// How long until this sweep runs again.
+///
+/// The configured period when the run did something, doubled per consecutive
+/// empty run when it did not, capped at `schedule.backoff_max_hours`. A quiet
+/// base therefore stops waking every interval to find nothing — which is what a
+/// dormant tenant costs, multiplied by however many of them there are.
+///
+/// The reset comes free, and it is what makes this a backoff rather than a
+/// firing rule: `arm_now` already pulls a sleeping unit's `run_after` forward to
+/// zero and already clears the count, and every producer already calls it. New
+/// data cancels the wait without a single producer change. In a firing world a
+/// lost token stalls a transition for ever and silently; here a missed signal
+/// costs one longer interval.
+async fn rearm_periodic_with(core: &Core, stage: Stage, target: &str, did_work: bool) {
+    let Some(period) = crate::core::background::periodic_period(core, stage) else {
         return;
     };
-    let at = crate::store::now() + period.as_secs() as i64;
+    let empty = if did_work {
+        0
+    } else {
+        core.store.empty_runs(stage, target).await.unwrap_or(0) + 1
+    };
+    let cap = core.schedule.backoff_max_hours.saturating_mul(3600);
+    // `empty - 1` doublings: the first empty run waits the configured period,
+    // and the shift is bounded well under `u64`'s width so a long-dormant base
+    // cannot wrap it back to something short.
+    let wait = period
+        .as_secs()
+        .saturating_mul(1u64 << empty.clamp(1, 32).saturating_sub(1))
+        .clamp(period.as_secs(), cap.max(period.as_secs()));
+    let at = crate::store::now() + wait as i64;
     if let Err(e) = core
         .store
-        .arm_periodic(job.stage, &job.target_kind, &job.target_id, at)
+        .arm_periodic_with_backoff(stage, "collection", target, at, empty)
         .await
     {
-        tracing::warn!(stage = job.stage.as_str(), error = %e, "could not re-arm the sweep");
+        tracing::warn!(stage = stage.as_str(), error = %e, "could not re-arm the sweep");
     }
 }
 
@@ -829,6 +885,138 @@ mod tests {
             !run_any(&tenants).await.unwrap(),
             "it was closed, not left to be claimed again"
         );
+    }
+
+    /// The `jobs` row a sweep left behind: when it next runs, and how many
+    /// consecutive runs before this one found nothing.
+    async fn pending_row(core: &Core, stage: Stage) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT run_after, empty_runs FROM jobs WHERE stage = ? AND state = 'pending'",
+        )
+        .bind(stage.as_str())
+        .fetch_one(&core.store.control.pool)
+        .await
+        .unwrap()
+    }
+
+    /// One sweep, as a worker runs it: the unit is closed, then re-armed.
+    ///
+    /// In that order and not the other, because the queue is keyed by
+    /// `(stage, target)` — a re-arm before the close would upsert the very row
+    /// the close then shuts, and the guard on the upsert says so by refusing to
+    /// touch anything that is not already finished.
+    async fn sweep_finds(core: &Core, stage: Stage, did_work: bool) {
+        let id: i64 = sqlx::query_scalar("SELECT id FROM jobs WHERE stage = ?")
+            .bind(stage.as_str())
+            .fetch_optional(&core.store.control.pool)
+            .await
+            .unwrap()
+            .unwrap_or(0);
+        if id > 0 {
+            core.store.complete_job(id).await.unwrap();
+        }
+        rearm_periodic_with(core, stage, "collection", did_work).await;
+    }
+
+    /// How long a re-armed unit has to wait, in whole seconds.
+    ///
+    /// Not on tokio's paused clock, though the pacing gate's tests are: a
+    /// paused clock makes sqlx's pool time out acquiring its first connection,
+    /// because the acquire timeout fires before any real work can happen. These
+    /// tests never sleep, so a second of wall clock between arming and reading
+    /// is the only imprecision, and one second against a period of minutes is
+    /// not what any of them is about.
+    /// A core on which `Retention` is a periodic unit at all. `test_core` has
+    /// learning off and `retain_days` at zero, which is a base with nothing to
+    /// expire and so no unit to schedule.
+    async fn sweeping_core() -> Core {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        core
+    }
+
+    async fn waits_about(core: &Core, stage: Stage, expected: i64) -> bool {
+        let (run_after, _) = pending_row(core, stage).await;
+        (run_after - crate::store::now()).abs_diff(expected) <= 2
+    }
+
+    /// A dormant tenant must not cost a wake-up an interval for ever. Nothing
+    /// here costs a model call — a sweep with nothing to do makes none — so the
+    /// backoff is proportionate to a wake-up, a file open and a few queries.
+    #[tokio::test]
+    async fn a_sweep_that_finds_nothing_waits_longer_each_time() {
+        let core = sweeping_core().await;
+        let base = crate::core::background::periodic_period(&core, Stage::Retention)
+            .unwrap()
+            .as_secs() as i64;
+
+        for (run, expected) in [base, base * 2, base * 4].into_iter().enumerate() {
+            sweep_finds(&core, Stage::Retention, false).await;
+            assert!(
+                waits_about(&core, Stage::Retention, expected).await,
+                "empty run {} did not wait {expected}s",
+                run + 1
+            );
+            let (_, empty) = pending_row(&core, Stage::Retention).await;
+            assert_eq!(empty as usize, run + 1, "the empty runs were not counted");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wait_is_capped() {
+        let core = sweeping_core().await;
+        let cap = core.schedule.backoff_max_hours as i64 * 3600;
+        for _ in 0..20 {
+            sweep_finds(&core, Stage::Retention, false).await;
+        }
+        let (run_after, _) = pending_row(&core, Stage::Retention).await;
+        assert!(
+            run_after - crate::store::now() <= cap,
+            "a quiet base backed off past its ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_did_work_goes_back_to_the_configured_period() {
+        let core = sweeping_core().await;
+        let base = crate::core::background::periodic_period(&core, Stage::Retention)
+            .unwrap()
+            .as_secs() as i64;
+        for _ in 0..5 {
+            sweep_finds(&core, Stage::Retention, false).await;
+        }
+        sweep_finds(&core, Stage::Retention, true).await;
+        assert!(waits_about(&core, Stage::Retention, base).await);
+        let (_, empty) = pending_row(&core, Stage::Retention).await;
+        assert_eq!(empty, 0, "the count did not start over");
+    }
+
+    /// The reset comes free, and it is what makes the backoff safe rather than
+    /// a firing rule: every producer already calls `arm_now`, so new data
+    /// cancels the wait with no producer changes at all.
+    #[tokio::test]
+    async fn new_data_cancels_the_backoff() {
+        let core = sweeping_core().await;
+        for _ in 0..5 {
+            sweep_finds(&core, Stage::Retention, false).await;
+        }
+        core.store
+            .arm_now(Stage::Retention, "collection", "collection")
+            .await
+            .unwrap();
+        let (run_after, empty) = pending_row(&core, Stage::Retention).await;
+        assert_eq!(run_after, 0, "arm_now already pulls a sleeping unit forward");
+        assert_eq!(empty, 0);
+    }
+
+    #[test]
+    fn a_sweep_did_work_when_any_of_its_counts_moved() {
+        // Read off the counts the account already writes, rather than each
+        // sweep learning to say so: a report that gains a field keeps working.
+        assert!(!did_work(r#"{"expired":0,"clusters":0}"#));
+        assert!(did_work(r#"{"expired":0,"clusters":3}"#));
+        assert!(!did_work("{}"), "a sweep that reported nothing found nothing");
+        assert!(!did_work("not json"), "an unreadable report is not a claim of work");
     }
 
     #[tokio::test]
