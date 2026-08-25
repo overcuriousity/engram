@@ -7,14 +7,13 @@
 //! the token back into the extension that started the flow.
 
 use crate::tenants::Tenant;
-use crate::auth::Identity;
 use crate::error::{Error, Result};
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
 use askama::Template;
 use axum::Form;
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Query};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -124,7 +123,6 @@ pub struct PairParams {
 /// missing and offers the way back; minting still requires an `Identity`, on
 /// the POST.
 async fn pair_page(
-    State(st): State<AppState>,
     tenant: Option<Tenant>,
     headers: HeaderMap,
     Query(p): Query<PairParams>,
@@ -148,7 +146,6 @@ async fn pair_page(
 }
 
 async fn pair_submit(
-    State(st): State<AppState>,
     tenant: Tenant,
     headers: HeaderMap,
     Form(p): Form<PairParams>,

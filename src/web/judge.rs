@@ -322,7 +322,7 @@ async fn pulse_of(tenant: &Tenant, stats: &Stats, delta: String, prev: i64) -> R
     })
 }
 
-async fn page(State(st): State<AppState>, CanJudge(tenant): CanJudge) -> Result<Response> {
+async fn page(CanJudge(tenant): CanJudge) -> Result<Response> {
     use axum::response::IntoResponse;
     let stats = tenant.core.store.feedback_stats().await?;
     let misses = if stats.judged >= MISS_LIST_AT {
@@ -450,7 +450,6 @@ async fn card_again(tenant: &Tenant, event_id: &str, line: &str) -> Result<Respo
 /// score or whether the search showed this at all: the card withholds that on
 /// purpose, and a detail view that leaked it would undo the whole arrangement.
 async fn read_artifact(
-    State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(artifact_id): Path<String>,
 ) -> Result<Response> {
@@ -469,7 +468,6 @@ async fn read_artifact(
 /// truth forever. The event comes back to the card it was on rather than to
 /// whatever now heads the queue.
 async fn undo(
-    State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
@@ -508,7 +506,6 @@ pub struct HitForm {
 }
 
 async fn hit(
-    State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
     axum::extract::Form(f): axum::extract::Form<HitForm>,
@@ -552,7 +549,6 @@ async fn hit(
 }
 
 async fn gap(
-    State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
@@ -562,7 +558,6 @@ async fn gap(
 }
 
 async fn discard(
-    State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
@@ -572,7 +567,6 @@ async fn discard(
 }
 
 async fn skip(
-    State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
@@ -609,7 +603,6 @@ struct AssignTemplate {
 }
 
 async fn assign(
-    State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
 ) -> Result<Response> {
@@ -640,7 +633,6 @@ pub struct AssignQuery {
 }
 
 async fn assign_results(
-    State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(event_id): Path<String>,
     axum::extract::Query(p): axum::extract::Query<AssignQuery>,

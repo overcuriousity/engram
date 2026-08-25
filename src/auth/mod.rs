@@ -69,7 +69,7 @@ impl FromRequestParts<AppState> for Identity {
             .and_then(|v| v.to_str().ok())
             && let Some(token) = bearer(h)
         {
-            return tokens::verify(&state.tenants.control(), &token).await;
+            return tokens::verify(state.tenants.control(), &token).await;
         }
 
         if let Some(h) = parts

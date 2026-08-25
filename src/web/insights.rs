@@ -15,11 +15,9 @@
 use crate::tenants::Tenant;
 use askama::Template;
 use axum::Router;
-use axum::extract::State;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 
-use crate::auth::Identity;
 use crate::error::Result;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
@@ -45,7 +43,7 @@ struct Retrieval {
 /// The old door. It takes an `Identity` like every other `/ui` route: a
 /// redirect that answers before the session is checked is a route that tells
 /// an anonymous caller which paths exist.
-async fn moved(tenant: Tenant) -> Response {
+async fn moved(_: Tenant) -> Response {
     Redirect::to("/ui/insights").into_response()
 }
 
@@ -253,7 +251,7 @@ pub(crate) struct MergedRow {
     orphaned: bool,
 }
 
-async fn page(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
+async fn page(tenant: Tenant) -> Result<Response> {
     use sqlx::Row;
 
     let (pairs, more_pairs) = crate::web::ui::pair_rows(&tenant).await?;

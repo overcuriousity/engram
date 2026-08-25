@@ -20,7 +20,6 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
-use crate::auth::Identity;
 use crate::core::ingest::{ORIGIN_ASK, ORIGIN_WEB};
 use crate::error::{Error, Result};
 use crate::web::auth_routes::HtmlTemplate;
@@ -176,8 +175,8 @@ async fn base_template(
         false => String::new(),
     };
     Ok(WorkspaceTemplate {
-        judge_pending: crate::web::state::judge_pending(&tenant).await,
-        ask_enabled: crate::web::state::ask_enabled(&tenant),
+        judge_pending: crate::web::state::judge_pending(tenant).await,
+        ask_enabled: crate::web::state::ask_enabled(tenant),
         q,
         facets,
         category,
@@ -193,7 +192,6 @@ async fn base_template(
 }
 
 async fn page(
-    State(st): State<AppState>,
     tenant: Tenant,
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
@@ -239,7 +237,6 @@ struct CapturedTemplate {
 }
 
 async fn capture_submit(
-    State(st): State<AppState>,
     tenant: Tenant,
     Form(f): Form<CaptureForm>,
 ) -> Result<Response> {
@@ -294,7 +291,6 @@ async fn capture_submit(
 /// an ask nobody recorded is not an error worth a page for: the box is simply
 /// empty, which is what an ordinary visit looks like.
 async fn capture_door(
-    State(st): State<AppState>,
     tenant: Tenant,
     Query(p): Query<CapturePrefill>,
 ) -> Result<Response> {
@@ -603,7 +599,6 @@ async fn ask_verdict_bar(tenant: &Tenant, id: &str, oob: bool) -> Result<String>
 }
 
 async fn ask_verdict(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<VerdictForm>,
@@ -624,7 +619,6 @@ async fn ask_verdict(
 }
 
 async fn ask_carried(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<CarriedForm>,
@@ -659,7 +653,6 @@ async fn ask_carried(
 /// operator who wants to edit first has `edit first` beside this, which is the
 /// old path unchanged.
 async fn ask_keep(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
 ) -> Result<Response> {
@@ -719,7 +712,6 @@ struct CarriedForm {
 /// into ask was the cost of two pages with nothing carried between them —
 /// there is one box now, and the query is already in it.
 async fn ask_door(
-    State(st): State<AppState>,
     tenant: Tenant,
     Query(p): Query<AskPrefill>,
 ) -> Result<Response> {

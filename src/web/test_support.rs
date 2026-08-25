@@ -7,31 +7,22 @@ use axum::response::Response;
 
 /// The real router over `core`, in local auth mode with no password
 /// configured (`local`); pass `Some(cfg)` to test the login form itself.
-pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
-    router_as(core, local, true)
-}
-
-/// The same, for a user who has not been granted the judge.
-pub fn router_ungranted(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
-    router_as(core, local, false)
-}
-
-/// A one-tenant registry around `core`, and the real router over it.
 ///
-/// Every test written against the single-user app goes through here, which is
-/// the point: if tenancy needed edits scattered across the web tests, the
+/// A one-tenant registry around `core`, and the real router over it. Every
+/// test written against the single-user app goes through here, which is the
+/// point: if tenancy needed edits scattered across the web tests, the
 /// extractor boundary would be in the wrong place, and this is where that
 /// would show.
-fn router_as(
-    core: Core,
-    local: Option<crate::config::LocalConfig>,
-    can_judge: bool,
-) -> axum::Router {
+///
+/// The user it registers holds the judge grant. A router alone cannot express
+/// the ungranted case, because the gate is only reachable by someone signed
+/// in — see `app_with_cookie_ungranted`, which carries a session.
+pub fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
     let user = crate::store::control::User {
         subject: crate::store::TEST_SUBJECT.into(),
         email: None,
         slug: crate::store::control::slug_for(crate::store::TEST_SUBJECT),
-        can_judge,
+        can_judge: true,
         created_at: 0,
         last_seen_at: 0,
     };

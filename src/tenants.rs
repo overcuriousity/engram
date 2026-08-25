@@ -258,7 +258,6 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::*;
-    use super::*;
 
     #[tokio::test]
     async fn a_first_request_provisions_and_a_second_reuses() {

@@ -353,7 +353,6 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
-    use engram::config::*;
 
 
     #[test]

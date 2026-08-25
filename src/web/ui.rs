@@ -1,5 +1,4 @@
 use crate::tenants::Tenant;
-use crate::auth::Identity;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::corpora::CorpusStatus;
@@ -8,7 +7,7 @@ use crate::web::markdown;
 use crate::web::state::AppState;
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, Query};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
@@ -786,7 +785,6 @@ struct TokenCreatedTemplate {
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 async fn gap_dismiss(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path((kind, id)): Path<(String, String)>,
 ) -> Result<Response> {
@@ -856,7 +854,6 @@ struct ContextForm {
 /// has learned nothing yet is exactly the one that most needs its situations
 /// written down.
 async fn context_offer(
-    State(st): State<AppState>,
     tenant: Tenant,
     Form(f): Form<ContextForm>,
 ) -> Result<Response> {
@@ -925,7 +922,6 @@ struct SeenForm {
 /// artifact must exist. Neither failure is worth a status code, because
 /// nothing is waiting on the answer.
 async fn context_seen(
-    State(st): State<AppState>,
     tenant: Tenant,
     Form(f): Form<SeenForm>,
 ) -> Result<Response> {
@@ -1070,7 +1066,6 @@ fn split_tags(t: Option<String>) -> Vec<String> {
 const MAX_QUERY_CHARS: usize = 2000;
 
 pub(crate) async fn search_results(
-    State(st): State<AppState>,
     tenant: Tenant,
     // Alongside the tenant, not instead of it: a `Tenant` is cached across
     // requests and cannot carry the session this one came in on, which is the
@@ -1326,7 +1321,7 @@ fn disambiguate_pair_titles(rows: &mut [PairRow]) {
     }
 }
 
-async fn queue_fragment(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
+async fn queue_fragment(tenant: Tenant) -> Result<Response> {
     let mut rows = Vec::new();
     let corpora = tenant.core.store.list_corpora(10, 0).await?;
     // Asked once for the page rather than once per row: this fragment is polled
@@ -1445,7 +1440,6 @@ struct RereadForm {
 /// passage that really is a loss, and really is inside the band pressed, is
 /// queued.
 async fn reread_uncovered_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(f): Form<RereadForm>,
@@ -1530,7 +1524,6 @@ struct DwellForm {
 /// The page saying how long an artifact was open, sent as the reader leaves
 /// it. `sendBeacon` lands here; nothing is rendered back.
 async fn artifact_dwell(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(aid): Path<String>,
     Form(f): Form<DwellForm>,
@@ -1542,7 +1535,6 @@ async fn artifact_dwell(
 /// Undo a promotion: the window's passages back in results, what the
 /// promotion wrote retired, the window `verbatim` again.
 async fn unpromote_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path((cid, idx)): Path<(String, i64)>,
 ) -> Result<Response> {
@@ -1551,7 +1543,6 @@ async fn unpromote_ui(
 }
 
 async fn corpus_detail(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
     Query(range): Query<LineRange>,
@@ -1792,7 +1783,6 @@ struct ArtifactEditForm {
 }
 
 async fn put_artifact(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(f): Form<ArtifactEditForm>,
@@ -1818,7 +1808,6 @@ async fn put_artifact(
 }
 
 async fn delete_corpus_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<Response> {
@@ -1843,7 +1832,6 @@ async fn delete_corpus_ui(
 /// An empty 200 rather than a 204: htmx treats no-content as "swap nothing",
 /// which would leave the deleted artifact on screen until a reload.
 async fn delete_artifact_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
@@ -1870,7 +1858,6 @@ struct ReprocessForm {
 /// Re-segment by default; `stage=describe` re-reads a captured image and
 /// `stage=extract` re-reads a captured PDF.
 async fn reprocess_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(form): Form<ReprocessForm>,
@@ -2171,7 +2158,7 @@ async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
 /// from the same quiet line under Capture, and no more advertised than
 /// Housekeeping is: neither belongs in a top row that is three destinations
 /// wide on purpose.
-async fn settings(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
+async fn settings(tenant: Tenant) -> Result<Response> {
     Ok(HtmlTemplate(SettingsTemplate {
         judge_pending: crate::web::state::judge_pending(&tenant).await,
         tokens: token_rows(&tenant).await?,
@@ -2190,7 +2177,6 @@ async fn settings(State(st): State<AppState>, tenant: Tenant) -> Result<Response
 /// Take a merge back: what it replaced returns, the merge is retired, and the
 /// pairs behind it are dismissed so the sweep does not simply redo it.
 async fn undo_merge_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(aid): Path<String>,
 ) -> Result<Response> {
@@ -2211,7 +2197,7 @@ async fn undo_merge_ui(
 /// under one window — but the questions are the harder loss, being the only
 /// source `--export-eval` has for `questions.json`, so the button and its
 /// confirmation name them rather than leaving them to the word "searches".
-async fn purge_feedback_ui(State(st): State<AppState>, tenant: Tenant) -> Result<Response> {
+async fn purge_feedback_ui(tenant: Tenant) -> Result<Response> {
     // The index first, while the rows still say which points carry a set.
     let cleared = tenant.core.forget_situations().await;
     let n = tenant.core.store.purge_feedback().await?;
@@ -2231,7 +2217,6 @@ struct MintForm {
 }
 
 async fn mint_token(
-    State(st): State<AppState>,
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Form(f): Form<MintForm>,
@@ -2253,7 +2238,6 @@ async fn mint_token(
 }
 
 async fn revoke_token_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(tid): Path<String>,
 ) -> Result<Response> {
@@ -2267,7 +2251,6 @@ struct ResolveForm {
 }
 
 async fn resolve_near_dupe_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(form): Form<ResolveForm>,
@@ -2328,7 +2311,6 @@ async fn artifact_changed(
 }
 
 async fn unsupersede_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
@@ -2340,7 +2322,6 @@ async fn unsupersede_ui(
 }
 
 async fn dismiss_pair_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(pid): Path<i64>,
     Form(back): Form<ReturnTo>,
@@ -2367,7 +2348,6 @@ async fn dismiss_pair_ui(
 /// whole of what makes the action safe, and a second copy of them is a second
 /// place for one of them to be dropped.
 async fn discard_pair_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(pid): Path<i64>,
     Form(back): Form<ReturnTo>,
@@ -2404,7 +2384,6 @@ struct KeepForm {
 ///
 /// Nothing before this press hides anything — see `jobs::consolidate::judge_pending`.
 async fn apply_pair_supersede_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(pid): Path<i64>,
     Form(f): Form<KeepForm>,
@@ -2448,7 +2427,6 @@ async fn apply_pair_supersede_ui(
 }
 
 async fn deprecate_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
@@ -2460,7 +2438,6 @@ async fn deprecate_ui(
 }
 
 async fn reactivate_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
@@ -2472,7 +2449,6 @@ async fn reactivate_ui(
 }
 
 async fn verify_ui(
-    State(st): State<AppState>,
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
@@ -2743,7 +2719,6 @@ struct ArtifactViewParams {
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
 /// wants a page with navigation around it.
 async fn artifact_detail(
-    State(st): State<AppState>,
     tenant: Tenant,
     identity: crate::auth::Identity,
     headers: axum::http::HeaderMap,
@@ -2808,7 +2783,6 @@ async fn artifact_detail(
 /// left exactly as it is, so the decision stays auditable against the evidence
 /// that produced it — undoing one is out of scope, and Ops is where it would go.
 async fn dismiss_link(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path((artifact_id, other_id)): Path<(String, String)>,
 ) -> Result<Response> {
@@ -2821,7 +2795,6 @@ async fn dismiss_link(
 /// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
 /// beside its source lines and decided the warning was noise.
 async fn mark_artifact_reviewed(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<Response> {
@@ -2907,7 +2880,7 @@ pub fn ui_router() -> Router<AppState> {
         // a signed-out visitor to sign in rather than bouncing them onward.
         .route(
             "/ui/browse",
-            get(|tenant: Tenant| async { Redirect::to("/ui/capture") }),
+            get(|_: Tenant| async { Redirect::to("/ui/capture") }),
         )
         .route("/ui/corpora/{id}", get(corpus_detail))
         .route("/ui/corpora/{id}/delete", post(delete_corpus_ui))
@@ -2934,7 +2907,7 @@ pub fn ui_router() -> Router<AppState> {
         // exist.
         .route(
             "/ui/housekeeping",
-            get(|tenant: Tenant| async { Redirect::to("/ui/insights") }),
+            get(|_: Tenant| async { Redirect::to("/ui/insights") }),
         )
         .route("/ui/settings", get(settings))
         .route("/ui/ops/tokens", post(mint_token))

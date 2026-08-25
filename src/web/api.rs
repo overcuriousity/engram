@@ -1,10 +1,9 @@
 use crate::tenants::Tenant;
-use crate::auth::Identity;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::jobs::{FailedJob, Stage};
 use crate::web::state::AppState;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -184,7 +183,6 @@ async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Resul
 }
 
 async fn ingest(
-    State(st): State<AppState>,
     tenant: Tenant,
     Json(req): Json<IngestRequest>,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
@@ -358,7 +356,6 @@ async fn read_upload(
 ///
 /// A PDF is stored and queued; the reading happens in `Stage::Extract`.
 async fn upload(
-    State(st): State<AppState>,
     tenant: Tenant,
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
@@ -464,7 +461,6 @@ enum Kind {
 /// The image door. Parts: `image` (required), `title_hint`, `note`. The
 /// bytes are validated and stored here; the reading happens in a job.
 async fn upload_image(
-    State(st): State<AppState>,
     tenant: Tenant,
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
@@ -498,7 +494,6 @@ async fn upload_image(
 /// answers the same thing for a photo and stays where it is; this is the name
 /// that does not lie about a PDF.
 async fn get_file(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
 ) -> Result<axum::response::Response> {
@@ -527,7 +522,6 @@ struct ImageQuery {
 
 /// The preview by default; `?original=1` for the bytes as uploaded.
 async fn get_image(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(id): Path<String>,
     Query(q): Query<ImageQuery>,
@@ -570,7 +564,6 @@ fn default_limit() -> i64 {
 }
 
 async fn list_corpora(
-    State(st): State<AppState>,
     tenant: Tenant,
     Query(p): Query<ListParams>,
 ) -> Result<Json<Vec<crate::store::corpora::Corpus>>> {
@@ -590,7 +583,6 @@ pub struct CorpusDetail {
 }
 
 async fn get_corpus(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<Json<CorpusDetail>> {
@@ -600,7 +592,6 @@ async fn get_corpus(
 }
 
 async fn delete_corpus(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<StatusCode> {
@@ -609,7 +600,6 @@ async fn delete_corpus(
 }
 
 async fn reprocess(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
     Json(req): Json<ReprocessRequest>,
@@ -629,7 +619,6 @@ struct ResolveBody {
 /// nothing here compares the two documents again, it only carries out what was
 /// chosen.
 async fn resolve_near_dupe(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
     Json(body): Json<ResolveBody>,
@@ -640,7 +629,6 @@ async fn resolve_near_dupe(
 
 /// What consolidation has decided and what it is still asking about.
 async fn consolidation(
-    State(st): State<AppState>,
     tenant: Tenant,
 ) -> Result<Json<serde_json::Value>> {
     use crate::store::pairs::PairState;
@@ -725,7 +713,6 @@ pub struct SearchParams {
 }
 
 async fn search(
-    State(st): State<AppState>,
     tenant: Tenant,
     Query(q): Query<SearchParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
@@ -790,7 +777,6 @@ pub struct StaleParams {
 /// for an operator to review and deprecate. Read-only: nothing here changes
 /// an artifact, and nothing here feeds search ranking.
 async fn stale(
-    State(st): State<AppState>,
     tenant: Tenant,
     Query(p): Query<StaleParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
@@ -798,7 +784,6 @@ async fn stale(
 }
 
 async fn ask(
-    State(st): State<AppState>,
     tenant: Tenant,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Json<crate::core::ask::AskResponse>> {
@@ -817,7 +802,6 @@ pub struct ResurfaceParams {
 }
 
 async fn resurface(
-    State(st): State<AppState>,
     tenant: Tenant,
     Query(p): Query<ResurfaceParams>,
 ) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
@@ -825,7 +809,6 @@ async fn resurface(
 }
 
 async fn get_artifact(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<Json<crate::store::artifacts::Chunk>> {
@@ -841,7 +824,6 @@ async fn get_artifact(
 }
 
 async fn patch_artifact(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
     Json(req): Json<PatchArtifactRequest>,
@@ -937,7 +919,6 @@ async fn patch_artifact(
 }
 
 async fn delete_artifact(
-    State(st): State<AppState>,
     tenant: Tenant,
     Path(cid): Path<String>,
 ) -> Result<StatusCode> {
@@ -947,7 +928,7 @@ async fn delete_artifact(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn status(State(st): State<AppState>, tenant: Tenant) -> Result<Json<StatusResponse>> {
+async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
     use sqlx::Row;
     let corpus_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
         .fetch_all(&tenant.core.store.pool)
@@ -984,7 +965,6 @@ async fn status(State(st): State<AppState>, tenant: Tenant) -> Result<Json<Statu
 ///
 /// One question, one request, and no handoff to expire.
 async fn ask_stream(
-    State(st): State<AppState>,
     tenant: Tenant,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Response> {
