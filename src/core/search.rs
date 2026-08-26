@@ -217,6 +217,43 @@ pub(super) fn now_secs() -> i64 {
 /// knowledge base, and the case where throwing matches away hurts most. So the
 /// displaced hits go back on the end in rank order: one long document no longer
 /// leads the list, but it still fills it when nothing else can.
+/// Each hit's current position, for `note_reorder` to compare against.
+fn positions(results: &[SearchResult]) -> HashMap<String, usize> {
+    results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.artifact_id.clone(), i))
+        .collect()
+}
+
+/// Record what a reordering stage did, on the hits it actually moved.
+///
+/// A stage that left a hit alone writes nothing: "considered and kept" and
+/// "did not run" must not render the same, and only the second is silence.
+fn note_reorder(
+    results: &mut [SearchResult],
+    before: &HashMap<String, usize>,
+    field: impl Fn(
+        &mut crate::core::explain::HitExplanation,
+    ) -> &mut Option<crate::core::explain::StageEffect>,
+) {
+    for (to, r) in results.iter_mut().enumerate() {
+        let Some(&from) = before.get(&r.artifact_id) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        if let Some(e) = r.explanation.as_mut() {
+            *field(e) = Some(crate::core::explain::StageEffect {
+                from: Some(from),
+                to: Some(to),
+                delta: None,
+            });
+        }
+    }
+}
+
 /// What the cap did, for the explanation. Kept beside the returned list rather
 /// than derived from it, because "was displaced and came back" is not
 /// recoverable from the order alone.
@@ -1169,6 +1206,7 @@ impl Core {
             && reranking
             && !results.is_empty()
         {
+            let before = positions(&results);
             let docs: Vec<String> = results.iter().map(|r| r.text.clone()).collect();
             // Reranked wider than the answer when the search is being recorded:
             // the reranker scores every document either way, so asking it to
@@ -1192,6 +1230,7 @@ impl Core {
                                 .map(|r| SearchResult { score, ..r.clone() })
                         })
                         .collect();
+                    note_reorder(&mut results, &before, |e| &mut e.rerank);
                 }
                 // A rerank failure degrades ordering, not availability; vector
                 // order is still a usable answer.
@@ -1217,6 +1256,7 @@ impl Core {
             && self.associate.prime_lift > 0
             && !matches!(door, Door::Ask | Door::Judge)
         {
+            let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let activation = self.activation_now(&ids).await;
             // Off by default and empty when off: this is the only part of the
@@ -1246,6 +1286,7 @@ impl Core {
                 self.associate.prime_lift,
                 &sitting,
             );
+            note_reorder(&mut results, &before, |e| &mut e.prime);
         }
 
         // Recorded here, where the list is still wider than the answer and the
@@ -2062,6 +2103,36 @@ mod tests {
             vec!["a1", "a2", "b1", "b2"],
             "a displaced hit must not spend a slot in a corpus it did not enter"
         );
+    }
+
+    #[tokio::test]
+    async fn a_rerank_that_moved_a_hit_says_where_it_moved_it_from() {
+        // `FakeReranker` reverses the order it is given, so in a list of three
+        // every hit moves and the assertion cannot pass by accident.
+        let core = test_core_counting_reranked_docs().await.0;
+        seed(
+            &core,
+            &[("alpha", "c", &[]), ("beta", "c", &[]), ("gamma", "c", &[])],
+        )
+        .await;
+
+        let hits = core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
+        let moved: Vec<_> = hits
+            .iter()
+            .filter_map(|h| h.explanation.as_ref()?.rerank.as_ref())
+            .collect();
+
+        assert!(
+            !moved.is_empty(),
+            "a reranker that reordered must say so on the hits it moved"
+        );
+        for e in moved {
+            assert_ne!(
+                e.from, e.to,
+                "only a hit that actually moved carries the stage: \
+                 considered-and-kept and did-not-run must not render the same"
+            );
+        }
     }
 
     #[tokio::test]
