@@ -2,8 +2,9 @@
 
 Date: 2026-08-26
 Status: draft
-Touches `src/core/search.rs`, `src/mcp/mod.rs`, `src/web/api.rs`,
-`src/web/ui.rs`, `templates/workspace.html`, `assets/css/40-workspace.css`,
+Adds `src/core/explain.rs`; touches `src/core/search.rs`, `src/core/mod.rs`,
+`src/mcp/mod.rs`, `src/web/api.rs`, `src/web/ui.rs`,
+`src/web/templates/_results.html`, `src/vector/qdrant.rs`,
 `tests/integration_qdrant.rs`, `ROADMAP.md`.
 No new store table, no migration, no model call, no second vector search.
 Nothing about the order of results changes — §8 says how that is pinned.
@@ -100,8 +101,9 @@ pub struct StageEffect {
 }
 
 pub struct HitExplanation {
-    /// Rank out of fusion — the baseline everything else is measured from.
-    pub fused_rank: usize,
+    /// Rank as retrieval returned it — fusion *and* the scoring stage, since
+    /// Qdrant applies both before anything comes back.
+    pub retrieved_rank: usize,
     pub recency: Option<f32>,
     pub pinned: Option<f32>,
     pub rerank: Option<StageEffect>,
@@ -131,9 +133,13 @@ pub struct SearchExplanation {
 }
 ```
 
-`fused_rank` has no `delta`, and that is deliberate rather than an omission.
-RRF fuses *ranks*, so its output is an ordinal with no score to attribute. It
-is the baseline, and a baseline does not need a difference against itself.
+`retrieved_rank` has no `delta`, and the name is careful. The pre-recency RRF
+rank is not obtainable without a second query, so the baseline this explanation
+measures from is what retrieval *returned* — fusion and the scoring stage
+together. Calling it a fused rank would claim a separation that costs a query
+nobody is paying for. RRF fuses ranks in any case, so its output is an ordinal
+with no score to attribute: a baseline does not need a difference against
+itself.
 
 `SearchExplanation` lives beside `SearchTiming` in the tuple `search_with`
 already returns (`src/core/search.rs:877`). That is the existing channel for
