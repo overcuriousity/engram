@@ -156,6 +156,11 @@ pub struct SearchResult {
     /// What the judge said the relation is, where a link has been judged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Why this hit is where it is. `None` for a `SearchResult` that never
+    /// came out of a ranking — a stale candidate, a neighbour, a resurfaced
+    /// row. A `Default` there would claim a retrieved rank of zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::core::explain::HitExplanation>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -189,6 +194,7 @@ impl From<SearchHit> for SearchResult {
             past_cliff: false,
             via: None,
             reason: None,
+            explanation: None,
         }
     }
 }
@@ -347,6 +353,9 @@ fn mark_past_cliff(results: &mut [SearchResult]) {
     if let Some(above) = cliff(&scores) {
         for r in results.iter_mut().skip(above) {
             r.past_cliff = true;
+            if let Some(e) = r.explanation.as_mut() {
+                e.past_cliff = true;
+            }
         }
     }
 }
@@ -816,6 +825,10 @@ impl Core {
                 primed: false,
                 in_sitting: false,
                 past_cliff: false,
+                // Set here, where `via` is known. Never ranked, so every other
+                // stage stays absent rather than defaulting to values that
+                // would read as facts about a competition that never happened.
+                explanation: Some(crate::core::explain::HitExplanation::recalled(&l.via)),
                 via: Some(l.via),
                 reason: l.reason,
                 model_written: false,
@@ -1123,12 +1136,29 @@ impl Core {
 
         let mut results: Vec<SearchResult> = hits
             .into_iter()
-            .map(|h| {
+            .enumerate()
+            .map(|(rank, h)| {
                 // Demonstrated, never assumed: a hit with no similarity to
                 // read is one the lexical half matched verbatim.
                 let weak = h.similarity.is_some_and(|s| s < self.weak_below);
+                // Kept and refilled are different claims: a refilled hit is
+                // over its cap and present only because nothing else was on
+                // offer, which is the case the cap fails silently in.
+                let cap = match (
+                    cap.is_some(),
+                    cap_report.refilled.contains(&h.payload.artifact_id),
+                ) {
+                    (false, _) => crate::core::explain::CapEffect::NotApplied,
+                    (true, true) => crate::core::explain::CapEffect::Refilled,
+                    (true, false) => crate::core::explain::CapEffect::Kept,
+                };
                 SearchResult {
                     weak,
+                    explanation: Some(crate::core::explain::HitExplanation {
+                        retrieved_rank: rank,
+                        cap,
+                        ..Default::default()
+                    }),
                     ..SearchResult::from(h)
                 }
             })
@@ -2034,6 +2064,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn every_ranked_hit_explains_its_retrieved_rank_and_the_cap() {
+        let core = test_core().await;
+        seed(&core, &[("mounting an image", "procedure", &[])]).await;
+
+        let (hits, _) = core
+            .search_with(&q("mount"), Some(3), Door::Ui)
+            .await
+            .unwrap();
+        let e = hits[0]
+            .explanation
+            .as_ref()
+            .expect("a ranked hit explains itself");
+
+        assert_eq!(e.retrieved_rank, 0);
+        assert!(
+            matches!(e.cap, crate::core::explain::CapEffect::Kept),
+            "a hit inside its corpus's allowance was kept, not refilled"
+        );
+        assert!(
+            e.recalled_via.is_none(),
+            "a ranked hit was not recalled by anything"
+        );
+    }
+
     #[test]
     fn a_pool_one_corpus_filled_reports_a_cap_that_redistributed_nothing() {
         // The failure the whole explanation exists to make visible: with only
@@ -2303,6 +2358,7 @@ mod tests {
                 past_cliff: false,
                 via: None,
                 reason: None,
+                explanation: None,
                 model_written: false,
                 synthesized: false,
                 origin_count: 0,
@@ -3253,6 +3309,7 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            explanation: None,
             model_written: false,
             synthesized: false,
             origin_count: 0,
@@ -3359,6 +3416,7 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            explanation: None,
             model_written: false,
             synthesized: false,
             origin_count: 0,
