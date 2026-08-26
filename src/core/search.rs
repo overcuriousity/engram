@@ -211,12 +211,24 @@ pub(super) fn now_secs() -> i64 {
 /// knowledge base, and the case where throwing matches away hurts most. So the
 /// displaced hits go back on the end in rank order: one long document no longer
 /// leads the list, but it still fills it when nothing else can.
+/// What the cap did, for the explanation. Kept beside the returned list rather
+/// than derived from it, because "was displaced and came back" is not
+/// recoverable from the order alone.
+#[derive(Debug, Default)]
+struct CapReport {
+    corpora_in_pool: usize,
+    displaced: usize,
+    /// Artifact ids that were over their cap and returned anyway.
+    refilled: std::collections::HashSet<String>,
+}
+
 fn cap_per_corpus(
     hits: Vec<crate::vector::SearchHit>,
     max: usize,
     target: usize,
-) -> Vec<crate::vector::SearchHit> {
+) -> (Vec<crate::vector::SearchHit>, CapReport) {
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut all_corpora: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut kept = Vec::with_capacity(hits.len());
     let mut displaced = Vec::new();
     for h in hits {
@@ -229,6 +241,7 @@ fn cap_per_corpus(
         } else {
             h.payload.origin_corpora.clone()
         };
+        all_corpora.extend(keys.iter().cloned());
         let over = keys
             .iter()
             .any(|k| seen.get(k).copied().unwrap_or(0) >= max);
@@ -245,11 +258,19 @@ fn cap_per_corpus(
             displaced.push(h);
         }
     }
+    let mut report = CapReport {
+        corpora_in_pool: all_corpora.len(),
+        displaced: displaced.len(),
+        refilled: Default::default(),
+    };
     if kept.len() < target {
         let room = target - kept.len();
-        kept.extend(displaced.into_iter().take(room));
+        for h in displaced.into_iter().take(room) {
+            report.refilled.insert(h.payload.artifact_id.clone());
+            kept.push(h);
+        }
     }
-    kept
+    (kept, report)
 }
 
 /// Each hit's stored retrieval count, keyed by artifact id. Absent means the
@@ -1058,10 +1079,34 @@ impl Core {
         // than the answer: refilling only to `limit` would hand the reranker
         // exactly `limit` hits whenever a few sources dominate, which is the
         // case over-fetching exists for. The final truncate still cuts to size.
-        let hits = match cap {
+        // The pool's shape is recorded either way: how many corpora were on
+        // offer is what says whether one source dominating is the rule failing
+        // or no rule at all, and that question does not need a cap to be set.
+        let (hits, cap_report) = match cap {
             Some(max) => cap_per_corpus(hits, max, candidates),
-            None => hits,
+            None => {
+                let corpora: std::collections::HashSet<&str> = hits
+                    .iter()
+                    .flat_map(|h| match h.payload.origin_corpora.is_empty() {
+                        true => vec![h.payload.corpus_id.as_str()],
+                        false => h
+                            .payload
+                            .origin_corpora
+                            .iter()
+                            .map(String::as_str)
+                            .collect(),
+                    })
+                    .collect();
+                let report = CapReport {
+                    corpora_in_pool: corpora.len(),
+                    ..Default::default()
+                };
+                (hits, report)
+            }
         };
+        explanation.corpora_in_pool = cap_report.corpora_in_pool;
+        explanation.displaced = cap_report.displaced;
+        explanation.refilled = cap_report.refilled.len();
         // Taken before the payloads are consumed: `mark_seen` needs each hit's
         // stored `hit_count` to increment it without reading it back.
         let hit_counts = counts_of(&hits);
@@ -1903,13 +1948,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_cap_leads_with_the_highest_ranked_chunk_of_each_source() {
-        // Applied to a ranked list, what leads per source must be its best,
-        // not whichever chunk happened to be enumerated first.
-        use crate::vector::{SearchHit, VectorPayload};
-        let hit = |chunk: &str, src: &str, score: f32| SearchHit {
-            payload: VectorPayload {
+    /// A ranked hit from one corpus, for the cap's own tests.
+    fn hit(chunk: &str, src: &str, score: f32) -> crate::vector::SearchHit {
+        crate::vector::SearchHit {
+            payload: crate::vector::VectorPayload {
                 artifact_id: chunk.into(),
                 corpus_id: src.into(),
                 text: String::new(),
@@ -1927,7 +1969,18 @@ mod tests {
             },
             score,
             similarity: Some(score),
-        };
+        }
+    }
+
+    /// The ids of a capped list, in order.
+    fn ids(hits: Vec<crate::vector::SearchHit>) -> Vec<String> {
+        hits.iter().map(|h| h.payload.artifact_id.clone()).collect()
+    }
+
+    #[test]
+    fn the_cap_leads_with_the_highest_ranked_chunk_of_each_source() {
+        // Applied to a ranked list, what leads per source must be its best,
+        // not whichever chunk happened to be enumerated first.
         let ranked = || {
             vec![
                 hit("a1", "a", 0.9),
@@ -1936,15 +1989,14 @@ mod tests {
                 hit("a3", "a", 0.6),
             ]
         };
-        let ids = |hits: Vec<SearchHit>| -> Vec<String> {
-            hits.iter().map(|h| h.payload.artifact_id.clone()).collect()
-        };
-
         // Room for three: the cap holds and `a3` stays out.
-        assert_eq!(ids(cap_per_corpus(ranked(), 2, 3)), vec!["a1", "a2", "b1"]);
+        assert_eq!(
+            ids(cap_per_corpus(ranked(), 2, 3).0),
+            vec!["a1", "a2", "b1"]
+        );
         // Room for four and nothing else to offer: `a3` comes back, last.
         assert_eq!(
-            ids(cap_per_corpus(ranked(), 2, 4)),
+            ids(cap_per_corpus(ranked(), 2, 4).0),
             vec!["a1", "a2", "b1", "a3"],
             "a displaced hit must refill an otherwise short list"
         );
@@ -1959,7 +2011,7 @@ mod tests {
             hit("b1", "b", 0.7),
         ];
         assert_eq!(
-            ids(cap_per_corpus(with_merge, 2, 3)),
+            ids(cap_per_corpus(with_merge, 2, 3).0),
             vec!["a1", "a2", "b1"]
         );
         // And a merge that was displaced took no place in the corpora it never
@@ -1976,9 +2028,53 @@ mod tests {
             hit("b2", "b", 0.6),
         ];
         assert_eq!(
-            ids(cap_per_corpus(with_merge, 2, 4)),
+            ids(cap_per_corpus(with_merge, 2, 4).0),
             vec!["a1", "a2", "b1", "b2"],
             "a displaced hit must not spend a slot in a corpus it did not enter"
+        );
+    }
+
+    #[test]
+    fn a_pool_one_corpus_filled_reports_a_cap_that_redistributed_nothing() {
+        // The failure the whole explanation exists to make visible: with only
+        // one corpus in the pool there is nothing to promote, so everything
+        // the cap displaces comes straight back and the list is dominated
+        // despite `per_source_cap` being set.
+        let only_a = vec![
+            hit("a1", "a", 0.9),
+            hit("a2", "a", 0.8),
+            hit("a3", "a", 0.7),
+            hit("a4", "a", 0.6),
+        ];
+        let (kept, report) = cap_per_corpus(only_a, 2, 4);
+
+        assert_eq!(kept.len(), 4, "the refill still fills the list");
+        assert_eq!(report.corpora_in_pool, 1);
+        assert_eq!(report.displaced, 2);
+        assert_eq!(
+            report.refilled.len(),
+            2,
+            "every displaced hit came back: the cap redistributed nothing"
+        );
+        assert!(report.refilled.contains("a3") && report.refilled.contains("a4"));
+    }
+
+    #[test]
+    fn a_cap_that_actually_redistributed_reports_no_refill() {
+        let mixed = vec![
+            hit("a1", "a", 0.9),
+            hit("a2", "a", 0.8),
+            hit("b1", "b", 0.7),
+            hit("a3", "a", 0.6),
+        ];
+        let (kept, report) = cap_per_corpus(mixed, 2, 3);
+
+        assert_eq!(kept.len(), 3);
+        assert_eq!(report.corpora_in_pool, 2);
+        assert_eq!(report.displaced, 1);
+        assert!(
+            report.refilled.is_empty(),
+            "the target was met without the displaced hit, so the rule held"
         );
     }
 
