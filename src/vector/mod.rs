@@ -397,6 +397,15 @@ pub trait VectorStore: Send + Sync {
 }
 
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    // Vectors of different widths are not directions in the same space. Zipping
+    // them would truncate the dot product to the shorter one while both norms
+    // stayed full-length, which answers a plausible-looking number for what is
+    // always a bug — a stored vector written under an older layout, or a slice
+    // taken at the wrong offset. Fail closed: no similarity, so nothing ranks
+    // on it and the caller's own guard, if it has one, still sees zero.
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -406,4 +415,28 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (na * nb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cosine;
+
+    #[test]
+    fn a_width_mismatch_scores_zero_rather_than_a_truncated_cosine() {
+        // Zipping alone would take the dot product over the first two slots and
+        // divide it by the full norm of both sides — a number in range, ordered
+        // against real scores, and meaningless. The case that produces it is a
+        // centroid stored under an older layout.
+        let short = [1.0, 1.0];
+        let long = [1.0, 1.0, 1.0];
+        assert_eq!(cosine(&short, &long), 0.0);
+        assert_eq!(cosine(&long, &short), 0.0);
+    }
+
+    #[test]
+    fn equal_widths_are_untouched_by_the_guard() {
+        let a = [1.0, 0.0];
+        assert!((cosine(&a, &a) - 1.0).abs() < 1e-6);
+        assert!((cosine(&a, &[0.0, 1.0]) - 0.0).abs() < 1e-6);
+    }
 }

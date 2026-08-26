@@ -5141,7 +5141,7 @@ mod tests {
             tz: Some("Europe/Berlin".into()),
             ..Default::default()
         };
-        let v = crate::core::context::encode(at, Some("user-1"), &bundle, &core.recommend.weights);
+        let v = crate::core::context::encode(at, &bundle, &core.recommend.weights);
         core.store
             .replace_context_clusters(
                 &aid,

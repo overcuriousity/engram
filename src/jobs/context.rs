@@ -246,7 +246,7 @@ fn blend(centroid: &mut [f32], have: f64, add: &[f32], w: f64) {
 
 /// The two nearest centroids, as `(keep, drop)` with `keep < drop`.
 ///
-/// Quadratic, over at most `max_clusters + 1` vectors of 53 dimensions. That is
+/// Quadratic, over at most `max_clusters + 1` vectors of 45 dimensions. That is
 /// a few hundred multiplications on a path that runs every six hours.
 fn closest_pair(centroids: &[&[f32]]) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, f32)> = None;
@@ -356,12 +356,11 @@ pub async fn run(core: &Core) -> Result<Report> {
             continue;
         }
 
-        let scope_arg = (!scope.is_empty()).then_some(scope.as_str());
         by_pair
             .entry((scope.clone(), artifact_id))
             .or_default()
             .push(Member {
-                vec: crate::core::context::encode(at, scope_arg, &bundle, &cfg.weights),
+                vec: crate::core::context::encode(at, &bundle, &cfg.weights),
                 weight,
                 at,
                 bundle: raw,

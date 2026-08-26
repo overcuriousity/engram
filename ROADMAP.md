@@ -244,6 +244,36 @@ thirty days, on Ops. Everything left here but the last item is gated on that
 instrument having months behind it, not on anybody's judgement; the last is
 the write-time half of the same question and carries an instrument of its own.
 
+Built: **the `scope` block is gone**, and with it the last thing in the vector
+that described who was asking rather than what the situation was. It existed to
+keep one person's situations from being ranked first for another while everyone
+shared a collection, at weight 10 against a block total under 5. Everyone no
+longer does: each user has their own database and their own Qdrant collection,
+and the read path cuts foreign clusters by an exact match on top of that, which
+was always the guarantee — a near-orthogonal direction is a probability, and
+isolation must not be one. Inside one collection the block had become a
+constant, ordering nothing and, under cosine, compressing the differences the
+blocks that do describe the situation are able to make.
+
+Two numbers became one. The full cosine ranked and `context_score` — the same
+vector with that block sliced off — decided the rung, because counting it in the
+gate would have dragged every same-subject pair above 0.95 and left `strong_at`
+and `weak_at` four hundredths apart. With the block gone the rank and the rung
+read the same evidence, and both thresholds keep the values they were calibrated
+at: the gate never saw what went. What is *not* collapsed is the loop over
+candidates. The rung still turns on `firm_at` as well as the score, so the
+closest situation can be a cluster seen twice that fails `strong_at` while an
+established pattern sits second and would pass — an argmax and a single gate is
+what used to drop that page to a random card.
+
+The cost was the one this file named and one it did not. The weights are the
+encoder version, so every stored cluster is retired and the offer falls to its
+`Random` floor until `jobs::context` has re-clustered. And the width changed,
+45 dimensions rather than 53 — a named vector cannot be resized in place, so an
+existing collection rejects the new one until `--reindex` has built the next
+generation. That copies the dense vectors across and re-embeds nothing; sets of
+the old width are discarded rather than reinterpreted.
+
 - **Learned block weights.** The weights in `[recommend.weights]` are chosen,
   not measured, and the honest description of them is "chosen". Once the
   shown/clicked rate has history, they can be fitted to it.
@@ -252,7 +282,9 @@ the write-time half of the same question and carries an instrument of its own.
   **Cost:** a fit over `offer_rates` history and the restraint to leave the
   defaults alone until the history exists. **A branch**, gated on data rather
   than on code. Fitting them before the data exists is guessing with extra
-  steps.
+  steps. Its one code-level precondition is met: with the `scope` block gone,
+  every weight left is a weight over something that actually varies, so a fit
+  is no longer a fit over a mostly-constant direction.
 
 - **Conjunctions across scopes.** The context vector can already hold "on the
   phone the hour matters, at the desk it does not"; nothing yet learns which of
@@ -270,29 +302,6 @@ the write-time half of the same question and carries an instrument of its own.
   **Cost:** no code — the mechanism is built. A harness run either way, and a
   commit of its own carrying both numbers in its message. It moves that way or
   it does not move.
-
-- **Dropping the `scope` block.** *(unblocked)* At weight 10 against a total
-  under 5, that block is what kept one person's situations from being ranked
-  first for another while everyone shared a collection. Everyone no longer does:
-  each user has their own database and their own Qdrant collection, and the read
-  path cuts foreign clusters exactly on top of that (`recommend.rs:177`), which
-  was always the guarantee. Inside one collection every cluster now carries the
-  same subject, so the block is a constant: the same direction of magnitude 10
-  in every stored vector and in the query, ordering nothing and — under
-  cosine — compressing the differences the seven blocks that *do* describe the
-  situation are able to make. `context_score` already slices it off, so the
-  gate never read it; only the ranking still carries it.
-  **Worth:** the full cosine stops being dominated by a block that decides
-  nothing, so the two numbers behind an offer are read on the same evidence.
-  Small in itself, and the honest precondition for fitting weights to history —
-  a fit over a mostly-constant block is a fit over noise.
-  **Cost:** not one weight after all. The weights are the encoder version
-  (`core::context::encoder_version`), so changing one retires every stored
-  cluster: they are skipped rather than explained with the wrong blocks, and the
-  offer falls to its `Random` floor until `jobs::context` has re-clustered. That
-  is correct behaviour and it is still a cost, and it argues for spending it
-  before the shown/clicked history is long enough to be worth keeping.
-  **One commit**, plus one sweep before the offer speaks again.
 
 - **The situation as a term in ranking.** The `ctx` vectors decide the offer
   under the search box and nothing else. The moment something is typed the
@@ -602,8 +611,8 @@ structural — there is no tenant filter to forget, because no tenant filter
 exists. Identity comes with it: the provider is the gate, and the local account
 store engram used to keep for a single operator is gone.
 
-Two items above are downstream of that. **Dropping the `scope` block** is
-unblocked and now has a cost worth naming. **OAuth 2.1 for `/mcp`** stopped
+Two items above are downstream of that. **Dropping the `scope` block** was
+unblocked by it and has shipped. **OAuth 2.1 for `/mcp`** stopped
 being administrative — with a collection per user, a bearer token is what
 decides whose base a call reads.
 
