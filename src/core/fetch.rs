@@ -1,7 +1,35 @@
 use crate::config::CaptureConfig;
 use crate::error::{Error, Result};
 
+/// What a URL turned out to hold, of the kinds some door here can read.
+#[derive(Debug)]
+pub enum Fetched {
+    /// A page, decoded to text. What the extractor reads.
+    Html(String),
+    /// A PDF, as sent. What `Stage::Extract` reads.
+    Pdf(Vec<u8>),
+    /// An image, as sent, with the type the server named it.
+    Image { mime: String, bytes: Vec<u8> },
+}
+
 /// Retrieve a page for the paste-a-link door.
+///
+/// The page-only face of `fetch`: a PDF or an image where HTML was expected
+/// is a bad request here, named by type.
+pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
+    match fetch(url, cfg).await? {
+        Fetched::Html(text) => Ok(text),
+        Fetched::Pdf(_) => Err(Error::Validation(
+            "that URL is `application/pdf`, not HTML".into(),
+        )),
+        Fetched::Image { mime, .. } => {
+            Err(Error::Validation(format!("that URL is `{mime}`, not HTML")))
+        }
+    }
+}
+
+/// Retrieve a document — a page, a PDF or an image — for the two doors that
+/// take a link: paste-a-link and MCP.
 ///
 /// This is an anonymous client: no session, no subscription, no JavaScript
 /// engine. It sees what a logged-out stranger sees, which is why it is the
@@ -10,14 +38,18 @@ use crate::error::{Error, Result};
 /// this path can do is bounded by that, and its limits are its own.
 ///
 /// Every failure is named rather than swallowed. The URL is operator input on
-/// an authenticated endpoint, so an upstream 404 or a PDF where HTML was
-/// expected is a bad request here, not a server fault — `Error::Validation`
+/// an authenticated endpoint, so an upstream 404 or a video where a document
+/// was expected is a bad request here, not a server fault — `Error::Validation`
 /// carries the reason back and renders as 400.
+///
+/// Each kind is held to the ceiling its upload door already applies: a page
+/// to `fetch_max_bytes`, a PDF to `pdf_max_bytes`, an image to
+/// `image_max_bytes`. A book is tens of megabytes and a page is not.
 ///
 /// Out of scope, deliberately: blocking loopback and private-range addresses.
 /// The endpoint is authenticated and single-operator, so the only caller who
 /// could aim it at the local network is the person who runs the machine.
-pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
+pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Error::Validation(format!(
             "unsupported scheme `{}` — only http and https are fetched",
@@ -60,13 +92,23 @@ pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if !matches!(essence.as_str(), "text/html" | "application/xhtml+xml") {
-        return Err(Error::Validation(format!(
-            "that URL is `{essence}`, not HTML"
-        )));
+    enum Kind {
+        Html,
+        Pdf,
+        Image,
     }
+    let (kind, ceiling, what) = match essence.as_str() {
+        "text/html" | "application/xhtml+xml" => (Kind::Html, cfg.fetch_max_bytes, "page"),
+        "application/pdf" => (Kind::Pdf, cfg.pdf_max_bytes, "PDF"),
+        e if e.starts_with("image/") => (Kind::Image, cfg.image_max_bytes, "image"),
+        _ => {
+            return Err(Error::Validation(format!(
+                "that URL is `{essence}` — only a page, a PDF or an image is read"
+            )));
+        }
+    };
 
-    // Streamed rather than `.text()`, because `Content-Length` is a claim and
+    // Streamed rather than `.bytes()`, because `Content-Length` is a claim and
     // the ceiling has to hold against a server that lies about it or omits it.
     let mut bytes: Vec<u8> = Vec::new();
     while let Some(chunk) = res
@@ -74,16 +116,22 @@ pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
         .await
         .map_err(|e| Error::Validation(format!("fetch failed mid-transfer: {e}")))?
     {
-        if bytes.len() + chunk.len() > cfg.fetch_max_bytes {
+        if bytes.len() + chunk.len() > ceiling {
             return Err(Error::Validation(format!(
-                "that page is larger than the {} byte fetch ceiling",
-                cfg.fetch_max_bytes
+                "that {what} is larger than the {ceiling} byte fetch ceiling"
             )));
         }
         bytes.extend_from_slice(&chunk);
     }
 
-    Ok(decode(&bytes, &content_type))
+    Ok(match kind {
+        Kind::Html => Fetched::Html(decode(&bytes, &content_type)),
+        Kind::Pdf => Fetched::Pdf(bytes),
+        Kind::Image => Fetched::Image {
+            mime: essence,
+            bytes,
+        },
+    })
 }
 
 /// The body as text, in whatever encoding it was actually sent in.
@@ -207,6 +255,88 @@ mod tests {
         assert!(
             matches!(err, Error::Validation(ref m) if m.contains("application/pdf")),
             "the refused type must be named: {err:?}"
+        );
+    }
+
+    /// The paste-a-link door and the MCP door both point at documents, and a
+    /// document at a URL is as often a PDF as a page.
+    #[tokio::test]
+    async fn fetch_hands_back_a_pdf_as_bytes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/doc.pdf"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(b"%PDF-1.7".to_vec(), "application/pdf"),
+            )
+            .mount(&server)
+            .await;
+        let u = url::Url::parse(&format!("{}/doc.pdf", server.uri())).unwrap();
+        match fetch(&u, &cfg()).await.unwrap() {
+            Fetched::Pdf(bytes) => assert_eq!(bytes, b"%PDF-1.7"),
+            other => panic!("not a pdf: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_hands_back_an_image_with_its_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pic"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(vec![1, 2, 3], "image/png"))
+            .mount(&server)
+            .await;
+        let u = url::Url::parse(&format!("{}/pic", server.uri())).unwrap();
+        match fetch(&u, &cfg()).await.unwrap() {
+            Fetched::Image { mime, bytes } => {
+                assert_eq!(mime, "image/png");
+                assert_eq!(bytes, vec![1, 2, 3]);
+            }
+            other => panic!("not an image: {other:?}"),
+        }
+    }
+
+    /// A book is tens of megabytes and a page is not; each kind is held to
+    /// its own ceiling, the one the upload doors already apply.
+    #[tokio::test]
+    async fn a_fetched_pdf_is_held_to_the_pdf_ceiling_not_the_page_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/doc.pdf"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(vec![b'x'; 4096], "application/pdf"),
+            )
+            .mount(&server)
+            .await;
+        let u = url::Url::parse(&format!("{}/doc.pdf", server.uri())).unwrap();
+        let page_small = CaptureConfig {
+            fetch_max_bytes: 1024,
+            ..CaptureConfig::default()
+        };
+        assert!(fetch(&u, &page_small).await.is_ok());
+        let pdf_small = CaptureConfig {
+            pdf_max_bytes: 1024,
+            ..CaptureConfig::default()
+        };
+        let err = fetch(&u, &pdf_small).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Validation(ref m) if m.contains("1024")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_type_nothing_here_reads_by_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/clip"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(vec![0; 8], "video/mp4"))
+            .mount(&server)
+            .await;
+        let u = url::Url::parse(&format!("{}/clip", server.uri())).unwrap();
+        let err = fetch(&u, &cfg()).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Validation(ref m) if m.contains("video/mp4")),
+            "{err:?}"
         );
     }
 
