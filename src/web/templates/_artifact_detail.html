@@ -216,17 +216,6 @@
         </form>
       </div>
 
-      {# The document, continuing. Appended rather than linked because the
-         answer to a question is often the paragraph after the one that
-         matched, and a link makes the reader decide whether it is worth a
-         page load before they can see it.
-
-         Under the artifact and above the neighbours: this is the same
-         document, and `Related` is other documents. Putting them in one list
-         would flatten the only distinction that matters here. #}
-      {% for item in d.run %}{% include "_run_item.html" %}{% endfor %}
-      {% if !d.merged %}{% include "_run_more.html" %}{% endif %}
-
       {% if !d.related.is_empty() %}
       {# Nearest by the vector already stored for this artifact: no embedding
          call, no completion. Swaps this detail for the neighbour's in place,
