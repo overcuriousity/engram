@@ -2085,3 +2085,68 @@ async fn two_tenants_get_two_collections_behind_two_aliases() {
     a.drop_collection().await.unwrap();
     b.drop_collection().await.unwrap();
 }
+
+/// The explanation reconstructs two terms Qdrant computed and never returned.
+///
+/// A unit test over `scoring_terms` pins our own arithmetic. Only this one
+/// pins that our arithmetic is Qdrant's. If `exp_decay` ever stops meaning
+/// what the reconstruction believes, this fails — and it has to, because an
+/// explanation that contradicts the ranking it explains is worse than silence.
+#[tokio::test]
+#[ignore]
+async fn the_reconstructed_recency_term_matches_what_qdrant_scored() {
+    let v = fresh("engram_it_explain", 4).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let half_life_secs = 180u64 * 86_400;
+
+    // Two identical directions, one a full half-life old. Identical vectors
+    // mean the retrieved half of the score is equal, so the whole difference
+    // between the two scores is the recency term.
+    let mut recent = point("fresh", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "concept");
+    recent.payload.last_verified_at = Some(now);
+    let mut old = point("old", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "concept");
+    old.payload.last_verified_at = Some(now - half_life_secs as i64);
+    v.upsert(vec![recent, old]).await.unwrap();
+
+    let hits = v
+        .search_weighted(
+            &[1.0, 0.0, 0.0, 0.0],
+            &Default::default(),
+            10,
+            &SearchFilter::default(),
+            0.05,
+        )
+        .await
+        .unwrap();
+
+    let hit_of = |id: &str| {
+        hits.iter()
+            .find(|h| h.payload.artifact_id == id)
+            .expect("both points come back")
+    };
+    let measured = hit_of("fresh").score - hit_of("old").score;
+
+    let term = |id: &str| {
+        engram::core::explain::scoring_terms(
+            &hit_of(id).payload,
+            now,
+            0.05,
+            half_life_secs,
+            0.15,
+            "pinned",
+        )
+        .0
+        .expect("a weighted recency term is present")
+    };
+    let reconstructed = term("fresh") - term("old");
+
+    assert!(
+        (measured - reconstructed).abs() < 1e-4,
+        "Qdrant scored a difference of {measured}; the reconstruction says \
+         {reconstructed}. The explanation may not contradict the ranking."
+    );
+    v.drop_collection().await.unwrap();
+}
