@@ -78,6 +78,17 @@ pub struct SearchTiming {
     pub reranked: bool,
 }
 
+/// Everything a search says about itself, beside the results.
+///
+/// Two things that are not one thing: how long it took, and how it decided.
+/// They are returned together because a caller that wants either has already
+/// paid for both.
+#[derive(Debug, Clone)]
+pub struct SearchOutcome {
+    pub timing: SearchTiming,
+    pub explanation: crate::core::explain::SearchExplanation,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub artifact_id: String,
@@ -874,7 +885,7 @@ impl Core {
         query: &SearchQuery,
         cap: Option<usize>,
         origin: impl Into<Origin>,
-    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+    ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let weight = self.ranking.read().expect("ranking lock").recency_weight;
         self.search_inner(query, cap, weight, origin.into(), true)
             .await
@@ -896,7 +907,7 @@ impl Core {
         query: &SearchQuery,
         params: crate::core::ranking::RankingParams,
         origin: impl Into<Origin>,
-    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+    ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         self.search_inner(
             query,
             params.per_source_cap,
@@ -916,8 +927,16 @@ impl Core {
         recency_weight: f32,
         origin: Origin,
         waited_on: bool,
-    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+    ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let door = origin.door;
+        // Filled in as the stages run. Always computed: a conditional path
+        // through the ranking would be a second pipeline, and the unexercised
+        // one is the one that ships. `query.explain` decides only what is
+        // rendered.
+        let mut explanation = crate::core::explain::SearchExplanation {
+            capped: cap,
+            ..Default::default()
+        };
         let q = query.q.trim();
         if q.is_empty() {
             return Err(Error::Validation("query is empty".into()));
@@ -1025,6 +1044,7 @@ impl Core {
         } else {
             candidates
         };
+        explanation.candidates_fetched = candidates;
         // The lexical half of the query. Computed locally and for free, so it
         // costs nothing when the store ignores it.
         let sparse = crate::vector::sparse::encode_query(query.q.trim());
@@ -1235,10 +1255,16 @@ impl Core {
         );
         Ok((
             results,
-            SearchTiming {
-                embed_ms,
-                total_ms: started.elapsed().as_millis(),
-                reranked,
+            SearchOutcome {
+                timing: SearchTiming {
+                    embed_ms,
+                    total_ms: started.elapsed().as_millis(),
+                    reranked,
+                },
+                explanation: crate::core::explain::SearchExplanation {
+                    reranked,
+                    ..explanation
+                },
             },
         ))
     }
@@ -1376,6 +1402,28 @@ mod tests {
             include_deprecated: false,
             include_superseded: false,
         }
+    }
+
+    #[tokio::test]
+    async fn a_search_reports_the_shape_of_its_own_pool() {
+        let core = test_core().await;
+        seed(&core, &[("mounting an image", "procedure", &[])]).await;
+
+        let (_, outcome) = core
+            .search_with(&q("mount"), Some(3), Door::Ui)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.explanation.capped,
+            Some(3),
+            "the cap in force belongs in the explanation: a reader cannot tell \
+             whether one corpus dominating is the rule failing or no rule at all"
+        );
+        assert!(
+            outcome.explanation.candidates_fetched >= 3,
+            "the pool is wider than the answer whenever something narrows it"
+        );
     }
 
     #[tokio::test]

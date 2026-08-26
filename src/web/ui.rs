@@ -1186,7 +1186,7 @@ pub(crate) async fn search_results(
         .read()
         .expect("ranking lock")
         .per_source_cap;
-    let (hits, t) = tenant
+    let (hits, outcome) = tenant
         .core
         .search_with(
             &SearchQuery {
@@ -1265,13 +1265,18 @@ pub(crate) async fn search_results(
         // From the search's outcome, not from the request's intent: a rerank
         // that failed or was skipped answered in vector order, and the tick
         // would assert a confirmation that never took place.
-        reranked: t.reranked,
+        reranked: outcome.timing.reranked,
     })
     .into_response();
     // Measured as before, reported where a browser already knows to show it.
     // On the page it was a line of debug telemetry floated beside the results
     // — a number nobody searching has a use for, in a place the eye lands.
-    if let Ok(v) = format!("embed;dur={}, total;dur={}", t.embed_ms, t.total_ms).parse() {
+    if let Ok(v) = format!(
+        "embed;dur={}, total;dur={}",
+        outcome.timing.embed_ms, outcome.timing.total_ms
+    )
+    .parse()
+    {
         res.headers_mut().insert("server-timing", v);
     }
     Ok(res)
