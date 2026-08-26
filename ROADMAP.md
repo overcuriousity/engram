@@ -181,16 +181,20 @@ decision from this one.
   cheap shape really changes is the cost of being wrong: a flag rather than a
   re-embedding pass.
 
-- **Error-driven re-synthesis.** An artifact shown often and never confirmed, or
-  judged noise, is misleading — a title that over-claims, a passage that lost its
-  context. It is re-synthesised **from its source segment**, never from itself,
-  with before/after on Ops.
-  **Worth:** the artifacts that mislead get repaired instead of accumulating,
-  and the detector is free — the exposure and confirmation counts activation
-  already keeps.
-  **Cost:** a job beside `jobs/synthesize.rs`, re-synthesis from the segment,
-  before/after on Ops, an undo path. **A branch.** No harness — it changes text
-  through the guards that already exist, not ranking.
+- **Error-driven re-synthesis, the judged-noise half.** The shown-often-and-
+  never-confirmed trigger is built: `maybe_resynthesize` (`jobs/promote.rs`),
+  wired from `core::search` once a hit is counted, re-synthesises **from the
+  source segment**, never from itself, when `resynthesize_after_unconfirmed` is
+  set above `0` in `eager` mode — it ships disabled. Not built: the second
+  trigger, an artifact **judged noise** rather than merely unconfirmed, and the
+  before/after that would let either trigger be checked on Ops rather than
+  trusted.
+  **Worth:** the artifacts that mislead through a bad verdict, not only through
+  silence, get repaired the same way; before/after makes both triggers
+  checkable.
+  **Cost:** a verdict-read branch beside `maybe_resynthesize`, before/after on
+  Ops, an undo path. **A branch.** No harness — it changes text through the
+  guards that already exist, not ranking.
 
 - **Usage-informed supersede.** `auto_supersede` keeps the newest member of a
   near-identical group; activation knows which member people actually confirmed.
