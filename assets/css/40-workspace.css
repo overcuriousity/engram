@@ -696,7 +696,18 @@ body { overflow-x: hidden; }
   .regions-rail-focus-source .pane > #ask-result {
     flex: 0 1 auto; min-height: 0; overflow-y: auto;
   }
-  .regions-rail-focus-source .split { flex: 1; min-height: 0; align-items: stretch; }
+  /* `.split` is a grid, not a flex column — `flex: 1; min-height: 0;` size the
+     grid *container* correctly against its own flex parent, but an implicit
+     grid row is sized to its tallest cell's content regardless of the
+     container's own height. Without a row track to cap it, the source column
+     grew to its full content height and silently overflowed the box `align-
+     items: stretch` never got the chance to stretch it into — nothing scrolled
+     because nothing above ever shrank. `minmax(0, 1fr)` is the row-axis
+     `min-height: 0` this needed: it lets the one row shrink to what `.split`
+     was already given, so `stretch` has an actual height to hand each column. */
+  .regions-rail-focus-source .split {
+    flex: 1; min-height: 0; align-items: stretch; grid-template-rows: minmax(0, 1fr);
+  }
   .regions-rail-focus-source .split > * { min-height: 0; }
   .regions-rail-focus-source .split > :first-child { max-height: none; }
 
@@ -727,7 +738,8 @@ body { overflow-x: hidden; }
 /* The document, continuing. Dashed and transparent like `.rail-assoc`: nothing
    ranked this passage, so it must not borrow the shape of something that did. */
 .run-item {
-  display: block; margin-top: 0.75rem; padding: 0.625rem 0.75rem;
+  display: block; flex: 0 3 auto; min-height: 6rem; overflow-y: auto;
+  margin-top: 0.75rem; padding: 0.625rem 0.75rem;
   border: 1px dashed var(--color-border); border-radius: var(--radius-md);
 }
 .run-head { display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 0.375rem; }
