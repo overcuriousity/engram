@@ -62,6 +62,18 @@ pub struct RenderedResult {
     pub origin_count: usize,
     /// The judge's line, where the link was judged.
     pub reason: Option<String>,
+    /// The document goes on past this passage, and what comes next did not
+    /// place in this list. The answer to a question is often the paragraph
+    /// after the one that matched, and the row says so rather than leaving the
+    /// reader to go and find out.
+    ///
+    /// False where the continuation *did* place: it is already on the page,
+    /// and `continues_in` names where.
+    pub continues: bool,
+    /// The rank of the next passage, where that passage is itself in this list
+    /// — `#2`, as the row beside it is labelled. Empty otherwise, including
+    /// when the next passage placed as something with no rank of its own.
+    pub continues_in: String,
 }
 
 #[derive(Default)]
@@ -1152,11 +1164,31 @@ pub(crate) async fn search_results(
     // and the title is looked up among the ranked ones rather than fetched.
     let titles = ranked_titles(&hits);
     let (ranked, recalled): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| h.via.is_none());
-    let results: Vec<RenderedResult> = ranked
+    let mut results: Vec<RenderedResult> = ranked
         .into_iter()
         .enumerate()
         .map(|(i, h)| render_hit(i, h, &titles))
         .collect();
+    // What each hit's document does next, in one read for the whole list. Only
+    // over the ranked rows: an associated one is not an answer to the query,
+    // and telling the reader to read on from something the query never matched
+    // is an invitation into a document they did not ask about.
+    //
+    // Best-effort, exactly like the reach `ask` makes: a marker is a bonus, and
+    // failing to read one must not cost the results that were already found.
+    let next = match tenant
+        .core
+        .store
+        .continuations_of(&results.iter().map(|r| r.artifact_id.clone()).collect::<Vec<_>>())
+        .await
+    {
+        Ok(next) => next,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read what these hits continue into");
+            Default::default()
+        }
+    };
+    mark_continuations(&mut results, &next);
     let associated: Vec<RenderedResult> = recalled
         .into_iter()
         .map(|h| render_hit(0, h, &titles))
@@ -1233,6 +1265,49 @@ pub(crate) fn render_hit(
         reason: h.reason.clone(),
         model_written: h.model_written,
         origin_count: h.origin_count,
+        // Filled by `mark_continuations` over the finished list: whether a
+        // passage's continuation is *on the page* is a fact about the list, not
+        // about the hit, and one row cannot answer it.
+        continues: false,
+        continues_in: String::new(),
+    }
+}
+
+/// Say, on each row, what its document does next.
+///
+/// `next` maps an artifact to the passage that follows it — `Store::
+/// continuations_of`, one read for the whole list. Two outcomes, and they are
+/// deliberately exclusive: a continuation that *placed* is named by its rank,
+/// because the row is already on the page and offering to fetch it would claim
+/// two things are there when one is; a continuation that did not place is
+/// announced as such, and the pane is where it gets read.
+///
+/// A row with no rank is not a destination. Associated rows and weak ones carry
+/// no rank by design, and `setzt sich fort in` followed by nothing is worse
+/// than the marker's absence — so such a continuation falls back to the plain
+/// announcement, which is still true.
+pub(crate) fn mark_continuations(
+    results: &mut [RenderedResult],
+    next: &std::collections::HashMap<String, String>,
+) {
+    let ranks: std::collections::HashMap<&str, &str> = results
+        .iter()
+        .filter(|r| !r.rank.is_empty())
+        .map(|r| (r.artifact_id.as_str(), r.rank.as_str()))
+        .collect();
+    let marks: Vec<(bool, String)> = results
+        .iter()
+        .map(|r| match next.get(&r.artifact_id) {
+            None => (false, String::new()),
+            Some(n) => match ranks.get(n.as_str()) {
+                Some(rank) => (false, (*rank).to_string()),
+                None => (true, String::new()),
+            },
+        })
+        .collect();
+    for (r, (continues, continues_in)) in results.iter_mut().zip(marks) {
+        r.continues = continues;
+        r.continues_in = continues_in;
     }
 }
 
@@ -6128,6 +6203,135 @@ mod tests {
         assert!(d.html.contains("<pre"), "{}", d.html);
     }
 
+    /// A rail row reduced to what the continuation marker reads: which artifact
+    /// it is, and whether it carries a rank to be named by.
+    #[cfg(test)]
+    fn row(id: &str, rank: &str) -> RenderedResult {
+        RenderedResult {
+            artifact_id: id.into(),
+            title: String::new(),
+            html: String::new(),
+            snippet: String::new(),
+            category: None,
+            tags: vec![],
+            corpus_id: "s".into(),
+            rank: rank.into(),
+            weak: false,
+            primed: false,
+            in_sitting: false,
+            past_cliff: false,
+            via_title: None,
+            model_written: false,
+            origin_count: 0,
+            reason: None,
+            continues: false,
+            continues_in: String::new(),
+        }
+    }
+
+    /// The two markers are exclusive on the page as well as in the struct: a
+    /// row that names a rank must not also carry the offer to fetch, or the
+    /// rail says both "it is over there" and "there is more" about one thing.
+    #[test]
+    fn the_rail_prints_one_continuation_marker_or_the_other() {
+        let mut named = row("a", "#1");
+        named.continues_in = "#2".into();
+        let mut offered = row("b", "#2");
+        offered.continues = true;
+
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![named, offered],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            reranked: false,
+        })
+        .unwrap();
+
+        assert!(html.contains("continues in #2"), "{html}");
+        assert!(html.contains("continues in the next passage"), "{html}");
+        assert_eq!(
+            html.matches("rail-continues").count(),
+            2,
+            "one marker per row, and no row wearing both: {html}"
+        );
+    }
+
+    /// The silent case, and the one worth pinning: a row that continues nowhere
+    /// must print nothing at all. An empty marker element is a line of space
+    /// the reader reads as meaning something.
+    #[test]
+    fn a_row_that_continues_nowhere_prints_no_marker() {
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![row("a", "#1")],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            reranked: false,
+        })
+        .unwrap();
+
+        assert!(!html.contains("rail-continues"), "{html}");
+    }
+
+    /// A search result and its next passage both placed. The rail says so by
+    /// pointing at the rank the reader can already see, because the row is
+    /// there and sending them to a second copy of it would be a claim that two
+    /// things are on the page when one is.
+    #[test]
+    fn a_hit_whose_next_passage_also_placed_names_its_rank() {
+        let mut rows = vec![row("a", "#1"), row("b", "#2")];
+        let next = [("a".to_string(), "b".to_string())].into_iter().collect();
+        super::mark_continuations(&mut rows, &next);
+
+        assert_eq!(rows[0].continues_in, "#2");
+        assert!(
+            !rows[0].continues,
+            "a hit whose continuation is on the page must not also offer to fetch it"
+        );
+    }
+
+    /// The ordinary case: the document goes on, and what comes next did not
+    /// place. Nothing about it is on the page, so the row says the one true
+    /// thing — there is more — and the pane is where it gets read.
+    #[test]
+    fn a_hit_whose_next_passage_did_not_place_says_only_that_it_continues() {
+        let mut rows = vec![row("a", "#1")];
+        let next = [("a".to_string(), "elsewhere".to_string())]
+            .into_iter()
+            .collect();
+        super::mark_continuations(&mut rows, &next);
+
+        assert!(rows[0].continues);
+        assert!(rows[0].continues_in.is_empty());
+    }
+
+    /// The last passage of a document, and the case the whole marker must not
+    /// get wrong: an offer to read on where there is nothing to read.
+    #[test]
+    fn a_hit_at_the_end_of_its_document_is_marked_neither_way() {
+        let mut rows = vec![row("a", "#1")];
+        super::mark_continuations(&mut rows, &Default::default());
+
+        assert!(!rows[0].continues);
+        assert!(rows[0].continues_in.is_empty());
+    }
+
+    /// An associated row is not a ranked one and carries no rank. Naming it as
+    /// a destination would print "setzt sich fort in" followed by nothing.
+    #[test]
+    fn a_continuation_into_a_row_with_no_rank_is_not_named_by_rank() {
+        let mut rows = vec![row("a", "#1"), row("b", "")];
+        let next = [("a".to_string(), "b".to_string())].into_iter().collect();
+        super::mark_continuations(&mut rows, &next);
+
+        assert!(rows[0].continues_in.is_empty());
+        assert!(
+            rows[0].continues,
+            "the continuation exists and must still be offered"
+        );
+    }
+
     #[test]
     fn a_result_with_no_title_of_its_own_is_given_no_heading() {
         // "Untitled" is a heading that says nothing and looks like one that
@@ -6191,6 +6395,8 @@ mod tests {
             reason: reason.map(str::to_string),
             model_written: false,
             origin_count: 0,
+            continues: false,
+            continues_in: String::new(),
         }
     }
 
@@ -6339,6 +6545,8 @@ mod tests {
             reason: None,
             model_written: false,
             origin_count: 0,
+            continues: false,
+            continues_in: String::new(),
         }
     }
 

@@ -101,6 +101,20 @@
         {%- if r.model_written %}{% if r.primed || r.weak %} · {% endif %}written by a model{% if r.origin_count > 0 %} from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}{% endif %}{% endif -%}
       </p>
       {% endif %}
+      {# Its own line, under the ones that say why this row is *here*. This says
+         something else — what the document does next — and the two must not run
+         together into one sentence.
+
+         Exclusive by construction, not by an accident of the template: a
+         continuation that placed is named by its rank, and one that did not is
+         announced. `mark_continuations` sets exactly one of the two, so there is
+         no case where the row both points at a visible neighbour and offers to
+         go and get it. #}
+      {% if !r.continues_in.is_empty() %}
+      <p class="rail-continues"><span class="arrow" aria-hidden="true">↓</span> continues in {{ r.continues_in }}</p>
+      {% else if r.continues %}
+      <p class="rail-continues"><span class="arrow" aria-hidden="true">↳</span> continues in the next passage</p>
+      {% endif %}
     </a>
     {# No delete control here. It was the only irreversible act in the app that
        could be fired on something nobody had opened — a title, a snippet and a
