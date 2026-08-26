@@ -1,5 +1,6 @@
 use crate::core::Core;
 use crate::core::search::{SearchQuery, SearchResult};
+use crate::store::artifacts::ArtifactStatus;
 use crate::web::state::AppState;
 use axum::Router;
 use rmcp::handler::server::wrapper::Parameters;
@@ -58,8 +59,37 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
                 }
                 (None, _) => format!("score {:.3}", r.score),
             };
+            // Everything the rail says with a badge or a shade of grey, said
+            // here in words: an agent reads the meta line and nothing else.
+            let mut facts = Vec::new();
+            if r.weak {
+                facts.push("only loosely related".to_string());
+            }
+            if r.model_written {
+                let verb = if r.synthesized {
+                    "synthesized"
+                } else {
+                    "written"
+                };
+                facts.push(format!("{verb} by a model from {} sources", r.origin_count));
+            }
+            match r.status {
+                Some(ArtifactStatus::Superseded) => facts.push(match &r.superseded_by {
+                    Some(by) => format!("superseded by `{by}`"),
+                    None => "superseded".to_string(),
+                }),
+                Some(ArtifactStatus::Deprecated) => facts.push("deprecated".to_string()),
+                Some(ArtifactStatus::Active) | None => {}
+            }
+            if r.primed {
+                facts.push("lifted: reached often".to_string());
+            }
+            if r.in_sitting {
+                facts.push("lifted: open in this sitting".to_string());
+            }
+            let facts = facts.iter().map(|f| format!(" · {f}")).collect::<String>();
             format!(
-                "{heading}\n_{how}{tags} · corpus: {}_\n\n{}",
+                "{heading}\n_{how}{facts}{tags} · corpus: {}_\n\n{}",
                 r.corpus_id, r.text
             )
         })
@@ -679,6 +709,66 @@ mod tests {
         assert!(out.contains("### 1. ranked"), "{out}");
         assert!(out.contains("### recalled"), "{out}");
         assert!(!out.contains("### 2"), "{out}");
+    }
+
+    /// The rail greys a weak hit; an agent has no grey to see, so the meta
+    /// line says it in words.
+    #[test]
+    fn a_weak_result_says_so() {
+        let mut w = hit("thin", None);
+        w.weak = true;
+        let out = format_search_results(&[w]);
+        assert!(out.contains("only loosely related"), "{out}");
+        assert!(!format_search_results(&[hit("firm", None)]).contains("loosely"));
+    }
+
+    /// Text a model wrote is never silently indistinguishable from captured
+    /// text — that is the field's own contract, and it held on every door but
+    /// this one.
+    #[test]
+    fn model_written_text_is_marked_as_such() {
+        let mut m = hit("merged", None);
+        m.model_written = true;
+        m.origin_count = 3;
+        let out = format_search_results(&[m]);
+        assert!(out.contains("written by a model from 3 sources"), "{out}");
+
+        let mut s = hit("pursued", None);
+        s.model_written = true;
+        s.synthesized = true;
+        s.origin_count = 2;
+        let out = format_search_results(&[s]);
+        assert!(
+            out.contains("synthesized by a model from 2 sources"),
+            "{out}"
+        );
+        assert!(!format_search_results(&[hit("captured", None)]).contains("model"));
+    }
+
+    #[test]
+    fn a_superseded_or_deprecated_result_names_its_status() {
+        use crate::store::artifacts::ArtifactStatus;
+        let mut old = hit("old", None);
+        old.status = Some(ArtifactStatus::Superseded);
+        old.superseded_by = Some("newer".into());
+        let out = format_search_results(&[old]);
+        assert!(out.contains("superseded by `newer`"), "{out}");
+
+        let mut dep = hit("dep", None);
+        dep.status = Some(ArtifactStatus::Deprecated);
+        assert!(format_search_results(&[dep]).contains("deprecated"));
+    }
+
+    /// Two different reasons to be higher up the list, and neither is
+    /// relevance; an agent trusting the order should be told.
+    #[test]
+    fn a_lifted_result_says_why_it_moved_up() {
+        let mut p = hit("often", None);
+        p.primed = true;
+        assert!(format_search_results(&[p]).contains("lifted: reached often"));
+        let mut s = hit("open", None);
+        s.in_sitting = true;
+        assert!(format_search_results(&[s]).contains("lifted: open in this sitting"));
     }
 
     #[test]
