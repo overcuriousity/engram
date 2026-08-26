@@ -1,5 +1,6 @@
 use crate::core::Core;
 use crate::core::search::{SearchQuery, SearchResult};
+use crate::error::Error;
 use crate::store::artifacts::ArtifactStatus;
 use crate::web::state::AppState;
 use axum::Router;
@@ -97,6 +98,39 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
         .join("\n\n---\n\n")
 }
 
+/// One line above a document: what it is called and where it came from.
+fn corpus_head(c: &crate::store::corpora::Corpus) -> String {
+    let title = c
+        .title_hint
+        .clone()
+        .unwrap_or_else(|| crate::web::markdown::stand_in_title(&c.raw_text, 60));
+    let mut head = format!("**{title}** · corpus `{}` · via {}", c.id, c.origin);
+    if let Some(u) = &c.source_url {
+        head.push_str(&format!(" · {u}"));
+    }
+    head
+}
+
+const READ_PAGE_CHARS: usize = 20_000;
+
+/// A page of a document, in characters, ending with where the next page
+/// begins when there is one. A 50 MB PDF read whole would be one tool result
+/// that fills an agent's context; a page is something it can keep asking for.
+fn page_of(text: &str, offset: usize, max_chars: Option<usize>) -> String {
+    let max = max_chars.unwrap_or(READ_PAGE_CHARS).max(1);
+    let total = text.chars().count();
+    if offset >= total {
+        return format!("(the document ends at offset {total})");
+    }
+    let page: String = text.chars().skip(offset).take(max).collect();
+    let end = offset + page.chars().count();
+    if end < total {
+        format!("{page}\n\n[… continues: read again with offset={end} ({total} characters in all)]")
+    } else {
+        page
+    }
+}
+
 /// Where a tool call's `Core` comes from.
 ///
 /// The whole point of the enum is that the production variant does *not* hold
@@ -164,6 +198,19 @@ pub struct IngestParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadParams {
+    /// A corpus id or an artifact id, as search prints them. An artifact id
+    /// reads the document that artifact was cut from.
+    pub id: String,
+    /// Character offset to read from; the previous page says where it ended.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Characters per page. Default 20 000.
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchParams {
     /// The situation to find something for, in natural language. A sentence or
     /// a paragraph of context ranks better than keywords: the query is embedded
@@ -228,6 +275,50 @@ impl PkdbTools {
             ),
             Err(e) => format!("Ingest failed: {e}"),
         }
+    }
+
+    #[tool(
+        name = "read",
+        description = "Read a stored document verbatim, by the corpus id or artifact id \
+                       search printed. The answer is often the paragraph after the one \
+                       that matched. Long documents arrive in pages; each says the \
+                       offset the next one starts at."
+    )]
+    async fn read(&self, Parameters(p): Parameters<ReadParams>) -> String {
+        let core = match self.source.core().await {
+            Ok(c) => c,
+            Err(e) => return format!("Read failed: {e}"),
+        };
+        let (head, body) = match core.store.get_corpus(&p.id).await {
+            Ok(c) => (corpus_head(&c), c.raw_text),
+            // Not a corpus: perhaps an artifact, whose parent is the document
+            // wanted. A merged artifact has no parent, and is its own text.
+            Err(Error::NotFound) => match core.store.get_artifact(&p.id).await {
+                Ok(a) => match &a.corpus_id {
+                    Some(cid) => match core.store.get_corpus(cid).await {
+                        Ok(c) => (corpus_head(&c), c.raw_text),
+                        Err(e) => return format!("Read failed: {e}"),
+                    },
+                    None => (
+                        format!(
+                            "**{}** · merged artifact `{}`",
+                            a.title.as_deref().unwrap_or("(untitled)"),
+                            a.id
+                        ),
+                        a.text,
+                    ),
+                },
+                Err(Error::NotFound) => {
+                    return format!("Nothing stored under `{}`.", p.id);
+                }
+                Err(e) => return format!("Read failed: {e}"),
+            },
+            Err(e) => return format!("Read failed: {e}"),
+        };
+        format!(
+            "{head}\n\n{}",
+            page_of(&body, p.offset.unwrap_or(0), p.max_chars)
+        )
     }
 
     #[tool(
@@ -769,6 +860,91 @@ mod tests {
         let mut s = hit("open", None);
         s.in_sitting = true;
         assert!(format_search_results(&[s]).contains("lifted: open in this sitting"));
+    }
+
+    /// Search is a dead end without this: it hands back one passage and the
+    /// corpus id, and the answer is often the paragraph after the one that
+    /// matched. `read` hands back the document, verbatim.
+    #[tokio::test]
+    async fn read_returns_the_whole_document_by_corpus_id() {
+        let core = crate::core::test_support::test_core().await;
+        let doc = "# Mounting\n\nRun mount.\n\n# Unmounting\n\nRun umount.";
+        let out = core.ingest(doc, "mcp", Some("disks")).await.unwrap();
+        let tools = PkdbTools::over(core);
+        let text = tools
+            .read(Parameters(ReadParams {
+                id: out.id.clone(),
+                offset: None,
+                max_chars: None,
+            }))
+            .await;
+        assert!(text.contains(doc), "{text}");
+        assert!(text.contains("disks"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn read_reaches_the_document_from_one_of_its_artifacts() {
+        let core = crate::core::test_support::test_core().await;
+        let doc = "## Mounting\nRun `mount /dev/sda1 /mnt`.\n\n## After\nThen check dmesg.";
+        let out = core.ingest(doc, "mcp", None).await.unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        let first = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        let tools = PkdbTools::over(core);
+        let text = tools
+            .read(Parameters(ReadParams {
+                id: first,
+                offset: None,
+                max_chars: None,
+            }))
+            .await;
+        assert!(text.contains("Then check dmesg"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn read_of_an_unknown_id_says_so() {
+        let tools = PkdbTools::over(crate::core::test_support::test_core().await);
+        let text = tools
+            .read(Parameters(ReadParams {
+                id: "nope".into(),
+                offset: None,
+                max_chars: None,
+            }))
+            .await;
+        assert!(text.contains("Nothing stored under `nope`"), "{text}");
+    }
+
+    /// A 50 MB PDF read whole would fill an agent's context with one call.
+    /// The document arrives in pages, each saying where the next begins.
+    #[tokio::test]
+    async fn read_pages_a_long_document_and_says_where_it_goes_on() {
+        let core = crate::core::test_support::test_core().await;
+        let doc = "abcdefghij".repeat(10);
+        let out = core.ingest(&doc, "mcp", None).await.unwrap();
+        let tools = PkdbTools::over(core);
+        let page = tools
+            .read(Parameters(ReadParams {
+                id: out.id.clone(),
+                offset: None,
+                max_chars: Some(30),
+            }))
+            .await;
+        // Below the head line, which quotes the opening as a stand-in title.
+        let body = page.split_once("\n\n").unwrap().1;
+        assert!(body.contains(&"abcdefghij".repeat(3)), "{page}");
+        assert!(!body.contains(&"abcdefghij".repeat(4)), "{page}");
+        assert!(body.contains("offset=30"), "{page}");
+
+        let last = tools
+            .read(Parameters(ReadParams {
+                id: out.id,
+                offset: Some(90),
+                max_chars: Some(30),
+            }))
+            .await;
+        assert!(last.ends_with("abcdefghij"), "{last}");
+        assert!(!last.contains("offset="), "{last}");
     }
 
     #[test]
