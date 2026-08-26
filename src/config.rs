@@ -403,13 +403,6 @@ impl Default for SittingConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct BlockWeights {
-    /// Interim, and load-bearing. Every scope shares one collection today, and
-    /// a point's multivector mixes the clusters of everyone who opened that
-    /// artifact — a payload filter cannot help, because it acts on the point
-    /// and not on elements of the set. A dominating `scope` block is what keeps
-    /// a foreign cluster from ever winning `max_sim`. When each user gets their
-    /// own collection this goes to 0 and nothing else changes.
-    pub scope: f32,
     /// The hour, as an angle. See `core::context::encode`.
     pub time_of_day: f32,
     pub weekday: f32,
@@ -430,7 +423,6 @@ pub struct BlockWeights {
 impl Default for BlockWeights {
     fn default() -> Self {
         Self {
-            scope: 10.0,
             time_of_day: 1.0,
             weekday: 1.0,
             weekend: 0.3,
@@ -452,7 +444,6 @@ impl BlockWeights {
     /// recommendation nobody could account for.
     pub fn of(&self, block: &str) -> f32 {
         match block {
-            "scope" => self.scope,
             "time_of_day" => self.time_of_day,
             "weekday" => self.weekday,
             "weekend" => self.weekend,
@@ -506,13 +497,13 @@ pub struct RecommendConfig {
     /// "Twice before" — and demands a strong situational match before saying
     /// anything. At the default half-life this is the third repetition.
     pub firm_at: f64,
-    /// Context score — the vector with its `scope` block sliced off — at or
-    /// above which the offer is called a pattern.
+    /// Context score at or above which the offer is called a pattern.
     ///
-    /// Scored without `scope` because that block decides *who* may be offered
-    /// something, at weight 10 against a total of under 5. Counting it here
-    /// would drag every same-scope score above 0.95 and leave these two
-    /// thresholds four hundredths apart.
+    /// The same number the store ranked on. These two lived on a scale of their
+    /// own while a `scope` block dominated the full cosine at weight 10 against
+    /// a total of under 5 — counting it would have dragged every same-subject
+    /// pair above 0.95 and left them four hundredths apart. That block is gone
+    /// and these values are unchanged: the gate never read it.
     pub strong_at: f32,
     /// And above which it is called a resemblance. Below it the ladder falls
     /// through to the sitting, and then to what has been forgotten.
@@ -2332,19 +2323,18 @@ mod tests {
         // is young. It still needs `[learn]`, which is where the log it reads
         // is switched on — see `Core::recommends`.
         assert!(r.enabled);
-        // The scope block dominates so a foreign cluster can never win
-        // `max_sim`. When each user has their own collection this goes to 0
-        // and nothing else changes.
-        assert_eq!(r.weights.of("scope"), 10.0);
         assert_eq!(r.weights.of("weekday"), 1.0);
+        // Nothing weights who is asking. Isolation is a database and a
+        // collection per user, plus the exact cut in `Core::offer` — never a
+        // direction in a vector.
+        assert_eq!(r.weights.of("scope"), 0.0);
         assert_eq!(r.weights.of("month_cycle"), 0.0, "off by default");
         // A block nobody named contributes nothing rather than a default. The
         // block table and this lookup are edited together, and a typo that
         // silently gave a block weight 1.0 would be a recommendation nobody
         // could account for.
         assert_eq!(r.weights.of("phase_of_the_moon"), 0.0);
-        // The two rungs are far enough apart to mean different things, which
-        // is only true because `scope` is left out of the score.
+        // The two rungs are far enough apart to mean different things.
         assert!(r.strong_at > r.weak_at + 0.2);
         assert_eq!(r.self_weight, 0.0, "the offer does not teach itself");
     }
@@ -2364,7 +2354,6 @@ mod tests {
             "and so is every weight the offer rests on"
         );
         for block in [
-            "scope",
             "time_of_day",
             "weekday",
             "weekend",

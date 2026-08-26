@@ -123,79 +123,75 @@ pub struct Block {
     pub dims: usize,
 }
 
-/// The layout, in order. `scope` leads because `context_score` slices it off by
-/// taking everything after it, which only works while it is first.
+/// The layout, in order. Every block describes the situation and nothing
+/// describes who is in it: each user has their own database and their own
+/// collection, and `Core::offer` cuts foreign clusters by an exact match on top
+/// of that.
 ///
 /// Circular where there is a circle, one-hot where there is not. The hour is a
 /// circle, so 23:30 and 00:30 are an hour apart. The weekday is *not* a useful
 /// circle — "Friday is three from Tuesday" means nothing, and the pattern is
 /// exactly Friday — so it is one-hot, with a separate weak weekday/weekend
 /// block for the part that genuinely is gradual.
-pub const BLOCKS: [Block; 11] = [
-    Block {
-        name: "scope",
-        label: "who",
-        at: 0,
-        dims: 8,
-    },
+pub const BLOCKS: [Block; 10] = [
     Block {
         name: "time_of_day",
         label: "hour",
-        at: 8,
+        at: 0,
         dims: 2,
     },
     Block {
         name: "weekday",
         label: "weekday",
-        at: 10,
+        at: 2,
         dims: 7,
     },
     Block {
         name: "weekend",
         label: "weekend",
-        at: 17,
+        at: 9,
         dims: 2,
     },
     Block {
         name: "device",
         label: "device",
-        at: 19,
+        at: 11,
         dims: 8,
     },
     Block {
         name: "viewport",
         label: "screen",
-        at: 27,
+        at: 19,
         dims: 4,
     },
     Block {
         name: "locale",
         label: "language",
-        at: 31,
+        at: 23,
         dims: 8,
     },
     Block {
         name: "network",
         label: "network",
-        at: 39,
+        at: 31,
         dims: 4,
     },
     Block {
         name: "power",
         label: "battery",
-        at: 43,
+        at: 35,
         dims: 3,
     },
     Block {
         name: "environment",
         label: "surroundings",
-        at: 46,
+        at: 38,
         dims: 5,
     },
     Block {
         name: "month_cycle",
         label: "month",
-        at: 51,
+        at: 43,
         dims: 2,
     },
 ];
@@ -203,14 +199,25 @@ pub const BLOCKS: [Block; 11] = [
 /// Fixed at collection creation, so a new block invalidates every stored
 /// centroid. That is what `encoder_version` and whole-bundle storage are for:
 /// the sweep rebuilds from the raw bundles rather than losing the history.
-pub const CTX_DIM: usize = 53;
-
-/// The width of the leading `scope` block. See `context_score`.
-pub const SCOPE_DIMS: usize = 8;
+///
+/// A *changed* width is the heavier case, because a named vector cannot be
+/// resized in place: an existing collection keeps the size it was created with
+/// and rejects the new one. `--reindex` is the migration — it creates the next
+/// generation with this size and copies the dense vectors across, so nothing is
+/// re-embedded, and sets of the old width are discarded rather than reinterpreted
+/// (see `ctx_of` in `vector/qdrant.rs`).
+pub const CTX_DIM: usize = 45;
 
 /// Bumped whenever `BLOCKS` changes in any way — a width, an order, or what a
 /// slot means. Not what is stored: see `encoder_version`.
-pub const LAYOUT_VERSION: i64 = 1;
+///
+/// 2: the `scope` block dropped. It existed to keep one person's situations from
+/// being ranked first for another while everyone shared a collection, and each
+/// user has had their own since. Inside one collection it was the same direction
+/// of magnitude 10 in every stored vector and in the query — ordering nothing,
+/// and under cosine compressing the differences the ten blocks that describe the
+/// situation are able to make.
+pub const LAYOUT_VERSION: i64 = 2;
 
 /// What a stored cluster carries, and what the read path insists on matching.
 ///
@@ -356,18 +363,13 @@ fn bucket(s: &str, n: usize) -> usize {
 ///
 /// A block whose values are all zero is left at zero rather than normalised —
 /// dividing by nothing is how absence turns into a manufactured direction.
-pub fn encode(
-    at: i64,
-    scope: Option<&str>,
-    b: &Bundle,
-    w: &crate::config::BlockWeights,
-) -> Vec<f32> {
+pub fn encode(at: i64, b: &Bundle, w: &crate::config::BlockWeights) -> Vec<f32> {
     let t = local_time(at, b.tz.as_deref(), b.tz_offset_mins);
     let mut v = vec![0.0f32; CTX_DIM];
 
     for block in BLOCKS {
         let slot = &mut v[block.at..block.at + block.dims];
-        fill(block.name, slot, &t, scope, b);
+        fill(block.name, slot, &t, b);
         scale(slot, w.of(block.name));
     }
     v
@@ -375,35 +377,9 @@ pub fn encode(
 
 /// Raw values into one block's slots. Every arm either fills or leaves zeros;
 /// leaving zeros is how "the browser did not say" is expressed.
-fn fill(name: &str, s: &mut [f32], t: &LocalTime, scope: Option<&str>, b: &Bundle) {
+fn fill(name: &str, s: &mut [f32], t: &LocalTime, b: &Bundle) {
     use std::f32::consts::TAU;
     match name {
-        "scope" => {
-            // A deterministic pseudo-random direction per scope, spread over
-            // every slot — *not* one-hot over eight buckets.
-            //
-            // One-hot was the first version and was wrong: two people had a
-            // one-in-eight chance of landing in the same bucket, and a shared
-            // bucket means identical scope blocks, which means one person's
-            // Friday afternoon offered to another at a perfect score. A test
-            // with two names caught it on the first run.
-            //
-            // Spread this way, two distinct scopes are near-orthogonal rather
-            // than identical. That keeps a foreign cluster from ranking first
-            // in the store; what *guarantees* isolation is the exact scope
-            // check in `Core::offer`, because a near-orthogonal direction is
-            // still a probability and isolation must not be one.
-            if let Some(sc) = scope {
-                for (i, x) in s.iter_mut().enumerate() {
-                    let h = fnv1a(&format!("{sc}#{i}"));
-                    // The top 53 bits into [-1, 1): the low bits of FNV-1a move
-                    // least between neighbouring inputs, and `sc#0`..`sc#7` are
-                    // exactly neighbouring inputs.
-                    let unit = (h >> 11) as f64 / (1u64 << 53) as f64;
-                    *x = (unit * 2.0 - 1.0) as f32;
-                }
-            }
-        }
         "time_of_day" => {
             let a = TAU * t.hour / 24.0;
             s[0] = a.sin();
@@ -528,19 +504,17 @@ fn scale(s: &mut [f32], weight: f32) {
     }
 }
 
-/// How well the situation matches, ignoring who is asking.
+/// How well the situation matches.
 ///
-/// The `scope` block decides *which* artifact may be offered — it is what keeps
-/// a foreign cluster from ever winning `max_sim`, at weight 10 against a total
-/// of under 5 — and that same dominance would drag every same-scope full cosine
-/// above 0.95, leaving `strong_at` and `weak_at` four hundredths apart. So the
-/// choice is made on the full vector and the rung is decided here. Two
-/// questions, two scales.
+/// One number, and the same one the store ranked on. It was two while the
+/// `scope` block dominated the full cosine at weight 10 against a total of under
+/// 5: counting it would have dragged every same-subject pair above 0.95 and left
+/// `strong_at` and `weak_at` four hundredths apart, so the choice was made on
+/// the full vector and the rung on the rest of it. With that block gone the two
+/// scales are one, and `strong_at`/`weak_at` keep the values they were
+/// calibrated at — they never saw the block that went.
 pub fn context_score(now: &[f32], cluster: &[f32]) -> f32 {
-    if now.len() < SCOPE_DIMS || cluster.len() < SCOPE_DIMS {
-        return 0.0;
-    }
-    crate::vector::cosine(&now[SCOPE_DIMS..], &cluster[SCOPE_DIMS..])
+    crate::vector::cosine(now, cluster)
 }
 
 /// What each named block contributed, largest first.
@@ -554,9 +528,6 @@ pub fn context_score(now: &[f32], cluster: &[f32]) -> f32 {
 /// one cosine over the whole vector and each of these is a cosine over a slice,
 /// with a different denominator. They rank which blocks decided it, which is
 /// what the line under the offer needs and all it claims.
-///
-/// `scope` is excluded. It is always either a perfect match or a rejection, so
-/// it would lead every list while explaining nothing.
 pub fn contributions(
     now: &[f32],
     cluster: &[f32],
@@ -564,7 +535,6 @@ pub fn contributions(
 ) -> Vec<(&'static str, f32)> {
     let mut out: Vec<(&'static str, f32)> = BLOCKS
         .iter()
-        .filter(|b| b.name != "scope")
         .filter(|b| now.len() >= b.at + b.dims && cluster.len() >= b.at + b.dims)
         .map(|b| {
             let a = &now[b.at..b.at + b.dims];
@@ -613,6 +583,30 @@ mod tests {
             network: Some("cellular".into()),
             audio_outputs: Some(1),
             ..Default::default()
+        }
+    }
+
+    /// A bundle a desktop in London would send. Nothing about it agrees with
+    /// `phone()`, which is what makes it useful.
+    fn desktop() -> Bundle {
+        Bundle {
+            platform: Some("macOS".into()),
+            ua_family: Some("Firefox".into()),
+            touch: Some(false),
+            orientation: Some("landscape".into()),
+            network: Some("wired".into()),
+            color_scheme: Some("light".into()),
+            language: Some("en-GB".into()),
+            viewport_w: Some(1920.0),
+            viewport_h: Some(1080.0),
+            screen_w: Some(2560.0),
+            screen_h: Some(1440.0),
+            dpr: Some(2.0),
+            // No Battery API on a desktop, so that block says nothing at all
+            // rather than agreeing with a phone at some invented level.
+            battery_level: None,
+            charging: None,
+            ..phone()
         }
     }
 
@@ -679,8 +673,6 @@ mod tests {
             at += b.dims;
         }
         assert_eq!(at, CTX_DIM);
-        assert_eq!(BLOCKS[0].name, "scope");
-        assert_eq!(BLOCKS[0].dims, SCOPE_DIMS);
     }
 
     #[test]
@@ -688,8 +680,8 @@ mod tests {
         // The hour is a circle, so the two are an hour apart rather than
         // twenty-three. A one-hot hour would have called them maximally
         // different, which is the whole reason this block is an angle.
-        let late = encode(FRIDAY - 2 * 3600 - 22 * 60, None, &phone(), &weights());
-        let early = encode(FRIDAY - 3600 - 22 * 60, None, &phone(), &weights());
+        let late = encode(FRIDAY - 2 * 3600 - 22 * 60, &phone(), &weights());
+        let early = encode(FRIDAY - 3600 - 22 * 60, &phone(), &weights());
         let c = crate::vector::cosine(
             slice_of(&late, "time_of_day"),
             slice_of(&early, "time_of_day"),
@@ -699,8 +691,8 @@ mod tests {
 
     #[test]
     fn five_past_three_costs_almost_nothing_against_a_three_o_clock_pattern() {
-        let at_three = encode(FRIDAY - 52 * 60, None, &phone(), &weights());
-        let five_past = encode(FRIDAY - 47 * 60, None, &phone(), &weights());
+        let at_three = encode(FRIDAY - 52 * 60, &phone(), &weights());
+        let five_past = encode(FRIDAY - 47 * 60, &phone(), &weights());
         let c = crate::vector::cosine(
             slice_of(&at_three, "time_of_day"),
             slice_of(&five_past, "time_of_day"),
@@ -713,18 +705,18 @@ mod tests {
         // The rule the whole design rests on. Seven one-hot slots for the
         // weekday do not outweigh two for the hour because there are seven of
         // them: each block is normalised and *then* scaled.
-        let v = encode(FRIDAY, Some("alice"), &phone(), &weights());
+        let v = encode(FRIDAY, &phone(), &weights());
         let w = weights();
         assert!((norm(slice_of(&v, "weekday")) - w.weekday).abs() < 1e-5);
         assert!((norm(slice_of(&v, "time_of_day")) - w.time_of_day).abs() < 1e-5);
-        assert!((norm(slice_of(&v, "scope")) - w.scope).abs() < 1e-5);
+        assert!((norm(slice_of(&v, "device")) - w.device).abs() < 1e-5);
     }
 
     #[test]
     fn a_block_switched_off_contributes_nothing() {
         let mut w = weights();
         w.month_cycle = 0.0;
-        let v = encode(FRIDAY, None, &phone(), &w);
+        let v = encode(FRIDAY, &phone(), &w);
         assert_eq!(norm(slice_of(&v, "month_cycle")), 0.0);
     }
 
@@ -736,7 +728,7 @@ mod tests {
         let mut b = phone();
         b.battery_level = None;
         b.charging = None;
-        let v = encode(FRIDAY, None, &b, &weights());
+        let v = encode(FRIDAY, &b, &weights());
         assert_eq!(norm(slice_of(&v, "power")), 0.0, "power says nothing");
         assert!(
             norm(slice_of(&v, "weekday")) > 0.0,
@@ -752,7 +744,7 @@ mod tests {
         let mut b = phone();
         b.battery_level = None;
         b.charging = None;
-        let v = encode(FRIDAY, None, &b, &weights());
+        let v = encode(FRIDAY, &b, &weights());
         let c = contributions(&v, &v, &weights());
         let power = c.iter().find(|(n, _)| *n == "battery").unwrap();
         assert_eq!(power.1, 0.0);
@@ -765,7 +757,7 @@ mod tests {
         // hardened browser is a situation, not a gap.
         let bare = Bundle::default();
         assert!(device_key(&bare).is_none());
-        let v = encode(FRIDAY, None, &bare, &weights());
+        let v = encode(FRIDAY, &bare, &weights());
         assert!((norm(slice_of(&v, "device")) - weights().device).abs() < 1e-5);
     }
 
@@ -786,66 +778,44 @@ mod tests {
     }
 
     #[test]
-    fn two_people_in_the_same_situation_are_still_far_apart() {
-        // Until each person has their own collection, the `scope` block is the
-        // only thing keeping one person's situations from being offered to
-        // another. It is load-bearing and this is the test that says so.
-        let alice = encode(FRIDAY, Some("alice"), &phone(), &weights());
-        let bob = encode(FRIDAY, Some("bob"), &phone(), &weights());
-        let same = encode(FRIDAY, Some("alice"), &phone(), &weights());
+    fn nothing_in_the_vector_says_who_is_asking() {
+        // Each user has their own database and their own Qdrant collection, and
+        // the read path cuts foreign clusters by an exact match on top of that.
+        // Inside one collection every cluster carries the same subject, so a
+        // block for it is the same direction in every stored vector and in the
+        // query: it orders nothing and, under cosine, compresses the
+        // differences the blocks that *do* describe the situation can make.
         assert!(
-            crate::vector::cosine(&alice, &bob) < crate::vector::cosine(&alice, &same),
-            "a foreign scope must never win max_sim"
+            !BLOCKS.iter().any(|b| b.name == "scope"),
+            "the situation is what the browser reports, not who is holding it"
         );
+        assert_eq!(CTX_DIM, 45, "eight dimensions of constant went with it");
     }
 
     #[test]
-    fn the_rung_is_scored_without_the_scope_block() {
-        // The scope block decides *who* may be offered something. If it counted
-        // towards the rung too, it would drag every same-scope score above 0.95
-        // and `strong_at` and `weak_at` would have to live four hundredths
-        // apart. Two different jobs, two different scales.
-        let friday_phone = encode(FRIDAY, Some("alice"), &phone(), &weights());
-        let mut desktop = phone();
-        desktop.platform = Some("macOS".into());
-        desktop.ua_family = Some("Firefox".into());
-        desktop.touch = Some(false);
-        desktop.orientation = Some("landscape".into());
-        desktop.network = Some("wired".into());
-        desktop.color_scheme = Some("light".into());
-        desktop.language = Some("en-GB".into());
-        desktop.viewport_w = Some(1920.0);
-        desktop.viewport_h = Some(1080.0);
-        desktop.screen_w = Some(2560.0);
-        desktop.screen_h = Some(1440.0);
-        desktop.dpr = Some(2.0);
-        desktop.battery_level = None;
-        desktop.charging = None;
-        // A Monday morning at a desk: nothing about the situation agrees.
-        let monday_desk = encode(
-            FRIDAY + 3 * 86_400 - 8 * 3600,
-            Some("alice"),
-            &desktop,
-            &weights(),
-        );
-
+    fn the_situation_is_the_whole_vector() {
+        // Two numbers were needed while one block dominated the full cosine and
+        // was sliced off the gate. With that block gone there is one number:
+        // what ranks in the store is what `strong_at` and `weak_at` read.
+        let friday_phone = encode(FRIDAY, &phone(), &weights());
+        let monday_desk = encode(FRIDAY + 3 * 86_400 - 8 * 3600, &desktop(), &weights());
+        let full = crate::vector::cosine(&friday_phone, &monday_desk);
+        let scored = context_score(&friday_phone, &monday_desk);
         assert!(
-            crate::vector::cosine(&friday_phone, &monday_desk) > 0.9,
-            "scope alone carries it, which is the problem being solved"
+            (full - scored).abs() < 1e-6,
+            "the rank and the rung read the same evidence: {full} against {scored}"
         );
-        let s = context_score(&friday_phone, &monday_desk);
-        assert!(s < 0.4, "and the situation does not agree at all, got {s}");
+        assert!(
+            scored < 0.4,
+            "a Monday at a desk does not resemble a Friday on a phone, got {scored}"
+        );
     }
 
     #[test]
     fn the_reason_names_the_blocks_that_decided_it() {
-        let a = encode(FRIDAY, Some("alice"), &phone(), &weights());
+        let a = encode(FRIDAY, &phone(), &weights());
         let c = contributions(&a, &a, &weights());
-        assert!(
-            !c.iter().any(|(n, _)| *n == "who"),
-            "scope explains nothing"
-        );
-        assert_eq!(c.len(), BLOCKS.len() - 1);
+        assert_eq!(c.len(), BLOCKS.len());
         for pair in c.windows(2) {
             assert!(
                 pair[0].1 >= pair[1].1,
@@ -863,7 +833,7 @@ mod tests {
         // filled; the weekday and the hour still stand.
         let b = parse_bundle("}{ not json");
         assert!(b.tz.is_none());
-        let v = encode(FRIDAY, Some("alice"), &b, &weights());
+        let v = encode(FRIDAY, &b, &weights());
         assert_eq!(v.len(), CTX_DIM);
         assert!(norm(slice_of(&v, "weekday")) > 0.0);
     }
@@ -962,7 +932,7 @@ mod tests {
             tz: Some("Europe/Berlin".into()),
             ..Default::default()
         };
-        let v = encode(FRIDAY_1352_UTC, Some("alice"), &bare, &w);
+        let v = encode(FRIDAY_1352_UTC, &bare, &w);
         let named = contributions(&v, &v, &w);
         // Every block is still in the list — the `<details>` pane is where
         // exactness lives — but the ones the browser said nothing about are
@@ -970,7 +940,7 @@ mod tests {
         // `device`, `network` and `language` are not among them: their last
         // slot means "nothing identifying was sent", which is a state that
         // recurs and not an absence.
-        assert_eq!(named.len(), BLOCKS.len() - 1, "{named:?}");
+        assert_eq!(named.len(), BLOCKS.len(), "{named:?}");
         let spoken: Vec<&str> = named
             .iter()
             .filter(|(_, c)| *c > 0.0)

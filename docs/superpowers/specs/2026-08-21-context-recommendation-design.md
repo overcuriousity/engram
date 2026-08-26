@@ -9,6 +9,20 @@ Adds one named vector to the collection, two tables, one endpoint, and no model
 call anywhere.
 See §11 for what it is not allowed to break.
 
+> **Amended 2026-08-26: the `scope` block is gone.** §6 called it an interim
+> measure that would go to 0 once each user had their own collection, and
+> `2026-08-24-multi-user-tenancy-design.md` gave them one. It was removed rather
+> than zeroed, because a weight of 0 leaves the dimensions and the reasoning in
+> place: the layout is ten blocks and 45 dimensions, `encode` takes no `scope`
+> argument, and `context_score` is the cosine over the whole vector rather than
+> over everything after the block. The rung thresholds are unchanged — the gate
+> never read the block that went. Isolation is the exact cut in `Core::offer`,
+> which §11 already named as the thing that guarantees it. The changed width
+> means an existing collection needs `--reindex` before it will accept the new
+> vectors; that copies the dense vectors and re-embeds nothing. Read §6 and §11
+> below as the record of why the block existed, not as a description of the
+> code.
+
 ## 1. Why
 
 The area under the search box is empty, and the base knows something that could
@@ -231,7 +245,6 @@ operator can change.
 
 | Block | Encoding | Dims | Default weight |
 |---|---|---|---|
-| `scope` | one-hot | ~8 | 10.0 |
 | `time_of_day` | circular, `sin`/`cos` of the hour angle | 2 | 1.0 |
 | `weekday` | one-hot | 7 | 1.0 |
 | `weekend` | weekday / weekend | 2 | 0.3 |
@@ -243,14 +256,13 @@ operator can change.
 | `environment` | colour scheme, touch, orientation, audio outputs | 5 | 0.2 |
 | `month_cycle` | circular over the month | 2 | 0.0 (off) |
 
-Roughly 55 dimensions.
+Roughly 45 dimensions.
 
-`scope` at weight 10 is an interim measure. Today every scope shares one
-collection, and a point's multivector mixes the clusters of everyone who opened
-that artifact; a payload filter cannot help, because it acts on the point and
-not on elements of the set. A dominating `scope` block means a foreign cluster
-can never win `max_sim`. When each user gets their own collection, the weight
-goes to 0 and nothing else changes.
+*As shipped, this table also carried a `scope` block: a pseudo-random direction
+per subject over ~8 dimensions at weight 10, so that a foreign cluster could
+never win `max_sim` while every subject shared one collection and a payload
+filter — which acts on the point, not on elements of the set — could not make
+the cut. It was removed on 2026-08-26; see the amendment at the top.*
 
 Two rules that are easy to get wrong:
 
@@ -480,9 +492,10 @@ which must fall to `resurface` and say so.
   surface and disappears the moment a query exists. Nothing here moves a hit's
   position in a result list, which is why it does not wait on the harness.
 - **Read-time cost.** One vector query, no embedding, no model call.
-- **`scope` isolation.** Until per-user collections exist, the `scope` block's
-  weight is what keeps one person's clusters from being offered to another. It
-  is load-bearing and needs a test.
+- **`scope` isolation.** One person's clusters must never be offered to
+  another, and it needs a test. *As shipped this was two things, the block's
+  weight and the exact cut in `Core::offer`; only the exact cut remains, which
+  was always the guarantee — a near-orthogonal direction is a probability.*
 - **The reason must match the hit.** If the local recomputation and the store
   disagree, the line explains a different artifact than the one shown. Test 3.
 
@@ -507,4 +520,4 @@ sweep reading older rows.
 - *Conjunctions across scopes.* The vector can hold them; nothing yet learns
   which ones matter.
 - *Dropping the `scope` block.* It goes when each user has their own
-  collection, not before.
+  collection, not before. **Done, 2026-08-26** — see the amendment at the top.

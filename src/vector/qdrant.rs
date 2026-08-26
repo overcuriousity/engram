@@ -222,7 +222,7 @@ fn collection_body(dim: usize) -> Value {
                 "distance": "Cosine",
                 "multivector_config": { "comparator": "max_sim" },
                 // No index, an exact scan. The candidates are only artifacts
-                // ever opened, at 53 dimensions, and an HNSW graph would be
+                // ever opened, at 45 dimensions, and an HNSW graph would be
                 // rebuilt on every sweep write to beat a scan it cannot beat at
                 // that size.
                 "hnsw_config": { "m": 0 },
@@ -2047,7 +2047,7 @@ mod tests {
         );
         // No HNSW, an exact scan. Right here rather than thrifty: the
         // candidates are only artifacts ever opened — hundreds to a few
-        // thousand at 53 dimensions — and an index would be rebuilt on every
+        // thousand at 45 dimensions — and an index would be rebuilt on every
         // sweep write to beat a scan it cannot beat at that size.
         assert_eq!(body["vectors"][CTX]["hnsw_config"]["m"], 0);
         // And nothing else moved.

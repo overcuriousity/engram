@@ -12,12 +12,11 @@
 use crate::core::Core;
 use crate::core::context::{Bundle, context_score, contributions, encode};
 use crate::error::Result;
-use crate::vector::cosine;
 
 /// How many artifacts the store is asked for.
 ///
 /// Ten. Every one of them has its clusters reloaded and rescored locally, at
-/// most five clusters of 53 dimensions apiece — a few thousand multiplications,
+/// most five clusters of 45 dimensions apiece — a few thousand multiplications,
 /// which is free next to the round trip that fetched them.
 pub const CANDIDATES: usize = 10;
 
@@ -119,7 +118,7 @@ impl Core {
             return Ok(None);
         }
         let now_at = self.clock.now();
-        let now = encode(now_at, scope, bundle, &self.recommend.weights);
+        let now = encode(now_at, bundle, &self.recommend.weights);
 
         // Superseded and deprecated are out, by `must_not` — the same rule
         // search obeys, and for the same reason a hand-written point carrying
@@ -139,19 +138,17 @@ impl Core {
         let ids: Vec<String> = hits.iter().map(|h| h.payload.artifact_id.clone()).collect();
         let clusters = self.store.context_clusters_of(&ids).await?;
 
-        // Ranked by the **full** vector — that is what reproduces the store's
-        // choice, because that is what `max_sim` scored. The rung comes from
-        // `context_score`, which slices the `scope` block off: the two numbers
-        // answer different questions and live on different scales.
+        // Ranked by `context_score`, which is the whole vector — the same
+        // number `max_sim` scored in the store, so this reproduces its choice
+        // rather than re-deciding it. It was two numbers while a `scope` block
+        // dominated the ranking at weight 10 and was sliced off the gate; with
+        // that block gone the rank and the rung read the same evidence.
         //
-        // Every candidate, in that order, and not only the argmax. The two
-        // numbers disagreeing is not an edge case here — `scope` is weighted
-        // 10 against a total under 5, so it dominates the ranking and barely
-        // participates in the gate. A thin cluster could take the top of the
-        // list on the strength of the block the gate does not read, fail the
-        // gate on the blocks it does, and drop the whole page to a random card
-        // while an established Friday-afternoon pattern sat second and would
-        // have passed. The first candidate that clears its rung is the offer.
+        // Still every candidate in that order rather than the argmax alone: the
+        // rung also turns on `firm_at`, so the closest situation can be a
+        // cluster seen twice that fails `strong_at` while an established
+        // Friday-afternoon pattern sits second and would pass. The first
+        // candidate that clears its rung is the offer.
         let mut ranked: Vec<(
             &crate::vector::SearchHit,
             &crate::store::context::StoredCluster,
@@ -162,18 +159,19 @@ impl Core {
                 continue;
             };
             for c in mine {
-                // Exact, not probabilistic. The `scope` block keeps a foreign
-                // cluster from ranking first in the store, but it is a
-                // direction in 53 dimensions and two of them are only ever
-                // *near*-orthogonal — and isolation must not be a probability.
-                // A cluster belongs to whoever opened the artifact, and this
-                // reads only the ones that belong to the caller.
+                // Exact, and now the only cut there is. A `scope` block in the
+                // vector used to keep a foreign cluster from ranking first,
+                // but a near-orthogonal direction is a probability and
+                // isolation must not be one — so this check was always the
+                // guarantee and the block was never more than a nudge in front
+                // of it. A cluster belongs to whoever opened the artifact, and
+                // this reads only the ones that belong to the caller.
                 //
-                // This is also why the multivector's own `scope` block cannot
-                // be the guarantee: a payload filter acts on the point, not on
-                // elements of the set, so Qdrant cannot make this cut. Loading
-                // the clusters is what makes it available, and the read path
-                // loads them anyway to produce the reason.
+                // Qdrant cannot make the cut for us: a payload filter acts on
+                // the point, not on elements of the set, and the `ctx`
+                // multivector is one array shared by everyone who opened this
+                // artifact. Loading the clusters is what makes it available,
+                // and the read path loads them anyway to produce the reason.
                 if c.scope.as_deref() != scope {
                     continue;
                 }
@@ -187,16 +185,15 @@ impl Core {
                 {
                     continue;
                 }
-                ranked.push((hit, c, cosine(&now, &c.centroid)));
+                ranked.push((hit, c, context_score(&now, &c.centroid)));
             }
         }
-        // Descending, and stable underneath: two clusters on the same full
-        // cosine keep the store's own order rather than swapping between page
-        // views.
+        // Descending, and stable underneath: two clusters on the same score
+        // keep the store's own order rather than swapping between page views.
         ranked.sort_by(|a, b| b.2.total_cmp(&a.2));
 
-        for (hit, cluster, _) in &ranked {
-            let score = context_score(&now, &cluster.centroid);
+        for (hit, cluster, score) in &ranked {
+            let score = *score;
             // Established, or seen only once or twice. A thin cluster has to
             // match the situation *better* before anything is said, which is
             // what keeps a single accident from being offered as if it meant
@@ -509,7 +506,7 @@ mod tests {
         weight: f64,
         events: i64,
     ) {
-        let v = encode(at, Some(scope), b, &core.recommend.weights);
+        let v = encode(at, b, &core.recommend.weights);
         core.store
             .replace_context_clusters(
                 aid,
@@ -713,7 +710,7 @@ mod tests {
         )
         .await;
 
-        let now = encode(FRIDAY, Some("alice"), &phone(), &core.recommend.weights);
+        let now = encode(FRIDAY, &phone(), &core.recommend.weights);
         let from_store = core
             .vectors
             .context_query(&now, CANDIDATES, &Default::default())
@@ -787,11 +784,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_foreign_scope_is_cut_exactly_rather_than_out_scored() {
-        // The `scope` block keeps a foreign cluster from ranking first in the
-        // store, but it is a direction in 53 dimensions and two of them are
-        // only ever near-orthogonal. What makes isolation exact is that the
-        // read path loads the clusters — which it does anyway, to produce the
-        // reason — and reads only the ones belonging to the caller.
+        // Nothing in the vector says whose situation it is, and nothing ever
+        // should have: a `scope` block kept a foreign cluster from ranking
+        // first in the store, but it was a direction two of which are only
+        // ever near-orthogonal, and isolation must not be a probability. What
+        // makes it exact is that the read path loads the clusters — which it
+        // does anyway, to produce the reason — and reads only the ones
+        // belonging to the caller.
         //
         // So: bob has learned nothing, and alice's cluster is the *only* thing
         // in the index. The store therefore returns it however anyone scores,
@@ -800,7 +799,7 @@ mod tests {
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
 
-        let now = encode(FRIDAY, Some("bob"), &phone(), &core.recommend.weights);
+        let now = encode(FRIDAY, &phone(), &core.recommend.weights);
         let from_store = core
             .vectors
             .context_query(&now, CANDIDATES, &Default::default())
@@ -1107,12 +1106,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_candidate_that_fails_its_rung_does_not_take_the_others_down_with_it() {
-        // The ladder reads two numbers that are not the same number. The full
-        // cosine ranks — it is what `max_sim` scored — and `context_score`,
-        // which slices `scope` off, decides the rung. `scope` is weighted 10
-        // against a block total under 5, so it dominates the first and barely
-        // enters the second, and the two can disagree about which candidate is
-        // best.
+        // The rung is not the ranking. One number orders the candidates, and
+        // `firm_at` decides which threshold each of them has to clear: a
+        // cluster seen once needs a *strong* match where an established one
+        // needs only a resemblance. So the closest situation can be the one
+        // that fails.
         //
         // This used to be an argmax and a single gate: whichever cluster won
         // the ranking was the only one ever tested, and if it failed, the page
@@ -1120,39 +1118,30 @@ mod tests {
         // second that would have passed. A pattern replaced by a card claiming
         // nothing is the worst rung the ladder can produce.
         let core = core_at(FRIDAY).await;
-        let now = encode(
-            FRIDAY,
-            Some("alice"),
-            &Bundle::default(),
-            &core.recommend.weights,
-        );
-        let dims = crate::core::context::SCOPE_DIMS;
+        let now = encode(FRIDAY, &Bundle::default(), &core.recommend.weights);
 
-        // Thin, and nothing outside `scope`. It takes the top of the ranking on
-        // the strength of the block the gate does not read, and scores 0 on the
-        // blocks it does — so `Tentative`, which needs a *strong* match, is
-        // refused.
-        let mut thin = vec![0.0; now.len()];
-        thin[..dims].copy_from_slice(&now[..dims]);
-
-        // Established, and a real half-match on the blocks that decide the
-        // rung: `Similar` at `weak_at`. Its extra length outside `scope` costs
-        // it the ranking against the candidate that has none.
-        let rest = &now[dims..];
-        let norm = rest.iter().map(|v| v * v).sum::<f32>().sqrt();
-        // The device block, which an empty bundle leaves at zero — so this is a
-        // direction the current situation has nothing in.
+        // A direction the present situation has nothing in, so a candidate can
+        // be placed at a chosen angle to it. An empty bundle reports no
+        // viewport at all, which leaves that block at zero.
         let free = crate::core::context::BLOCKS
             .iter()
-            .find(|b| b.name == "device")
+            .find(|b| b.name == "viewport")
             .unwrap()
             .at;
-        let mut firm = vec![0.0; now.len()];
-        firm[..dims].copy_from_slice(&now[..dims]);
-        for i in dims..now.len() {
-            firm[i] = now[i] / norm;
-        }
-        firm[free] += 3f32.sqrt();
+        // `cos(t) * now_hat + sin(t) * e` scores exactly `cos(t)` against
+        // `now`, because `e` is orthogonal to it.
+        let at_score = |target: f32| {
+            let n = now.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let mut v: Vec<f32> = now.iter().map(|x| x / n * target).collect();
+            v[free] += (1.0 - target * target).sqrt();
+            v
+        };
+
+        // Seen once, and the closest match there is — but a thin cluster has to
+        // clear `strong_at` to be offered at all, and this does not.
+        let thin = at_score(0.65);
+        // Established, and further away. `weak_at` is all it has to clear.
+        let firm = at_score(0.55);
 
         let a = seed_artifact(&core, "a coincidence").await;
         let b = seed_artifact(&core, "recycling centre").await;
@@ -1163,12 +1152,13 @@ mod tests {
         // one that clears a rung. Asserted rather than assumed — if the
         // encoder's weights move, this test must fail loudly rather than pass
         // for a reason it was not written for.
+        let thin_score = context_score(&now, &thin);
+        let firm_score = context_score(&now, &firm);
         assert!(
-            cosine(&now, &thin) > cosine(&now, &firm),
+            thin_score > firm_score,
             "the thin cluster no longer wins the ranking"
         );
-        assert!(context_score(&now, &thin) < core.recommend.strong_at);
-        let firm_score = context_score(&now, &firm);
+        assert!(thin_score < core.recommend.strong_at);
         assert!(
             firm_score >= core.recommend.weak_at && firm_score < core.recommend.strong_at,
             "the firm cluster is not a Similar: {firm_score}"
