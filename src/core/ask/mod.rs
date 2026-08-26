@@ -534,6 +534,7 @@ impl Core {
                     // Whether ask reranks is the scope's decision, not this
                     // call's: nobody is typing here.
                     rerank: true,
+                    explain: false,
                 },
                 None,
                 // Deliberately not captured: the right answer to a question is

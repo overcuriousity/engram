@@ -48,6 +48,13 @@ pub struct SearchQuery {
     /// that reorders the rail.
     #[serde(default = "default_rerank")]
     pub rerank: bool,
+    /// Render the ranking explanation. Off by default: the object is computed
+    /// on every search either way, and this decides only whether a door says
+    /// any of it out loud. Making the computation conditional would be a
+    /// second path through the ranking stages, and the unexercised one is the
+    /// one that ships.
+    #[serde(default)]
+    pub explain: bool,
 }
 
 fn default_rerank() -> bool {
@@ -1533,6 +1540,7 @@ mod tests {
             // MCP make; the incremental case is exercised explicitly below.
             mark: true,
             rerank: true,
+            explain: false,
             include_deprecated: false,
             include_superseded: false,
         }
@@ -2120,6 +2128,42 @@ mod tests {
             ids(cap_per_corpus(with_merge, 2, 4).0),
             vec!["a1", "a2", "b1", "b2"],
             "a displaced hit must not spend a slot in a corpus it did not enter"
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_for_an_explanation_does_not_change_the_order() {
+        // The whole of what this branch promises not to break.
+        let core = test_core().await;
+        seed(
+            &core,
+            &[
+                ("mounting an image", "procedure", &[]),
+                ("mounting a share", "procedure", &[]),
+                ("unmounting cleanly", "procedure", &[]),
+            ],
+        )
+        .await;
+
+        let plain = core.search(&q("mount"), Door::Ui).await.unwrap();
+        let explained = core
+            .search(
+                &SearchQuery {
+                    explain: true,
+                    ..q("mount")
+                },
+                Door::Ui,
+            )
+            .await
+            .unwrap();
+
+        let ids = |v: &[SearchResult]| -> Vec<String> {
+            v.iter().map(|r| r.artifact_id.clone()).collect()
+        };
+        assert_eq!(
+            ids(&plain),
+            ids(&explained),
+            "an explanation is an observation, never a stage"
         );
     }
 

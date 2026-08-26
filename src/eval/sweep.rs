@@ -118,6 +118,7 @@ async fn rank_of(core: &Core, pair: &Pair, params: RankingParams) -> Result<Opti
         // The sweep measures the pipeline as configured, reranker included;
         // the scope alone decides whether one runs.
         rerank: true,
+        explain: false,
         include_deprecated: false,
         include_superseded: false,
     };
@@ -380,6 +381,7 @@ mod tests {
             include_deprecated: false,
             include_superseded: false,
             rerank: true,
+            explain: false,
         };
         core.search_with_ranking(&q, params, Door::Judge)
             .await

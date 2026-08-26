@@ -746,6 +746,7 @@ async fn search(
         // at vector-order speed. An explicit `rerank` still overrides either
         // way.
         rerank: q.rerank.unwrap_or(!typing),
+        explain: false,
     };
     // Coalescing folds a keystroke into the query it was an early spelling of,
     // and it folds only within one scope — so a box that types has to say who

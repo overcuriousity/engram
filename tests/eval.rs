@@ -127,6 +127,7 @@ async fn evaluate_retrieval() {
             // The harness measures the configured pipeline; with no reranker
             // wired this is inert either way.
             rerank: true,
+            explain: false,
         };
         let (results, _) = core
             .search_with(&q, cap, engram::store::feedback::Door::Ui)
@@ -532,6 +533,8 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         )),
         tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         weak_below: 0.0,
+        recency_half_life_days: 180,
+        pinned_boost: 0.15,
         learn: engram::config::LearnConfig { enabled: false },
         feedback: engram::config::FeedbackConfig::default(),
         capture: engram::config::CaptureConfig::default(),
@@ -565,6 +568,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         include_deprecated: false,
         include_superseded: false,
         rerank: true,
+        explain: false,
     };
     let (results, _) = core
         .search_with(&q, None, engram::store::feedback::Door::Judge)

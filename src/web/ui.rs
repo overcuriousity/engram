@@ -1199,6 +1199,7 @@ pub(crate) async fn search_results(
                 include_deprecated: false,
                 include_superseded: false,
                 rerank: p.rerank,
+                explain: false,
             },
             cap,
             // Scoped to the operator, because coalescing folds a keystroke into
@@ -3718,6 +3719,7 @@ mod tests {
                     include_deprecated: false,
                     include_superseded: false,
                     rerank: true,
+                    explain: false,
                 },
                 crate::store::feedback::Door::Ui,
             )

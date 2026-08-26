@@ -454,6 +454,7 @@ impl PkdbTools {
             include_deprecated: false,
             include_superseded: false,
             rerank: true,
+            explain: false,
         };
         let core = match self.source.core().await {
             Ok(c) => c,
@@ -846,6 +847,7 @@ mod tests {
                         include_deprecated: false,
                         include_superseded: false,
                         rerank: true,
+                        explain: false,
                     },
                     crate::store::feedback::Door::Ui,
                 )
