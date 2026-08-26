@@ -38,7 +38,10 @@ as a paste the operator approves; one bounded round of planned retrieval behind
 `[infer.ask] plan`, fanning out to a search per uncovered subject; named model
 tiers, so a role picks a model by what the call is worth; judged questions with
 a second harness — citation recall, abstention, faithfulness by literals and by
-claim check; knowledge gaps grouped and named on the capture page; a
+claim check; knowledge gaps grouped and named on the capture page, the fifth
+kind of them the subjects a plan named and the base could not cover; what a
+hit's document does next, said on the rail and read in the pane, which appends
+the passages that follow one click at a time; a
 recommendation under the search box, learned from the situations an artifact
 was opened in — the browser's time zone and local time, the device, the
 viewport, the network and the power state, clustered per artifact and stored as
@@ -261,15 +264,28 @@ the write-time half of the same question and carries an instrument of its own.
   commit of its own carrying both numbers in its message. It moves that way or
   it does not move.
 
-- **Dropping the `scope` block.** At weight 10 against a total under 5, that
-  block is what keeps one person's situations from being ranked first for
-  another. The read path cuts foreign clusters exactly, so the block is a
-  ranking aid rather than the guarantee — but it stays until each user has their
-  own collection.
-  **Worth:** none for a single operator. It is a correctness item for the day
-  tenancy exists, and nothing else about the encoder changes with it.
-  **Cost:** one weight to 0. **One commit**, blocked on **Multi-user tenancy**
-  below.
+- **Dropping the `scope` block.** *(unblocked)* At weight 10 against a total
+  under 5, that block is what kept one person's situations from being ranked
+  first for another while everyone shared a collection. Everyone no longer does:
+  each user has their own database and their own Qdrant collection, and the read
+  path cuts foreign clusters exactly on top of that (`recommend.rs:177`), which
+  was always the guarantee. Inside one collection every cluster now carries the
+  same subject, so the block is a constant: the same direction of magnitude 10
+  in every stored vector and in the query, ordering nothing and — under
+  cosine — compressing the differences the seven blocks that *do* describe the
+  situation are able to make. `context_score` already slices it off, so the
+  gate never read it; only the ranking still carries it.
+  **Worth:** the full cosine stops being dominated by a block that decides
+  nothing, so the two numbers behind an offer are read on the same evidence.
+  Small in itself, and the honest precondition for fitting weights to history —
+  a fit over a mostly-constant block is a fit over noise.
+  **Cost:** not one weight after all. The weights are the encoder version
+  (`core::context::encoder_version`), so changing one retires every stored
+  cluster: they are skipped rather than explained with the wrong blocks, and the
+  offer falls to its `Random` floor until `jobs::context` has re-clustered. That
+  is correct behaviour and it is still a cost, and it argues for spending it
+  before the shown/clicked history is long enough to be worth keeping.
+  **One commit**, plus one sweep before the offer speaks again.
 
 - **Speculative synthesis.** Promotion is retrospective: a window is rewritten
   once its passages have earned it. The prospective half is to spend an idle
@@ -321,6 +337,21 @@ generation. And nothing is written to memory without a person: the
 keep-this-answer link prefills the capture box and saves nothing, so the trace
 records that a model wrote the text and what it was written from.
 
+Built: **the plan's uncovered subjects are gaps of their own**, a fifth
+`GapKind` beside the four the capture page already had. A subject whose fan-out
+search came back with every ranked candidate under `weak_below` is a hole the
+base named itself, for a question a person asked, out of a call that was
+already paid for. Weakness rather than emptiness, and deliberately the same
+threshold `Unmatched` reads — one definition of "nothing near this", at a
+second door. What makes it a kind rather than a second reading of `Unmatched`
+is the text: a subject a model named to describe a hole, where `Unmatched`
+carries a query somebody typed. Badged *planned*, and only at the web door,
+because a subject is derived from a question and `record_ask` already draws
+that line. Only the ranked hits are read — a neighbour reached sideways is
+structure, not a match. The cost was not the "one commit" this file estimated:
+it wanted a table, because planned rounds deliberately write nothing to the
+search log.
+
 Model tiers are built: named tiers under `[infer.tiers.*]`, each chat role
 pointing at one, resolved at parse time into the same concrete role structs the
 completers already took. The planning call runs on the efficient tier while the
@@ -329,17 +360,6 @@ too (`2026-08-17-ask-harness-design.md`): verdicts with carriers,
 `questions.json` in the export, `evaluate_ask` measuring citation recall,
 abstention accuracy and faithfulness by literals and by claim check, and
 "nothing here" surfaced as a knowledge gap.
-
-- **The plan's uncovered subjects are gap candidates.** When `[infer.ask] plan`
-  names the subjects the excerpts miss, it has said out loud what the base does
-  not hold, in the model's own words, one bounded round per question. Today each
-  becomes a search and is then thrown away. A subject whose fan-out search came
-  back with nothing is a knowledge gap that cost nothing to find.
-  **Worth:** gaps from a call already paid for, and the most specific ones on
-  the queue — a named subject beats "this search scored low".
-  **Cost:** keep what the plan already computed and write it as a fifth
-  `GapKind` (`src/store/gaps.rs:10`), with the same coverage and dismissal paths
-  the other four use. **One commit.**
 
 - **Whether the planning call earns itself, and whether packing to the cliff
   helps with no reranker configured.** A search's own fused scores are smooth
@@ -375,19 +395,29 @@ abstention accuracy and faithfulness by literals and by claim check, and
 What ask learns at write time, search inherits. Ask verdicts join judged
 searches as access cues under **access reconsolidation** above. The cliff is
 built (`search::cliff`, `src/core/search.rs:256`) and ask packs to it. The items
-here are search's own, and all but the first move ranking.
+here are search's own, and every one of them moves ranking.
 
-- **Continues in.** A hit whose neighbour in its corpus (adjacent ordinal) is
-  also above the cliff says so, and one click reads on. The answer to a
-  situation is often the paragraph after the one that matched. Most of the
-  machinery arrived with ask's sideways reach: `Store::adjacent_artifacts`
-  exists (`src/store/artifacts.rs:660`), and `ask/retrieve.rs` already decides
-  which hits are reliable enough to reach from. What is left is the presentation
-  — saying so on the rail, and the click.
-  **Worth:** the paragraph after the match stops being something the operator
-  has to go and find. Highest worth-per-line in this section, and the only item
-  here that needs no measurement.
-  **Cost:** a badge on the rail and a route behind the click. **One commit.**
+Built: **continues in**, and it turned out to be two things rather than one. On
+the rail a hit says what its document does next — *continues in #2* where the
+next passage itself placed, *continues in the next passage* where it did not,
+never both. In the pane the document actually continues: opening a passage
+appends the one after it, and a control appends the next as often as it is
+clicked, until the document ends and the control becomes the way into the
+document. The source column grows with the run, recomputed rather than
+appended so the lines between two adjacent passages are not printed twice.
+
+Two things it did not become. Not an inline expansion on the rail — the rail is
+a `listbox` whose rows are options, and a disclosure inside an option breaks
+the arrow keys as well as the ARIA. And not a semantic chain: adjacent passages
+are additionally similar through their shared heading (see **Server-side
+grouping** below), so such a chain ends where the formatting changes rather
+than where the meaning does, and a pane whose length is a computed judgement
+cannot tell the reader whether it stopped because the document ended or because
+a number was not met. The run length rides in the link, so the reader is the
+stopping rule. Cross-corpus was considered and belongs elsewhere: `ordinal` is
+a per-corpus sequence, so there is no reading order to continue into, and what
+a near artifact in another document is — a neighbour — the pane already shows
+as *Related* and *Seen together*.
 
 - **Server-side grouping — a prerequisite, not a nice-to-have.** The per-corpus
   cap is applied client-side over a candidate pool three times the limit; a
@@ -514,6 +544,23 @@ keep in step — and every one of the three exits re-enables through the one
 `stop()` the stream already funnelled them into, including the transport error
 that would otherwise have left the page disabled for good.
 
+Built: **multi-user tenancy**, and not in the shape this file predicted (spec
+`2026-08-24-multi-user-tenancy-design.md`). It was listed here as
+de-prioritised and payload-partitioned; it shipped as a database and a Qdrant
+collection per user, with the job queue and one worker pool staying
+instance-wide. The split follows what is actually scarce: files and collections
+are cheap and get divided, the embed and synthesize endpoints are one GPU and
+stay shared, and the queue is where the two planes meet, which is why the
+tenant lives in the queue rather than in a registry beside it. Isolation is
+structural — there is no tenant filter to forget, because no tenant filter
+exists. Identity comes with it: the provider is the gate, and the local account
+store engram used to keep for a single operator is gone.
+
+Two items above are downstream of that. **Dropping the `scope` block** is
+unblocked and now has a cost worth naming. **OAuth 2.1 for `/mcp`** stopped
+being administrative — with a collection per user, a bearer token is what
+decides whose base a call reads.
+
 - **One dial instead of eight gates.** Three are gone: `[learn]` is now the
   single switch over recording, association and pursuits, and the sections below
   it keep their thresholds and no switch of their own. What is left is the half
@@ -573,18 +620,15 @@ that would otherwise have left the page disabled for good.
   **Cost:** a snapshot call, a file copy, a restore path that checks the two
   agree. **A branch.**
 
-- **OAuth 2.1 for `/mcp`.** OIDC login for the web UI is built; the MCP surface
-  still authenticates on its own terms.
-  **Worth:** one identity model instead of two — and `/mcp` is about to become
-  the door that teaches the base, which makes "who is this" load-bearing rather
-  than administrative.
+- **OAuth 2.1 for `/mcp`.** The web UI's identity is the provider's now, and
+  the local one it used to keep is gone. `/mcp` still authenticates on its own
+  terms: a bearer token, checked against `api_tokens`, with nothing but the
+  protected-resource host taken from the OIDC config.
+  **Worth:** one identity model instead of two, and it is no longer only
+  administrative. With a database and a collection per user, a token is what
+  decides *whose* base a call reads — an answer the web door now gets from the
+  provider and the MCP door still gets from a row.
   **Cost:** the MCP surface moved onto the existing OIDC path. **A branch.**
-
-- **Multi-user tenancy.** *(de-prioritised)* Payload-partitioned rather than a
-  collection per user. Single-operator use is the design point.
-  **Worth:** none for the design point. It unblocks **Dropping the `scope`
-  block** and nothing else.
-  **Cost:** **a project**, and it stays de-prioritised.
 
 - `clippy` is not run locally in every environment; CI is the only gate.
 

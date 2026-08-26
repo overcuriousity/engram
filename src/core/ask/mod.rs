@@ -26,6 +26,14 @@ pub struct AskRequest {
 
 /// What one retrieval round produced.
 struct Round {
+    /// The query this round ran. Round one carries the question as it was
+    /// asked; a planned round carries the subject the model named.
+    ///
+    /// Held on the round rather than zipped alongside it, because `fan_out`
+    /// drops a round that failed — a list of queries and a list of rounds stop
+    /// lining up the moment one endpoint times out, and the thing that would
+    /// then be mislabelled is a claim about what the base does not hold.
+    query: String,
     /// Above the cliff, with whatever was reached sideways appended.
     hits: Vec<SearchResult>,
     /// How many of `hits` are ranked. Everything after them was reached.
@@ -160,7 +168,9 @@ impl Core {
                 // question that retrieved nothing.
                 yield AskEvent::Retrieved { round: 1, retrieved: 0, shown: 0, dropped: 0, cliff_at: None };
                 yield AskEvent::Citations(vec![]);
-                let response = core.record_ask(&req, &origin, response).await?;
+                // Nothing was planned — this returns before the plan runs — so
+                // there are no uncovered subjects to record.
+                let response = core.record_ask(&req, &origin, response, &[]).await?;
                 yield AskEvent::Done(Box::new(response));
                 return;
             }
@@ -202,7 +212,9 @@ impl Core {
                     cliff_at: first.cliff_at,
                 };
                 yield AskEvent::Citations(vec![]);
-                let response = core.record_ask(&req, &origin, response).await?;
+                // Nothing was planned — this returns before the plan runs — so
+                // there are no uncovered subjects to record.
+                let response = core.record_ask(&req, &origin, response, &[]).await?;
                 yield AskEvent::Done(Box::new(response));
                 return;
             }
@@ -229,6 +241,9 @@ impl Core {
             // `needed_queries` returns empty the moment no planning model is
             // wired, so with the feature off this costs one `Option` check and
             // no call at all.
+            // The subjects the plan named that nothing came back for. Empty
+            // with planning off, and empty when the plan named nothing.
+            let mut uncovered: Vec<String> = Vec::new();
             let queries = plan::needed_queries(&core, &req.q, &blocks[..kept]).await;
             if !queries.is_empty() {
                 yield AskEvent::Needs(queries.clone());
@@ -238,6 +253,10 @@ impl Core {
                 // charge the reader one embedding round trip per subject for no
                 // reason. `PLAN_MAX_QUERIES` caps the plan and so caps this.
                 let extra = core.fan_out(&req, &queries).await;
+                // Read before the rounds are merged away. A subject the base
+                // held nothing near is a hole it just named itself, and after
+                // the merge there is no round left to ask.
+                uncovered = plan::uncovered(&extra);
 
                 // Round one's hits are the first part, so round-robin starts
                 // with the question as it was actually asked.
@@ -411,7 +430,7 @@ impl Core {
             };
             // Recorded here rather than by either door, so one ask is one row
             // however it was asked. The harness reads these.
-            let response = core.record_ask(&req, &origin, response).await?;
+            let response = core.record_ask(&req, &origin, response, &uncovered).await?;
             yield AskEvent::Done(Box::new(response));
         }
     }
@@ -547,6 +566,7 @@ impl Core {
         self.reach_sideways(&mut hits, cliff_at).await;
 
         Ok(Round {
+            query: q.to_string(),
             hits,
             ranked,
             retrieved,
@@ -883,6 +903,7 @@ impl Core {
         req: &AskRequest,
         origin: &Origin,
         mut response: AskResponse,
+        uncovered: &[String],
     ) -> Result<AskResponse> {
         if !(self.learn.enabled && origin.door == Door::Ui) {
             return Ok(response);
@@ -932,7 +953,31 @@ impl Core {
                 .collect(),
         );
         match self.store.record_ask(ask).await {
-            Ok(id) => response.event_id = Some(id),
+            Ok(id) => {
+                // The subjects the plan named and the base could not cover,
+                // written as gaps of their own. They hang off the question,
+                // so this runs only where the question was recorded — the
+                // same door, in the same breath, and never for an ask whose
+                // insert failed and has no row to hang from.
+                //
+                // The vector costs nothing: the fan-out embedded each subject
+                // in order to search for it, and the query cache still holds
+                // what it embedded. A subject whose vector has fallen out of
+                // the cache is stored without one and skipped by every reader
+                // here — the fact that it was named is still worth more than
+                // the row is worth refusing.
+                for subject in uncovered {
+                    let vec = self.cached_query_vector(subject).unwrap_or_default();
+                    if let Err(e) = self
+                        .store
+                        .record_uncovered_subject(&id, subject, &vec, self.embedder.model())
+                        .await
+                    {
+                        tracing::warn!(error = %e, subject, "could not record an uncovered subject");
+                    }
+                }
+                response.event_id = Some(id);
+            }
             Err(e) => tracing::warn!(error = %e, "could not record the question"),
         }
         Ok(response)
@@ -1189,6 +1234,57 @@ mod tests {
             model.calls(),
             1,
             "a plan that plans again is a third round waiting to happen"
+        );
+    }
+
+    /// The plan says out loud what the base does not hold, in the model's own
+    /// words, for a question a person asked in earnest — and the call was
+    /// already paid for. The subject that came back with nothing becomes a gap
+    /// rather than being discarded with the round.
+    #[tokio::test]
+    async fn a_planned_subject_the_base_could_not_cover_becomes_a_gap() {
+        let (mut core, _) = core_with_planner(Some(r#"{"need": ["mounting an E01"]}"#)).await;
+        core.learn.enabled = true;
+        // A base where nothing matches closely. Cosine tops out at 1, so every
+        // candidate is under this — which is the situation the kind exists for,
+        // stated as a threshold rather than hoped for from a fake embedder.
+        core.weak_below = 1.0;
+        core.ask(&req("chunk"), Door::Ui.by("me")).await.unwrap();
+
+        let gaps = core
+            .store
+            .open_gap_refs(core.embedder.model(), core.weak_below)
+            .await
+            .unwrap();
+        let subjects: Vec<&str> = gaps
+            .iter()
+            .filter(|g| g.kind == crate::store::gaps::GapKind::Subject)
+            .map(|g| g.text.as_str())
+            .collect();
+        assert_eq!(subjects, vec!["mounting an E01"]);
+    }
+
+    /// The same rule `record_ask` already draws, and for the same reason: a
+    /// subject is derived from a question, a question is personal data of the
+    /// same kind as a query, and API and MCP callers asked for the smallest
+    /// footprint. The bump rides with the recording rather than around it.
+    #[tokio::test]
+    async fn the_api_door_names_no_subjects() {
+        let (mut core, _) = core_with_planner(Some(r#"{"need": ["mounting an E01"]}"#)).await;
+        core.learn.enabled = true;
+        core.weak_below = 1.0;
+        core.ask(&req("chunk"), Door::Api).await.unwrap();
+
+        let gaps = core
+            .store
+            .open_gap_refs(core.embedder.model(), core.weak_below)
+            .await
+            .unwrap();
+        assert!(
+            !gaps
+                .iter()
+                .any(|g| g.kind == crate::store::gaps::GapKind::Subject),
+            "a door that records no question recorded what its plan named"
         );
     }
 

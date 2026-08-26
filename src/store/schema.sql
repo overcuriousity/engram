@@ -379,6 +379,38 @@ CREATE TABLE IF NOT EXISTS ask_citations (
   PRIMARY KEY (event_id, n)
 );
 
+-- A subject the answer's excerpts did not cover, named by the planning call and
+-- then found by nothing.
+--
+-- `[infer.ask] plan` asks the model once, after the first round, which subjects
+-- the excerpts miss; each becomes a search of its own. A subject whose search
+-- came back with every candidate under `vector.weak_below` is a hole in the
+-- base stated in the model's own words, for a question a person actually asked
+-- — and it cost nothing to find, because the planning call was already paid
+-- for. Only the uncovered ones are written; a subject the fan-out answered is
+-- not a gap and leaves no row.
+--
+-- A child of its question rather than a row of its own kind. It is a fact about
+-- one ask: the ask going takes it, because a subject naming a plan whose
+-- question no longer exists says nothing anybody can act on.
+--
+-- `query_vec` costs no embedding call. The fan-out already embedded this
+-- subject to search for it, so the vector is read back out of the query cache
+-- at write time.
+CREATE TABLE IF NOT EXISTS ask_subjects (
+  id           TEXT PRIMARY KEY,
+  event_id     TEXT NOT NULL REFERENCES ask_events(id) ON DELETE CASCADE,
+  subject      TEXT NOT NULL,
+  query_vec    BLOB NOT NULL,
+  vec_dim      INTEGER NOT NULL,
+  embed_model  TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  -- Set when the operator says this subject has since been covered.
+  dismissed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ask_subjects_open
+  ON ask_subjects(dismissed_at, created_at DESC);
+
 -- ── Knowledge gaps ───────────────────────────────────────────────────────────
 -- Unanswered questions and gap searches, grouped by their stored vectors and
 -- named once. Membership is identity: a group whose members change is a new

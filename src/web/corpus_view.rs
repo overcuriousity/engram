@@ -32,7 +32,34 @@ pub struct CorpusSlice {
 
 /// The lines of `source` around `span`, labelled for the pane. Without a span
 /// the opening of the source is shown as context.
+///
+/// One span through `slice_over`, so the single-passage pane and the appended
+/// run cannot drift apart: there is one definition of what a slice is and this
+/// is the narrow way into it.
 pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
+    match span {
+        Some(sp) => slice_over(source, std::slice::from_ref(sp), context),
+        None => slice_over(source, &[], context),
+    }
+}
+
+/// The lines of `source` covering a *run* of spans, labelled for the pane.
+///
+/// The detail pane appends the passages that follow the one it opened on, and
+/// the source column beside them has to grow in step. Recomputed over the whole
+/// run rather than appended a slice at a time: every slice carries context lines
+/// at both edges, so appending would print the lines between two adjacent
+/// passages twice — on the column whose whole job is to show what the text was
+/// drawn from.
+///
+/// `in_span` is true for a line inside *any* of the spans. What falls between
+/// two of them is context, and is marked as such: a run that stepped over a
+/// superseded row has a hole in it, and claiming those lines were read would be
+/// the one dishonesty this column must not commit.
+///
+/// An empty run is the headless case — no span, so the opening of the source
+/// stands as context.
+pub fn slice_over(source: &Corpus, spans: &[CorpusSpan], context: usize) -> CorpusSlice {
     // An image corpus's lines are the model's reading of the picture, and a
     // PDF's are docling's extraction of it. The label says so in both cases: a
     // span into either is a claim about what was written down, not about what
@@ -45,7 +72,10 @@ pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> Corp
     let all: Vec<&str> = source.raw_text.lines().collect();
     let total = all.len() as i64;
 
-    let Some(span) = span else {
+    let (Some(first), Some(last)) = (
+        spans.iter().map(|s| s.start_line).min(),
+        spans.iter().map(|s| s.end_line).max(),
+    ) else {
         return CorpusSlice {
             lines: all
                 .iter()
@@ -61,35 +91,35 @@ pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> Corp
         };
     };
 
-    let start = (span.start_line - context as i64).max(1);
-    let end = (span.end_line + context as i64).min(total);
+    let start = (first - context as i64).max(1);
+    let end = (last + context as i64).min(total);
     let lines = (start..=end)
         .filter_map(|n| {
             all.get((n - 1) as usize).map(|t| CorpusLine {
                 number: n,
                 text: (*t).to_string(),
-                in_span: n >= span.start_line && n <= span.end_line,
+                in_span: spans.iter().any(|s| n >= s.start_line && n <= s.end_line),
             })
         })
         .collect();
 
     CorpusSlice {
         lines,
-        // Singular when the span is one line. "lines 576–576" is a range with
+        // Singular when the run covers one line. "lines 576–576" is a range with
         // one thing in it, and a pane that says it has not checked what it is
         // about to claim.
-        label: if span.start_line == span.end_line {
+        label: if first == last {
             format!(
                 "{}line {}",
                 written_down.map(|w| format!("{w} ")).unwrap_or_default(),
-                span.start_line
+                first
             )
         } else {
             format!(
                 "{}lines {}–{}",
                 written_down.map(|w| format!("{w} ")).unwrap_or_default(),
-                span.start_line,
-                span.end_line
+                first,
+                last
             )
         },
     }
@@ -344,6 +374,71 @@ mod tests {
             .map(|l| l.number)
             .collect();
         assert_eq!(marked, vec![3, 4]);
+    }
+
+    /// The pane appends the passages that follow, and the source column beside
+    /// it has to grow with them. Recomputed over the whole run rather than
+    /// appended: each slice carries context lines at both edges, so appending
+    /// would print the lines between two adjacent passages twice.
+    #[tokio::test]
+    async fn a_run_of_spans_is_one_slice_with_no_line_printed_twice() {
+        let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8").await;
+        // Adjacent passages: 2–3 and 4–5. With one line of context each, the
+        // two single slices would both carry line 3 and line 4.
+        let slice = slice_over(&src, &[span(2, 3), span(4, 5)], 1);
+
+        let numbers: Vec<i64> = slice.lines.iter().map(|l| l.number).collect();
+        assert_eq!(numbers, vec![1, 2, 3, 4, 5, 6], "a line came back twice");
+    }
+
+    /// Every line the run was written from is the claim; the lines around it
+    /// are context. A gap between two passages — a superseded row stepped over
+    /// — is context too, and must not be marked as though something on screen
+    /// was drawn from it.
+    #[tokio::test]
+    async fn a_run_marks_every_span_and_nothing_between_them() {
+        let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8").await;
+        let slice = slice_over(&src, &[span(2, 2), span(5, 6)], 1);
+
+        let marked: Vec<i64> = slice
+            .lines
+            .iter()
+            .filter(|l| l.in_span)
+            .map(|l| l.number)
+            .collect();
+        assert_eq!(marked, vec![2, 5, 6]);
+    }
+
+    /// The label names what is on screen. Over a run that is the union, and
+    /// saying only the first passage's range would describe a column the reader
+    /// can see is longer than that.
+    #[tokio::test]
+    async fn a_run_is_labelled_with_the_range_it_covers() {
+        let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8").await;
+        let slice = slice_over(&src, &[span(2, 3), span(4, 5)], 1);
+        assert_eq!(slice.label, "lines 2–5");
+    }
+
+    /// One span through the run-aware path is the single-passage pane, which is
+    /// every pane before the reader has appended anything. It must not drift
+    /// from what `slice` produces.
+    #[tokio::test]
+    async fn one_span_over_the_run_is_what_the_single_slice_already_was() {
+        let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6").await;
+        let one = slice(&src, Some(&span(3, 4)), 1);
+        let run = slice_over(&src, &[span(3, 4)], 1);
+
+        assert_eq!(run.label, one.label);
+        assert_eq!(
+            run.lines
+                .iter()
+                .map(|l| (l.number, l.in_span))
+                .collect::<Vec<_>>(),
+            one.lines
+                .iter()
+                .map(|l| (l.number, l.in_span))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

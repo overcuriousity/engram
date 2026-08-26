@@ -62,6 +62,50 @@ pub struct RenderedResult {
     pub origin_count: usize,
     /// The judge's line, where the link was judged.
     pub reason: Option<String>,
+    /// The document goes on past this passage, and what comes next did not
+    /// place in this list. The answer to a question is often the paragraph
+    /// after the one that matched, and the row says so rather than leaving the
+    /// reader to go and find out.
+    ///
+    /// False where the continuation *did* place: it is already on the page,
+    /// and `continues_in` names where.
+    pub continues: bool,
+    /// The rank of the next passage, where that passage is itself in this list
+    /// — `#2`, as the row beside it is labelled. Empty otherwise, including
+    /// when the next passage placed as something with no rank of its own.
+    pub continues_in: String,
+}
+
+/// One appended passage: the next thing in the document, and nothing more.
+///
+/// Deliberately thinner than the artifact above it. No verify, no hide, no
+/// delete — those act on *an* artifact, and the one the reader opened is the
+/// one at the top. A run item carries the way to make itself that artifact
+/// instead, which is an ordinary link to its own pane.
+#[derive(Clone)]
+pub struct RunItem {
+    pub id: String,
+    /// Empty where the passage has no title of its own, exactly as on the rail.
+    pub title: String,
+    /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
+    pub html: String,
+    /// Its place in the document, which is the one thing it can honestly say
+    /// about why it is on screen.
+    pub ordinal: i64,
+}
+
+/// The control at the foot of the run.
+#[derive(Clone, Default)]
+pub struct RunMore {
+    pub artifact_id: String,
+    /// Where to send a reader who wants the document rather than another
+    /// passage. Empty for an artifact that belongs to no document.
+    pub corpus_id: String,
+    /// The length of the run one more click would produce. `None` at the end of
+    /// the document, which is a state the pane renders rather than a control
+    /// that comes back empty.
+    pub next: Option<usize>,
+    pub terms: String,
 }
 
 #[derive(Default)]
@@ -182,6 +226,18 @@ pub struct ArtifactDetail {
     /// with the rest of the sentence visible in the column beside it and no
     /// way onward is.
     pub continues_at: Option<String>,
+    /// The passages that follow this one in its document, in reading order.
+    ///
+    /// One when the pane opens, and one more each time the reader asks. They
+    /// are not results and never claim to be: nothing ranked them, and what
+    /// they say about themselves is only that they came next.
+    pub run: Vec<RunItem>,
+    /// The control under the run: what to ask for next, or the way into the
+    /// document when there is nothing left to append.
+    pub more: RunMore,
+    /// The source block is rendered out of band when it arrives as part of an
+    /// append, and in place when the pane is drawn whole.
+    pub source_oob: bool,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
     pub slice_lines: Vec<crate::web::corpus_view::CorpusLine>,
@@ -455,6 +511,9 @@ pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
             GapKind::Ask => "asked",
             GapKind::Unmatched => "nothing near",
             GapKind::Pursuit => "pursued",
+            // What asked it, like the other four — and here what asked was the
+            // planning call, on a question somebody put to the base.
+            GapKind::Subject => "planned",
         },
         id: g.id,
         text: g.text,
@@ -655,6 +714,12 @@ struct ArtifactFragment {
 #[derive(Template)]
 #[template(path = "_artifact_detail.html")]
 struct ArtifactDetailFragment {
+    d: ArtifactDetail,
+}
+
+#[derive(Template)]
+#[template(path = "_run_append.html")]
+struct RunAppendFragment {
     d: ArtifactDetail,
 }
 
@@ -1152,11 +1217,36 @@ pub(crate) async fn search_results(
     // and the title is looked up among the ranked ones rather than fetched.
     let titles = ranked_titles(&hits);
     let (ranked, recalled): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| h.via.is_none());
-    let results: Vec<RenderedResult> = ranked
+    let mut results: Vec<RenderedResult> = ranked
         .into_iter()
         .enumerate()
         .map(|(i, h)| render_hit(i, h, &titles))
         .collect();
+    // What each hit's document does next, in one read for the whole list. Only
+    // over the ranked rows: an associated one is not an answer to the query,
+    // and telling the reader to read on from something the query never matched
+    // is an invitation into a document they did not ask about.
+    //
+    // Best-effort, exactly like the reach `ask` makes: a marker is a bonus, and
+    // failing to read one must not cost the results that were already found.
+    let next = match tenant
+        .core
+        .store
+        .continuations_of(
+            &results
+                .iter()
+                .map(|r| r.artifact_id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await
+    {
+        Ok(next) => next,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read what these hits continue into");
+            Default::default()
+        }
+    };
+    mark_continuations(&mut results, &next);
     let associated: Vec<RenderedResult> = recalled
         .into_iter()
         .map(|h| render_hit(0, h, &titles))
@@ -1233,6 +1323,49 @@ pub(crate) fn render_hit(
         reason: h.reason.clone(),
         model_written: h.model_written,
         origin_count: h.origin_count,
+        // Filled by `mark_continuations` over the finished list: whether a
+        // passage's continuation is *on the page* is a fact about the list, not
+        // about the hit, and one row cannot answer it.
+        continues: false,
+        continues_in: String::new(),
+    }
+}
+
+/// Say, on each row, what its document does next.
+///
+/// `next` maps an artifact to the passage that follows it — `Store::
+/// continuations_of`, one read for the whole list. Two outcomes, and they are
+/// deliberately exclusive: a continuation that *placed* is named by its rank,
+/// because the row is already on the page and offering to fetch it would claim
+/// two things are there when one is; a continuation that did not place is
+/// announced as such, and the pane is where it gets read.
+///
+/// A row with no rank is not a destination. Associated rows and weak ones carry
+/// no rank by design, and `setzt sich fort in` followed by nothing is worse
+/// than the marker's absence — so such a continuation falls back to the plain
+/// announcement, which is still true.
+pub(crate) fn mark_continuations(
+    results: &mut [RenderedResult],
+    next: &std::collections::HashMap<String, String>,
+) {
+    let ranks: std::collections::HashMap<&str, &str> = results
+        .iter()
+        .filter(|r| !r.rank.is_empty())
+        .map(|r| (r.artifact_id.as_str(), r.rank.as_str()))
+        .collect();
+    let marks: Vec<(bool, String)> = results
+        .iter()
+        .map(|r| match next.get(&r.artifact_id) {
+            None => (false, String::new()),
+            Some(n) => match ranks.get(n.as_str()) {
+                Some(rank) => (false, (*rank).to_string()),
+                None => (true, String::new()),
+            },
+        })
+        .collect();
+    for (r, (continues, continues_in)) in results.iter_mut().zip(marks) {
+        r.continues = continues;
+        r.continues_in = continues_in;
     }
 }
 
@@ -1812,7 +1945,11 @@ async fn put_artifact(
         .enqueue(crate::store::jobs::Stage::Embed, "artifact", &cid)
         .await?;
     if f.view == "detail" {
-        let d = build_artifact_detail(&tenant.core, &cid, &f.terms).await?;
+        // Back to one appended passage. The run's length lives in the link the
+        // reader last clicked, and a save posts a form rather than that link —
+        // carrying it would mean threading a count through every control on
+        // the pane to preserve something one click restores.
+        let d = build_artifact_detail(&tenant.core, &cid, &f.terms, 1).await?;
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     let c = tenant.core.store.get_artifact(&cid).await?;
@@ -2323,7 +2460,9 @@ async fn artifact_changed(
     back: &ReturnTo,
 ) -> Result<Response> {
     if headers.contains_key("hx-request") {
-        let d = build_artifact_detail(&tenant.core, aid, terms).await?;
+        // As above: an action on the artifact redraws the pane at its opening
+        // length rather than reconstructing a run nobody passed along.
+        let d = build_artifact_detail(&tenant.core, aid, terms, 1).await?;
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(Redirect::to(back.path()).into_response())
@@ -2547,6 +2686,7 @@ pub(crate) async fn build_artifact_detail(
     core: &crate::core::Core,
     artifact_id: &str,
     terms: &str,
+    run_len: usize,
 ) -> Result<ArtifactDetail> {
     let c = core.store.get_artifact(artifact_id).await?;
     let html = artifact_html(&c);
@@ -2558,10 +2698,53 @@ pub(crate) async fn build_artifact_detail(
         Some(id) => Some(core.store.get_corpus(id).await?),
         None => None,
     };
+    // The passages that follow, in reading order. Best-effort like every other
+    // addition to this pane: a run that cannot be read is a pane without one,
+    // never a pane that refuses to show the artifact beside its source.
+    let following = match (&c.corpus_id, run_len) {
+        (Some(cid), n) if n > 0 => core
+            .store
+            .following_artifacts(cid, c.ordinal, n as i64)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(artifact_id, error = %e, "could not read on from this passage");
+                vec![]
+            }),
+        _ => vec![],
+    };
+    // The source column is the claim about where the text on screen came from,
+    // so it covers the whole run. `slice_over` recomputes rather than appends,
+    // which is what keeps the lines between two adjacent passages from being
+    // printed twice.
+    let spans: Vec<crate::store::artifacts::CorpusSpan> = std::iter::once(&c)
+        .chain(following.iter())
+        .filter_map(|a| a.corpus_span.clone())
+        .collect();
     let slice = match &src {
-        Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
+        Some(s) => crate::web::corpus_view::slice_over(s, &spans, 3),
         None => crate::web::corpus_view::CorpusSlice::default(),
     };
+    // Asked for one more than is on screen, which is how the end of the
+    // document is discovered without a second query: a run that came back
+    // shorter than it was asked for has nothing after it.
+    let more = RunMore {
+        artifact_id: c.id.clone(),
+        corpus_id: c.corpus_id.clone().unwrap_or_default(),
+        next: match (&c.corpus_id, following.len() >= run_len) {
+            (Some(_), true) => Some(run_len + 1),
+            _ => None,
+        },
+        terms: terms.to_string(),
+    };
+    let run: Vec<RunItem> = following
+        .iter()
+        .map(|a| RunItem {
+            id: a.id.clone(),
+            title: a.title.clone().unwrap_or_default(),
+            html: artifact_html(a),
+            ordinal: a.ordinal,
+        })
+        .collect();
     // A missing lineage is not a missing pane, for the same reason a missing
     // neighbour list is not: it is a layer over the artifact, and the artifact
     // beside its source is what the page is for.
@@ -2686,6 +2869,11 @@ pub(crate) async fn build_artifact_detail(
     let title = artifact_title(&c);
     Ok(ArtifactDetail {
         continues_at,
+        run,
+        more,
+        // Drawn in place: this is the whole pane, not a piece arriving to be
+        // slotted into one.
+        source_oob: false,
         related,
         seen_together,
         orphaned_source,
@@ -2739,6 +2927,52 @@ struct ArtifactViewParams {
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
 /// wants a page with navigation around it.
+/// How long a run one click asks for. The whole of the state, and it rides in
+/// the link rather than sitting on the server: two clicks cannot append the
+/// same passage twice, and a reload cannot resume a run nobody is in.
+#[derive(serde::Deserialize)]
+struct RunParams {
+    n: usize,
+    #[serde(default)]
+    terms: String,
+}
+
+/// One more passage of the document, and the source column re-drawn around the
+/// longer run.
+///
+/// Built through `build_artifact_detail` rather than beside it, so there is one
+/// account of what a run is and what the source column says about it. Only the
+/// last item is sent: everything before it is already on the page, and sending
+/// the whole run again would stack it under itself.
+///
+/// A run asked past the end of the document appends nothing and answers with
+/// the end state, which is the same answer the pane would have drawn — the
+/// reader learns the document ended rather than clicking into silence.
+async fn artifact_run(
+    tenant: Tenant,
+    Path(aid): Path<String>,
+    Query(p): Query<RunParams>,
+) -> Result<Response> {
+    // At least one, so `n - 1` below cannot wrap and a hand-written `?n=0`
+    // asks for the opening state rather than for something meaningless.
+    let n = p.n.max(1);
+    let mut d = build_artifact_detail(&tenant.core, &aid, &p.terms, n).await?;
+    // Only what is new. `split_off` at the last index leaves either one item —
+    // the passage this click asked for — or none, which is what the end of a
+    // document looks like from here.
+    d.run = if n <= 1 {
+        // The opening passage is already on the pane: a run of one has nothing
+        // new in it, and appending it would stack the passage under itself.
+        vec![]
+    } else if d.run.len() >= n {
+        d.run.split_off(n - 1)
+    } else {
+        vec![]
+    };
+    d.source_oob = true;
+    Ok(HtmlTemplate(RunAppendFragment { d }).into_response())
+}
+
 async fn artifact_detail(
     tenant: Tenant,
     identity: crate::auth::Identity,
@@ -2746,7 +2980,10 @@ async fn artifact_detail(
     Path(cid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
 ) -> Result<Response> {
-    let d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
+    // One appended passage when the pane opens. The reader asked for an
+    // artifact and gets it plus the beginning of the answer to "and then?";
+    // everything past that is theirs to ask for.
+    let d = build_artifact_detail(&tenant.core, &cid, &p.terms, 1).await?;
     // Opening a chunk is the deliberate act that counts as remembering it.
     tenant.core.mark_artifact_seen(&cid);
     // And the act the pursuit sweep reads: opened, or pivoted through — unless
@@ -2913,6 +3150,7 @@ pub fn ui_router() -> Router<AppState> {
             post(unpromote_ui),
         )
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
+        .route("/ui/artifacts/{id}/run", get(artifact_run))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route(
             "/ui/artifacts/{id}/links/{other}/dismiss",
@@ -3521,7 +3759,7 @@ mod tests {
         .await
         .unwrap();
 
-        let d = build_artifact_detail(&core, &m.id, "").await.unwrap();
+        let d = build_artifact_detail(&core, &m.id, "", 1).await.unwrap();
 
         assert_eq!(d.corpus_id, None, "a merged artifact claimed a corpus");
         assert!(
@@ -3551,7 +3789,7 @@ mod tests {
         let core = crate::core::test_support::test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(&core, &[("a text", [1.0, 0.0])]).await;
 
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
 
         assert!(d.lineage.is_empty());
         assert!(!d.merged);
@@ -3588,7 +3826,7 @@ mod tests {
             core.store.delete_artifact(id).await.unwrap();
         }
 
-        let d = build_artifact_detail(&core, &m.id, "").await.unwrap();
+        let d = build_artifact_detail(&core, &m.id, "", 1).await.unwrap();
 
         assert!(
             d.lineage.roots.is_empty(),
@@ -3616,7 +3854,7 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let d = match super::build_artifact_detail(&core, &c.id, "").await {
+        let d = match super::build_artifact_detail(&core, &c.id, "", 1).await {
             Ok(d) => d,
             Err(e) => panic!("detail view failed: {e}"),
         };
@@ -3660,7 +3898,7 @@ mod tests {
         assert!(all.len() > 1, "the fixture produced one passage, not two");
 
         let first = all.iter().min_by_key(|c| c.ordinal).unwrap();
-        let d = super::build_artifact_detail(&core, &first.id, "")
+        let d = super::build_artifact_detail(&core, &first.id, "", 1)
             .await
             .unwrap();
         assert!(
@@ -3670,7 +3908,7 @@ mod tests {
         );
 
         let last = all.iter().max_by_key(|c| c.ordinal).unwrap();
-        let d = super::build_artifact_detail(&core, &last.id, "")
+        let d = super::build_artifact_detail(&core, &last.id, "", 1)
             .await
             .unwrap();
         assert!(
@@ -3692,7 +3930,7 @@ mod tests {
             .remove(0);
         core.delete_corpus(&out.id).await.unwrap();
 
-        match super::build_artifact_detail(&core, &c.id, "").await {
+        match super::build_artifact_detail(&core, &c.id, "", 1).await {
             Err(crate::error::Error::NotFound) => {}
             Err(e) => panic!("expected a not-found, got {e}"),
             Ok(_) => panic!("a chunk whose source was deleted must not resolve"),
@@ -5675,7 +5913,7 @@ mod tests {
             "a neighbour list needs something to be a neighbour of"
         );
 
-        let d = super::build_artifact_detail(&core, &artifacts[0].id, "")
+        let d = super::build_artifact_detail(&core, &artifacts[0].id, "", 1)
             .await
             .unwrap();
         assert!(!d.related.is_empty(), "the pane listed no neighbours");
@@ -5703,7 +5941,7 @@ mod tests {
             .await
             .unwrap();
 
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
         assert_eq!(d.seen_together.len(), 1);
         assert_eq!(d.seen_together[0].id, ids[1]);
         assert_eq!(
@@ -5733,7 +5971,7 @@ mod tests {
             .await
             .unwrap();
 
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
         assert_eq!(
             d.seen_together[0].why.as_deref(),
             Some("the tool and the error it prints")
@@ -5772,7 +6010,7 @@ mod tests {
             "the evidence was thrown away with the decision"
         );
         assert!(
-            build_artifact_detail(&core, &ids[0], "")
+            build_artifact_detail(&core, &ids[0], "", 1)
                 .await
                 .unwrap()
                 .seen_together
@@ -5791,7 +6029,7 @@ mod tests {
             .execute(&core.store.pool)
             .await
             .unwrap();
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
         assert!(d.seen_together.is_empty());
     }
 
@@ -5839,7 +6077,7 @@ mod tests {
             .await
             .unwrap();
 
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
         let same = d
             .seen_together
             .iter()
@@ -6024,7 +6262,7 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let d = super::build_artifact_detail(&core, &c.id, "")
+        let d = super::build_artifact_detail(&core, &c.id, "", 1)
             .await
             .unwrap();
         assert!(d.related.is_empty());
@@ -6122,10 +6360,236 @@ mod tests {
         // The detail pane renders the same artifact and has to say the same
         // thing about it: it is the half of the search page that shows a
         // passage in full.
-        let d = super::build_artifact_detail(&core, &p[0].id, "")
+        let d = super::build_artifact_detail(&core, &p[0].id, "", 1)
             .await
             .unwrap();
         assert!(d.html.contains("<pre"), "{}", d.html);
+    }
+
+    /// The id of the first passage of the seeded corpus, in reading order.
+    #[cfg(test)]
+    async fn first_passage(app: &axum::Router, cookie: &str) -> String {
+        let rail = get(app, "/ui/search/results?q=alpha", cookie).await;
+        rail.split(r#"hx-get="/ui/artifacts/"#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
+            .expect("no result to open")
+            .to_string()
+    }
+
+    /// Opening a passage shows what comes next, once. The reader asked for one
+    /// artifact and gets it plus the beginning of the answer to "and then?";
+    /// everything beyond that is theirs to ask for.
+    #[tokio::test]
+    async fn opening_a_passage_appends_the_one_that_follows_it() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        let page = flat(&get(&app, &format!("/ui/artifacts/{id}"), &cookie).await);
+        assert_eq!(
+            page.matches("run-item").count(),
+            1,
+            "the pane opened with something other than one appended passage: {page}"
+        );
+    }
+
+    /// The control carries the length of the run it would produce, so clicking
+    /// it twice cannot append the same passage twice — the count is the whole
+    /// of the state, and it lives in the link rather than on the server.
+    #[tokio::test]
+    async fn the_run_control_asks_for_one_more_than_is_on_screen() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        let page = flat(&get(&app, &format!("/ui/artifacts/{id}"), &cookie).await);
+        assert!(
+            page.contains(&format!("/ui/artifacts/{id}/run?n=2")),
+            "the control does not ask for the second passage: {page}"
+        );
+    }
+
+    /// Clicking it appends the next one and nothing else, and the control that
+    /// comes back asks for the one after that.
+    #[tokio::test]
+    async fn asking_for_more_appends_the_next_passage() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        let frag = flat(&get(&app, &format!("/ui/artifacts/{id}/run?n=2"), &cookie).await);
+        assert_eq!(
+            frag.matches("run-item").count(),
+            1,
+            "a click must append one passage, not the whole run again: {frag}"
+        );
+        assert!(
+            frag.contains(&format!("/ui/artifacts/{id}/run?n=3")),
+            "the returned control does not move on: {frag}"
+        );
+    }
+
+    /// The end of the document is a state the pane renders, not a control that
+    /// returns nothing. What stands there instead is the way into the document
+    /// itself.
+    #[tokio::test]
+    async fn at_the_end_of_the_document_the_control_becomes_the_way_in() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        // Far past the end of a three-passage document.
+        let frag = flat(&get(&app, &format!("/ui/artifacts/{id}/run?n=99"), &cookie).await);
+        assert!(
+            !frag.contains("/run?n="),
+            "the document ended and the control still offered more: {frag}"
+        );
+        assert!(
+            frag.contains("/ui/corpora/"),
+            "nothing offered the document itself: {frag}"
+        );
+    }
+
+    /// The source column is the claim about where the text came from, so it has
+    /// to grow with the run rather than keep describing the first passage
+    /// alone.
+    #[tokio::test]
+    async fn the_source_column_grows_with_the_run() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        let frag = flat(&get(&app, &format!("/ui/artifacts/{id}/run?n=3"), &cookie).await);
+        assert!(
+            frag.contains(r#"id="source-lines" hx-swap-oob"#),
+            "the source column was not re-rendered with the run: {frag}"
+        );
+    }
+
+    /// A rail row reduced to what the continuation marker reads: which artifact
+    /// it is, and whether it carries a rank to be named by.
+    #[cfg(test)]
+    fn row(id: &str, rank: &str) -> RenderedResult {
+        RenderedResult {
+            artifact_id: id.into(),
+            title: String::new(),
+            html: String::new(),
+            snippet: String::new(),
+            category: None,
+            tags: vec![],
+            corpus_id: "s".into(),
+            rank: rank.into(),
+            weak: false,
+            primed: false,
+            in_sitting: false,
+            past_cliff: false,
+            via_title: None,
+            model_written: false,
+            origin_count: 0,
+            reason: None,
+            continues: false,
+            continues_in: String::new(),
+        }
+    }
+
+    /// The two markers are exclusive on the page as well as in the struct: a
+    /// row that names a rank must not also carry the offer to fetch, or the
+    /// rail says both "it is over there" and "there is more" about one thing.
+    #[test]
+    fn the_rail_prints_one_continuation_marker_or_the_other() {
+        let mut named = row("a", "#1");
+        named.continues_in = "#2".into();
+        let mut offered = row("b", "#2");
+        offered.continues = true;
+
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![named, offered],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            reranked: false,
+        })
+        .unwrap();
+
+        assert!(html.contains("continues in #2"), "{html}");
+        assert!(html.contains("continues in the next passage"), "{html}");
+        assert_eq!(
+            html.matches("rail-continues").count(),
+            2,
+            "one marker per row, and no row wearing both: {html}"
+        );
+    }
+
+    /// The silent case, and the one worth pinning: a row that continues nowhere
+    /// must print nothing at all. An empty marker element is a line of space
+    /// the reader reads as meaning something.
+    #[test]
+    fn a_row_that_continues_nowhere_prints_no_marker() {
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![row("a", "#1")],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            reranked: false,
+        })
+        .unwrap();
+
+        assert!(!html.contains("rail-continues"), "{html}");
+    }
+
+    /// A search result and its next passage both placed. The rail says so by
+    /// pointing at the rank the reader can already see, because the row is
+    /// there and sending them to a second copy of it would be a claim that two
+    /// things are on the page when one is.
+    #[test]
+    fn a_hit_whose_next_passage_also_placed_names_its_rank() {
+        let mut rows = vec![row("a", "#1"), row("b", "#2")];
+        let next = [("a".to_string(), "b".to_string())].into_iter().collect();
+        super::mark_continuations(&mut rows, &next);
+
+        assert_eq!(rows[0].continues_in, "#2");
+        assert!(
+            !rows[0].continues,
+            "a hit whose continuation is on the page must not also offer to fetch it"
+        );
+    }
+
+    /// The ordinary case: the document goes on, and what comes next did not
+    /// place. Nothing about it is on the page, so the row says the one true
+    /// thing — there is more — and the pane is where it gets read.
+    #[test]
+    fn a_hit_whose_next_passage_did_not_place_says_only_that_it_continues() {
+        let mut rows = vec![row("a", "#1")];
+        let next = [("a".to_string(), "elsewhere".to_string())]
+            .into_iter()
+            .collect();
+        super::mark_continuations(&mut rows, &next);
+
+        assert!(rows[0].continues);
+        assert!(rows[0].continues_in.is_empty());
+    }
+
+    /// The last passage of a document, and the case the whole marker must not
+    /// get wrong: an offer to read on where there is nothing to read.
+    #[test]
+    fn a_hit_at_the_end_of_its_document_is_marked_neither_way() {
+        let mut rows = vec![row("a", "#1")];
+        super::mark_continuations(&mut rows, &Default::default());
+
+        assert!(!rows[0].continues);
+        assert!(rows[0].continues_in.is_empty());
+    }
+
+    /// An associated row is not a ranked one and carries no rank. Naming it as
+    /// a destination would print "setzt sich fort in" followed by nothing.
+    #[test]
+    fn a_continuation_into_a_row_with_no_rank_is_not_named_by_rank() {
+        let mut rows = vec![row("a", "#1"), row("b", "")];
+        let next = [("a".to_string(), "b".to_string())].into_iter().collect();
+        super::mark_continuations(&mut rows, &next);
+
+        assert!(rows[0].continues_in.is_empty());
+        assert!(
+            rows[0].continues,
+            "the continuation exists and must still be offered"
+        );
     }
 
     #[test]
@@ -6191,6 +6655,8 @@ mod tests {
             reason: reason.map(str::to_string),
             model_written: false,
             origin_count: 0,
+            continues: false,
+            continues_in: String::new(),
         }
     }
 
@@ -6339,6 +6805,8 @@ mod tests {
             reason: None,
             model_written: false,
             origin_count: 0,
+            continues: false,
+            continues_in: String::new(),
         }
     }
 
