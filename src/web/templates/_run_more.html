@@ -1,0 +1,24 @@
+{# The foot of the run. Either the next passage is available and this asks for
+   it, or the document has ended and the honest thing left to offer is the
+   document.
+
+   `n` is the whole of the state and it lives in this link. The server keeps no
+   cursor, so two clicks cannot append the same passage twice and a reload
+   cannot resume a run nobody is in the middle of. #}
+<div id="run-more" class="run-more">
+  {% if let Some(n) = d.more.next %}
+  <button class="btn btn-ghost btn-sm" type="button"
+          hx-get="/ui/artifacts/{{ d.more.artifact_id }}/run?n={{ n }}&terms={{ d.more.terms|urlencode }}"
+          hx-target="#run-more" hx-swap="outerHTML"
+          hx-indicator="#run-more">
+    append next from corpus
+  </button>
+  {% else %}
+  <p class="run-end">
+    End of the document.
+    {% if !d.more.corpus_id.is_empty() %}
+    <a class="quiet-link" href="/ui/corpora/{{ d.more.corpus_id }}">Read it whole →</a>
+    {% endif %}
+  </p>
+  {% endif %}
+</div>

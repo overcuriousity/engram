@@ -76,6 +76,38 @@ pub struct RenderedResult {
     pub continues_in: String,
 }
 
+/// One appended passage: the next thing in the document, and nothing more.
+///
+/// Deliberately thinner than the artifact above it. No verify, no hide, no
+/// delete — those act on *an* artifact, and the one the reader opened is the
+/// one at the top. A run item carries the way to make itself that artifact
+/// instead, which is an ordinary link to its own pane.
+#[derive(Clone)]
+pub struct RunItem {
+    pub id: String,
+    /// Empty where the passage has no title of its own, exactly as on the rail.
+    pub title: String,
+    /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
+    pub html: String,
+    /// Its place in the document, which is the one thing it can honestly say
+    /// about why it is on screen.
+    pub ordinal: i64,
+}
+
+/// The control at the foot of the run.
+#[derive(Clone, Default)]
+pub struct RunMore {
+    pub artifact_id: String,
+    /// Where to send a reader who wants the document rather than another
+    /// passage. Empty for an artifact that belongs to no document.
+    pub corpus_id: String,
+    /// The length of the run one more click would produce. `None` at the end of
+    /// the document, which is a state the pane renders rather than a control
+    /// that comes back empty.
+    pub next: Option<usize>,
+    pub terms: String,
+}
+
 #[derive(Default)]
 pub struct QueueRow {
     pub id: String,
@@ -194,6 +226,18 @@ pub struct ArtifactDetail {
     /// with the rest of the sentence visible in the column beside it and no
     /// way onward is.
     pub continues_at: Option<String>,
+    /// The passages that follow this one in its document, in reading order.
+    ///
+    /// One when the pane opens, and one more each time the reader asks. They
+    /// are not results and never claim to be: nothing ranked them, and what
+    /// they say about themselves is only that they came next.
+    pub run: Vec<RunItem>,
+    /// The control under the run: what to ask for next, or the way into the
+    /// document when there is nothing left to append.
+    pub more: RunMore,
+    /// The source block is rendered out of band when it arrives as part of an
+    /// append, and in place when the pane is drawn whole.
+    pub source_oob: bool,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
     pub slice_lines: Vec<crate::web::corpus_view::CorpusLine>,
@@ -667,6 +711,12 @@ struct ArtifactFragment {
 #[derive(Template)]
 #[template(path = "_artifact_detail.html")]
 struct ArtifactDetailFragment {
+    d: ArtifactDetail,
+}
+
+#[derive(Template)]
+#[template(path = "_run_append.html")]
+struct RunAppendFragment {
     d: ArtifactDetail,
 }
 
@@ -1179,7 +1229,12 @@ pub(crate) async fn search_results(
     let next = match tenant
         .core
         .store
-        .continuations_of(&results.iter().map(|r| r.artifact_id.clone()).collect::<Vec<_>>())
+        .continuations_of(
+            &results
+                .iter()
+                .map(|r| r.artifact_id.clone())
+                .collect::<Vec<_>>(),
+        )
         .await
     {
         Ok(next) => next,
@@ -1887,7 +1942,11 @@ async fn put_artifact(
         .enqueue(crate::store::jobs::Stage::Embed, "artifact", &cid)
         .await?;
     if f.view == "detail" {
-        let d = build_artifact_detail(&tenant.core, &cid, &f.terms).await?;
+        // Back to one appended passage. The run's length lives in the link the
+        // reader last clicked, and a save posts a form rather than that link —
+        // carrying it would mean threading a count through every control on
+        // the pane to preserve something one click restores.
+        let d = build_artifact_detail(&tenant.core, &cid, &f.terms, 1).await?;
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     let c = tenant.core.store.get_artifact(&cid).await?;
@@ -2398,7 +2457,9 @@ async fn artifact_changed(
     back: &ReturnTo,
 ) -> Result<Response> {
     if headers.contains_key("hx-request") {
-        let d = build_artifact_detail(&tenant.core, aid, terms).await?;
+        // As above: an action on the artifact redraws the pane at its opening
+        // length rather than reconstructing a run nobody passed along.
+        let d = build_artifact_detail(&tenant.core, aid, terms, 1).await?;
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(Redirect::to(back.path()).into_response())
@@ -2622,6 +2683,7 @@ pub(crate) async fn build_artifact_detail(
     core: &crate::core::Core,
     artifact_id: &str,
     terms: &str,
+    run_len: usize,
 ) -> Result<ArtifactDetail> {
     let c = core.store.get_artifact(artifact_id).await?;
     let html = artifact_html(&c);
@@ -2633,10 +2695,53 @@ pub(crate) async fn build_artifact_detail(
         Some(id) => Some(core.store.get_corpus(id).await?),
         None => None,
     };
+    // The passages that follow, in reading order. Best-effort like every other
+    // addition to this pane: a run that cannot be read is a pane without one,
+    // never a pane that refuses to show the artifact beside its source.
+    let following = match (&c.corpus_id, run_len) {
+        (Some(cid), n) if n > 0 => core
+            .store
+            .following_artifacts(cid, c.ordinal, n as i64)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(artifact_id, error = %e, "could not read on from this passage");
+                vec![]
+            }),
+        _ => vec![],
+    };
+    // The source column is the claim about where the text on screen came from,
+    // so it covers the whole run. `slice_over` recomputes rather than appends,
+    // which is what keeps the lines between two adjacent passages from being
+    // printed twice.
+    let spans: Vec<crate::store::artifacts::CorpusSpan> = std::iter::once(&c)
+        .chain(following.iter())
+        .filter_map(|a| a.corpus_span.clone())
+        .collect();
     let slice = match &src {
-        Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
+        Some(s) => crate::web::corpus_view::slice_over(s, &spans, 3),
         None => crate::web::corpus_view::CorpusSlice::default(),
     };
+    // Asked for one more than is on screen, which is how the end of the
+    // document is discovered without a second query: a run that came back
+    // shorter than it was asked for has nothing after it.
+    let more = RunMore {
+        artifact_id: c.id.clone(),
+        corpus_id: c.corpus_id.clone().unwrap_or_default(),
+        next: match (&c.corpus_id, following.len() >= run_len) {
+            (Some(_), true) => Some(run_len + 1),
+            _ => None,
+        },
+        terms: terms.to_string(),
+    };
+    let run: Vec<RunItem> = following
+        .iter()
+        .map(|a| RunItem {
+            id: a.id.clone(),
+            title: a.title.clone().unwrap_or_default(),
+            html: artifact_html(a),
+            ordinal: a.ordinal,
+        })
+        .collect();
     // A missing lineage is not a missing pane, for the same reason a missing
     // neighbour list is not: it is a layer over the artifact, and the artifact
     // beside its source is what the page is for.
@@ -2761,6 +2866,11 @@ pub(crate) async fn build_artifact_detail(
     let title = artifact_title(&c);
     Ok(ArtifactDetail {
         continues_at,
+        run,
+        more,
+        // Drawn in place: this is the whole pane, not a piece arriving to be
+        // slotted into one.
+        source_oob: false,
         related,
         seen_together,
         orphaned_source,
@@ -2814,6 +2924,48 @@ struct ArtifactViewParams {
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
 /// wants a page with navigation around it.
+/// How long a run one click asks for. The whole of the state, and it rides in
+/// the link rather than sitting on the server: two clicks cannot append the
+/// same passage twice, and a reload cannot resume a run nobody is in.
+#[derive(serde::Deserialize)]
+struct RunParams {
+    n: usize,
+    #[serde(default)]
+    terms: String,
+}
+
+/// One more passage of the document, and the source column re-drawn around the
+/// longer run.
+///
+/// Built through `build_artifact_detail` rather than beside it, so there is one
+/// account of what a run is and what the source column says about it. Only the
+/// last item is sent: everything before it is already on the page, and sending
+/// the whole run again would stack it under itself.
+///
+/// A run asked past the end of the document appends nothing and answers with
+/// the end state, which is the same answer the pane would have drawn — the
+/// reader learns the document ended rather than clicking into silence.
+async fn artifact_run(
+    tenant: Tenant,
+    Path(aid): Path<String>,
+    Query(p): Query<RunParams>,
+) -> Result<Response> {
+    // At least one, so `n - 1` below cannot wrap and a hand-written `?n=0`
+    // asks for the opening state rather than for something meaningless.
+    let n = p.n.max(1);
+    let mut d = build_artifact_detail(&tenant.core, &aid, &p.terms, n).await?;
+    // Only what is new. `split_off` at the last index leaves either one item —
+    // the passage this click asked for — or none, which is what the end of a
+    // document looks like from here.
+    d.run = if d.run.len() >= n {
+        d.run.split_off(n - 1)
+    } else {
+        vec![]
+    };
+    d.source_oob = true;
+    Ok(HtmlTemplate(RunAppendFragment { d }).into_response())
+}
+
 async fn artifact_detail(
     tenant: Tenant,
     identity: crate::auth::Identity,
@@ -2821,7 +2973,10 @@ async fn artifact_detail(
     Path(cid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
 ) -> Result<Response> {
-    let d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
+    // One appended passage when the pane opens. The reader asked for an
+    // artifact and gets it plus the beginning of the answer to "and then?";
+    // everything past that is theirs to ask for.
+    let d = build_artifact_detail(&tenant.core, &cid, &p.terms, 1).await?;
     // Opening a chunk is the deliberate act that counts as remembering it.
     tenant.core.mark_artifact_seen(&cid);
     // And the act the pursuit sweep reads: opened, or pivoted through — unless
@@ -2988,6 +3143,7 @@ pub fn ui_router() -> Router<AppState> {
             post(unpromote_ui),
         )
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
+        .route("/ui/artifacts/{id}/run", get(artifact_run))
         .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route(
             "/ui/artifacts/{id}/links/{other}/dismiss",
@@ -3596,7 +3752,7 @@ mod tests {
         .await
         .unwrap();
 
-        let d = build_artifact_detail(&core, &m.id, "").await.unwrap();
+        let d = build_artifact_detail(&core, &m.id, "", 1).await.unwrap();
 
         assert_eq!(d.corpus_id, None, "a merged artifact claimed a corpus");
         assert!(
@@ -3626,7 +3782,7 @@ mod tests {
         let core = crate::core::test_support::test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(&core, &[("a text", [1.0, 0.0])]).await;
 
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
 
         assert!(d.lineage.is_empty());
         assert!(!d.merged);
@@ -3663,7 +3819,7 @@ mod tests {
             core.store.delete_artifact(id).await.unwrap();
         }
 
-        let d = build_artifact_detail(&core, &m.id, "").await.unwrap();
+        let d = build_artifact_detail(&core, &m.id, "", 1).await.unwrap();
 
         assert!(
             d.lineage.roots.is_empty(),
@@ -3691,7 +3847,7 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let d = match super::build_artifact_detail(&core, &c.id, "").await {
+        let d = match super::build_artifact_detail(&core, &c.id, "", 1).await {
             Ok(d) => d,
             Err(e) => panic!("detail view failed: {e}"),
         };
@@ -3735,7 +3891,7 @@ mod tests {
         assert!(all.len() > 1, "the fixture produced one passage, not two");
 
         let first = all.iter().min_by_key(|c| c.ordinal).unwrap();
-        let d = super::build_artifact_detail(&core, &first.id, "")
+        let d = super::build_artifact_detail(&core, &first.id, "", 1)
             .await
             .unwrap();
         assert!(
@@ -3745,7 +3901,7 @@ mod tests {
         );
 
         let last = all.iter().max_by_key(|c| c.ordinal).unwrap();
-        let d = super::build_artifact_detail(&core, &last.id, "")
+        let d = super::build_artifact_detail(&core, &last.id, "", 1)
             .await
             .unwrap();
         assert!(
@@ -3767,7 +3923,7 @@ mod tests {
             .remove(0);
         core.delete_corpus(&out.id).await.unwrap();
 
-        match super::build_artifact_detail(&core, &c.id, "").await {
+        match super::build_artifact_detail(&core, &c.id, "", 1).await {
             Err(crate::error::Error::NotFound) => {}
             Err(e) => panic!("expected a not-found, got {e}"),
             Ok(_) => panic!("a chunk whose source was deleted must not resolve"),
@@ -5750,7 +5906,7 @@ mod tests {
             "a neighbour list needs something to be a neighbour of"
         );
 
-        let d = super::build_artifact_detail(&core, &artifacts[0].id, "")
+        let d = super::build_artifact_detail(&core, &artifacts[0].id, "", 1)
             .await
             .unwrap();
         assert!(!d.related.is_empty(), "the pane listed no neighbours");
@@ -5778,7 +5934,7 @@ mod tests {
             .await
             .unwrap();
 
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
         assert_eq!(d.seen_together.len(), 1);
         assert_eq!(d.seen_together[0].id, ids[1]);
         assert_eq!(
@@ -5808,7 +5964,7 @@ mod tests {
             .await
             .unwrap();
 
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
         assert_eq!(
             d.seen_together[0].why.as_deref(),
             Some("the tool and the error it prints")
@@ -5847,7 +6003,7 @@ mod tests {
             "the evidence was thrown away with the decision"
         );
         assert!(
-            build_artifact_detail(&core, &ids[0], "")
+            build_artifact_detail(&core, &ids[0], "", 1)
                 .await
                 .unwrap()
                 .seen_together
@@ -5866,7 +6022,7 @@ mod tests {
             .execute(&core.store.pool)
             .await
             .unwrap();
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
         assert!(d.seen_together.is_empty());
     }
 
@@ -5914,7 +6070,7 @@ mod tests {
             .await
             .unwrap();
 
-        let d = build_artifact_detail(&core, &ids[0], "").await.unwrap();
+        let d = build_artifact_detail(&core, &ids[0], "", 1).await.unwrap();
         let same = d
             .seen_together
             .iter()
@@ -6099,7 +6255,7 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let d = super::build_artifact_detail(&core, &c.id, "")
+        let d = super::build_artifact_detail(&core, &c.id, "", 1)
             .await
             .unwrap();
         assert!(d.related.is_empty());
@@ -6197,10 +6353,107 @@ mod tests {
         // The detail pane renders the same artifact and has to say the same
         // thing about it: it is the half of the search page that shows a
         // passage in full.
-        let d = super::build_artifact_detail(&core, &p[0].id, "")
+        let d = super::build_artifact_detail(&core, &p[0].id, "", 1)
             .await
             .unwrap();
         assert!(d.html.contains("<pre"), "{}", d.html);
+    }
+
+    /// The id of the first passage of the seeded corpus, in reading order.
+    #[cfg(test)]
+    async fn first_passage(app: &axum::Router, cookie: &str) -> String {
+        let rail = get(app, "/ui/search/results?q=alpha", cookie).await;
+        rail.split(r#"hx-get="/ui/artifacts/"#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|s| s.split('?').next())
+            .expect("no result to open")
+            .to_string()
+    }
+
+    /// Opening a passage shows what comes next, once. The reader asked for one
+    /// artifact and gets it plus the beginning of the answer to "and then?";
+    /// everything beyond that is theirs to ask for.
+    #[tokio::test]
+    async fn opening_a_passage_appends_the_one_that_follows_it() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        let page = flat(&get(&app, &format!("/ui/artifacts/{id}"), &cookie).await);
+        assert_eq!(
+            page.matches("run-item").count(),
+            1,
+            "the pane opened with something other than one appended passage: {page}"
+        );
+    }
+
+    /// The control carries the length of the run it would produce, so clicking
+    /// it twice cannot append the same passage twice — the count is the whole
+    /// of the state, and it lives in the link rather than on the server.
+    #[tokio::test]
+    async fn the_run_control_asks_for_one_more_than_is_on_screen() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        let page = flat(&get(&app, &format!("/ui/artifacts/{id}"), &cookie).await);
+        assert!(
+            page.contains(&format!("/ui/artifacts/{id}/run?n=2")),
+            "the control does not ask for the second passage: {page}"
+        );
+    }
+
+    /// Clicking it appends the next one and nothing else, and the control that
+    /// comes back asks for the one after that.
+    #[tokio::test]
+    async fn asking_for_more_appends_the_next_passage() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        let frag = flat(&get(&app, &format!("/ui/artifacts/{id}/run?n=2"), &cookie).await);
+        assert_eq!(
+            frag.matches("run-item").count(),
+            1,
+            "a click must append one passage, not the whole run again: {frag}"
+        );
+        assert!(
+            frag.contains(&format!("/ui/artifacts/{id}/run?n=3")),
+            "the returned control does not move on: {frag}"
+        );
+    }
+
+    /// The end of the document is a state the pane renders, not a control that
+    /// returns nothing. What stands there instead is the way into the document
+    /// itself.
+    #[tokio::test]
+    async fn at_the_end_of_the_document_the_control_becomes_the_way_in() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        // Far past the end of a three-passage document.
+        let frag = flat(&get(&app, &format!("/ui/artifacts/{id}/run?n=99"), &cookie).await);
+        assert!(
+            !frag.contains("/run?n="),
+            "the document ended and the control still offered more: {frag}"
+        );
+        assert!(
+            frag.contains("/ui/corpora/"),
+            "nothing offered the document itself: {frag}"
+        );
+    }
+
+    /// The source column is the claim about where the text came from, so it has
+    /// to grow with the run rather than keep describing the first passage
+    /// alone.
+    #[tokio::test]
+    async fn the_source_column_grows_with_the_run() {
+        let (app, cookie) = app_with_embedded_corpus().await;
+        let id = first_passage(&app, &cookie).await;
+
+        let frag = flat(&get(&app, &format!("/ui/artifacts/{id}/run?n=3"), &cookie).await);
+        assert!(
+            frag.contains(r#"id="source-lines" hx-swap-oob"#),
+            "the source column was not re-rendered with the run: {frag}"
+        );
     }
 
     /// A rail row reduced to what the continuation marker reads: which artifact

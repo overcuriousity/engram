@@ -430,8 +430,14 @@ mod tests {
 
         assert_eq!(run.label, one.label);
         assert_eq!(
-            run.lines.iter().map(|l| (l.number, l.in_span)).collect::<Vec<_>>(),
-            one.lines.iter().map(|l| (l.number, l.in_span)).collect::<Vec<_>>()
+            run.lines
+                .iter()
+                .map(|l| (l.number, l.in_span))
+                .collect::<Vec<_>>(),
+            one.lines
+                .iter()
+                .map(|l| (l.number, l.in_span))
+                .collect::<Vec<_>>()
         );
     }
 

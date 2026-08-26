@@ -1,0 +1,18 @@
+{# The lines the text on screen was drawn from. One block, rendered in place
+   when the pane is drawn whole and out of band when it arrives with an
+   appended passage — the run grew, so the claim about where it came from has
+   to grow with it. #}
+<div id="source-lines"{% if d.source_oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <div class="label pane-label">
+    <a href="{{ d.source_at_lines }}">Source</a> · {{ d.slice_label }}
+  </div>
+  <div class="raw">
+    <table>
+      {% for l in d.slice_lines %}
+      <tr class="{% if l.in_span %}in{% endif %}">
+        <td class="ln">{{ l.number }}</td><td>{{ l.text }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>

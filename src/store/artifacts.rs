@@ -2061,7 +2061,10 @@ mod tests {
             .await
             .unwrap();
 
-        let got = s.continuations_of(&[merged.id.clone()]).await.unwrap();
+        let got = s
+            .continuations_of(std::slice::from_ref(&merged.id))
+            .await
+            .unwrap();
         assert!(!got.contains_key(&merged.id));
         assert!(s.continuations_of(&[]).await.unwrap().is_empty());
     }
@@ -2079,7 +2082,11 @@ mod tests {
 
         let got = s.following_artifacts(&src.id, 1, 3).await.unwrap();
         let ordinals: Vec<i64> = got.iter().map(|c| c.ordinal).collect();
-        assert_eq!(ordinals, vec![2, 3, 4], "the run must follow in reading order");
+        assert_eq!(
+            ordinals,
+            vec![2, 3, 4],
+            "the run must follow in reading order"
+        );
     }
 
     /// The same lifecycle rule `adjacent_artifacts` already applies. A reader
@@ -2119,7 +2126,12 @@ mod tests {
         let new: Vec<NewArtifact> = (0..3).map(|i| nc(i, &format!("chunk {i}"))).collect();
         s.insert_artifacts(&src.id, &new).await.unwrap();
 
-        assert!(s.following_artifacts(&src.id, 2, 3).await.unwrap().is_empty());
+        assert!(
+            s.following_artifacts(&src.id, 2, 3)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
