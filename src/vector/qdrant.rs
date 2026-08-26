@@ -83,6 +83,31 @@ pub fn dimension_mismatch(collection: &str, configured: usize, existing: usize) 
     ))
 }
 
+/// A named vector cannot be resized in place, so a collection created under an
+/// older `BLOCKS` keeps the `ctx` width it was made with and answers 400 to
+/// every read and write at the new one.
+///
+/// Unlike `dimension_mismatch` this *is* repairable, and saying so is the whole
+/// point of the check: left to run, the service starts normally, `offer`
+/// swallows its rejected context query and falls back to its random floor
+/// forever, and the context sweep dies on its first artifact — after it has
+/// already replaced that artifact's stored centroids with the new width.
+fn ctx_dimension_mismatch(collection: &str, configured: usize, existing: Option<u64>) -> Error {
+    let found = match existing {
+        Some(n) => format!("has a `{CTX}` vector {n} wide"),
+        None => format!("has no `{CTX}` vector at all"),
+    };
+    Error::Vector(format!(
+        "collection `{collection}` {found}, but this build encodes situations at {configured}. \
+         Refusing to start: Qdrant rejects every context read and write at the other width, \
+         which would leave recommendations silently falling back to random and the context \
+         sweep failing part way through. Run `--reindex --user <slug>`, once per user, to \
+         build the next generation at {configured} — dense vectors are copied across, so \
+         nothing is re-embedded, and the situations rebuild from `context_events` on the \
+         next sweep."
+    ))
+}
+
 /// Qdrant refuses an alias whose name collides with an existing collection, so
 /// a plain collection sitting where the alias belongs blocks every read and
 /// write. It is not ours and nothing here may delete it.
@@ -716,6 +741,28 @@ impl QdrantVectors {
             .ok_or_else(|| Error::Vector("could not read collection vector dimension".into()))
     }
 
+    /// The width of the `ctx` named vector, or `None` for a collection created
+    /// before there was one — which is the same problem for the same reason,
+    /// and is why the caller decides rather than this.
+    async fn ctx_dim(&self, collection: &str) -> Result<Option<u64>> {
+        let info: Value = self
+            .call(Method::GET, &format!("/collections/{collection}"), None)
+            .await?;
+        Ok(info
+            .pointer(&format!("/config/params/vectors/{CTX}/size"))
+            .and_then(Value::as_u64))
+    }
+
+    /// Refuse a collection whose `ctx` width is not the one this build encodes.
+    /// See `ctx_dimension_mismatch` for what running on anyway costs.
+    async fn check_ctx_dim(&self, collection: &str) -> Result<()> {
+        let want = crate::core::context::CTX_DIM;
+        match self.ctx_dim(collection).await? {
+            Some(n) if n as usize == want => Ok(()),
+            found => Err(ctx_dimension_mismatch(collection, want, found)),
+        }
+    }
+
     /// `exact` because the collection-info counter is allowed to lag behind an
     /// accepted write, and both callers act on the number.
     async fn exact_count(&self, collection: &str) -> Result<u64> {
@@ -1107,6 +1154,7 @@ impl VectorStore for QdrantVectors {
             if existing as usize != dim {
                 return Err(dimension_mismatch(&current, dim, existing as usize));
             }
+            self.check_ctx_dim(&current).await?;
             // An already-serving collection predates any index this release
             // added, so this is the path that matters most.
             self.ensure_payload_indexes(&current).await?;
@@ -1127,6 +1175,7 @@ impl VectorStore for QdrantVectors {
             if existing as usize != dim {
                 return Err(dimension_mismatch(&orphan, dim, existing as usize));
             }
+            self.check_ctx_dim(&orphan).await?;
             tracing::warn!(
                 collection = %orphan,
                 alias = %self.alias,
@@ -2202,6 +2251,109 @@ mod tests {
         let msg = dimension_mismatch("chunks_v1", 768, 1024).to_string();
         assert!(msg.contains("cannot change their width"), "{msg}");
         assert!(msg.contains("embed again"), "no way forward offered: {msg}");
+    }
+
+    #[test]
+    fn ctx_dimension_mismatch_names_the_repair_that_exists() {
+        // The dense message rules a rebuild out; this one is the case where a
+        // rebuild is exactly the answer, and the reader has to be able to tell
+        // the two apart from the text alone.
+        let msg = ctx_dimension_mismatch("engram_v1", 45, Some(53)).to_string();
+        assert!(msg.contains("45"), "{msg}");
+        assert!(msg.contains("53"), "{msg}");
+        assert!(msg.contains("--reindex"), "no way forward offered: {msg}");
+    }
+
+    #[test]
+    fn a_collection_predating_context_vectors_reads_as_a_mismatch() {
+        // `None` is not "nothing to check": writes to a named vector the
+        // collection does not have fail the same way, for the same reason, and
+        // are fixed by the same rebuild.
+        let msg = ctx_dimension_mismatch("engram_v1", 45, None).to_string();
+        assert!(msg.contains("no `ctx` vector at all"), "{msg}");
+        assert!(msg.contains("--reindex"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_collection_with_the_old_context_width_stops_startup() {
+        // Without this the service comes up clean: the dense width is what the
+        // check used to read and the embedding model never changed, so a
+        // collection built under the previous `BLOCKS` passed. Every context
+        // query after that was a 400 that `offer` swallowed.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/aliases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "aliases": [
+                    { "alias_name": "engram", "collection_name": "engram_v1" }
+                ] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/collections/engram_v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "config": { "params": { "vectors": {
+                    DENSE: { "size": 768 },
+                    CTX: { "size": 53 },
+                } } } }
+            })))
+            .mount(&server)
+            .await;
+
+        let err = against(&server)
+            .await
+            .ensure_collection(768)
+            .await
+            .expect_err("the dense width matching is not enough to serve on");
+        let msg = err.to_string();
+        assert!(msg.contains("53"), "{msg}");
+        assert!(msg.contains("--reindex"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_collection_at_the_current_context_width_starts() {
+        // The other half: the check must not turn a healthy collection away,
+        // and it runs on every startup.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/aliases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "aliases": [
+                    { "alias_name": "engram", "collection_name": "engram_v1" }
+                ] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/collections/engram_v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "config": { "params": { "vectors": {
+                    DENSE: { "size": 768 },
+                    CTX: { "size": crate::core::context::CTX_DIM },
+                } } }, "payload_schema": {} }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/collections/engram_v1/index"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": { "status": "completed" }, "status": "ok"
+            })))
+            .mount(&server)
+            .await;
+
+        against(&server)
+            .await
+            .ensure_collection(768)
+            .await
+            .expect("a collection at the current width is the ordinary case");
     }
 
     #[test]

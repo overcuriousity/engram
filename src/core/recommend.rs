@@ -531,10 +531,9 @@ mod tests {
     }
 
     /// Give `aid` one cluster whose centroid is written by hand, so a test can
-    /// place a candidate at a chosen full cosine and a chosen `context_score`
-    /// — the two numbers the ladder reads, which the encoder always moves
-    /// together and which have to be separable to test what happens when they
-    /// disagree.
+    /// place a candidate at a chosen `context_score` — the one number the
+    /// ladder reads — without going through the encoder, which only ever
+    /// produces the scores some real bundle happens to land on.
     async fn learn_raw(
         core: &Core,
         aid: &str,

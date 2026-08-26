@@ -206,6 +206,10 @@ pub const BLOCKS: [Block; 10] = [
 /// generation with this size and copies the dense vectors across, so nothing is
 /// re-embedded, and sets of the old width are discarded rather than reinterpreted
 /// (see `ctx_of` in `vector/qdrant.rs`).
+///
+/// `ensure_collection` refuses to start against a collection whose `ctx` vector
+/// is a different width, because the failure without it is silent: the rejected
+/// query leaves `offer` on its random floor and the sweep dies part way through.
 pub const CTX_DIM: usize = 45;
 
 /// Bumped whenever `BLOCKS` changes in any way — a width, an order, or what a
@@ -513,6 +517,11 @@ fn scale(s: &mut [f32], weight: f32) {
 /// the full vector and the rung on the rest of it. With that block gone the two
 /// scales are one, and `strong_at`/`weak_at` keep the values they were
 /// calibrated at — they never saw the block that went.
+///
+/// A centroid of the wrong width scores zero rather than something plausible:
+/// `cosine` fails closed on a length mismatch, so a cluster stored under an
+/// older `CTX_DIM` cannot rank on a truncated comparison even if it reaches
+/// here past the caller's own layout check.
 pub fn context_score(now: &[f32], cluster: &[f32]) -> f32 {
     crate::vector::cosine(now, cluster)
 }
