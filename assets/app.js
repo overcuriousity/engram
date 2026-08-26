@@ -487,7 +487,12 @@
       source.addEventListener('token', function (e) {
         if (!current()) return;
         live.hidden = false;
+        // The box scrolls inside the pinned workspace, so the tail is what
+        // leaves the screen. Followed while the reader is at it, and left
+        // alone once they have scrolled up to reread something.
+        var atTail = live.scrollHeight - live.scrollTop - live.clientHeight < 40;
         live.appendChild(document.createTextNode(JSON.parse(e.data).text));
+        if (atTail) live.scrollTop = live.scrollHeight;
       });
       source.addEventListener('done', function (e) {
         if (!current()) return;

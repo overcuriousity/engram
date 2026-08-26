@@ -4224,6 +4224,44 @@ mod tests {
         }
     }
 
+    /// On a wide window the workspace is pinned to the viewport and the body
+    /// does not scroll; the height is handed down the chain to the artifact
+    /// card, which scrolls. The answer is not on that chain — `#ask-live` and
+    /// `#ask-result` are siblings of `#pane-content` — so a long answer grew
+    /// the column past the window and the body's `overflow: hidden` clipped
+    /// it, with nothing anywhere to scroll. Each has to be its own scroller
+    /// inside the pinned block, and the live one has to follow its own tail.
+    #[test]
+    fn a_long_answer_scrolls_inside_the_pinned_workspace() {
+        let css = crate::web::assets::Assets::get("app.css").expect("app.css is embedded");
+        let css = String::from_utf8(css.data.into_owned()).unwrap();
+        let pinned = css
+            .split_once(".regions-rail-focus-source { grid-template-rows:")
+            .expect("the pinned block")
+            .1;
+        for target in ["#ask-live", "#ask-result"] {
+            let rule = pinned
+                .split_once(&format!(".pane > {target}"))
+                .unwrap_or_else(|| panic!("{target} is not a scroller in the pinned block"))
+                .1;
+            let rule = &rule[..rule.find('}').unwrap()];
+            assert!(rule.contains("overflow-y: auto"), "{target}: {rule}");
+            assert!(rule.contains("min-height: 0"), "{target}: {rule}");
+        }
+
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        let token = js
+            .split_once("addEventListener('token'")
+            .expect("the driver handles token")
+            .1;
+        let token = &token[..token.find("addEventListener").unwrap()];
+        assert!(
+            token.contains("live.scrollTop = live.scrollHeight"),
+            "the live answer does not follow its tail: {token}"
+        );
+    }
+
     /// No ask model, no ask door: not a greyed-out button over a page that
     /// explains itself, and not a route that 500s. The door is simply absent.
     #[tokio::test]

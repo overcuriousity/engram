@@ -681,6 +681,17 @@ body { overflow-x: hidden; }
   .regions-rail-focus-source #pane-content > [data-terms] {
     display: flex; flex-direction: column; flex: 1; min-height: 0;
   }
+  /* The answer is not on that chain. `#ask-live` and `#ask-result` are
+     siblings of `#pane-content`, and a flex item that neither shrinks nor
+     scrolls grows the column past the pinned height, where the body's
+     `overflow: hidden` clips it: a long answer simply left the screen, and
+     nothing anywhere could scroll to it. Each is its own scroller — the two
+     never show at once — and shrinks before the empty `#pane-content`
+     beside it, whose basis is zero. */
+  .regions-rail-focus-source .pane > #ask-live,
+  .regions-rail-focus-source .pane > #ask-result {
+    flex: 0 1 auto; min-height: 0; overflow-y: auto;
+  }
   .regions-rail-focus-source .split { flex: 1; min-height: 0; align-items: stretch; }
   .regions-rail-focus-source .split > * { min-height: 0; }
   .regions-rail-focus-source .split > :first-child { max-height: none; }
