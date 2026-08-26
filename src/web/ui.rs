@@ -2960,7 +2960,11 @@ async fn artifact_run(
     // Only what is new. `split_off` at the last index leaves either one item —
     // the passage this click asked for — or none, which is what the end of a
     // document looks like from here.
-    d.run = if d.run.len() >= n {
+    d.run = if n <= 1 {
+        // The opening passage is already on the pane: a run of one has nothing
+        // new in it, and appending it would stack the passage under itself.
+        vec![]
+    } else if d.run.len() >= n {
         d.run.split_off(n - 1)
     } else {
         vec![]

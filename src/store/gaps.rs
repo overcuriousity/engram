@@ -250,12 +250,6 @@ macro_rules! unmatched_gaps_sql {
     };
 }
 
-/// A run of searches the base did not answer.
-///
-/// The text is the leading clustered query rather than all of them joined: the
-/// naming prompt keeps the first twelve members, and a member that is itself a
-/// paragraph of queries would crowd out eleven other gaps. `queries` is JSON,
-/// so the first element is read out in Rust rather than in SQL.
 /// A subject the plan named and the fan-out could not cover.
 ///
 /// The join to `ask_events` is what makes the row die with its question — a
@@ -278,6 +272,12 @@ macro_rules! subject_gaps_sql {
     };
 }
 
+/// A run of searches the base did not answer.
+///
+/// The text is the leading clustered query rather than all of them joined: the
+/// naming prompt keeps the first twelve members, and a member that is itself a
+/// paragraph of queries would crowd out eleven other gaps. `queries` is JSON,
+/// so the first element is read out in Rust rather than in SQL.
 macro_rules! pursuit_gaps_sql {
     ($cols:literal) => {
         concat!(
@@ -679,11 +679,12 @@ impl Store {
         let holes = vec!["?"; corpus_ids.len()].join(", ");
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT c.corpus_id, c.kind, c.gap_id,
-                    COALESCE(a.question, s.query, p.queries) AS text
+                    COALESCE(a.question, s.query, p.queries, sub.subject) AS text
                FROM gap_coverage c
                LEFT JOIN ask_events a    ON c.kind = 'ask'    AND a.id = c.gap_id
                LEFT JOIN search_events s ON c.kind IN ('search', 'unmatched') AND s.id = c.gap_id
                LEFT JOIN pursuits p      ON c.kind = 'pursuit' AND p.id = c.gap_id
+               LEFT JOIN ask_subjects sub ON c.kind = 'subject' AND sub.id = c.gap_id
               WHERE c.corpus_id IN ({holes})
               ORDER BY c.covered_at DESC"
         )));
@@ -743,7 +744,9 @@ impl Store {
                      AND NOT EXISTS (SELECT 1 FROM search_events WHERE id = gap_coverage.gap_id))
                  OR (kind = 'pursuit'
                      AND NOT EXISTS (SELECT 1 FROM pursuits WHERE id = gap_coverage.gap_id))
-                 OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit')",
+                 OR (kind = 'subject'
+                     AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = gap_coverage.gap_id))
+                 OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject')",
         )
         .execute(&self.pool)
         .await?
@@ -1036,6 +1039,62 @@ mod tests {
             !gaps.iter().any(|g| g.gap.kind == GapKind::Subject),
             "a covered subject stayed on the list"
         );
+    }
+
+    /// The repair pass collects coverage whose gap is gone, and a subject is a
+    /// gap like the others: its row survives, and the capture that closed it
+    /// still says which subject it closed. Both were once true of four kinds
+    /// and not of the fifth — the pass swept every `subject` row on sight, and
+    /// the covered-by list dropped what it could not name.
+    #[tokio::test]
+    async fn a_covered_subject_survives_the_repair_pass() {
+        let store = Store::memory().await.unwrap();
+        let id =
+            uncovered_subject(&store, "how do ticks work", "job priority", vec![0.0, 1.0]).await;
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "job priority is a column".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .cover_gap(GapKind::Subject, &id, &src.id, &made[0].id, 0.9)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.trim_gap_coverage().await.unwrap(),
+            0,
+            "the repair pass collected a coverage whose subject still exists"
+        );
+        let covered = store
+            .gaps_covered_by_each(std::slice::from_ref(&src.id))
+            .await
+            .unwrap();
+        let named: Vec<&str> = covered
+            .get(&src.id)
+            .map(|v| v.iter().map(|c| c.text.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(named, vec!["job priority"]);
+
+        // And when the subject is gone, the row goes with it.
+        sqlx::query("DELETE FROM ask_subjects WHERE id = ?")
+            .bind(&id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(store.trim_gap_coverage().await.unwrap(), 1);
     }
 
     /// The rule every kind here already applies: no vector, no grouping, so it

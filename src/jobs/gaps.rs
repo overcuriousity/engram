@@ -37,7 +37,7 @@ static COVER_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
 /// How many gaps one capture is checked against.
 ///
 /// `COVER_SLOTS` bounds how many queries are in the air, which is not a bound
-/// on how many there are. `open_gaps` caps each of four kinds at
+/// on how many there are. `open_gaps` caps each of five kinds at
 /// `MAX_OPEN_GAPS`, so one capture can ask two thousand questions of the vector
 /// store, and `settle_corpus` asks them once per document that reaches `ready`:
 /// an ingest of fifty documents is a hundred thousand round trips. Nothing
@@ -76,7 +76,7 @@ pub struct SweepReport {
 /// waiting, and two thousand at once is not concurrency but an outage in the
 /// vector store the whole memory shares. How many there are at all is
 /// `COVER_MAX_GAPS`, because concurrency is not a ceiling on the total — there
-/// are four kinds of gap, each capped at `MAX_OPEN_GAPS`, and since the
+/// are five kinds of gap, each capped at `MAX_OPEN_GAPS`, and since the
 /// unmatched ones are derived from the search log without anybody judging
 /// anything, a base with capture on reaches those caps as a matter of course
 /// rather than as a worst case.
