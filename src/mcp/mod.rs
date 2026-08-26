@@ -13,12 +13,39 @@ use rmcp::{tool, tool_router};
 /// Results go straight into an agent's context, so they stay markdown: the
 /// artifact text is already markdown, and the surrounding structure has to be
 /// readable rather than JSON-shaped.
-pub fn format_search_results(results: &[SearchResult]) -> String {
+pub fn format_search_results(
+    results: &[SearchResult],
+    explanation: Option<&crate::core::explain::SearchExplanation>,
+) -> String {
     if results.is_empty() {
         return "No matches in the knowledge base.".to_string();
     }
+    // The pool's shape cannot belong to a hit: no result can say how many
+    // corpora it was drawn from, and that number is what distinguishes one
+    // source dominating because the rule failed from one source being all
+    // there was.
+    let head = match explanation {
+        Some(s) => format!(
+            "_Pool: {} candidates, {} corpus{}{}{}._\n\n",
+            s.candidates_fetched,
+            s.corpora_in_pool,
+            if s.corpora_in_pool == 1 { "" } else { "es" },
+            match s.capped {
+                Some(n) => format!(" · cap {n} per source"),
+                None => " · uncapped".to_string(),
+            },
+            match (s.displaced, s.refilled) {
+                (0, _) => String::new(),
+                (d, r) if d == r => format!(
+                    " · {d} displaced and all {r} refilled — the cap redistributed nothing"
+                ),
+                (d, r) => format!(" · {d} displaced, {r} refilled"),
+            },
+        ),
+        None => String::new(),
+    };
     let mut rank = 0;
-    results
+    let body = results
         .iter()
         .map(|r| {
             // Never "Untitled": a verbatim passage has no title by design, and
@@ -92,13 +119,57 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
                 facts.push("lifted: open in this sitting".to_string());
             }
             let facts = facts.iter().map(|f| format!(" · {f}")).collect::<String>();
+            let why = match (explanation.is_some(), r.explanation.as_ref()) {
+                (true, Some(e)) => why_line(e),
+                _ => String::new(),
+            };
             format!(
-                "{heading}\n_{how}{facts}{tags} · corpus: {}_\n\n{}",
+                "{heading}\n_{how}{facts}{tags} · corpus: {}_{why}\n\n{}",
                 r.corpus_id, r.text
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
+        .join("\n\n---\n\n");
+    format!("{head}{body}")
+}
+
+/// One hit's stages, in the order they ran. Named rather than counted: an
+/// agent gets this string and nothing else, so a number it cannot attribute
+/// to a stage is worse than no line at all.
+fn why_line(e: &crate::core::explain::HitExplanation) -> String {
+    if let Some(via) = &e.recalled_via {
+        return format!("\n_why it is here: recalled beside `{via}`; never ranked._");
+    }
+    let mut parts = vec![format!("retrieved at #{}", e.retrieved_rank + 1)];
+    if let Some(v) = e.recency {
+        parts.push(format!("recency +{v:.3}"));
+    }
+    if let Some(v) = e.pinned {
+        parts.push(format!("pinned +{v:.3}"));
+    }
+    if let Some(s) = &e.rerank {
+        parts.push(format!(
+            "reranked {} → {}",
+            s.from.unwrap_or(0) + 1,
+            s.to.unwrap_or(0) + 1
+        ));
+    }
+    // Kept says nothing: the cap holding is the ordinary case, and a line that
+    // reports every no-op is one an agent stops reading.
+    if matches!(e.cap, crate::core::explain::CapEffect::Refilled) {
+        parts.push("displaced, refilled".to_string());
+    }
+    if let Some(s) = &e.prime {
+        parts.push(format!(
+            "primed {} → {}",
+            s.from.unwrap_or(0) + 1,
+            s.to.unwrap_or(0) + 1
+        ));
+    }
+    if e.past_cliff {
+        parts.push("below the cliff".to_string());
+    }
+    format!("\n_why it is here: {}._", parts.join(" · "))
 }
 
 /// The channel a tool call arrives through.
@@ -295,6 +366,11 @@ pub struct SearchParams {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub category: Option<String>,
+    /// Ask why each hit is where it is: the ranking stages that moved it, and
+    /// the shape of the pool it was drawn from. Off by default — the stages
+    /// are noise to a caller that only wants the artifacts.
+    #[serde(default)]
+    pub explain: Option<bool>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -454,14 +530,23 @@ impl PkdbTools {
             include_deprecated: false,
             include_superseded: false,
             rerank: true,
-            explain: false,
+            explain: p.explain.unwrap_or(false),
         };
         let core = match self.source.core().await {
             Ok(c) => c,
             Err(e) => return format!("Search failed: {e}"),
         };
-        match core.search(&query, crate::store::feedback::Door::Mcp).await {
-            Ok(r) => format_search_results(&r),
+        // The cap `Core::search` would have applied, read the same way, so
+        // asking for an explanation cannot change what the door returns.
+        let cap = core.ranking.read().expect("ranking lock").per_source_cap;
+        let explain = query.explain;
+        match core
+            .search_with(&query, cap, crate::store::feedback::Door::Mcp)
+            .await
+        {
+            Ok((r, outcome)) => {
+                format_search_results(&r, explain.then_some(&outcome.explanation))
+            }
             Err(e) => format!("Search failed: {e}"),
         }
     }
@@ -532,7 +617,7 @@ fn format_answer(a: &crate::core::ask::AskResponse) -> String {
     }
     if !a.citations.is_empty() {
         out.push_str("\n\n---\n\n**Sources**\n\n");
-        out.push_str(&format_search_results(&a.citations));
+        out.push_str(&format_search_results(&a.citations, None));
     }
     if a.dropped > 0 {
         out.push_str(&format!(
@@ -770,7 +855,7 @@ mod tests {
         let out = format_search_results(&[search_hit(
             None,
             "Die digitale Forensik unterscheidet sich zusätzlich",
-        )]);
+        )], None);
         assert!(!out.contains("Untitled"), "{out}");
         assert!(out.contains("Die digitale Forensik"), "{out}");
     }
@@ -853,6 +938,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
+            None,
         );
 
         // An agent consumes this directly, so it must stay markdown and keep
@@ -863,7 +949,7 @@ mod tests {
 
     #[test]
     fn empty_results_produce_a_clear_message_not_an_empty_string() {
-        let text = format_search_results(&[]);
+        let text = format_search_results(&[], None);
         assert!(!text.trim().is_empty());
         assert!(text.to_lowercase().contains("no match"));
     }
@@ -893,13 +979,70 @@ mod tests {
         }
     }
 
+    /// A hit that carries an explanation, for the two tests below.
+    fn explained(id: &str) -> SearchResult {
+        let mut r = hit(id, None);
+        r.explanation = Some(crate::core::explain::HitExplanation {
+            retrieved_rank: 3,
+            recency: Some(0.021),
+            cap: crate::core::explain::CapEffect::Refilled,
+            ..Default::default()
+        });
+        r
+    }
+
+    #[test]
+    fn the_meta_line_stays_silent_unless_an_explanation_was_asked_for() {
+        let out = format_search_results(&[explained("a1")], None);
+        assert!(
+            !out.contains("why it is here"),
+            "an agent that did not ask for the stages must not be handed them"
+        );
+        assert!(
+            out.contains("corpus: c"),
+            "the existing meta line is untouched"
+        );
+    }
+
+    #[test]
+    fn an_explained_result_names_the_stage_that_failed_to_redistribute() {
+        let summary = crate::core::explain::SearchExplanation {
+            candidates_fetched: 30,
+            corpora_in_pool: 1,
+            capped: Some(3),
+            displaced: 4,
+            refilled: 4,
+            reranked: false,
+        };
+        let out = format_search_results(&[explained("a1")], Some(&summary));
+
+        assert!(
+            out.contains("retrieved at #4"),
+            "ranks are 1-based at every door: {out}"
+        );
+        assert!(
+            out.contains("displaced, refilled"),
+            "the case the whole object exists for has to be readable rather \
+             than inferred: {out}"
+        );
+        assert!(
+            out.contains("1 corpus") && out.contains("30 candidates"),
+            "the pool's shape belongs above the list, not on a hit: {out}"
+        );
+        assert!(
+            out.contains("redistributed nothing"),
+            "displaced and refilled in equal number is the failure, and it \
+             has to be named: {out}"
+        );
+    }
+
     /// An agent reading a numbered list has no grey to see; a hit past the
     /// cliff has to say so in words, and one above it must not.
     #[test]
     fn a_result_past_the_cliff_says_so_and_keeps_its_number() {
         let mut past = hit("tail", None);
         past.past_cliff = true;
-        let out = format_search_results(&[hit("head", None), past]);
+        let out = format_search_results(&[hit("head", None), past], None);
         let head = out.find("### 1. head").unwrap();
         let tail = out.find("### 2. tail").unwrap();
         let note = out.find("below the relevance cliff").unwrap();
@@ -911,7 +1054,7 @@ mod tests {
     fn an_associated_result_says_it_was_recalled_rather_than_ranked() {
         // Straight into an agent's context: without this the extra result reads
         // as the fourth-best match for the query, which it is not.
-        let out = format_search_results(&[hit("ranked", None), hit("recalled", Some("ranked"))]);
+        let out = format_search_results(&[hit("ranked", None), hit("recalled", Some("ranked"))], None);
         assert!(out.contains("recalled beside"), "{out}");
 
         // A bare ordinal is the strongest ranking signal there is: an agent
@@ -929,9 +1072,9 @@ mod tests {
     fn a_weak_result_says_so() {
         let mut w = hit("thin", None);
         w.weak = true;
-        let out = format_search_results(&[w]);
+        let out = format_search_results(&[w], None);
         assert!(out.contains("only loosely related"), "{out}");
-        assert!(!format_search_results(&[hit("firm", None)]).contains("loosely"));
+        assert!(!format_search_results(&[hit("firm", None)], None).contains("loosely"));
     }
 
     /// Text a model wrote is never silently indistinguishable from captured
@@ -942,19 +1085,19 @@ mod tests {
         let mut m = hit("merged", None);
         m.model_written = true;
         m.origin_count = 3;
-        let out = format_search_results(&[m]);
+        let out = format_search_results(&[m], None);
         assert!(out.contains("written by a model from 3 sources"), "{out}");
 
         let mut s = hit("pursued", None);
         s.model_written = true;
         s.synthesized = true;
         s.origin_count = 2;
-        let out = format_search_results(&[s]);
+        let out = format_search_results(&[s], None);
         assert!(
             out.contains("synthesized by a model from 2 sources"),
             "{out}"
         );
-        assert!(!format_search_results(&[hit("captured", None)]).contains("model"));
+        assert!(!format_search_results(&[hit("captured", None)], None).contains("model"));
     }
 
     #[test]
@@ -963,12 +1106,12 @@ mod tests {
         let mut old = hit("old", None);
         old.status = Some(ArtifactStatus::Superseded);
         old.superseded_by = Some("newer".into());
-        let out = format_search_results(&[old]);
+        let out = format_search_results(&[old], None);
         assert!(out.contains("superseded by `newer`"), "{out}");
 
         let mut dep = hit("dep", None);
         dep.status = Some(ArtifactStatus::Deprecated);
-        assert!(format_search_results(&[dep]).contains("deprecated"));
+        assert!(format_search_results(&[dep], None).contains("deprecated"));
     }
 
     /// Two different reasons to be higher up the list, and neither is
@@ -977,10 +1120,10 @@ mod tests {
     fn a_lifted_result_says_why_it_moved_up() {
         let mut p = hit("often", None);
         p.primed = true;
-        assert!(format_search_results(&[p]).contains("lifted: reached often"));
+        assert!(format_search_results(&[p], None).contains("lifted: reached often"));
         let mut s = hit("open", None);
         s.in_sitting = true;
-        assert!(format_search_results(&[s]).contains("lifted: open in this sitting"));
+        assert!(format_search_results(&[s], None).contains("lifted: open in this sitting"));
     }
 
     /// Search is a dead end without this: it hands back one passage and the
