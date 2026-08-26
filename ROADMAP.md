@@ -41,7 +41,10 @@ a second harness — citation recall, abstention, faithfulness by literals and b
 claim check; knowledge gaps grouped and named on the capture page, the fifth
 kind of them the subjects a plan named and the base could not cover; what a
 hit's document does next, said on the rail and read in the pane, which appends
-the passages that follow one click at a time; a
+the passages that follow one click at a time; the MCP door reaching what the
+web doors reach — a link, a PDF, an image, a note, the document behind a hit,
+and a meta line that says in words what the rail badges; a phone browser
+offered the installed app, once a week; a
 recommendation under the search box, learned from the situations an artifact
 was opened in — the browser's time zone and local time, the device, the
 viewport, the network and the power state, clustered per artifact and stored as
@@ -560,6 +563,31 @@ Two items above are downstream of that. **Dropping the `scope` block** is
 unblocked and now has a cost worth naming. **OAuth 2.1 for `/mcp`** stopped
 being administrative — with a collection per user, a bearer token is what
 decides whose base a call reads.
+
+Built: **the MCP door takes what the web doors take, and reads what they
+read.** `ingest` took text and nothing else, which an agent noticed before this
+file did. It takes exactly one of text, a link or a file as base64 now, with a
+note beside it; the link goes through the same `Core::ingest_url` the
+paste-a-link door does, so a URL to a PDF or an image is stored for its reading
+stage at either door and the link is provenance on the corpus. A file handed
+over as bytes is known by its bytes, not its name — a PDF by its header, an
+image by its own, otherwise UTF-8 text or a refusal by name. What was
+deliberately not added: a path on this server's disk, because with a base per
+user the server's disk is nobody's. Two things beside it. `read` returns the
+document a hit was cut from, verbatim and in pages, by the corpus or artifact
+id search prints — search over MCP was a dead end before it, and the paragraph
+after the one that matched is often the answer. And the meta line now says in
+words everything the rail says with a badge or a shade of grey: weak, written
+or synthesized by a model and from how many sources, superseded and by what,
+deprecated, lifted by priming or by the sitting. A model-written text read as a
+captured one over MCP until then, which is the one thing that field forbids.
+
+Built: **a phone browser is offered the app.** Registering the worker made
+engram installable and nothing asked. On a phone browser that is not already
+the installed window a toast above the tab bar offers it, once a week —
+Chrome's own prompt where the browser hands one over, the Share-sheet route
+on Safari, nothing at all on a browser with neither. Never on a desktop and
+never in an installed window.
 
 - **One dial instead of eight gates.** Three are gone: `[learn]` is now the
   single switch over recording, association and pursuits, and the sections below
