@@ -294,6 +294,28 @@ the write-time half of the same question and carries an instrument of its own.
   before the shown/clicked history is long enough to be worth keeping.
   **One commit**, plus one sweep before the offer speaks again.
 
+- **The situation as a term in ranking.** The `ctx` vectors decide the offer
+  under the search box and nothing else. The moment something is typed the
+  situation is dropped, and the query is one dense vector like any other
+  system's. The score `recommend` already computes — `max_sim` against an
+  artifact's clusters — can be a bounded term beside the recency and pinned
+  terms in `scoring_formula`, so that *backup* at 23:00 on the phone need not
+  rank exactly as it does at the desk on a Tuesday afternoon. Bounded the way
+  priming is bounded, and never by enough to bury an exact match.
+  **Worth:** the two halves of this file's opening thesis stop being two
+  features that happen to share an encoder. Every piece of it is built — the
+  encoder, the clusters, the sweep, the multivector in the collection — and
+  search reads none of it.
+  **Cost:** the ctx score reached from the search path, which is a separate
+  query today, so either a third prefetch branch or the score carried across; a
+  weight and a cap in `[recommend]`; the same in `vector/memory.rs`; tests.
+  **A branch**, plus a harness run — and the harness needs work before the run
+  is worth anything. A recorded search replayed months later is replayed in a
+  different situation, so a judged pair stops being a fixed question unless the
+  situation is recorded beside the query and replayed with it. That is the real
+  cost of this item, and it is not the code. Gated on the block weights being
+  fitted rather than chosen, like everything else in this section.
+
 - **Speculative synthesis.** Promotion is retrospective: a window is rewritten
   once its passages have earned it. The prospective half is to spend an idle
   call on a window nobody has opened yet, chosen because the base can already
@@ -477,6 +499,23 @@ as *Related* and *Seen together*.
   **Cost:** an explanation struct threaded through eight stages in
   `src/core/search.rs`, then read by the rail, MCP's meta line and the API.
   **A branch.** No harness — it changes nothing about the order.
+
+- **Spreading activation past one hop.** *(low, and put here saying so)*
+  Association reaches exactly one hop from a hit. The general form is a
+  diffusion — the cosine kNN graph unioned with the Hebbian link weights,
+  personalised PageRank seeded by the hits above the cliff, run to convergence —
+  which is what the phrase *spreading activation* means everywhere it is
+  borrowed from, and it costs no model call at all.
+  **Worth:** unproven, and there is reason to expect little. One hop from a
+  strong hit is already the neighbour worth having; hops two and three are where
+  a graph learned from co-display turns into a graph of what happened to be on
+  the same page. It also runs against **Why this hit is where it is** above:
+  *recalled through this link* is an explanation an operator can check, and
+  *arrived at by diffusion over the whole graph* is not.
+  **Cost:** a materialised kNN graph, which nothing keeps today — `neighbours`
+  is per-request — plus its refresh on every capture, the walk itself, and a
+  harness run to find out whether any of it beats the hop. **A project.** Last
+  in this section, and it stays there until the hop it generalises has a number.
 
 <!-- CUT: late-interaction reranking (ColBERT-style multivectors). Not for the
      reason first written here, which said storage and memory both. Memory is
