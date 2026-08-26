@@ -566,11 +566,15 @@ impl Store {
     /// read, is a row that lies about what it holds.
     ///
     /// `reading` is the caller's because it is what differs between the doors.
+    // Eight arguments: one per fact about the file, each of which some door
+    // has and another has not. A builder here would be eight setters.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_attached_corpus(
         &self,
         content_hash: &str,
         origin: &str,
         title_hint: Option<&str>,
+        source_url: Option<&str>,
         metadata: &serde_json::Value,
         reading: Reading,
         attachment: &super::attachments::NewFile<'_>,
@@ -589,7 +593,7 @@ impl Store {
             shingles: vec![],
             near_dupe_of: None,
             near_dupe_score: None,
-            source_url: None,
+            source_url: source_url.map(str::to_string),
             restored_at: None,
             metadata: metadata.clone(),
         };
@@ -1090,6 +1094,7 @@ mod tests {
                 "hash-1",
                 "image",
                 None,
+                None,
                 &serde_json::json!({}),
                 crate::store::corpora::Reading::VISION,
                 &a_test_image(),
@@ -1102,7 +1107,7 @@ mod tests {
         assert!(s.live_job(Stage::Describe, &src.id).await.unwrap());
         // The same hash again: Existing, and nothing new written.
         assert!(matches!(
-            s.insert_attached_corpus("hash-1", "image", None, &serde_json::json!({}), Reading::VISION, &a_test_image())
+            s.insert_attached_corpus("hash-1", "image", None, None, &serde_json::json!({}), Reading::VISION, &a_test_image())
                 .await
                 .unwrap(),
             Insertion::Existing(e) if e.id == src.id
@@ -1123,6 +1128,7 @@ mod tests {
                 "hash-1",
                 "image",
                 Some("a.jpg"),
+                None,
                 &meta,
                 crate::store::corpora::Reading::VISION,
                 &a_test_image(),
@@ -1139,7 +1145,7 @@ mod tests {
 
         // The same photo again is the same row.
         assert!(matches!(
-            s.insert_attached_corpus("hash-1", "image", None, &meta, Reading::VISION, &a_test_image())
+            s.insert_attached_corpus("hash-1", "image", None, None, &meta, Reading::VISION, &a_test_image())
                 .await
                 .unwrap(),
             Insertion::Existing(e) if e.id == src.id
@@ -1153,6 +1159,7 @@ mod tests {
             .insert_attached_corpus(
                 "hash-2",
                 "image",
+                None,
                 None,
                 &serde_json::json!({}),
                 crate::store::corpora::Reading::VISION,

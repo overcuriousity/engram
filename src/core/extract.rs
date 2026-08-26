@@ -202,6 +202,20 @@ fn closes(line: &str, marker: &str) -> bool {
 /// `dom_query::Document`, which is `!Send`; alive across an `.await` it would
 /// make the enclosing future `!Send` and axum would refuse the handler. Every
 /// non-`Send` value here is created and dropped inside this call.
+/// `html_to_markdown` off the async runtime's threads: the two parsers are a
+/// synchronous walk over whatever a page contained, seconds during which
+/// search, health and the queue poll on that thread would all wait.
+pub async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Result<String> {
+    tokio::task::spawn_blocking(move || html_to_markdown(&html, url.as_ref(), min_chars))
+        .await
+        // A `JoinError` is a panic in `dom_smoothie` or `htmd` — two parsers
+        // fed whatever a remote page contained — or a cancelled runtime.
+        // Neither is anything the caller did, so it must not come back as a
+        // 400 telling them their page was malformed while the crash goes
+        // unrecorded.
+        .map_err(|e| Error::Internal(format!("extraction did not finish: {e}")))?
+}
+
 pub fn html_to_markdown(
     html: &str,
     base_url: Option<&url::Url>,

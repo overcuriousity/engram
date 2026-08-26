@@ -475,6 +475,7 @@ mod tests {
                 "h",
                 crate::core::ingest::ORIGIN_PDF,
                 None,
+                None,
                 &serde_json::json!({}),
                 crate::store::corpora::Reading::EXTRACTION,
                 &crate::store::attachments::NewFile {
@@ -514,6 +515,7 @@ mod tests {
             .insert_attached_corpus(
                 "h",
                 "image",
+                None,
                 None,
                 &serde_json::json!({}),
                 crate::store::corpora::Reading::VISION,

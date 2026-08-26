@@ -282,6 +282,7 @@ mod tests {
                 "h",
                 "image",
                 None,
+                None,
                 &metadata,
                 crate::store::corpora::Reading::VISION,
                 &crate::store::attachments::NewFile {

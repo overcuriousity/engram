@@ -4792,6 +4792,7 @@ mod tests {
                 "h",
                 "image",
                 Some("IMG.png"),
+                None,
                 &serde_json::json!({
                     "note": "front porch",
                     "file": {"name": "IMG.png", "width": 4, "height": 2},

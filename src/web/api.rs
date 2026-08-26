@@ -160,7 +160,6 @@ pub struct StatusResponse {
 /// hardcoded: it is the only record of how a document got here.
 use crate::core::ingest::ORIGIN_WEB;
 const ORIGIN_EXTENSION: &str = "extension";
-const ORIGIN_FETCH: &str = "fetch";
 
 /// Readability and the markdown conversion, off the async worker.
 ///
@@ -170,17 +169,7 @@ const ORIGIN_FETCH: &str = "fetch";
 /// `Readability` is `!Send`, which is why this could not be awaited across;
 /// inside a `spawn_blocking` closure it is created and dropped without ever
 /// crossing an await, and only the owned `String` has to move.
-async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Result<String> {
-    tokio::task::spawn_blocking(move || {
-        crate::core::extract::html_to_markdown(&html, url.as_ref(), min_chars)
-    })
-    .await
-    // A `JoinError` is a panic in `dom_smoothie` or `htmd` — two parsers
-    // fed whatever a remote page contained — or a cancelled runtime. Neither
-    // is anything the caller did, so it must not come back as a 400 telling
-    // them their page was malformed while the crash goes unrecorded.
-    .map_err(|e| Error::Internal(format!("extraction did not finish: {e}")))?
-}
+use crate::core::extract::extract;
 
 async fn ingest(
     tenant: Tenant,
@@ -234,12 +223,21 @@ async fn ingest(
             ORIGIN_EXTENSION,
         )
     } else {
+        // A link may hold a page, a PDF or an image; the core decides which,
+        // the same way it does for the MCP door. 202 when what it stored is
+        // still to be read, as the upload doors answer.
         let u = parsed_url.as_ref().expect("one-of check guarantees a url");
-        let html = crate::core::fetch::fetch_html(u, &tenant.core.capture).await?;
-        (
-            extract(html, parsed_url.clone(), floor).await?,
-            ORIGIN_FETCH,
-        )
+        let out = tenant.core.ingest_url(u, req.title, None).await?;
+        let code = match (&out.status, out.duplicate) {
+            (_, true) => StatusCode::OK,
+            (
+                crate::store::corpora::CorpusStatus::Extracting
+                | crate::store::corpora::CorpusStatus::Describing,
+                _,
+            ) => StatusCode::ACCEPTED,
+            _ => StatusCode::CREATED,
+        };
+        return Ok((code, Json(out)));
     };
 
     let out = tenant
@@ -2495,6 +2493,32 @@ pub(crate) mod tests {
         let second = json_of(res).await;
         assert_eq!(first["id"], second["id"]);
         assert_eq!(second["duplicate"], true);
+    }
+
+    /// The paste-a-link door reads what the MCP door reads: a link to a PDF
+    /// is stored for extraction and answered 202, like an uploaded one.
+    #[tokio::test]
+    async fn a_pasted_link_to_a_pdf_is_stored_for_extraction() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/plan.pdf"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(a_pdf(), "application/pdf"))
+            .mount(&server)
+            .await;
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/corpora",
+                &token,
+                serde_json::json!({"url": format!("{}/plan.pdf", server.uri())}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let body = json_of(res).await;
+        assert_eq!(body["status"], "extracting");
     }
 
     #[tokio::test]

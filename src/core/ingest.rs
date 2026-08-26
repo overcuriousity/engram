@@ -16,6 +16,8 @@ pub const ORIGIN_IMAGE: &str = "image";
 pub const ORIGIN_PDF: &str = "pdf";
 /// Text typed or pasted into the capture box.
 pub const ORIGIN_WEB: &str = "web";
+/// A page read from a pasted link, by this server, as a stranger.
+pub const ORIGIN_FETCH: &str = "fetch";
 /// An answer the operator chose to keep. Its own value because a corpus whose
 /// text a model wrote must never read as one a person typed — that difference
 /// is the whole of what the keep-this-answer door concedes, and a bare literal
@@ -183,6 +185,15 @@ impl Capture {
     }
 }
 
+/// The last path segment of a URL, when it reads as a file name. `plan.pdf`
+/// out of `/papers/plan.pdf`; nothing out of `/` or `/papers/`.
+fn url_filename(url: &url::Url) -> Option<String> {
+    url.path_segments()?
+        .next_back()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 impl Core {
     /// Store the text and queue processing. Deliberately makes no inference
     /// call: capture must stay instant and must survive a dead endpoint.
@@ -194,6 +205,63 @@ impl Core {
     ) -> Result<IngestOutcome> {
         self.ingest_capture(Capture::new(text, origin).with_title(title_hint.map(str::to_string)))
             .await
+    }
+
+    /// Capture whatever a URL holds: a page is extracted and stored as a
+    /// `fetch` capture, a PDF or an image is stored for its reading stage.
+    /// The link is provenance on the corpus whichever it was.
+    ///
+    /// Both link doors — paste-a-link and MCP — come through here, so that
+    /// what one can read the other can too.
+    pub async fn ingest_url(
+        &self,
+        url: &url::Url,
+        title: Option<String>,
+        note: Option<String>,
+    ) -> Result<IngestOutcome> {
+        use crate::core::fetch::Fetched;
+        let source_url = Some(url.to_string());
+        match crate::core::fetch::fetch(url, &self.capture).await? {
+            Fetched::Html(html) => {
+                let text = crate::core::extract::extract(
+                    html,
+                    Some(url.clone()),
+                    self.capture.min_extracted_chars,
+                )
+                .await?;
+                self.ingest_capture(
+                    Capture::new(text, ORIGIN_FETCH)
+                        .with_title(title)
+                        .with_note(note)
+                        .with_source_url(source_url),
+                )
+                .await
+            }
+            Fetched::Pdf(bytes) => {
+                self.ingest_pdf_from(
+                    PdfCapture {
+                        bytes,
+                        filename: url_filename(url),
+                        title_hint: title,
+                        note,
+                    },
+                    source_url,
+                )
+                .await
+            }
+            Fetched::Image { bytes, .. } => {
+                self.ingest_image_from(
+                    ImageCapture {
+                        bytes,
+                        filename: url_filename(url),
+                        title_hint: title,
+                        note,
+                    },
+                    source_url,
+                )
+                .await
+            }
+        }
     }
 
     /// The same thing, for a door that also knows where the text was read.
@@ -378,6 +446,16 @@ impl Core {
     /// preview, because rendering a first page needs pdfium and that is the ML
     /// build's dependency, not this one's.
     pub async fn ingest_pdf(&self, c: PdfCapture) -> Result<IngestOutcome> {
+        self.ingest_pdf_from(c, None).await
+    }
+
+    /// The same, for a PDF read from a URL: the link is provenance on the
+    /// corpus, as it is for a fetched page.
+    pub async fn ingest_pdf_from(
+        &self,
+        c: PdfCapture,
+        source_url: Option<String>,
+    ) -> Result<IngestOutcome> {
         let PdfCapture {
             bytes,
             filename,
@@ -414,6 +492,7 @@ impl Core {
                 &hash,
                 ORIGIN_PDF,
                 title_hint.as_deref(),
+                source_url.as_deref(),
                 &metadata,
                 crate::store::corpora::Reading::EXTRACTION,
                 &crate::store::attachments::NewFile {
@@ -445,6 +524,15 @@ impl Core {
     }
 
     pub async fn ingest_image(&self, c: ImageCapture) -> Result<IngestOutcome> {
+        self.ingest_image_from(c, None).await
+    }
+
+    /// The same, for an image read from a URL.
+    pub async fn ingest_image_from(
+        &self,
+        c: ImageCapture,
+        source_url: Option<String>,
+    ) -> Result<IngestOutcome> {
         if self.describer.is_none() {
             return Err(Error::Validation(
                 "image capture is not configured — set [infer.vision] to enable it".into(),
@@ -516,6 +604,7 @@ impl Core {
                 &hash,
                 ORIGIN_IMAGE,
                 title_hint.as_deref(),
+                source_url.as_deref(),
                 &metadata,
                 crate::store::corpora::Reading::VISION,
                 &attachment,
@@ -1291,12 +1380,65 @@ impl Core {
 mod tests {
 
     use crate::core::ingest::{
-        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_IMAGE, ORIGIN_PDF, PdfCapture,
+        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_FETCH, ORIGIN_IMAGE,
+        ORIGIN_PDF, PdfCapture,
     };
     use crate::core::test_support::test_core;
     use crate::error::Error;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    /// The two link doors share one path, and the path decides by what the
+    /// URL held: a page is extracted here, a PDF is stored for `Stage::Extract`.
+    #[tokio::test]
+    async fn a_url_holding_a_page_is_captured_with_its_provenance() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let body = format!(
+            "<html><body><article><h1>Mounting</h1>{}</article></body></html>",
+            "<p>Run mount, then check dmesg for the device name and the filesystem it found.</p>"
+                .repeat(6)
+        );
+        Mock::given(method("GET"))
+            .and(path("/page"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/html"))
+            .mount(&server)
+            .await;
+        let core = test_core().await;
+        let u = url::Url::parse(&format!("{}/page", server.uri())).unwrap();
+        let out = core
+            .ingest_url(&u, None, Some("from the agent".into()))
+            .await
+            .unwrap();
+        let c = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(c.origin, ORIGIN_FETCH);
+        assert_eq!(c.source_url.as_deref(), Some(u.as_str()));
+        assert!(c.raw_text.contains("check dmesg"), "{}", c.raw_text);
+        assert_eq!(c.metadata["note"], "from the agent");
+    }
+
+    #[tokio::test]
+    async fn a_url_holding_a_pdf_is_stored_for_extraction_under_its_name() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/papers/plan.pdf"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(a_pdf_fixture(), "application/pdf"),
+            )
+            .mount(&server)
+            .await;
+        let core = test_core().await;
+        let u = url::Url::parse(&format!("{}/papers/plan.pdf", server.uri())).unwrap();
+        let out = core.ingest_url(&u, None, None).await.unwrap();
+        assert_eq!(out.status, CorpusStatus::Extracting);
+        let c = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(c.origin, ORIGIN_PDF);
+        assert_eq!(c.metadata["file"]["name"], "plan.pdf");
+        assert_eq!(c.source_url.as_deref(), Some(u.as_str()));
+    }
 
     fn a_pdf_fixture() -> Vec<u8> {
         include_bytes!("../../tests/fixtures/one-heading.pdf").to_vec()
