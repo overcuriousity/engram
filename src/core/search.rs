@@ -1171,6 +1171,14 @@ impl Core {
             HashMap::new()
         };
 
+        // Read once, and from the same configuration the vector store was
+        // built from: a second reading of these could drift from the formula
+        // that actually scored this search. `recency_weight` comes off the
+        // parameter rather than the lock, because `search_with_ranking`
+        // overrides it and the sweep must be explained with the weight it ran.
+        let half_life_secs = self.recency_half_life_days as u64 * 86_400;
+        let pinned_boost = self.pinned_boost;
+        let scored_at = now_secs();
         let mut results: Vec<SearchResult> = hits
             .into_iter()
             .enumerate()
@@ -1189,10 +1197,20 @@ impl Core {
                     (true, true) => crate::core::explain::CapEffect::Refilled,
                     (true, false) => crate::core::explain::CapEffect::Kept,
                 };
+                let (recency, pinned) = crate::core::explain::scoring_terms(
+                    &h.payload,
+                    scored_at,
+                    recency_weight,
+                    half_life_secs,
+                    pinned_boost,
+                    crate::vector::qdrant::PINNED_TAG,
+                );
                 SearchResult {
                     weak,
                     explanation: Some(crate::core::explain::HitExplanation {
                         retrieved_rank: rank,
+                        recency,
+                        pinned,
                         cap,
                         ..Default::default()
                     }),

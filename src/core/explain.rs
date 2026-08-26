@@ -96,9 +96,124 @@ pub struct SearchExplanation {
     pub reranked: bool,
 }
 
+/// The two score terms Qdrant applied, reconstructed from the payload.
+///
+/// The recency decay and the pinned boost run inside Qdrant as one sum and
+/// only the final score comes back (`src/vector/qdrant.rs`, `scoring_formula`).
+/// Both terms are nonetheless computable here from fields the payload already
+/// carries, so a full explanation costs no second query.
+///
+/// `exp_decay` with `midpoint: 0.5` and `scale: s` is `0.5^(|x - target| / s)`
+/// — a half-life curve whose half-life is `scale`. A weight of zero omits its
+/// term from the formula entirely, so this returns `None` rather than `0.0`: a
+/// rendered zero would claim a stage ran and contributed nothing, which is a
+/// different statement from the stage not being configured.
+///
+/// This re-implements another system's semantics, which is the one real risk
+/// in the design. It is pinned against real Qdrant in
+/// `tests/integration_qdrant.rs`, not against our own belief about the
+/// formula.
+pub fn scoring_terms(
+    payload: &crate::vector::VectorPayload,
+    now: i64,
+    recency_weight: f32,
+    half_life_secs: u64,
+    pinned_boost: f32,
+    pinned_tag: &str,
+) -> (Option<f32>, Option<f32>) {
+    let recency = (recency_weight > 0.0).then(|| {
+        // Absent means `now`, exactly as the formula's `"defaults"` says.
+        let stamp = payload.last_verified_at.unwrap_or(now);
+        let age = (now - stamp).max(0) as f64;
+        let decay = 0.5f64.powf(age / half_life_secs.max(1) as f64);
+        recency_weight * decay as f32
+    });
+    let pinned = (pinned_boost > 0.0 && payload.tags.iter().any(|t| t == pinned_tag))
+        .then_some(pinned_boost);
+    (recency, pinned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn payload(last_verified_at: Option<i64>, tags: &[&str]) -> crate::vector::VectorPayload {
+        crate::vector::VectorPayload {
+            artifact_id: "a".into(),
+            corpus_id: "c".into(),
+            text: String::new(),
+            title: None,
+            category: None,
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            created_at: 0,
+            last_seen_at: None,
+            hit_count: None,
+            status: None,
+            last_verified_at,
+            superseded_by: None,
+            origin_corpora: vec![],
+            provenance: None,
+        }
+    }
+
+    #[test]
+    fn one_half_life_of_age_halves_the_recency_term() {
+        let (recency, pinned) = scoring_terms(
+            &payload(Some(9_000), &[]),
+            10_000,
+            0.05,
+            1_000,
+            0.15,
+            "pinned",
+        );
+        let recency = recency.expect("a weighted recency term is present");
+        assert!(
+            (recency - 0.025).abs() < 1e-6,
+            "one half-life old halves the decay: 0.05 * 0.5 = 0.025, got {recency}"
+        );
+        assert!(pinned.is_none(), "an untagged point earns no pinned term");
+    }
+
+    #[test]
+    fn a_point_with_no_verification_stamp_decays_not_at_all() {
+        let (recency, _) = scoring_terms(&payload(None, &[]), 10_000, 0.05, 1_000, 0.15, "pinned");
+        assert_eq!(
+            recency,
+            Some(0.05),
+            "the formula's own default is `now`, which is a decay of 1.0 — \
+             reading the absence as maximum age would rank the opposite way"
+        );
+    }
+
+    #[test]
+    fn a_pinned_point_earns_the_whole_boost() {
+        let (_, pinned) = scoring_terms(
+            &payload(None, &["pinned"]),
+            10_000,
+            0.0,
+            1_000,
+            0.15,
+            "pinned",
+        );
+        assert_eq!(pinned, Some(0.15));
+    }
+
+    #[test]
+    fn a_disabled_term_is_absent_rather_than_zero() {
+        let (recency, pinned) = scoring_terms(
+            &payload(None, &["pinned"]),
+            10_000,
+            0.0,
+            1_000,
+            0.0,
+            "pinned",
+        );
+        assert!(
+            recency.is_none() && pinned.is_none(),
+            "`scoring_formula` omits a term at weight zero, so the explanation \
+             must not claim a stage that never entered the sum"
+        );
+    }
 
     #[test]
     fn a_stage_that_did_not_apply_serialises_to_nothing() {
