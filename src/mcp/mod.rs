@@ -1,9 +1,12 @@
 use crate::core::Core;
+use crate::core::ingest::Capture;
 use crate::core::search::{SearchQuery, SearchResult};
 use crate::error::Error;
 use crate::store::artifacts::ArtifactStatus;
+use crate::store::corpora::CorpusStatus;
 use crate::web::state::AppState;
 use axum::Router;
+use base64::Engine;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
@@ -98,6 +101,56 @@ pub fn format_search_results(results: &[SearchResult]) -> String {
         .join("\n\n---\n\n")
 }
 
+/// The channel a tool call arrives through.
+const ORIGIN_MCP: &str = "mcp";
+
+/// Store a file an agent handed over as bytes, by what the bytes are: a PDF
+/// by its header, an image by its own, and otherwise UTF-8 text with its
+/// file facts, as the upload door records them. Anything else is refused by
+/// name: a corpus is quoted back verbatim, and bytes stored as mojibake would
+/// be a fidelity loss nothing downstream could detect.
+async fn ingest_file(
+    core: &Core,
+    bytes: Vec<u8>,
+    filename: Option<String>,
+    title: Option<String>,
+    note: Option<String>,
+) -> crate::error::Result<crate::core::ingest::IngestOutcome> {
+    if bytes.starts_with(b"%PDF-") {
+        return core
+            .ingest_pdf(crate::core::ingest::PdfCapture {
+                bytes,
+                filename,
+                title_hint: title,
+                note,
+            })
+            .await;
+    }
+    if image::guess_format(&bytes).is_ok() {
+        return core
+            .ingest_image(crate::core::ingest::ImageCapture {
+                bytes,
+                filename,
+                title_hint: title,
+                note,
+            })
+            .await;
+    }
+    let size = bytes.len();
+    let text = String::from_utf8(bytes).map_err(|_| {
+        Error::Validation(
+            "that file is neither a PDF, an image nor UTF-8 text — nothing here reads it".into(),
+        )
+    })?;
+    core.ingest_capture(
+        Capture::new(text, ORIGIN_MCP)
+            .with_title(title)
+            .with_note(note)
+            .with_file(filename.as_deref(), size, "text/plain"),
+    )
+    .await
+}
+
 /// One line above a document: what it is called and where it came from.
 fn corpus_head(c: &crate::store::corpora::Corpus) -> String {
     let title = c
@@ -188,13 +241,33 @@ impl PkdbTools {
     }
 }
 
+/// Exactly one of `text`, `url` and `file_base64`. What an agent usually has
+/// is text or a link; `file_base64` is for a client that actually holds the
+/// bytes — a PDF, an image, a text file — and is bounded by the request body
+/// limit, so a book goes in by its link.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct IngestParams {
     /// The text to store verbatim.
-    pub text: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// A link to read instead: a page is extracted to markdown, a PDF or an
+    /// image is stored and read in the background. http or https only.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// A file's bytes, base64-encoded: a PDF, an image (PNG, JPEG, WebP) or
+    /// a UTF-8 text file. Known by its bytes, not its name.
+    #[serde(default)]
+    pub file_base64: Option<String>,
+    /// The file's name, with `file_base64`. Kept as a fact about the capture.
+    #[serde(default)]
+    pub filename: Option<String>,
     /// Optional short label for the corpus.
     #[serde(default)]
     pub title: Option<String>,
+    /// A sentence of context — where this came from, why it is kept. Stored
+    /// beside the text, never inside it.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -244,7 +317,10 @@ impl PkdbTools {
 
     #[tool(
         name = "ingest",
-        description = "Store text in the personal knowledge base. Returns immediately; \
+        description = "Store something in the personal knowledge base: verbatim text, \
+                       a link (a page, a PDF or an image — read by this server), or a \
+                       file as base64 (PDF, image or UTF-8 text). Exactly one of `text`, \
+                       `url`, `file_base64`. Returns immediately; extraction, \
                        segmentation and embedding happen in the background."
     )]
     async fn ingest(&self, Parameters(p): Parameters<IngestParams>) -> String {
@@ -252,7 +328,34 @@ impl PkdbTools {
             Ok(c) => c,
             Err(e) => return format!("Ingest failed: {e}"),
         };
-        match core.ingest(&p.text, "mcp", p.title.as_deref()).await {
+        let supplied = [p.text.is_some(), p.url.is_some(), p.file_base64.is_some()]
+            .iter()
+            .filter(|x| **x)
+            .count();
+        if supplied != 1 {
+            return "Ingest failed: supply exactly one of `text`, `url` or `file_base64`."
+                .to_string();
+        }
+        let outcome = if let Some(text) = p.text {
+            core.ingest_capture(
+                Capture::new(text, ORIGIN_MCP)
+                    .with_title(p.title)
+                    .with_note(p.note),
+            )
+            .await
+        } else if let Some(raw) = p.url {
+            match url::Url::parse(&raw) {
+                Ok(u) => core.ingest_url(&u, p.title, p.note).await,
+                Err(e) => Err(Error::Validation(format!("url: {e}"))),
+            }
+        } else {
+            let encoded = p.file_base64.expect("the one-of check");
+            match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
+                Ok(bytes) => ingest_file(&core, bytes, p.filename, p.title, p.note).await,
+                Err(e) => Err(Error::Validation(format!("file_base64 is not base64: {e}"))),
+            }
+        };
+        match outcome {
             Ok(o) if o.duplicate => format!("Already stored as `{}`.", o.id),
             // A parked capture is stored and nothing more: no segmentation, no
             // embedding, and nothing searchable until a person decides. Saying
@@ -269,10 +372,24 @@ impl PkdbTools {
                     n.corpus_id
                 )
             }
-            Ok(o) => format!(
-                "Stored as `{}`. Segmentation and embedding run in the background.",
-                o.id
-            ),
+            // What was stored is not yet what search finds; the reply says
+            // which reading still stands between the two.
+            Ok(o) => match o.status {
+                CorpusStatus::Extracting => format!(
+                    "Stored as `{}`. Text extraction, then segmentation and embedding, \
+                     run in the background.",
+                    o.id
+                ),
+                CorpusStatus::Describing => format!(
+                    "Stored as `{}`. The image is read by a vision model, then segmented \
+                     and embedded, in the background.",
+                    o.id
+                ),
+                _ => format!(
+                    "Stored as `{}`. Segmentation and embedding run in the background.",
+                    o.id
+                ),
+            },
             Err(e) => format!("Ingest failed: {e}"),
         }
     }
@@ -945,6 +1062,143 @@ mod tests {
             .await;
         assert!(last.ends_with("abcdefghij"), "{last}");
         assert!(!last.contains("offset="), "{last}");
+    }
+
+    fn ingest_params() -> IngestParams {
+        IngestParams {
+            text: None,
+            url: None,
+            file_base64: None,
+            filename: None,
+            title: None,
+            note: None,
+        }
+    }
+
+    fn a_pdf_fixture() -> Vec<u8> {
+        include_bytes!("../../tests/fixtures/one-heading.pdf").to_vec()
+    }
+
+    #[tokio::test]
+    async fn ingest_keeps_the_note_an_agent_attaches() {
+        let core = crate::core::test_support::test_core().await;
+        let tools = PkdbTools::over(core.clone());
+        let reply = tools
+            .ingest(Parameters(IngestParams {
+                text: Some("Run mount.".into()),
+                note: Some("from the shell session".into()),
+                ..ingest_params()
+            }))
+            .await;
+        let id = reply.split('`').nth(1).expect("an id in backticks");
+        let c = core.store.get_corpus(id).await.unwrap();
+        assert_eq!(c.metadata["note"], "from the shell session");
+    }
+
+    #[tokio::test]
+    async fn ingest_takes_exactly_one_source() {
+        let tools = PkdbTools::over(crate::core::test_support::test_core().await);
+        let both = tools
+            .ingest(Parameters(IngestParams {
+                text: Some("a".into()),
+                url: Some("https://example.test/".into()),
+                ..ingest_params()
+            }))
+            .await;
+        assert!(both.contains("exactly one of"), "{both}");
+        let none = tools.ingest(Parameters(ingest_params())).await;
+        assert!(none.contains("exactly one of"), "{none}");
+    }
+
+    /// An agent that holds bytes hands them over as base64; a PDF is known
+    /// by its bytes, and stored for extraction under the name it came with.
+    #[tokio::test]
+    async fn ingest_takes_a_pdf_as_base64_and_says_extraction_is_queued() {
+        use base64::Engine;
+        let core = crate::core::test_support::test_core().await;
+        let tools = PkdbTools::over(core.clone());
+        let reply = tools
+            .ingest(Parameters(IngestParams {
+                file_base64: Some(
+                    base64::engine::general_purpose::STANDARD.encode(a_pdf_fixture()),
+                ),
+                filename: Some("plan.pdf".into()),
+                ..ingest_params()
+            }))
+            .await;
+        assert!(reply.contains("extraction"), "{reply}");
+        let id = reply.split('`').nth(1).expect("an id in backticks");
+        let c = core.store.get_corpus(id).await.unwrap();
+        assert_eq!(c.origin, crate::core::ingest::ORIGIN_PDF);
+        assert_eq!(c.metadata["file"]["name"], "plan.pdf");
+    }
+
+    /// Plain text as a file is a text capture that remembers its file facts,
+    /// as the upload door records them; bytes that are neither a document
+    /// nor text are refused by name rather than stored as mojibake.
+    #[tokio::test]
+    async fn ingest_takes_a_text_file_and_refuses_bytes_it_cannot_read() {
+        use base64::Engine;
+        let core = crate::core::test_support::test_core().await;
+        let tools = PkdbTools::over(core.clone());
+        let reply = tools
+            .ingest(Parameters(IngestParams {
+                file_base64: Some(
+                    base64::engine::general_purpose::STANDARD.encode("# Notes\n\nRun mount."),
+                ),
+                filename: Some("notes.md".into()),
+                ..ingest_params()
+            }))
+            .await;
+        let id = reply.split('`').nth(1).expect("an id in backticks");
+        let c = core.store.get_corpus(id).await.unwrap();
+        assert_eq!(c.raw_text, "# Notes\n\nRun mount.");
+        assert_eq!(c.metadata["file"]["name"], "notes.md");
+
+        let refused = tools
+            .ingest(Parameters(IngestParams {
+                file_base64: Some(
+                    base64::engine::general_purpose::STANDARD.encode([0u8, 159, 146, 150]),
+                ),
+                ..ingest_params()
+            }))
+            .await;
+        assert!(refused.contains("Ingest failed"), "{refused}");
+        assert!(refused.contains("PDF"), "{refused}");
+        let garbage = tools
+            .ingest(Parameters(IngestParams {
+                file_base64: Some("not base64!".into()),
+                ..ingest_params()
+            }))
+            .await;
+        assert!(garbage.contains("base64"), "{garbage}");
+    }
+
+    #[tokio::test]
+    async fn ingest_reads_a_url_and_keeps_it_as_provenance() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/plan.pdf"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(a_pdf_fixture(), "application/pdf"),
+            )
+            .mount(&server)
+            .await;
+        let core = crate::core::test_support::test_core().await;
+        let tools = PkdbTools::over(core.clone());
+        let url = format!("{}/plan.pdf", server.uri());
+        let reply = tools
+            .ingest(Parameters(IngestParams {
+                url: Some(url.clone()),
+                ..ingest_params()
+            }))
+            .await;
+        assert!(reply.contains("extraction"), "{reply}");
+        let id = reply.split('`').nth(1).expect("an id in backticks");
+        let c = core.store.get_corpus(id).await.unwrap();
+        assert_eq!(c.source_url.as_deref(), Some(url.as_str()));
     }
 
     #[test]
