@@ -38,7 +38,10 @@ as a paste the operator approves; one bounded round of planned retrieval behind
 `[infer.ask] plan`, fanning out to a search per uncovered subject; named model
 tiers, so a role picks a model by what the call is worth; judged questions with
 a second harness — citation recall, abstention, faithfulness by literals and by
-claim check; knowledge gaps grouped and named on the capture page; a
+claim check; knowledge gaps grouped and named on the capture page, the fifth
+kind of them the subjects a plan named and the base could not cover; what a
+hit's document does next, said on the rail and read in the pane, which appends
+the passages that follow one click at a time; a
 recommendation under the search box, learned from the situations an artifact
 was opened in — the browser's time zone and local time, the device, the
 viewport, the network and the power state, clustered per artifact and stored as
@@ -334,6 +337,21 @@ generation. And nothing is written to memory without a person: the
 keep-this-answer link prefills the capture box and saves nothing, so the trace
 records that a model wrote the text and what it was written from.
 
+Built: **the plan's uncovered subjects are gaps of their own**, a fifth
+`GapKind` beside the four the capture page already had. A subject whose fan-out
+search came back with every ranked candidate under `weak_below` is a hole the
+base named itself, for a question a person asked, out of a call that was
+already paid for. Weakness rather than emptiness, and deliberately the same
+threshold `Unmatched` reads — one definition of "nothing near this", at a
+second door. What makes it a kind rather than a second reading of `Unmatched`
+is the text: a subject a model named to describe a hole, where `Unmatched`
+carries a query somebody typed. Badged *planned*, and only at the web door,
+because a subject is derived from a question and `record_ask` already draws
+that line. Only the ranked hits are read — a neighbour reached sideways is
+structure, not a match. The cost was not the "one commit" this file estimated:
+it wanted a table, because planned rounds deliberately write nothing to the
+search log.
+
 Model tiers are built: named tiers under `[infer.tiers.*]`, each chat role
 pointing at one, resolved at parse time into the same concrete role structs the
 completers already took. The planning call runs on the efficient tier while the
@@ -342,17 +360,6 @@ too (`2026-08-17-ask-harness-design.md`): verdicts with carriers,
 `questions.json` in the export, `evaluate_ask` measuring citation recall,
 abstention accuracy and faithfulness by literals and by claim check, and
 "nothing here" surfaced as a knowledge gap.
-
-- **The plan's uncovered subjects are gap candidates.** When `[infer.ask] plan`
-  names the subjects the excerpts miss, it has said out loud what the base does
-  not hold, in the model's own words, one bounded round per question. Today each
-  becomes a search and is then thrown away. A subject whose fan-out search came
-  back with nothing is a knowledge gap that cost nothing to find.
-  **Worth:** gaps from a call already paid for, and the most specific ones on
-  the queue — a named subject beats "this search scored low".
-  **Cost:** keep what the plan already computed and write it as a fifth
-  `GapKind` (`src/store/gaps.rs:10`), with the same coverage and dismissal paths
-  the other four use. **One commit.**
 
 - **Whether the planning call earns itself, and whether packing to the cliff
   helps with no reranker configured.** A search's own fused scores are smooth
@@ -388,19 +395,29 @@ abstention accuracy and faithfulness by literals and by claim check, and
 What ask learns at write time, search inherits. Ask verdicts join judged
 searches as access cues under **access reconsolidation** above. The cliff is
 built (`search::cliff`, `src/core/search.rs:256`) and ask packs to it. The items
-here are search's own, and all but the first move ranking.
+here are search's own, and every one of them moves ranking.
 
-- **Continues in.** A hit whose neighbour in its corpus (adjacent ordinal) is
-  also above the cliff says so, and one click reads on. The answer to a
-  situation is often the paragraph after the one that matched. Most of the
-  machinery arrived with ask's sideways reach: `Store::adjacent_artifacts`
-  exists (`src/store/artifacts.rs:660`), and `ask/retrieve.rs` already decides
-  which hits are reliable enough to reach from. What is left is the presentation
-  — saying so on the rail, and the click.
-  **Worth:** the paragraph after the match stops being something the operator
-  has to go and find. Highest worth-per-line in this section, and the only item
-  here that needs no measurement.
-  **Cost:** a badge on the rail and a route behind the click. **One commit.**
+Built: **continues in**, and it turned out to be two things rather than one. On
+the rail a hit says what its document does next — *continues in #2* where the
+next passage itself placed, *continues in the next passage* where it did not,
+never both. In the pane the document actually continues: opening a passage
+appends the one after it, and a control appends the next as often as it is
+clicked, until the document ends and the control becomes the way into the
+document. The source column grows with the run, recomputed rather than
+appended so the lines between two adjacent passages are not printed twice.
+
+Two things it did not become. Not an inline expansion on the rail — the rail is
+a `listbox` whose rows are options, and a disclosure inside an option breaks
+the arrow keys as well as the ARIA. And not a semantic chain: adjacent passages
+are additionally similar through their shared heading (see **Server-side
+grouping** below), so such a chain ends where the formatting changes rather
+than where the meaning does, and a pane whose length is a computed judgement
+cannot tell the reader whether it stopped because the document ended or because
+a number was not met. The run length rides in the link, so the reader is the
+stopping rule. Cross-corpus was considered and belongs elsewhere: `ordinal` is
+a per-corpus sequence, so there is no reading order to continue into, and what
+a near artifact in another document is — a neighbour — the pane already shows
+as *Related* and *Seen together*.
 
 - **Server-side grouping — a prerequisite, not a nice-to-have.** The per-corpus
   cap is applied client-side over a candidate pool three times the limit; a
