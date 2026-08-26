@@ -601,9 +601,20 @@ self_weight = 0.0
 # weight however many dimensions it uses — seven one-hot slots for the weekday
 # do not outweigh two for the hour because there are seven of them.
 [recommend.weights]
-# Interim, and load-bearing: every person shares one collection today, so this
-# is what keeps one person's situations from being offered to another. It goes
-# to 0 when each user has their own collection.
+# Interim, and no longer load-bearing. This kept one person's situations from
+# being ranked first for another back when everyone shared one collection; each
+# user now has their own database and their own collection, and the read path
+# cuts foreign clusters by an exact match on top of that, which was always the
+# guarantee. Inside one collection every cluster carries the same subject, so
+# this block is the same direction in every stored vector and in the query: it
+# orders nothing, and under cosine it flattens the differences the blocks below
+# can make. `strong_at`/`weak_at` never saw it — the gate slices it off — so
+# only the ranking still carries it.
+#
+# It stays at 10.0 for one reason: the weights *are* the encoder version, so
+# changing this retires every cluster already learnt and the offer falls back
+# to a random card until the next context sweep has rebuilt them. Set it to 0
+# when you would rather pay that sweep than keep the distortion.
 scope = 10.0
 # The hour, as an angle — 23:30 and 00:30 are an hour apart, and 14:55 against a
 # 15:00 pattern costs almost nothing.
