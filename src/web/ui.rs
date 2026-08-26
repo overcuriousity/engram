@@ -511,6 +511,9 @@ pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
             GapKind::Ask => "asked",
             GapKind::Unmatched => "nothing near",
             GapKind::Pursuit => "pursued",
+            // What asked it, like the other four — and here what asked was the
+            // planning call, on a question somebody put to the base.
+            GapKind::Subject => "planned",
         },
         id: g.id,
         text: g.text,

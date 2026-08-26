@@ -79,3 +79,107 @@ pub(super) async fn needed_queries(
     }
     queries
 }
+
+/// Which of the planned subjects the base turned out not to hold.
+///
+/// The plan names what the first round's excerpts miss; each subject then gets
+/// a search of its own. A subject whose search came back with every ranked
+/// candidate *weak* — under `vector.weak_below` — is a hole in the base, stated
+/// in the model's own words, for a question a person actually asked. Today that
+/// is computed, used to widen one answer, and thrown away.
+///
+/// Weakness rather than emptiness, and for the reason `GapKind::Unmatched`
+/// gives: retrieval always returns its best candidates however bad they are, so
+/// "no hits" almost never happens and "nothing near" is the measurable form of
+/// the same claim. It is deliberately the same threshold — one definition of
+/// "the base held nothing near this", read at a second door.
+///
+/// Only the *ranked* hits are read. What a round reached sideways is structure
+/// rather than a match: a neighbour is on the page because it sits next to
+/// something, and letting it argue that a subject was covered would silence the
+/// gap on evidence about a different passage.
+///
+/// A round that failed is not here at all — `fan_out` drops it — and that is
+/// right: a search that never ran is not evidence that the base lacks anything.
+pub(super) fn uncovered(rounds: &[super::Round]) -> Vec<String> {
+    rounds
+        .iter()
+        .filter(|r| r.hits[..r.ranked].iter().all(|h| h.weak))
+        .map(|r| r.query.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::search::SearchResult;
+
+    fn hit(weak: bool) -> SearchResult {
+        SearchResult {
+            artifact_id: "a".into(),
+            corpus_id: "s".into(),
+            title: None,
+            text: "body".into(),
+            category: None,
+            tags: vec![],
+            score: 0.5,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak,
+            primed: false,
+            in_sitting: false,
+            past_cliff: false,
+            via: None,
+            reason: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+        }
+    }
+
+    fn round(query: &str, ranked: Vec<SearchResult>) -> super::super::Round {
+        super::super::Round {
+            query: query.into(),
+            ranked: ranked.len(),
+            hits: ranked,
+            retrieved: vec![],
+            cliff_at: None,
+        }
+    }
+
+    /// The subject the model asked for and the base could not answer. The
+    /// planning call already paid for this; today it is discarded.
+    #[test]
+    fn a_subject_whose_every_hit_was_weak_is_uncovered() {
+        let rounds = [round("job priority", vec![hit(true), hit(true)])];
+        assert_eq!(super::uncovered(&rounds), vec!["job priority".to_string()]);
+    }
+
+    /// One real match is coverage. The subject was named as missing and turned
+    /// out not to be, which is the fan-out working rather than a hole.
+    #[test]
+    fn a_subject_with_one_real_match_is_not_a_gap() {
+        let rounds = [round("job priority", vec![hit(true), hit(false)])];
+        assert!(super::uncovered(&rounds).is_empty());
+    }
+
+    /// Nothing came back at all. Rare, because retrieval returns its best
+    /// candidates however bad they are — but when it happens it is the same
+    /// claim in its strongest form.
+    #[test]
+    fn a_subject_that_returned_nothing_is_uncovered() {
+        let rounds = [round("job priority", vec![])];
+        assert_eq!(super::uncovered(&rounds), vec!["job priority".to_string()]);
+    }
+
+    /// What a round reached sideways is not a match. A neighbour is on the page
+    /// because it sits beside something, and letting it vouch for a subject
+    /// would close a gap on evidence about a different passage.
+    #[test]
+    fn a_neighbour_reached_sideways_does_not_cover_a_subject() {
+        let mut r = round("job priority", vec![hit(true)]);
+        // Appended past `ranked`, exactly as `reach_sideways` appends.
+        r.hits.push(hit(false));
+        assert_eq!(super::uncovered(&[r]), vec!["job priority".to_string()]);
+    }
+}

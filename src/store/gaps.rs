@@ -31,6 +31,23 @@ pub enum GapKind {
     /// row. A pursuit written before that has none and is not a gap, which is
     /// the same rule `vec_dim > 0` already applies to everything else here.
     Pursuit,
+    /// A subject `[infer.ask] plan` named as missing from the excerpts, whose
+    /// own fan-out search then found nothing near it either.
+    ///
+    /// The measurement is `Unmatched`'s — every candidate under `weak_below` —
+    /// and that is deliberate: there is one definition of "the base held
+    /// nothing near this" and this reuses it rather than inventing a second.
+    /// What makes it a kind of its own is the *text*. `Unmatched` carries a
+    /// query somebody typed; this carries a subject a model named, in a
+    /// sentence written to describe a hole rather than to find a thing. A named
+    /// subject is the most specific thing on this list, and the badge says who
+    /// named it.
+    ///
+    /// Only at the web door. The subject is derived from a question, questions
+    /// are personal data of the same kind as a query, and `record_ask` already
+    /// draws that line — so this rides with the recording rather than around
+    /// it.
+    Subject,
 }
 
 impl GapKind {
@@ -40,6 +57,7 @@ impl GapKind {
             GapKind::Search => "search",
             GapKind::Unmatched => "unmatched",
             GapKind::Pursuit => "pursuit",
+            GapKind::Subject => "subject",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -48,6 +66,7 @@ impl GapKind {
             "search" => Some(GapKind::Search),
             "unmatched" => Some(GapKind::Unmatched),
             "pursuit" => Some(GapKind::Pursuit),
+            "subject" => Some(GapKind::Subject),
             _ => None,
         }
     }
@@ -119,8 +138,10 @@ pub struct GapRow {
 /// on every retention tick, and `ui::capture_page` — the page the app opens on —
 /// walks the same list with its full query vectors on every load.
 ///
-/// Per kind, and there are four of them, so what either reader actually gets is
-/// up to four times this. The sweep's clustering is quadratic in that total and
+/// Per kind, and there are five of them, so what either reader actually gets is
+/// up to five times this — the fifth, `Subject`, widened a quadratic loop by a
+/// quarter, which is the price of the kind and is named here rather than
+/// discovered later. The sweep's clustering is quadratic in that total and
 /// the capture page renders one row of it apiece, which is two million cosines
 /// on a timer and two thousand `<li>` before the first sweep has grouped
 /// anything. Both are the accepted cost of showing every kind of gap rather
@@ -235,6 +256,28 @@ macro_rules! unmatched_gaps_sql {
 /// naming prompt keeps the first twelve members, and a member that is itself a
 /// paragraph of queries would crowd out eleven other gaps. `queries` is JSON,
 /// so the first element is read out in Rust rather than in SQL.
+/// A subject the plan named and the fan-out could not cover.
+///
+/// The join to `ask_events` is what makes the row die with its question — a
+/// `DELETE` cascades, and a base whose foreign keys are off still cannot return
+/// an orphan through this. `dismissed_at` and `gap_coverage` close it the same
+/// way they close the other four.
+macro_rules! subject_gaps_sql {
+    ($cols:literal) => {
+        concat!(
+            "SELECT s.id, s.subject AS text",
+            $cols,
+            " FROM ask_subjects s
+              JOIN ask_events e ON e.id = s.event_id
+              WHERE s.dismissed_at IS NULL
+                AND s.embed_model = ? AND s.vec_dim > 0
+                AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                                 WHERE kind = 'subject' AND gap_id = s.id)
+              ORDER BY s.created_at DESC, s.id DESC LIMIT ?"
+        )
+    };
+}
+
 macro_rules! pursuit_gaps_sql {
     ($cols:literal) => {
         concat!(
@@ -376,7 +419,33 @@ impl Store {
         let pursuits_capped = (out.len() - before_pursuits) as i64 > MAX_OPEN_GAPS;
         out.truncate(before_pursuits + MAX_OPEN_GAPS as usize);
         let pursuits = out.len() - before_pursuits;
-        let capped = asks_capped || searches_capped || unmatched_capped || pursuits_capped;
+        let before_subjects = out.len();
+        for r in sqlx::query(subject_gaps_sql!(", s.query_vec, s.created_at"))
+            .bind(embed_model)
+            .bind(MAX_OPEN_GAPS + 1)
+            .fetch_all(&self.pool)
+            .await?
+        {
+            out.push((
+                r.get("created_at"),
+                GapVec {
+                    gap: Gap {
+                        kind: GapKind::Subject,
+                        id: r.get("id"),
+                        text: r.get("text"),
+                    },
+                    vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+                },
+            ));
+        }
+        let subjects_capped = (out.len() - before_subjects) as i64 > MAX_OPEN_GAPS;
+        out.truncate(before_subjects + MAX_OPEN_GAPS as usize);
+        let subjects = out.len() - before_subjects;
+        let capped = asks_capped
+            || searches_capped
+            || unmatched_capped
+            || pursuits_capped
+            || subjects_capped;
         // The same key each half was already read by, applied across both:
         // whole-second `judged_at`, ties broken by a uuid v7 id, so a second's
         // worth of gaps is still ordered by when they were recorded.
@@ -389,10 +458,53 @@ impl Store {
                 searches,
                 unmatched,
                 pursuits,
+                subjects,
                 "more open gaps than one pass reads; the oldest are left out of this one"
             );
         }
         Ok(OpenGaps { gaps: out, capped })
+    }
+
+    /// A subject the plan named and the fan-out could not cover.
+    ///
+    /// Written only for the uncovered ones. A subject the fan-out answered is
+    /// not a hole and leaves no row, which is what keeps this table a list of
+    /// what the base lacks rather than a log of everything a planning call ever
+    /// said.
+    ///
+    /// The vector is handed in rather than embedded here. The fan-out already
+    /// embedded this subject in order to search for it, so the caller reads it
+    /// back out of the query cache and this costs no model call at all — which
+    /// is the whole argument for the kind: the call was paid for, and today its
+    /// findings are thrown away.
+    ///
+    /// An empty vector is stored as one rather than refused. Every reader here
+    /// already gates on `vec_dim > 0`, and a subject whose embedding could not
+    /// be recovered is a subject that was still named — refusing the row would
+    /// lose the fact to save a few bytes.
+    pub async fn record_uncovered_subject(
+        &self,
+        event_id: &str,
+        subject: &str,
+        query_vec: &[f32],
+        embed_model: &str,
+    ) -> Result<String> {
+        let id = crate::store::new_id();
+        sqlx::query(
+            "INSERT INTO ask_subjects
+               (id, event_id, subject, query_vec, vec_dim, embed_model, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(event_id)
+        .bind(subject)
+        .bind(crate::store::feedback::vec_to_blob(query_vec))
+        .bind(query_vec.len() as i64)
+        .bind(embed_model)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
     }
 
     /// The same open gaps, without their vectors: what the capture page renders.
@@ -405,6 +517,7 @@ impl Store {
         for (sql, kind) in [
             (ask_gaps_sql!(""), GapKind::Ask),
             (search_gaps_sql!(""), GapKind::Search),
+            (subject_gaps_sql!(""), GapKind::Subject),
         ] {
             for r in sqlx::query(sql)
                 .bind(embed_model)
@@ -680,6 +793,17 @@ impl Store {
                     .execute(&self.pool)
                     .await?
             }
+            // Its own column, unlike `Search`/`Unmatched` above. A subject is
+            // not a second reading of some other row — it is a row of its own,
+            // written for one plan, and dismissing it says nothing about the
+            // question it came from.
+            GapKind::Subject => {
+                sqlx::query("UPDATE ask_subjects SET dismissed_at = ? WHERE id = ?")
+                    .bind(now())
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await?
+            }
         };
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
@@ -831,6 +955,114 @@ mod tests {
             .unwrap();
         store.judge_ask(&id, AskVerdict::NothingHere).await.unwrap();
         id
+    }
+
+    /// A question whose plan named a subject the base could not cover.
+    async fn uncovered_subject(store: &Store, q: &str, subject: &str, vec: Vec<f32>) -> String {
+        let ask = store
+            .record_ask(NewAsk {
+                question: q.into(),
+                scope: None,
+                filters: "{}".into(),
+                query_vec: vec![1.0, 0.0],
+                embed_model: "fake".into(),
+                answer: "here is what I found".into(),
+                abstained: false,
+                dropped: 0,
+                truncated: false,
+                citations: vec![],
+            })
+            .await
+            .unwrap();
+        store
+            .record_uncovered_subject(&ask, subject, &vec, "fake")
+            .await
+            .unwrap()
+    }
+
+    /// The plan says out loud what the excerpts miss, and a subject whose
+    /// fan-out came back with nothing is a hole in the base named by the model,
+    /// for a question a person actually asked. It cost nothing to find — the
+    /// planning call was already paid for.
+    #[tokio::test]
+    async fn an_uncovered_subject_is_an_open_gap() {
+        let store = Store::memory().await.unwrap();
+        uncovered_subject(&store, "how do ticks work", "job priority", vec![0.0, 1.0]).await;
+
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+        let subjects: Vec<&str> = gaps
+            .iter()
+            .filter(|g| g.gap.kind == GapKind::Subject)
+            .map(|g| g.gap.text.as_str())
+            .collect();
+        assert_eq!(subjects, vec!["job priority"]);
+    }
+
+    /// The same closing rule the other four use: a capture that covers it takes
+    /// it off the list, and what an automatic score decided never overwrites
+    /// what a person judged.
+    #[tokio::test]
+    async fn a_covered_subject_leaves_the_list() {
+        let store = Store::memory().await.unwrap();
+        let id =
+            uncovered_subject(&store, "how do ticks work", "job priority", vec![0.0, 1.0]).await;
+        // Coverage points at a real capture: the row carries foreign keys, and
+        // a gap closed by an artifact nobody stored would be a claim with
+        // nothing behind it.
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "job priority is a column".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .cover_gap(GapKind::Subject, &id, &src.id, &made[0].id, 0.9)
+            .await
+            .unwrap();
+
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+        assert!(
+            !gaps.iter().any(|g| g.gap.kind == GapKind::Subject),
+            "a covered subject stayed on the list"
+        );
+    }
+
+    /// The rule every kind here already applies: no vector, no grouping, so it
+    /// is not a gap this list can do anything with.
+    #[tokio::test]
+    async fn a_subject_with_no_vector_is_not_a_gap() {
+        let store = Store::memory().await.unwrap();
+        uncovered_subject(&store, "how do ticks work", "job priority", vec![]).await;
+
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+        assert!(!gaps.iter().any(|g| g.gap.kind == GapKind::Subject));
+    }
+
+    /// A subject is a fact about one question. The question going means the
+    /// subject goes: it was never a hole anybody reported on its own, and left
+    /// behind it would name a plan whose ask no longer exists.
+    #[tokio::test]
+    async fn a_subject_dies_with_the_question_it_came_from() {
+        let store = Store::memory().await.unwrap();
+        uncovered_subject(&store, "how do ticks work", "job priority", vec![0.0, 1.0]).await;
+        sqlx::query("DELETE FROM ask_events")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+        assert!(!gaps.iter().any(|g| g.gap.kind == GapKind::Subject));
     }
 
     async fn gap_search(store: &Store, q: &str, vec: Vec<f32>) -> String {
