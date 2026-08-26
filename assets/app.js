@@ -28,6 +28,60 @@
     });
   }
 
+  // Chrome fires this once, early, and only hands the prompt to a listener
+  // that was already there — so it is caught here, at script scope, and
+  // `installNudge` decides later whether to use it.
+  var installPrompt = null;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    installPrompt = e;
+    installNudge();
+  });
+
+  // Offered on a phone browser, once a week, until installed or declined.
+  // Not in an installed window: there is nothing left to offer. Not on a
+  // desktop: the browser's own address-bar affordance is enough there, and a
+  // banner on a wide screen is furniture. A week rather than never, because
+  // "Not now" means not now.
+  var INSTALL_KEY = 'engram.install-nudged';
+  var INSTALL_WEEK = 7 * 24 * 60 * 60 * 1000;
+  function installNudge() {
+    var nudge = document.querySelector('.installnudge');
+    if (!nudge || !nudge.hidden) return;
+    var installed = window.matchMedia('(display-mode: standalone)').matches ||
+      window.navigator.standalone === true;
+    if (installed) return;
+    var phone = window.matchMedia('(pointer: coarse)').matches &&
+      window.matchMedia('(max-width: 40rem)').matches;
+    if (!phone) return;
+    var last = 0;
+    try { last = parseInt(localStorage.getItem(INSTALL_KEY) || '0', 10) || 0; } catch (e) { return; }
+    if (Date.now() - last < INSTALL_WEEK) return;
+    // Safari has no prompt and no event; the route is the Share sheet. Any
+    // other browser without a prompt has no route at all, so no banner.
+    var ios = /iPhone|iPad|iPod/.test(navigator.userAgent) && !window.MSStream;
+    if (!installPrompt && !ios) return;
+    function stamp() {
+      try { localStorage.setItem(INSTALL_KEY, String(Date.now())); } catch (e) {}
+      nudge.hidden = true;
+    }
+    if (installPrompt) {
+      var button = nudge.querySelector('[data-install]');
+      button.hidden = false;
+      button.addEventListener('click', function () {
+        var p = installPrompt;
+        installPrompt = null;
+        stamp();
+        if (p) p.prompt();
+      });
+    } else {
+      nudge.querySelector('[data-install-how]').hidden = false;
+    }
+    nudge.querySelector('[data-dismiss-install]').addEventListener('click', stamp);
+    window.addEventListener('appinstalled', stamp);
+    nudge.hidden = false;
+  }
+
   function terms(root) {
     var host = root.closest ? (root.closest('[data-terms]') || root.querySelector('[data-terms]')) : null;
     if (!host && root.getAttribute && root.getAttribute('data-terms') !== null) host = root;
@@ -1910,6 +1964,7 @@
     themeToggle();
     vectorBg();
     keyHint();
+    installNudge();
     primeSlow();
     contextOffer();
     restoreReading();

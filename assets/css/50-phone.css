@@ -11,6 +11,9 @@
    to do. The back link answers a different width and gets its own block
    below. */
 .tabbar { display: none; }
+/* Shown by app.js on a phone only; see `installNudge`. Above 40rem there is
+   no case for it, whatever the script decides. */
+.installnudge { display: none; }
 .back { display: none; }
 
 /* Paired with `.regions.has-selection .region-rail { display: none }`, which
@@ -157,6 +160,22 @@
   /* Clear of both bars, so the last result can be scrolled to. The shell's own
      5.5rem clears the tab bar alone. */
   .regions-rail-focus-source { padding-bottom: 4rem; }
+
+  /* A toast above the tab bar, not a banner above the page: the box is the
+     first thing on the screen and stays so. Ships `hidden`; an author
+     `display` beats the UA's `[hidden]` rule, the same trap `.keyhint`
+     documents. */
+  .installnudge {
+    position: fixed; left: 0.75rem; right: 0.75rem; z-index: 11;
+    bottom: calc(46px + 0.75rem + env(safe-area-inset-bottom));
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    padding: 0.75rem; border: 1px solid var(--color-border);
+    border-radius: var(--radius-md); background: var(--color-bg-surface);
+    font-size: var(--text-sm);
+  }
+  .installnudge[hidden] { display: none; }
+  .installnudge p { flex: 1 1 100%; margin: 0; color: var(--color-fg-secondary); }
+  .installnudge [data-dismiss-install] { margin-left: auto; }
 
   .tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: flex;

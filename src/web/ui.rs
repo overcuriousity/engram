@@ -4561,6 +4561,68 @@ mod tests {
         );
     }
 
+    /// The page ships the install nudge hidden, on every page, and app.js
+    /// decides — so a browser without JS, or one that already installed the
+    /// app, never sees a banner offering it.
+    #[tokio::test]
+    async fn the_install_nudge_ships_hidden_and_app_js_gates_it() {
+        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
+        for uri in ["/ui", "/ui/settings"] {
+            let html = get(&app, uri, &cookie).await;
+            let nudge = html
+                .split_once(r#"class="installnudge""#)
+                .unwrap_or_else(|| panic!("no install nudge on {uri}: {html}"))
+                .1;
+            let tag = &nudge[..nudge.find('>').unwrap()];
+            assert!(
+                tag.contains("hidden"),
+                "the nudge is not hidden on {uri}: {tag}"
+            );
+            assert!(nudge.contains("data-install-how"), "{uri}");
+            assert!(
+                nudge.contains("Add to Home Screen"),
+                "the Safari route: {uri}"
+            );
+            assert!(nudge.contains("data-install"), "{uri}");
+            assert!(nudge.contains("data-dismiss-install"), "{uri}");
+        }
+
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        // The constants sit just above the function; the slice takes both.
+        let body = js
+            .split_once("var INSTALL_KEY")
+            .expect("app.js has no installNudge()")
+            .1;
+        let body = &body[..body.find("\n  }\n").unwrap()];
+        // Not in an installed window, not on a desktop, not more than once a
+        // week, and the prompt where the browser offers one.
+        for guard in [
+            "display-mode: standalone",
+            "navigator.standalone",
+            "pointer: coarse",
+            "max-width: 40rem",
+            "7 * 24 * 60 * 60 * 1000",
+            "engram.install-nudged",
+        ] {
+            assert!(
+                body.contains(guard),
+                "installNudge() lost `{guard}`: {body}"
+            );
+        }
+        assert!(
+            js.contains("    installNudge();\n"),
+            "installNudge() is not called on load"
+        );
+        // Chrome fires the event once, early; a listener added at load time
+        // may miss it. It is captured at script scope.
+        let before = js.split_once("function installNudge() {").unwrap().0;
+        assert!(
+            before.contains("addEventListener('beforeinstallprompt'"),
+            "beforeinstallprompt is not captured before load"
+        );
+    }
+
     /// After #52 every user has their own base, and nothing anywhere said
     /// which account was looking at one. Settings is where account things
     /// live; it was also the one page a phone could not reach.
