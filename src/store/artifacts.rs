@@ -302,6 +302,31 @@ impl Store {
         // precisely the case the counter was added for.
         let root_ids: std::collections::BTreeSet<&String> = resolved.values().flatten().collect();
 
+        // The invariant stated above, checked rather than assumed. A merge over
+        // passages rewrites the verbatim substrate into text that belongs to no
+        // corpus and carries no span, and hides the wording someone captured
+        // behind it. On the base this was written for, every one of the merge
+        // path's root rows named a passage, silently, for as long as it ran.
+        //
+        // Here and not as a constraint on `artifact_sources`: the same table
+        // carries a synthesis's passage sources, where naming a passage is
+        // correct and intended.
+        //
+        // `Validation` and not `Internal` (`src/error.rs`): the caller sent a
+        // root it may not merge, which is a refused request and not a broken
+        // server.
+        for root in &root_ids {
+            let p: String = sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
+                .bind(root.as_str())
+                .fetch_one(&self.pool)
+                .await?;
+            if Provenance::parse(&p) != Provenance::Captured {
+                return Err(crate::error::Error::Validation(format!(
+                    "a merge root must be a captured artifact; {root} is {p}"
+                )));
+            }
+        }
+
         let mut tx = self.pool.begin().await?;
         let created_at = now();
         let c = Chunk {
@@ -1398,6 +1423,70 @@ mod tests {
             read.source_count, 0,
             "a captured artifact was merged from something"
         );
+    }
+
+    /// One passage in a corpus of its own, for the root-provenance cases.
+    async fn a_passage(s: &Store) -> String {
+        let src = s.insert_corpus("skript", "web", None).await.unwrap();
+        let mut p = nc(0, "Spuren sind materielle Veraenderungen.");
+        p.segment_idx = Some(0);
+        s.insert_artifacts_with_provenance(&src.id, &[p], Provenance::Passage)
+            .await
+            .unwrap()
+            .remove(0)
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_merge_whose_root_is_a_passage_is_refused() {
+        // The invariant `insert_merged_artifact` documents and the live base
+        // violated in every one of its 135 merge-lineage rows. A merge over
+        // passages rewrites the verbatim substrate into text that belongs to no
+        // corpus and carries no span, and hides the wording someone captured
+        // behind it — the outcome `schema.sql` and the ROADMAP's fidelity rule
+        // exist to prevent.
+        let s = Store::memory().await.unwrap();
+        let root = a_passage(&s).await;
+
+        let refused = s
+            .insert_merged_artifact(
+                &NewMerged {
+                    title: Some("merged".into()),
+                    text: "rewritten".into(),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[root],
+            )
+            .await;
+
+        assert!(refused.is_err(), "a passage is not a merge root");
+    }
+
+    #[tokio::test]
+    async fn a_synthesized_artifact_may_still_name_passage_sources() {
+        // Why the check is on the merge path and not on `artifact_sources`. A
+        // synthesis draws on passages by design, and eleven rows in the live
+        // base are exactly that; a table constraint would break it.
+        let s = Store::memory().await.unwrap();
+        let root = a_passage(&s).await;
+
+        let made = s
+            .insert_synthesized_artifact(
+                &NewSynthesized {
+                    text: "Zusammenfassung".into(),
+                    title: Some("Spurenkunde".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![],
+                },
+                &[root],
+            )
+            .await;
+
+        assert!(made.is_ok(), "synthesis over passages is what synthesis is");
     }
 
     /// One query for every hit's caveats: each id maps to its own list, an id
