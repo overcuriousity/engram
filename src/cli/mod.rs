@@ -5,6 +5,7 @@
 //! at a shell is a real recorded search the judge page can grade later.
 
 pub mod args;
+pub mod ask;
 pub mod capture;
 pub mod endpoint;
 pub mod search;
@@ -76,7 +77,12 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                 }
             }
         }
-        // The ask verb arrives with its own task.
-        args::Verb::Ask(_) => 0,
+        args::Verb::Ask(question) => match ask::run(&endpoint, &question, cli).await {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("{e}");
+                2
+            }
+        },
     }
 }

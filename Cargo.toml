@@ -38,7 +38,7 @@ async-stream = "0.3"
 # Already in the tree by way of axum and sqlx; named here because this uses it
 # directly.
 tokio-stream = "0.1"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream"] }
 pulldown-cmark = "0.13.4"
 ammonia = "4.1.4"
 argon2 = { version = "0.5.3", features = ["std", "password-hash"] }
@@ -103,7 +103,7 @@ tokio = { version = "1.53.1", features = ["full", "test-util"] }
 tempfile = "3"
 temp-env = "0.3"
 wiremock = "0.6.5"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream"] }
 
 [build-dependencies]
 # Packs the Chrome extension at compile time. A build dependency, not a
