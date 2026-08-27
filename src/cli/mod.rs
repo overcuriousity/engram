@@ -5,3 +5,4 @@
 //! at a shell is a real recorded search the judge page can grade later.
 
 pub mod args;
+pub mod endpoint;
