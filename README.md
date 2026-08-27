@@ -103,14 +103,21 @@ one click. No artifact spans two segments.
 
 ```bash
 cargo build --release        # target/release/engram
-docker compose up -d         # Qdrant on 127.0.0.1:6333
 cp config.example.toml config.toml
 ./target/release/engram --hash-password 'your password'   # paste into config.toml
 ./target/release/engram
 ```
 
-Qdrant's [released binary](https://github.com/qdrant/qdrant/releases) works just
-as well as the container; engram only needs its REST port.
+Qdrant has to be answering on the address in `config.toml` — `127.0.0.1:6333`
+by default — before that last line. How you run it is your business: the
+[released binary](https://github.com/qdrant/qdrant/releases) and a container
+are equally fine, and engram only ever speaks to its REST port.
+
+Released builds are on the [releases
+page](https://github.com/overcuriousity/engram/releases): a statically linked
+`x86_64` binary that needs no libc of any particular vintage, and an `aarch64`
+one. Versions are dates — `v2026.827.0` — and are marked pre-release while the
+shape of things is still moving.
 
 Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
 through `raw → embedding → ready` on Browse. `partial` means part of it has not
