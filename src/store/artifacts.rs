@@ -1153,6 +1153,14 @@ impl Store {
     /// backstop for an arming that failed after the embed committed. A row
     /// survives its completion, so "no job at all" is exactly "never asked".
     ///
+    /// Neither passages nor merges are anchors, and both exclusions belong
+    /// here rather than only in `embed::mark_indexed`. A backstop for "never
+    /// asked" cannot distinguish an arming that failed from one that was
+    /// deliberately withheld: every merged artifact now has no relate row *by
+    /// design*, so a filter on passages alone would arm one for each of them on
+    /// the next repair tick and undo the rule the embed path applies. The
+    /// reason merges are not anchors is spelled out there.
+    ///
     /// Walked in windows behind a cursor, rather than always from the oldest
     /// artifact forward. The "never asked" test lives in the other database
     /// now, so it cannot be a `WHERE` clause any more and the `LIMIT` has to be
@@ -1186,7 +1194,7 @@ impl Store {
             "SELECT a.id, a.created_at FROM artifacts a
               WHERE a.status = 'active' AND a.superseded_by IS NULL
                 AND a.embed_state = 'embedded'
-                AND a.provenance <> 'passage'
+                AND a.provenance <> 'passage' AND a.provenance <> 'merged'
                 AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
               ORDER BY a.created_at ASC, a.id ASC
               LIMIT ?",
@@ -1962,6 +1970,46 @@ mod tests {
         }
         let ids = s.list_unrelated_artifact_ids(10).await.unwrap();
         assert_eq!(ids, vec![c[0].id.clone()]);
+    }
+
+    /// Nor a merge, and for a reason the passage case does not carry: a merge
+    /// is *never* armed by the embed path (`embed::mark_indexed`), so the
+    /// backstop's own test — no relate row means the arming was lost — is true
+    /// of every merge on the base. Filtering passages alone therefore hands one
+    /// back on the very next repair tick and makes each merge an anchor again,
+    /// which is exactly the walk the withholding was added to stop.
+    #[tokio::test]
+    async fn the_relate_backstop_never_lists_a_merge_either() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b")])
+            .await
+            .unwrap();
+        let m = s
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "a and b".into(),
+                    title: Some("both".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[made[0].id.clone(), made[1].id.clone()],
+            )
+            .await
+            .unwrap();
+        for id in [&made[0].id, &made[1].id, &m.id] {
+            s.mark_embedded(id, "fake", 0).await.unwrap();
+        }
+
+        let ids = s.list_unrelated_artifact_ids(10).await.unwrap();
+
+        assert!(
+            !ids.contains(&m.id),
+            "the repair pass would arm a relate unit for a merge"
+        );
+        assert_eq!(ids.len(), 2, "it should still list the two captured rows");
     }
 
     /// The backstop has to be able to see past its own window.

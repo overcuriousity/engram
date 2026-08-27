@@ -36,9 +36,13 @@ pub async fn arm(core: &Core, artifact_id: &str, seq: i64) -> Result<()> {
 
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let me = core.store.get_artifact(artifact_id).await?;
-    // A passage is not anchored: see `embed::mark_indexed`. Said here too, so a
-    // unit armed some other way files nothing.
-    if me.provenance == Provenance::Passage {
+    // Neither a passage nor a merge is anchored: see `embed::mark_indexed` for
+    // why each is withheld. Said here too, so a unit armed some other way —
+    // the sweep's repair pass, an operator, a re-embed — files nothing.
+    //
+    // `Merged` and not `is_model_written()`, the same distinction the embed
+    // path draws: a synthesis is ordinary dedupe material and stays an anchor.
+    if me.provenance == Provenance::Passage || me.provenance == Provenance::Merged {
         return Ok(());
     }
     // A retired artifact has no duplicates worth recording. Every pair naming
@@ -318,6 +322,50 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::jobs::consolidate::tests::seed;
+
+    /// A merge is not an anchor, and the guard has to be here and not only in
+    /// `embed::mark_indexed`. The embed path withholds the arming; the sweep's
+    /// repair pass arms a unit for anything that has none, which after that
+    /// withholding is every merge on the base. Without this the merge is an
+    /// anchor again one tick later, and files the pair that becomes the next
+    /// merge.
+    #[tokio::test]
+    async fn a_merge_armed_by_the_repair_pass_still_files_nothing() {
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let m = crate::jobs::merge::write(
+            &core,
+            &crate::infer::prompt::MergedDraft {
+                text: "Attach the volume, then mount the filesystem, before writing.".into(),
+                title: Some("before writing".into()),
+                category: None,
+                tags: vec![],
+                caveats: vec![],
+            },
+            &ids,
+        )
+        .await
+        .unwrap();
+
+        run(&core, &m.id).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|p| p.a_id != m.id && p.b_id != m.id),
+            "the merge was an anchor after all"
+        );
+    }
 
     #[tokio::test]
     async fn an_artifact_finds_its_duplicate_the_moment_it_is_embedded() {
