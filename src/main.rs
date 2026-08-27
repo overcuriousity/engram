@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "engram")]
+#[command(
+    name = "engram",
+    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s or -a it is a client of one."
+)]
 struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
@@ -57,6 +60,11 @@ struct Args {
     /// account straight back.
     #[arg(long, value_name = "SUBJECT")]
     delete_user: Option<String>,
+    /// The client half — `-c`, `-s`, `-a`. One parser for both, so `--help`
+    /// lists the server's flags and the client's together and there is one
+    /// binary to build, ship and version.
+    #[command(flatten)]
+    cli: engram::cli::args::CliArgs,
 }
 
 fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
