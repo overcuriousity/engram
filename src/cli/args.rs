@@ -48,6 +48,10 @@ pub struct CliArgs {
     /// After capturing, follow the background stages until they finish.
     #[arg(long)]
     pub watch: bool,
+    /// Read one artifact in full: a rank from the last search, a leading piece
+    /// of an id, or a whole id.
+    #[arg(long, value_name = "RANK|ID", conflicts_with_all = ["capture", "search", "ask"])]
+    pub show: Option<String>,
 }
 
 /// When the drawn rendering is used. `Auto` is the only honest default: a pipe
@@ -73,6 +77,10 @@ pub enum Verb {
         query: String,
     },
     Ask(String),
+    /// One artifact, read in full. Carries what the operator typed rather than
+    /// an id: a rank means nothing until the remembered list is read, and that
+    /// is a file, which is not something this decision touches.
+    Show(String),
 }
 
 /// The verb, or `None` for "no verb was asked for — be the server".
@@ -95,6 +103,7 @@ pub fn verb(
         !args.capture.is_empty(),
         !args.search.is_empty(),
         !args.ask.is_empty(),
+        args.show.is_some(),
     ]
     .iter()
     .filter(|x| **x)
@@ -110,8 +119,8 @@ pub fn verb(
         // prompt below would then be handed EOF.
         if named > 0 {
             return Err(Error::Validation(
-                "`-c`, `-s` and `-a` are the client half of this binary; \
-                 run them on their own, without the server's own flags"
+                "`-c`, `-s`, `-a` and `--show` are the client half of this \
+                 binary; run them on their own, without the server's own flags"
                     .into(),
             ));
         }
@@ -123,10 +132,16 @@ pub fn verb(
         // this is here for the caller that built `CliArgs` itself — which is
         // every test, and one day some other entry point.
         return Err(Error::Validation(
-            "one verb at a time: `-c`, `-s` or `-a`".into(),
+            "one verb at a time: `-c`, `-s`, `-a` or `--show`".into(),
         ));
     }
 
+    if let Some(which) = &args.show {
+        // Answered before the pipe is looked at. `engram --show 3 | less` is
+        // the ordinary way to read a long artifact, and without this the pipe
+        // would be taken for the capture gesture the door below exists for.
+        return Ok(Some(Verb::Show(which.clone())));
+    }
     if !args.capture.is_empty() {
         // Not read here: a capture target may be a path or a link, and the
         // reading of each belongs to the verb that knows what to do with it.
@@ -272,6 +287,41 @@ mod tests {
         a.search = vec!["a".into()];
         a.ask = vec!["b".into()];
         assert!(verb(&a, false, false, piped("")).is_err());
+    }
+
+    #[test]
+    fn show_names_one_artifact_to_read_in_full() {
+        let a = CliArgs {
+            show: Some("3".into()),
+            ..Default::default()
+        };
+        let v = verb(&a, false, false, piped("")).unwrap().unwrap();
+        assert!(matches!(v, Verb::Show(ref which) if which == "3"));
+    }
+
+    /// A reading is its own verb, so it is refused alongside another one for
+    /// the same reason `-s` and `-a` are: quietly picking one loses the other.
+    #[test]
+    fn show_alongside_another_verb_is_refused() {
+        let a = CliArgs {
+            show: Some("3".into()),
+            search: vec!["forensik".into()],
+            ..Default::default()
+        };
+        assert!(verb(&a, false, false, piped("")).is_err());
+    }
+
+    /// And `engram --show 3 | less` must stay a reading. Without `show` in the
+    /// count, the pipe would be read as the capture gesture and the id would
+    /// be stored as a note.
+    #[test]
+    fn show_down_a_pipe_is_still_a_reading_and_not_a_capture() {
+        let a = CliArgs {
+            show: Some("3".into()),
+            ..Default::default()
+        };
+        let v = verb(&a, false, true, piped("something")).unwrap().unwrap();
+        assert!(matches!(v, Verb::Show(ref which) if which == "3"));
     }
 
     /// The gesture this guards: `--delete-user` prints a prompt, and the

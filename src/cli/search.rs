@@ -33,9 +33,10 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
         .user_agent(USER_AGENT)
         .build()
         .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let face = crate::cli::face::Face::decide(
         cli,
-        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        is_tty,
         std::env::var_os("NO_COLOR").is_some(),
         crate::cli::face::locale().as_deref(),
     );
@@ -65,6 +66,13 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
     }
     let hits: Vec<SearchResult> =
         serde_json::from_str(&body).map_err(|err| Error::Internal(format!("results: {err}")))?;
+
+    // What `--show 3` will mean. Written before anything is printed, so the
+    // list on screen and the list on disk cannot disagree, and only for a
+    // search a person watched: see `last::worth_remembering`.
+    if crate::cli::last::worth_remembering(is_tty, cli.json) {
+        crate::cli::last::save(query, hits.iter().map(|h| h.artifact_id.clone()).collect());
+    }
 
     if cli.json {
         // The server's own JSON, unchanged. A client that re-serialised it

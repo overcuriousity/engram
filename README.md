@@ -53,6 +53,11 @@ from the positions those searches actually gave.
   a score as a bar, the cliff as a break in the trace beside it — and in a pipe
   it is plain text with every one of those claims still said in words. Exit `1`
   means nothing was found, so `engram -s "x" || …` is a usable branch.
+  A list clips each hit to a couple of lines; `engram --show 3` then reads the
+  third of them in full, along with the document it was captured from. It takes
+  a rank from the last search, a leading piece of an id, or a whole id — and
+  the sources under an `-a` answer are numbered as the same kind of list, so
+  the `[9]` an answer cites is `engram --show 9`.
 - **Search by meaning** — type the situation, not the keywords. Loose matches
   are labelled as loose, and where the scores fall off a cliff the hits past it
   are greyed: they keep their rank but stop claiming to be answers.

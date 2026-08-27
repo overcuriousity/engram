@@ -58,7 +58,7 @@ impl Reading {
 /// `as_str` writes `needs_review` for the database and serde writes
 /// `needsreview` for a response — and a client comparing strings would pick the
 /// wrong one and silently never match.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CorpusStatus {
     /// An image whose text has not been read yet. Only image corpora hold it.

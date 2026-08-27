@@ -49,6 +49,317 @@ pub fn locale() -> Option<String> {
     locale_from(|k| std::env::var(k).ok())
 }
 
+/// Where one background stage has got to.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Lamp {
+    /// Not reached yet.
+    Waiting,
+    /// The stage the corpus is in right now.
+    Running,
+    /// Finished, whether this client watched it happen or it was already past.
+    Done,
+    /// Not finished, and not going to be.
+    Stopped,
+}
+
+/// Extraction, segmentation and embedding — the three stages `-c --watch`
+/// follows, drawn from the one status the server reports.
+///
+/// The mapping is a total function of the status rather than a tally this
+/// client keeps, because a client that starts watching late has missed the
+/// transitions and must still draw the truth: a corpus that is embedding was
+/// segmented, whoever saw it happen.
+pub struct Lamps(pub [Lamp; 3]);
+
+impl Lamps {
+    pub fn of(status: crate::store::corpora::CorpusStatus) -> Lamps {
+        use crate::store::corpora::CorpusStatus as S;
+        use Lamp::*;
+        Lamps(match status {
+            S::Describing | S::Extracting => [Running, Waiting, Waiting],
+            S::Raw => [Done, Waiting, Waiting],
+            S::Segmenting => [Done, Running, Waiting],
+            S::Segmented => [Done, Done, Waiting],
+            S::Embedding => [Done, Done, Running],
+            S::Ready => [Done, Done, Done],
+            // Stored on purpose without being segmented: the extraction is
+            // real and finished, and the two stages after it are not coming.
+            S::NeedsReview => [Done, Stopped, Stopped],
+            // Some of it embedded and some of it did not.
+            S::Partial => [Done, Done, Stopped],
+            // Nothing can be claimed about a capture that failed.
+            S::Failed => [Stopped, Stopped, Stopped],
+        })
+    }
+
+    /// One line, drawn and said. The words are the claim; the glyphs are how
+    /// you see at a glance which of the three is moving.
+    pub fn render(&self, unicode: bool) -> String {
+        let glyph = |l: Lamp| match (l, unicode) {
+            (Lamp::Waiting, true) => '·',
+            (Lamp::Running, true) => '◉',
+            (Lamp::Done, true) => '●',
+            (Lamp::Stopped, true) => '×',
+            (Lamp::Waiting, false) => '.',
+            (Lamp::Running, false) => 'o',
+            (Lamp::Done, false) => 'O',
+            (Lamp::Stopped, false) => 'x',
+        };
+        ["extract", "segment", "embed"]
+            .iter()
+            .zip(self.0)
+            .map(|(name, lamp)| format!("{} {name}", glyph(lamp)))
+            .collect::<Vec<_>>()
+            .join("  ")
+    }
+}
+
+/// A track that fills as a body is read out of this process and into the
+/// request.
+///
+/// It reports bytes handed to the transport, which is what this client can
+/// honestly know: it is not a claim about what the server has received, and
+/// the word beside it says `read` rather than `sent` for that reason.
+pub struct Fill {
+    on: bool,
+    unicode: bool,
+    width: usize,
+    drawn: bool,
+}
+
+impl Fill {
+    /// What this chunk would draw, or `None` where the face is off.
+    pub fn line(&self, done: usize, total: usize) -> Option<String> {
+        if !self.on || total == 0 {
+            return None;
+        }
+        let (full, empty) = if self.unicode {
+            ('█', '░')
+        } else {
+            ('#', '.')
+        };
+        // A quarter of the terminal, so the track never crowds out the word
+        // beside it on a narrow window.
+        let cells = (self.width / 4).clamp(8, 40);
+        let done = done.min(total);
+        let lit = (cells * done) / total;
+        let bar: String = (0..cells)
+            .map(|i| if i < lit { full } else { empty })
+            .collect();
+        Some(format!(
+            "{bar}  read {}%",
+            (100 * done as u64) / total as u64
+        ))
+    }
+
+    pub fn show(&mut self, done: usize, total: usize) {
+        let Some(line) = self.line(done, total) else {
+            return;
+        };
+        use std::io::Write;
+        eprint!("\r\u{1b}[2K{line}");
+        std::io::stderr().flush().ok();
+        self.drawn = true;
+    }
+
+    pub fn clear(&mut self) {
+        if self.drawn {
+            use std::io::Write;
+            eprint!("\r\u{1b}[2K");
+            std::io::stderr().flush().ok();
+            self.drawn = false;
+        }
+    }
+}
+
+/// The three lamps, drawn in place while a capture is watched.
+///
+/// Holds no timer and starts no thread: it is redrawn from each poll the watch
+/// loop was already making, so nothing here can delay a result or outlive the
+/// loop that owns it.
+pub struct Track {
+    on: bool,
+    unicode: bool,
+    drawn: bool,
+}
+
+impl Track {
+    /// What this poll would draw, or `None` where the face is off.
+    ///
+    /// Separate from `show` because the rule worth asserting is that a pipe
+    /// receives nothing, and stderr is a poor place to assert it from.
+    pub fn line(&self, status: crate::store::corpora::CorpusStatus) -> Option<String> {
+        self.on.then(|| Lamps::of(status).render(self.unicode))
+    }
+
+    /// Draw this poll's stage, over the last one.
+    ///
+    /// On stderr, and by rewriting the current line rather than on the
+    /// alternate screen: the ids `-c` prints on stdout have to stay in
+    /// scrollback and stay pipeable.
+    pub fn show(&mut self, status: crate::store::corpora::CorpusStatus) {
+        let Some(line) = self.line(status) else {
+            return;
+        };
+        use std::io::Write;
+        eprint!("\r\u{1b}[2K{line}");
+        std::io::stderr().flush().ok();
+        self.drawn = true;
+    }
+
+    /// Take the line back before anything else prints, or a result lands on
+    /// top of half a track.
+    pub fn clear(&mut self) {
+        if self.drawn {
+            use std::io::Write;
+            eprint!("\r\u{1b}[2K");
+            std::io::stderr().flush().ok();
+            self.drawn = false;
+        }
+    }
+}
+
+/// How many cells the streaming readout is wide, and how long each one covers.
+/// Ten hundred-millisecond buckets: a one-second window, which is short enough
+/// that a model pausing to think shows as the readout falling away.
+const READOUT_CELLS: usize = 10;
+const READOUT_BUCKET_MS: u64 = 100;
+
+/// An activity readout of a thing genuinely happening: the rate at which the
+/// answer's own tokens are arriving.
+///
+/// Drawn at the cursor, immediately after the text written so far, and taken
+/// back before the next text is written. That is the only place a line can be
+/// redrawn without either disturbing what is already on the screen or moving to
+/// the alternate screen, and the answer has to stay in scrollback.
+///
+/// The amplitude is measured, never invented. A readout that animated on a
+/// timer would claim arrivals that did not happen, which is the one thing an
+/// activity display must not do.
+pub struct Readout {
+    on: bool,
+    unicode: bool,
+    width: usize,
+    /// When each recent token arrived. Pruned to the window on every push, so
+    /// this holds at most a second of arrivals however long the answer is.
+    marks: Vec<u64>,
+    /// Column the cursor sits at, so the readout is dropped rather than wrapped
+    /// when the sentence being written has filled the line.
+    col: usize,
+    /// Cells drawn last time, to be walked back over before anything else.
+    tail: usize,
+}
+
+impl Readout {
+    /// The text to write for one arriving chunk: what was drawn last taken
+    /// back, the chunk itself, then the readout at the new cursor.
+    ///
+    /// `at_ms` is passed rather than read from the clock so the shape of a
+    /// stream can be tested without one.
+    pub fn push(&mut self, text: &str, at_ms: u64) -> String {
+        if !self.on {
+            return text.to_string();
+        }
+        let mut out = self.erase();
+        out.push_str(text);
+        self.advance(text);
+        self.marks.push(at_ms);
+        let window = READOUT_CELLS as u64 * READOUT_BUCKET_MS;
+        self.marks.retain(|m| at_ms.saturating_sub(*m) < window);
+        let strand = self.strand(at_ms);
+        // Two spaces of gap, and only if the line has room. A readout that
+        // wrapped would push the answer's own text down a line and leave the
+        // walk-back pointing at the wrong row.
+        if self.col + strand.chars().count() + 2 < self.width {
+            out.push_str("  ");
+            out.push_str(&strand);
+            self.tail = strand.chars().count() + 2;
+        }
+        out
+    }
+
+    /// Take the readout back for good. Called before the sources are printed,
+    /// so nothing of it survives into the scrollback.
+    pub fn finish(&mut self) -> String {
+        self.erase()
+    }
+
+    fn erase(&mut self) -> String {
+        if self.tail == 0 {
+            return String::new();
+        }
+        let back = self.tail;
+        self.tail = 0;
+        // Back over what was drawn, then erase to the end of the line: the
+        // cursor is left exactly where the answer's own text ended.
+        format!("\u{1b}[{back}D\u{1b}[K")
+    }
+
+    /// Where the cursor ends up after this chunk is written.
+    fn advance(&mut self, text: &str) {
+        match text.rsplit_once('\n') {
+            Some((_, after)) => self.col = after.chars().count(),
+            None => self.col += text.chars().count(),
+        }
+    }
+
+    /// One cell per bucket of the window, oldest on the left, each cell as tall
+    /// as that bucket was busy.
+    fn strand(&self, now_ms: u64) -> String {
+        let blocks = if self.unicode { BLOCKS } else { ASCII_BLOCKS };
+        (0..READOUT_CELLS)
+            .map(|i| {
+                let age = (READOUT_CELLS - i) as u64 * READOUT_BUCKET_MS;
+                let from = now_ms.saturating_sub(age);
+                let to = from + READOUT_BUCKET_MS;
+                let n = self
+                    .marks
+                    .iter()
+                    .filter(|m| **m >= from && **m < to)
+                    .count();
+                match n {
+                    0 => ' ',
+                    n => blocks[(n - 1).min(blocks.len() - 1)],
+                }
+            })
+            .collect()
+    }
+}
+
+/// The span of one ranked list, and where a score sits in it.
+///
+/// Its own type because "best full, worst empty" is only meaningful relative to
+/// a list, and because the degenerate list — one hit, or several that tied — is
+/// a division by zero that has to be answered somewhere.
+struct Scale {
+    low: f32,
+    span: f32,
+}
+
+impl Scale {
+    fn over(hits: &[SearchResult]) -> Scale {
+        let low = hits.iter().map(|h| h.score).fold(f32::INFINITY, f32::min);
+        let high = hits
+            .iter()
+            .map(|h| h.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        Scale {
+            low,
+            span: high - low,
+        }
+    }
+
+    /// Zero to seven. A list with no spread gets the top rung throughout:
+    /// nothing separates those hits, and drawing them all empty would say the
+    /// opposite of what a tie means.
+    fn rung(&self, score: f32) -> usize {
+        if !self.span.is_finite() || self.span <= f32::EPSILON {
+            return 7;
+        }
+        ((((score - self.low) / self.span) * 7.0).round() as usize).min(7)
+    }
+}
+
 impl Face {
     /// `is_tty`, `no_color` and `lang` are passed rather than read, so every
     /// rule about when the face appears is testable in a process that has no
@@ -86,9 +397,14 @@ impl Face {
         } else {
             ('|', ':')
         };
+        // The list is its own scale. A score here is a fused rank rather than a
+        // probability — `search::prime` says so about the same numbers — and a
+        // whole list of them is routinely negative, so a fixed `0.0..=1.0`
+        // clamp put every hit on the bottom rung and the bar said nothing.
+        let scale = Scale::over(hits);
         let mut out = String::new();
         for (i, h) in hits.iter().enumerate() {
-            let rung = ((h.score.clamp(0.0, 1.0) * 7.0).round() as usize).min(7);
+            let rung = scale.rung(h.score);
             let trace = if h.past_cliff { broken } else { solid };
             let (dim, reset) = if h.past_cliff { (DIM, RESET) } else { ("", "") };
             out.push_str(&format!(
@@ -112,6 +428,40 @@ impl Face {
             out.push_str(&format!("{trace}\n"));
         }
         out
+    }
+
+    /// A readout of the rate an answer's tokens are arriving at.
+    ///
+    /// Off where the face is off, and then `push` hands back the text
+    /// unchanged: `engram -a … | tee` writes the answer and nothing else.
+    pub fn readout(&self) -> Readout {
+        Readout {
+            on: self.on,
+            unicode: self.unicode,
+            width: self.width,
+            marks: Vec::new(),
+            col: 0,
+            tail: 0,
+        }
+    }
+
+    /// A track for a body being read into a request.
+    pub fn fill(&self) -> Fill {
+        Fill {
+            on: self.on,
+            unicode: self.unicode,
+            width: self.width,
+            drawn: false,
+        }
+    }
+
+    /// The three background stages, for a watch loop to redraw from its polls.
+    pub fn track(&self) -> Track {
+        Track {
+            on: self.on,
+            unicode: self.unicode,
+            drawn: false,
+        }
     }
 
     /// A pulse travelling along a strand while a request is in flight — an
@@ -246,6 +596,117 @@ mod tests {
             !drawn.contains('█') && !drawn.contains('┃'),
             "a drawing glyph reached a non-UTF-8 terminal: {drawn}"
         );
+    }
+
+    /// A score here is a fused rank, not a probability, and a whole list of
+    /// them is routinely negative — the shell that prompted this drew ten hits
+    /// between -3.57 and -5.45. Clamping to `0.0..=1.0` gave every one of them
+    /// the bottom rung, so the bar said nothing at all. The list is its own
+    /// scale: best full, worst empty, and the steps between them real.
+    /// The three background stages every other door only describes in a
+    /// sentence. The corpus status names exactly one of them as running, and
+    /// everything before it is finished by definition — a corpus cannot be
+    /// embedding without having been segmented first.
+    /// A face that is off draws no track at all — not an ASCII one, none.
+    /// `-c --watch` down a pipe prints one status line per corpus and nothing
+    /// else, which is what every script reading it was written against.
+    #[test]
+    fn a_track_is_not_drawn_where_the_face_is_off() {
+        use crate::store::corpora::CorpusStatus as S;
+        let off = Face::decide(&Default::default(), false, false, Some("en_US.UTF-8"));
+        assert!(off.track().line(S::Segmenting).is_none());
+
+        let on = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        assert!(on.track().line(S::Segmenting).is_some());
+    }
+
+    #[test]
+    fn the_lamps_read_the_stage_the_corpus_is_actually_in() {
+        use crate::store::corpora::CorpusStatus as S;
+        use Lamp::*;
+        assert_eq!(Lamps::of(S::Extracting).0, [Running, Waiting, Waiting]);
+        assert_eq!(Lamps::of(S::Describing).0, [Running, Waiting, Waiting]);
+        assert_eq!(Lamps::of(S::Raw).0, [Done, Waiting, Waiting]);
+        assert_eq!(Lamps::of(S::Segmenting).0, [Done, Running, Waiting]);
+        assert_eq!(Lamps::of(S::Segmented).0, [Done, Done, Waiting]);
+        assert_eq!(Lamps::of(S::Embedding).0, [Done, Done, Running]);
+        assert_eq!(Lamps::of(S::Ready).0, [Done, Done, Done]);
+    }
+
+    /// A capture that stopped did not finish the stage it stopped in, and a
+    /// rendering that lit all three would say it did.
+    #[test]
+    fn a_capture_that_stopped_does_not_light_the_stage_it_never_reached() {
+        use crate::store::corpora::CorpusStatus as S;
+        use Lamp::*;
+        assert_eq!(Lamps::of(S::Failed).0, [Stopped, Stopped, Stopped]);
+        assert_eq!(
+            Lamps::of(S::NeedsReview).0,
+            [Done, Stopped, Stopped],
+            "captured and stored, and deliberately not segmented"
+        );
+        assert_eq!(
+            Lamps::of(S::Partial).0,
+            [Done, Done, Stopped],
+            "some of it embedded and some of it did not"
+        );
+    }
+
+    /// Drawn and said, like every other claim this face makes: a lamp that is
+    /// only a glyph is a lamp nobody reading a screen reader sees.
+    #[test]
+    fn the_lamps_name_their_stages_in_words() {
+        use crate::store::corpora::CorpusStatus as S;
+        let drawn = Lamps::of(S::Segmenting).render(true);
+        for stage in ["extract", "segment", "embed"] {
+            assert!(drawn.contains(stage), "{drawn}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_cannot_draw_gets_the_same_lamps_in_ascii() {
+        use crate::store::corpora::CorpusStatus as S;
+        let drawn = Lamps::of(S::Embedding).render(false);
+        assert!(drawn.is_ascii(), "a drawing glyph reached it: {drawn}");
+        for stage in ["extract", "segment", "embed"] {
+            assert!(drawn.contains(stage), "{drawn}");
+        }
+    }
+
+    #[test]
+    fn the_bar_is_drawn_against_the_list_it_is_in() {
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let drawn = f.render(&[
+            hit("a", -3.57, false, false),
+            hit("b", -4.42, false, false),
+            hit("c", -5.45, false, false),
+        ]);
+        let rungs: Vec<char> = drawn
+            .lines()
+            .filter_map(|l| l.chars().find(|c| BLOCKS.contains(c)))
+            .collect();
+        assert_eq!(rungs.len(), 3, "one bar per hit: {drawn}");
+        assert_eq!(rungs[0], '█', "the best hit of the list fills the bar");
+        assert_eq!(rungs[2], '▁', "and the worst empties it");
+        assert!(
+            rungs[1] != rungs[0] && rungs[1] != rungs[2],
+            "the middle hit got no step of its own: {drawn}"
+        );
+    }
+
+    /// One hit, or several that tied, have no spread to be drawn against.
+    /// Dividing by that spread is a division by zero.
+    #[test]
+    fn a_list_with_no_spread_still_draws() {
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let drawn = f.render(&[hit("a", -2.0, false, false), hit("b", -2.0, false, false)]);
+        assert!(!drawn.contains("NaN"), "{drawn}");
+        let rungs: Vec<char> = drawn
+            .lines()
+            .filter_map(|l| l.chars().find(|c| BLOCKS.contains(c)))
+            .collect();
+        assert_eq!(rungs.len(), 2, "{drawn}");
+        assert_eq!(rungs[0], rungs[1], "nothing separates them: {drawn}");
     }
 
     #[test]
