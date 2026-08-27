@@ -37,7 +37,7 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::infer::prompt::{MergedDraft, Relation};
-use crate::store::artifacts::Chunk;
+use crate::store::artifacts::{Chunk, Provenance};
 use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
 
 /// What the model decided, with everything the write path needs already read.
@@ -114,6 +114,46 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             &p,
             PairState::Dismissed,
             Some("one of these is a source of the other"),
+        )
+        .await;
+    }
+
+    // Every root a merge would record has to be a captured artifact. That is
+    // the invariant `insert_merged_artifact` enforces and the whole anti-drift
+    // rule rests on: a merge over verbatim source text rewrites the substrate
+    // into wording that belongs to no corpus and carries no span.
+    //
+    // Asked here, before the model call, and not left to the merge path. That
+    // path refuses with `Error::Validation`, and `apply` propagates it — which
+    // leaves the pair `Pending`, so `arm_dedupe` re-arms it on the next tick
+    // and the same pair buys the same refusal every tick, forever. Refusing at
+    // admission costs nothing and settles the row once.
+    //
+    // A synthesis over passages is the ordinary way to arrive here, and it is
+    // not a defect: `roots_of` resolves such an artifact to the passages it
+    // drew on, which is exactly what a synthesis is made of. A passage member
+    // reaches it too, since a passage is its own root.
+    //
+    // `Contradiction` and not `Dismissed`: these two may well say the same
+    // thing, and that question stays open on somebody's queue. What is
+    // unavailable is only the automatic answer.
+    let all_roots: Vec<String> = root_map.values().flatten().cloned().collect();
+    let roots = core.store.artifacts_by_ids(&all_roots).await?;
+    if let Some(r) = roots.iter().find(|r| r.provenance != Provenance::Captured) {
+        tracing::info!(
+            pair = p.id,
+            root = %r.id,
+            provenance = r.provenance.as_str(),
+            "a member's lineage names something a merge may not rewrite; handing the pair to a person"
+        );
+        return settle(
+            core,
+            &p,
+            PairState::Contradiction,
+            Some(
+                "These cannot be merged automatically: what one of them is made of is \
+                 stored source text, and a merge must not rewrite that. Resolve by hand.",
+            ),
         )
         .await;
     }
@@ -457,7 +497,34 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             // to the new one. `insert_merged_artifact` flattens both of them to
             // captured roots, and `subsumed_merges` catches the merged member.
             let sources: Vec<String> = s.members.iter().map(|m| m.id.clone()).collect();
-            let m = crate::jobs::merge::write(core, draft, &sources).await?;
+            // `Validation` is the merge path's own refusal — a root it may not
+            // rewrite — and not a failure to retry. Retrying is precisely the
+            // damage: the pair would stay `Pending`, `arm_dedupe` re-arms it,
+            // and the same refusal is bought again every tick. `run` already
+            // declines such a pair before the call, so reaching this is a case
+            // that check does not cover; the row is handed to a person rather
+            // than left circling.
+            let m = match crate::jobs::merge::write(core, draft, &sources).await {
+                Ok(m) => m,
+                Err(Error::Validation(why)) => {
+                    tracing::warn!(
+                        pair = s.pair.id,
+                        reason = %why,
+                        "the merge path refused this draft; handing the pair to a person"
+                    );
+                    return settle(
+                        core,
+                        &s.pair,
+                        PairState::Contradiction,
+                        Some(
+                            "These could not be merged: the merge was refused because of \
+                             what one of them is made of. Resolve by hand.",
+                        ),
+                    )
+                    .await;
+                }
+                Err(e) => return Err(e),
+            };
             // `merged_into` rather than a detail string: if the embed never
             // lands, the sweep's reap has to find exactly this pair and reopen
             // it (`reap_stranded`).
@@ -615,6 +682,108 @@ mod tests {
             .find(|p| (p.a_id == a || p.b_id == a) && (p.a_id == b || p.b_id == b))
             .expect("the pair was just recorded")
             .id
+    }
+
+    /// A passage, and a synthesis drawn from it, under a corpus of their own.
+    async fn a_passage_and_a_synthesis_over_it(core: &Core) -> (String, String) {
+        let src = core
+            .store
+            .insert_corpus("skript", "web", None)
+            .await
+            .unwrap();
+        let passage = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "Spuren sind materielle Veraenderungen.".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+                Provenance::Passage,
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+        let synth = core
+            .store
+            .insert_synthesized_artifact(
+                &crate::store::artifacts::NewSynthesized {
+                    text: "Spuren sind Veraenderungen am Material.".into(),
+                    title: Some("Spurenkunde".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![],
+                },
+                std::slice::from_ref(&passage),
+            )
+            .await
+            .unwrap()
+            .id;
+        (passage, synth)
+    }
+
+    /// A synthesis is made of passages, by design — so `roots_of` resolves it
+    /// to source text, and `insert_merged_artifact` refuses to merge it.
+    ///
+    /// The refusal has to happen before the model call. Leaving it to the merge
+    /// path means `apply` propagates `Validation`, the pair stays `Pending`, and
+    /// `arm_dedupe` arms it again on the next tick — the same pair buying the
+    /// same refusal at full price, forever.
+    #[tokio::test]
+    async fn a_pair_a_merge_could_not_write_is_handed_over_before_the_call() {
+        let mut core = test_core().await;
+        let judge = Arc::new(ScriptedCompleter::new(vec![]));
+        core.judge = Some(judge.clone());
+        let (_passage, synth) = a_passage_and_a_synthesis_over_it(&core).await;
+        let other = seed(&core, &[("Spuren am Material", [1.0, 0.0])])
+            .await
+            .remove(0);
+        let pair = queue_pair(&core, &synth, &other).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(
+            judge.calls(),
+            0,
+            "a pair no merge can write was still judged"
+        );
+        let read = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(
+            read.state,
+            PairState::Contradiction,
+            "the pair was left for `arm_dedupe` to buy again"
+        );
+    }
+
+    /// The same, for a passage on one side. A passage is its own root, so it
+    /// reaches the merge path's refusal by a different route and must be
+    /// declined by the same rule.
+    #[tokio::test]
+    async fn a_pair_naming_a_passage_is_handed_over_before_the_call() {
+        let mut core = test_core().await;
+        let judge = Arc::new(ScriptedCompleter::new(vec![]));
+        core.judge = Some(judge.clone());
+        let (passage, _synth) = a_passage_and_a_synthesis_over_it(&core).await;
+        let other = seed(&core, &[("Spuren am Material", [1.0, 0.0])])
+            .await
+            .remove(0);
+        let pair = queue_pair(&core, &passage, &other).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(judge.calls(), 0, "a passage pair was sent to the judge");
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::Contradiction
+        );
     }
 
     /// The button and the judge reach one helper, and the row has to say which
