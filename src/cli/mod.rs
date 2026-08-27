@@ -7,6 +7,7 @@
 pub mod args;
 pub mod capture;
 pub mod endpoint;
+pub mod search;
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -66,7 +67,16 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                 }
             }
         }
-        // The other verbs arrive with their own tasks.
-        args::Verb::Search { .. } | args::Verb::Ask(_) => 0,
+        args::Verb::Search { limit, query } => {
+            match search::run(&endpoint, limit, &query, cli).await {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("{e}");
+                    2
+                }
+            }
+        }
+        // The ask verb arrives with its own task.
+        args::Verb::Ask(_) => 0,
     }
 }
