@@ -457,6 +457,32 @@ a per-corpus sequence, so there is no reading order to continue into, and what
 a near artifact in another document is — a neighbour — the pane already shows
 as *Related* and *Seen together*.
 
+Built: **why this hit is where it is, as one object.** A rank is the product of
+eight stages, and each used to say what it did in its own way or not at all.
+One `HitExplanation` now rides on every ranked hit and one `SearchExplanation`
+on the search, filled in as the pipeline walks, and all three doors read that
+same object: the rail extends its `rail-why` line with the consequence in a
+sentence, MCP's meta line lists the stages when the `explain` parameter asks,
+and the API wraps its array as `{"results", "explanation"}` under `?explain=1`.
+A door that did not ask sees byte-identical output to before — the flag gates
+rendering and nothing else, and the order is the same either way.
+
+What the estimate missed. Three of the eight stages run inside Qdrant, which
+returns a fused score and no working. Rather than pay for a second query they
+are reconstructed locally from payload fields the search already fetched
+(`core::explain::scoring_terms`), and that reconstruction is pinned against a
+real Qdrant in `tests/integration_qdrant.rs` — a unit test would only have
+pinned our own belief about `exp_decay`, which is the thing in doubt. That
+contract test is the branch's load-bearing one.
+
+What it is not. Nothing is stored: there is no explanation table and no
+migration, so the corpus-concentration figure this was built to measure has to
+be gathered by deliberate searches rather than read off history — and each such
+search writes, because `Door::Mcp` is captured and the `search` tool marks.
+Keep the probes few. And `retrieved_rank` is named for what it is: the pre-
+recency RRF rank is not obtainable without a second query, so the baseline is
+what retrieval returned, fusion and scoring together, not fusion alone.
+
 - **Server-side grouping — a prerequisite, not a nice-to-have.** The per-corpus
   cap is applied client-side over a candidate pool three times the limit; a
   corpus whose artifacts fill the pool leaves nothing to promote. At
@@ -472,6 +498,10 @@ as *Related* and *Seen together*.
   **Cost:** the `query/groups` call in `vector/qdrant.rs`, its emulation in
   `vector/memory.rs`, and the judged-pair measurement. **A branch**, plus a
   harness run.
+  **The instrument now exists.** Whether this is worth building or worth
+  cutting is a number, and the ranking explanation above is what reads it:
+  `CapEffect::Refilled` on a hit, and `displaced == refilled` on the pool line,
+  are the cap redistributing nothing. Measure before committing the branch.
 
 - **A dismissal that changes the next search.** Verdicts and dismissals are
   recorded and read — by gaps, by pursuits, by activation — and `verdict`
@@ -494,20 +524,6 @@ as *Related* and *Seen together*.
   above are downstream of it.
   **Cost:** a config default. The real cost is the dependency and both harnesses
   saying it earns it. **One commit**, plus two harness runs.
-
-- **Why this hit is where it is, as one object.** A rank is now the product of
-  hybrid fusion, the recency stage, the pinned boost, the reranker,
-  `cap_per_corpus`, `prime`, the cliff and the one-hop reach — eight stages
-  layered in the order they were built, each saying what it did in its own way
-  or not at all. The rail badges some of it, MCP's meta line a different some,
-  the API a third.
-  **Worth:** one explanation carried on the hit — lifted two places on
-  activation, recalled through this link, past the cliff — is what lets all three
-  doors say the same thing. It is the only honest way to keep adding stages to a
-  ranking the operator is asked to trust, and every ranking item above adds one.
-  **Cost:** an explanation struct threaded through eight stages in
-  `src/core/search.rs`, then read by the rail, MCP's meta line and the API.
-  **A branch.** No harness — it changes nothing about the order.
 
 - **Spreading activation past one hop.** *(low, and put here saying so)*
   Association reaches exactly one hop from a hit. The general form is a
