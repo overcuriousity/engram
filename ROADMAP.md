@@ -58,7 +58,11 @@ classify it — a body that is one link is a link, a PDF and an image arrive as
 raw bytes, and a multipart share of four photos is four captures; engram in the
 phone's share sheet, answering with the corpus page because that is the surface
 that can say a share was held for review; and a bookmarklet and a Shortcut
-recipe carrying a token minted for one device on a press, revocable on its own.
+recipe carrying a token minted for one device on a press, revocable on its own;
+and the shell as a fourth door — capture, search and ask over HTTP like every
+other client, so a search typed at a prompt is a real recorded search the judge
+page can grade, drawn where a person is watching and plain wherever a machine
+might be.
 
 The doors that run while nobody is watching — a watched folder, directory
 import, feeds, email-in — are not built, and near-duplicate parking is the
