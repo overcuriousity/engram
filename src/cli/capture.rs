@@ -20,13 +20,60 @@ pub async fn run(
     title: Option<&str>,
     note: Option<&str>,
 ) -> Result<Vec<String>> {
-    let http = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let http = client()?;
     let mut ids = Vec::new();
     for target in targets {
         let (bytes, content_type) = read_target(target)?;
+        ids.push(post(&http, e, bytes, &content_type, target, title, note).await?);
+    }
+    Ok(ids)
+}
+
+/// Capture what arrived on stdin, already read.
+///
+/// Its own entry point because deciding whether a pipe held anything consumes
+/// it — see `args::verb` — and stdin does not rewind, so the bytes have to
+/// travel rather than be read a second time.
+pub async fn run_piped(
+    e: &Endpoint,
+    text: String,
+    title: Option<&str>,
+    note: Option<&str>,
+) -> Result<Vec<String>> {
+    let http = client()?;
+    let id = post(
+        &http,
+        e,
+        text.into_bytes(),
+        "text/plain",
+        "stdin",
+        title,
+        note,
+    )
+    .await?;
+    Ok(vec![id])
+}
+
+fn client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|err| Error::Internal(format!("http client: {err}")))
+}
+
+/// One capture, answering with the corpus id. `label` is what the target is
+/// called when something goes wrong — a path, or `stdin`.
+async fn post(
+    http: &reqwest::Client,
+    e: &Endpoint,
+    bytes: Vec<u8>,
+    content_type: &str,
+    label: &str,
+    title: Option<&str>,
+    note: Option<&str>,
+) -> Result<String> {
+    let target = label;
+    {
         let mut url = format!("{}?", e.api("/capture"));
         if let Some(t) = title {
             url.push_str(&format!("title={}&", encode(t)));
@@ -63,9 +110,8 @@ pub async fn run(
                     .unwrap_or("something already stored")
             );
         }
-        ids.push(body["id"].as_str().unwrap_or_default().to_string());
+        Ok(body["id"].as_str().unwrap_or_default().to_string())
     }
-    Ok(ids)
 }
 
 /// Follow a capture through the stages that run after it is stored.

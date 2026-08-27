@@ -46,15 +46,29 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
         }
     };
     match verb {
-        args::Verb::Capture(targets) => {
-            match capture::run(
-                &endpoint,
-                &targets,
-                cli.title.as_deref(),
-                cli.note.as_deref(),
-            )
-            .await
-            {
+        args::Verb::Capture(_) | args::Verb::CapturePiped(_) => {
+            let captured = match &verb {
+                args::Verb::Capture(targets) => {
+                    capture::run(
+                        &endpoint,
+                        targets,
+                        cli.title.as_deref(),
+                        cli.note.as_deref(),
+                    )
+                    .await
+                }
+                args::Verb::CapturePiped(text) => {
+                    capture::run_piped(
+                        &endpoint,
+                        text.clone(),
+                        cli.title.as_deref(),
+                        cli.note.as_deref(),
+                    )
+                    .await
+                }
+                _ => unreachable!("the arm this match is inside"),
+            };
+            match captured {
                 Ok(ids) => {
                     // One id per line, which is what a shell wants to pipe into
                     // whatever it does next.

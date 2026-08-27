@@ -57,7 +57,15 @@ pub enum Fancy {
 #[derive(Debug, PartialEq)]
 pub enum Verb {
     Capture(Vec<String>),
-    Search { limit: Option<usize>, query: String },
+    /// What arrived on stdin with no verb flag, already read.
+    ///
+    /// Carried rather than re-read: deciding whether a pipe held anything
+    /// consumes it, and stdin does not rewind.
+    CapturePiped(String),
+    Search {
+        limit: Option<usize>,
+        query: String,
+    },
     Ask(String),
 }
 
@@ -88,23 +96,13 @@ pub fn verb(
         ));
     }
 
-    let read = |words: &[String]| -> Result<String> {
-        let joined = words.join(" ");
-        if joined.trim() == "-" {
-            return stdin()
-                .map(|s| s.trim().to_string())
-                .map_err(|e| Error::Validation(format!("stdin: {e}")));
-        }
-        Ok(joined)
-    };
-
     if !args.capture.is_empty() {
         // Not read here: a capture target may be a path or a link, and the
         // reading of each belongs to the verb that knows what to do with it.
         return Ok(Some(Verb::Capture(args.capture.clone())));
     }
     if !args.ask.is_empty() {
-        return Ok(Some(Verb::Ask(read(&args.ask)?)));
+        return Ok(Some(Verb::Ask(read(&args.ask, stdin)?)));
     }
     if !args.search.is_empty() {
         // A leading integer is a count only when something is left to be the
@@ -118,19 +116,45 @@ pub fn verb(
         };
         return Ok(Some(Verb::Search {
             limit,
-            query: read(&rest)?,
+            query: read(&rest, stdin)?,
         }));
     }
 
     // No verb named. A pipe is still an instruction: capturing what was piped
     // is the gesture the whole terminal door exists for, and requiring `-c -`
     // there would be ceremony in front of the one case that has to be
-    // frictionless. A terminal on stdin is no instruction at all, so the
-    // binary stays the server it has always been.
+    // frictionless.
+    //
+    // But "not a terminal" is not "a pipe". A service started by systemd is
+    // handed `/dev/null` on stdin, and so is anything under `nohup`, `cron` or
+    // a bare `engram &` — none of which is a terminal and none of which is
+    // asking for a capture. Reading first and deciding on what came back is
+    // what keeps `engram` the server in every one of those: an empty stdin is
+    // not an instruction, so the binary stays what it has always been.
     if stdin_piped {
-        return Ok(Some(Verb::Capture(vec!["-".into()])));
+        let piped = stdin().map_err(|e| Error::Validation(format!("stdin: {e}")))?;
+        if piped.trim().is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(Verb::CapturePiped(piped)));
     }
     Ok(None)
+}
+
+/// The words a verb was given, or what stdin held when they are just `-`.
+///
+/// A free function rather than a closure inside `verb`, because the closure
+/// would have to capture the one-shot reader and every branch wants it: the
+/// borrow checker is right that only one of them may have it, and each branch
+/// returns, so handing it over per branch is the shape that says so.
+fn read(words: &[String], stdin: impl FnOnce() -> std::io::Result<String>) -> Result<String> {
+    let joined = words.join(" ");
+    if joined.trim() == "-" {
+        return stdin()
+            .map(|s| s.trim().to_string())
+            .map_err(|e| Error::Validation(format!("stdin: {e}")));
+    }
+    Ok(joined)
 }
 
 #[cfg(test)]
@@ -180,7 +204,23 @@ mod tests {
         let v = verb(&args(), true, piped("a procedure worth keeping"))
             .unwrap()
             .unwrap();
-        assert!(matches!(v, Verb::Capture(ref w) if w == &["-".to_string()]));
+        assert!(matches!(v, Verb::CapturePiped(ref t) if t == "a procedure worth keeping"));
+    }
+
+    #[test]
+    fn a_service_handed_dev_null_is_still_the_server() {
+        // systemd gives a unit `/dev/null` on stdin unless told otherwise, and
+        // so do `nohup`, `cron` and `engram &`. None of them is a terminal and
+        // none of them is asking for a capture: reading a service's stdin as
+        // an instruction is a server that never starts.
+        assert!(
+            verb(&args(), true, piped("")).unwrap().is_none(),
+            "an empty stdin is not an instruction"
+        );
+        assert!(
+            verb(&args(), true, piped("  \n ")).unwrap().is_none(),
+            "and neither is whitespace"
+        );
     }
 
     #[test]
