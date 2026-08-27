@@ -271,6 +271,104 @@ async fn ingest(
     Ok((code, Json(out)))
 }
 
+/// What `?title=` and `?note=` carry, for every branch of `/capture`.
+#[derive(serde::Deserialize, Default)]
+pub struct CaptureQuery {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Whether a body is one link and nothing else.
+///
+/// The single guess this endpoint makes, and it is made because every share
+/// sheet on both platforms hands a shared link over as `text/plain`. Narrow on
+/// purpose: one whitespace-separated token, parsing as a URL, over http or
+/// https. A line of prose that opens with a link is prose, and a caller who
+/// wants the other reading has `POST /corpora`, which asks in as many words.
+pub(crate) fn only_a_url(body: &str) -> Option<url::Url> {
+    let trimmed = body.trim();
+    if trimmed.split_whitespace().count() != 1 {
+        return None;
+    }
+    let u = url::Url::parse(trimmed).ok()?;
+    matches!(u.scheme(), "http" | "https").then_some(u)
+}
+
+/// The code a stored capture answers with, in the one place the doors that now
+/// need it can share: `200` for something already held, `202` while what was
+/// stored is still to be read, `201` for a capture that is complete.
+pub(crate) fn code_for(out: &crate::core::ingest::IngestOutcome) -> StatusCode {
+    if out.duplicate {
+        StatusCode::OK
+    } else if matches!(
+        out.status,
+        crate::store::corpora::CorpusStatus::Extracting
+            | crate::store::corpora::CorpusStatus::Describing
+    ) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::CREATED
+    }
+}
+
+/// One door for a client that has not classified what it is holding.
+///
+/// A share sheet hands over a blob and a maybe-URL; a shell hands over a path
+/// or a pipe. Written once here, that dispatch is thirty lines; written once
+/// per client, it is the reason the clients never get written. Every branch
+/// ends in an ingest call the other doors already use, and `POST /corpora`
+/// stays exactly as it was for a caller that does know what it holds.
+async fn capture(
+    tenant: Tenant,
+    Query(q): Query<CaptureQuery>,
+    req: axum::extract::Request,
+) -> Result<Response> {
+    use axum::extract::FromRequest;
+    let content_type = req
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if content_type.starts_with("text/plain") {
+        let bytes = axum::body::Bytes::from_request(req, &())
+            .await
+            .map_err(|e| Error::Validation(format!("body: {e}")))?;
+        if bytes.len() > crate::web::MAX_BODY_BYTES {
+            return Err(Error::Validation(
+                "that text is over the 8 MB limit for a text capture".into(),
+            ));
+        }
+        // Refused rather than lossily converted, for the reason the upload
+        // door refuses it: a corpus is quoted back verbatim, so text that
+        // arrived mangled is a fidelity loss nothing downstream can detect.
+        let text = String::from_utf8(bytes.to_vec())
+            .map_err(|_| Error::Validation("that body is not valid UTF-8 text".into()))?;
+        let out = match only_a_url(&text) {
+            Some(u) => tenant.core.ingest_url(&u, q.title, q.note).await?,
+            None => {
+                tenant
+                    .core
+                    .ingest_capture(
+                        crate::core::ingest::Capture::new(text, ORIGIN_WEB)
+                            .with_title(q.title)
+                            .with_note(q.note),
+                    )
+                    .await?
+            }
+        };
+        return Ok((code_for(&out), Json(out)).into_response());
+    }
+
+    Err(Error::Validation(format!(
+        "`{content_type}` is not a type this door reads — send text/plain, \
+         application/pdf, an image, or multipart/form-data"
+    )))
+}
+
 const ORIGIN_UPLOAD: &str = "upload";
 
 /// Whether an upload's filename claims to be a PDF. Consulted on the same
@@ -1116,6 +1214,14 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         // Its own ceiling, because this door now takes a PDF and a book is
         // many times the global limit. The text branch re-imposes
         // `MAX_BODY_BYTES` on itself inside the handler.
+        // One route carrying what three carried, so its ceiling is the widest
+        // of theirs; each branch re-imposes its own inside the handler.
+        .route(
+            "/capture",
+            post(capture).layer(axum::extract::DefaultBodyLimit::max(
+                pdf_max_bytes.max(image_max_bytes),
+            )),
+        )
         .route(
             "/corpora/upload",
             post(upload).layer(axum::extract::DefaultBodyLimit::max(pdf_max_bytes)),
@@ -1464,6 +1570,26 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A POST with a raw body and a content type of the caller's choosing —
+    /// what every client of `/capture` sends, and what `post_json` cannot
+    /// express because it fixes the type. An empty `content_type` omits the
+    /// header entirely, which is a case the door has to answer for.
+    pub(crate) fn raw_post(
+        uri: &str,
+        token: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("authorization", format!("Bearer {token}"));
+        if !content_type.is_empty() {
+            b = b.header("content-type", content_type);
+        }
+        b.body(Body::from(body.to_vec())).unwrap()
     }
 
     fn post_json(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
@@ -2882,6 +3008,104 @@ pub(crate) mod tests {
                 "the server streams a `{name}` frame and the panel ignores it"
             );
         }
+    }
+    #[tokio::test]
+    async fn a_bare_url_in_a_text_body_is_captured_as_a_link() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "<html><body><article><h1>Mounting</h1><p>Run mount, then check dmesg \
+                 for the device name and the filesystem it found. The label is what \
+                 fstab matches on, and it survives a reformat only if you set it \
+                 again afterwards, which is the step everyone forgets.</p><p>A loop \
+                 device needs losetup first, and the offset is in bytes rather than \
+                 sectors, which is where the arithmetic usually goes wrong.</p>\
+                 </article></body></html>",
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(raw_post(
+                "/api/v1/capture",
+                &token,
+                "text/plain",
+                format!("{}/a", server.uri()).as_bytes(),
+            ))
+            .await
+            .unwrap();
+        let status = res.status();
+        let v = json_of(res).await;
+        assert!(status.is_success(), "{status}: {v}");
+        let stored = core
+            .store
+            .get_corpus(v["id"].as_str().unwrap())
+            .await
+            .unwrap();
+        // The claim: a body that is one link became a link capture — read by
+        // this server as a stranger — rather than the text of the link itself.
+        assert_eq!(stored.origin, crate::core::ingest::ORIGIN_FETCH);
+    }
+
+    #[tokio::test]
+    async fn a_line_that_merely_begins_with_a_url_is_prose() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(raw_post(
+                "/api/v1/capture",
+                &token,
+                "text/plain",
+                b"https://example.test/a is where the procedure lives",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v = json_of(res).await;
+        let stored = core
+            .store
+            .get_corpus(v["id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            stored.raw_text.contains("is where"),
+            "stored verbatim, not fetched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_title_and_note_ride_on_the_query_string() {
+        let (app, token, core) = app_token_and_core().await;
+        let res = app
+            .oneshot(raw_post(
+                "/api/v1/capture?title=A%20title&note=why",
+                &token,
+                "text/plain",
+                b"a procedure worth keeping",
+            ))
+            .await
+            .unwrap();
+        let v = json_of(res).await;
+        let stored = core
+            .store
+            .get_corpus(v["id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(stored.title_hint.as_deref(), Some("A title"));
+    }
+
+    #[tokio::test]
+    async fn a_capture_with_no_content_type_is_refused_rather_than_guessed() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(raw_post("/api/v1/capture", &token, "", b"something"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }
 
