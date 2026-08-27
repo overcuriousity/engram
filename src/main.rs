@@ -322,13 +322,32 @@ async fn main() -> anyhow::Result<()> {
     // engram over HTTP and needs neither this machine's config.toml nor its
     // database. A terminal on stdin with no verb flag falls straight through,
     // so `engram` alone is the server it has always been.
+    //
+    // Every flag below is one this binary honours as the server. Named here so
+    // `verb` can stand down before it reads stdin: a pipe is an instruction to
+    // capture only when nothing else was asked for, and `echo yes | engram
+    // --delete-user sub@idp` is a scripted answer to a prompt, not a note.
+    let server_command = args.print_config
+        || args.reindex
+        || args.recompute_coverage
+        || args.list_users
+        || args.export_eval.is_some()
+        || args.grant_judge.is_some()
+        || args.revoke_judge.is_some()
+        || args.delete_user.is_some()
+        || args.user.is_some();
     use std::io::IsTerminal;
-    if let Some(verb) = engram::cli::args::verb(&args.cli, !std::io::stdin().is_terminal(), || {
-        use std::io::Read;
-        let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s)?;
-        Ok(s)
-    })? {
+    if let Some(verb) = engram::cli::args::verb(
+        &args.cli,
+        server_command,
+        !std::io::stdin().is_terminal(),
+        || {
+            use std::io::Read;
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s)?;
+            Ok(s)
+        },
+    )? {
         let code = engram::cli::run(verb, &args.cli).await;
         std::process::exit(code);
     }

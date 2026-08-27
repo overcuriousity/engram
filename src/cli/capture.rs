@@ -140,6 +140,22 @@ pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Res
             .send()
             .await
             .map_err(|err| Error::Validation(format!("{err}")))?;
+        // Looked at before the body is read. Without this the loop polls a
+        // 401, a 404 or a deleted id six hundred times: `res.json()` falls
+        // back to `Null`, the status fails to parse, and five minutes later
+        // the client claims the capture is "still being read". A wrong token
+        // or a wrong `ENGRAM_URL` is not something waiting will fix.
+        //
+        // Only 4xx. A 502, or a restart caught mid-poll, is exactly what the
+        // retry is for, and giving up on one would be worse than the bug this
+        // fixes.
+        let code = res.status();
+        if code.is_client_error() {
+            drop(lamps);
+            return Err(Error::Validation(format!(
+                "{id}: the server would not say how it is getting on ({code})"
+            )));
+        }
         let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
         let status: Option<CorpusStatus> = serde_json::from_value(body["status"].clone()).ok();
         if let Some(s) = status
@@ -256,6 +272,25 @@ mod tests {
         .unwrap();
         let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
         assert_eq!(stored.title_hint.as_deref(), Some("A title with spaces"));
+    }
+
+    /// The five minutes this stops: an id the server will not talk about used
+    /// to be polled six hundred times, the pulse animating the whole way, and
+    /// then reported as "still being read". A revoked token, a wrong
+    /// `ENGRAM_URL` and a deleted corpus all landed there, and none of them is
+    /// something waiting fixes.
+    #[tokio::test]
+    async fn watching_gives_up_at_once_on_an_id_the_server_refuses() {
+        let (e, _core) = endpoint().await;
+        let face = crate::cli::face::Face::decide(&Default::default(), false, true, None);
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            watch(&e, "no-such-corpus", &face),
+        )
+        .await
+        .expect("it must not sit in the poll loop")
+        .expect_err("an id the server refuses is an error, not a wait");
+        assert!(err.to_string().contains("404"), "{err}");
     }
 
     #[tokio::test]

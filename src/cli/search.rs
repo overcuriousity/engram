@@ -37,7 +37,7 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
         cli,
         std::io::IsTerminal::is_terminal(&std::io::stdout()),
         std::env::var_os("NO_COLOR").is_some(),
-        std::env::var("LANG").ok().as_deref(),
+        crate::cli::face::locale().as_deref(),
     );
     let waiting = face.pulse("searching");
     let res = http

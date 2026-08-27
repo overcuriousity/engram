@@ -26,12 +26,18 @@ pub struct CliArgs {
     pub title: Option<String>,
     #[arg(long, value_name = "NOTE")]
     pub note: Option<String>,
-    #[arg(long = "tag", value_name = "TAG")]
+    /// Narrow a search to artifacts carrying this tag. Repeatable.
+    ///
+    /// Refused with `-a`, along with `--category` and `--json`: the ask door
+    /// accepts all three over its JSON API, but no interactive door offers a
+    /// filtered ask, and a flag that is accepted and then dropped is worse
+    /// than one that is refused. See `cli::ask::run`.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with = "ask")]
     pub tags: Vec<String>,
-    #[arg(long, value_name = "CATEGORY")]
+    #[arg(long, value_name = "CATEGORY", conflicts_with = "ask")]
     pub category: Option<String>,
     /// Print the results as JSON instead of for a person.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "ask")]
     pub json: bool,
     /// Never colour, never animate, never leave ASCII.
     #[arg(long)]
@@ -74,8 +80,14 @@ pub enum Verb {
 /// `stdin_piped` is passed rather than detected, and `stdin` is a closure
 /// rather than a read, so the whole decision runs in a test with no terminal
 /// and no process to pipe into.
+///
+/// `other_command` says the invocation already named something this binary
+/// does as the server — `--delete-user`, `--reindex`, `--print-config`. Asked
+/// for rather than derived, because `CliArgs` is the client half and cannot
+/// see the other half's flags.
 pub fn verb(
     args: &CliArgs,
+    other_command: bool,
     stdin_piped: bool,
     stdin: impl FnOnce() -> std::io::Result<String>,
 ) -> Result<Option<Verb>> {
@@ -87,6 +99,25 @@ pub fn verb(
     .iter()
     .filter(|x| **x)
     .count();
+    if other_command {
+        // Answered before stdin is touched, which is the whole of why this
+        // parameter exists. `--delete-user` prints a prompt and reads the
+        // answer, and the obvious way to script past it is
+        // `echo yes | engram --delete-user sub@idp`. Without this, the pipe is
+        // taken for the gesture the terminal door exists for: "yes" is stored
+        // as a corpus, the process exits 0, and nothing is deleted. Reading
+        // stdin to find that out would be just as wrong the other way — the
+        // prompt below would then be handed EOF.
+        if named > 0 {
+            return Err(Error::Validation(
+                "`-c`, `-s` and `-a` are the client half of this binary; \
+                 run them on their own, without the server's own flags"
+                    .into(),
+            ));
+        }
+        return Ok(None);
+    }
+
     if named > 1 {
         // clap's `conflicts_with_all` refuses this before we are reached, and
         // this is here for the caller that built `CliArgs` itself — which is
@@ -172,7 +203,7 @@ mod tests {
     fn a_leading_integer_is_how_many_hits_are_wanted() {
         let mut a = args();
         a.search = vec!["40".into(), "qdrant payload filter".into()];
-        let v = verb(&a, false, piped("")).unwrap().unwrap();
+        let v = verb(&a, false, false, piped("")).unwrap().unwrap();
         assert!(
             matches!(v, Verb::Search { limit: Some(40), ref query } if query == "qdrant payload filter")
         );
@@ -184,7 +215,7 @@ mod tests {
         // reading flags: it is a query, not a count.
         let mut a = args();
         a.search = vec!["42".into()];
-        let v = verb(&a, false, piped("")).unwrap().unwrap();
+        let v = verb(&a, false, false, piped("")).unwrap().unwrap();
         assert!(
             matches!(v, Verb::Search { limit: None, ref query } if query == "42"),
             "a lone number is the query — there is nothing left for it to count"
@@ -195,13 +226,15 @@ mod tests {
     fn stdin_is_the_value_of_whichever_verb_was_named() {
         let mut a = args();
         a.search = vec!["-".into()];
-        let v = verb(&a, true, piped("loop device")).unwrap().unwrap();
+        let v = verb(&a, false, true, piped("loop device"))
+            .unwrap()
+            .unwrap();
         assert!(matches!(v, Verb::Search { ref query, .. } if query == "loop device"));
     }
 
     #[test]
     fn a_pipe_with_no_verb_at_all_is_a_capture() {
-        let v = verb(&args(), true, piped("a procedure worth keeping"))
+        let v = verb(&args(), false, true, piped("a procedure worth keeping"))
             .unwrap()
             .unwrap();
         assert!(matches!(v, Verb::CapturePiped(ref t) if t == "a procedure worth keeping"));
@@ -214,11 +247,13 @@ mod tests {
         // none of them is asking for a capture: reading a service's stdin as
         // an instruction is a server that never starts.
         assert!(
-            verb(&args(), true, piped("")).unwrap().is_none(),
+            verb(&args(), false, true, piped("")).unwrap().is_none(),
             "an empty stdin is not an instruction"
         );
         assert!(
-            verb(&args(), true, piped("  \n ")).unwrap().is_none(),
+            verb(&args(), false, true, piped("  \n "))
+                .unwrap()
+                .is_none(),
             "and neither is whitespace"
         );
     }
@@ -226,7 +261,7 @@ mod tests {
     #[test]
     fn a_terminal_with_no_verb_is_the_server_it_has_always_been() {
         assert!(
-            verb(&args(), false, piped("")).unwrap().is_none(),
+            verb(&args(), false, false, piped("")).unwrap().is_none(),
             "`engram` alone must not change meaning"
         );
     }
@@ -236,6 +271,43 @@ mod tests {
         let mut a = args();
         a.search = vec!["a".into()];
         a.ask = vec!["b".into()];
-        assert!(verb(&a, false, piped("")).is_err());
+        assert!(verb(&a, false, false, piped("")).is_err());
+    }
+
+    /// The gesture this guards: `--delete-user` prints a prompt, and the
+    /// obvious way to script past it is to pipe the answer in. Without the
+    /// guard the pipe was read as a capture, "yes" became a corpus, the
+    /// process exited 0 and the account was still there.
+    #[test]
+    fn a_piped_answer_to_a_prompt_is_not_a_capture() {
+        assert!(
+            verb(&args(), true, true, piped("yes")).unwrap().is_none(),
+            "a pipe alongside a server command is an answer, not a note"
+        );
+    }
+
+    /// And stdin is not touched on the way to finding that out, or the prompt
+    /// the pipe was answering would be handed EOF.
+    #[test]
+    fn stdin_is_left_alone_when_the_server_was_asked_for() {
+        let read = std::cell::Cell::new(false);
+        let v = verb(&args(), true, true, || {
+            read.set(true);
+            Ok("yes".into())
+        })
+        .unwrap();
+        assert!(v.is_none());
+        assert!(!read.get(), "stdin was drained out from under the prompt");
+    }
+
+    /// A verb flag *and* a server command is neither one thing nor the other,
+    /// and quietly picking the server would lose the capture in silence.
+    #[test]
+    fn a_verb_flag_alongside_a_server_command_is_refused() {
+        let a = CliArgs {
+            capture: vec!["notes.pdf".into()],
+            ..Default::default()
+        };
+        assert!(verb(&a, true, false, piped("")).is_err());
     }
 }

@@ -18,8 +18,6 @@ pub const ORIGIN_PDF: &str = "pdf";
 pub const ORIGIN_WEB: &str = "web";
 /// A page read from a pasted link, by this server, as a stranger.
 pub const ORIGIN_FETCH: &str = "fetch";
-/// Text, a file or a link handed over by the terminal client.
-pub const ORIGIN_CLI: &str = "cli";
 /// A share from a phone's share sheet — the Android share target, the iOS
 /// Shortcut and the bookmarklet alike. One value for all three, because the
 /// distinction between them is one the operator cannot act on.
@@ -29,6 +27,17 @@ pub const ORIGIN_SHARE: &str = "share";
 /// is the whole of what the keep-this-answer door concedes, and a bare literal
 /// in one handler is not where a distinction that load-bearing should live.
 pub const ORIGIN_ASK: &str = "ask";
+/// Bytes a file may weigh to be stored as text. The kind-specific ceilings
+/// are configuration because a photo and a book differ by an order of
+/// magnitude and an operator has to be able to say so; this one is not,
+/// because there is no such thing as a text file that large on purpose.
+///
+/// The same figure as `web::MAX_BODY_BYTES` and deliberately not that
+/// constant: that one bounds any request body whatever it holds, this one
+/// bounds one artifact however it arrived — through `/capture`, a share
+/// sheet, `/mcp` or a shell.
+pub const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
+
 /// Longest note spent on a vision call. Context, not a document: the note is
 /// the lead line of the describe prompt, and an unbounded one swamps the
 /// description or overruns the request.
@@ -456,9 +465,16 @@ impl Core {
     /// stored as a corpus nobody can search.
     ///
     /// `origin` is the caller's, because the doors that reach this differ in
-    /// the one way a person later cares about: `/mcp` is an agent, `cli` is a
-    /// shell, `share` is a phone's share sheet. It used to be a constant here,
-    /// which was only ever true because there was one caller.
+    /// the one way a person later cares about: `/mcp` is an agent, `share` is
+    /// a phone's share sheet, `web` is the capture box. It used to be a
+    /// constant here, which was only ever true because there was one caller.
+    ///
+    /// The terminal client has no value of its own: it reaches `/capture` over
+    /// HTTP like any other client and declares nothing, so a corpus it stored
+    /// reads as `web`. Giving it one means a door=... parameter and an
+    /// allowlist to keep a client from claiming a door it is not, the way
+    /// `Door::from_client` does for search — worth writing when something
+    /// reads the distinction, and not before.
     pub async fn ingest_file(
         &self,
         bytes: Vec<u8>,
@@ -488,6 +504,12 @@ impl Core {
                 .await;
         }
         let size = bytes.len();
+        if size > MAX_TEXT_BYTES {
+            return Err(Error::Validation(format!(
+                "that file is over the {} MB limit for a text capture",
+                MAX_TEXT_BYTES / (1024 * 1024)
+            )));
+        }
         let text = String::from_utf8(bytes).map_err(|_| {
             Error::Validation(
                 "that file is neither a PDF, an image nor UTF-8 text — nothing here reads it"
@@ -520,6 +542,20 @@ impl Core {
             title_hint,
             note,
         } = c;
+        // The ceiling, imposed here rather than at each door.
+        //
+        // Every route that reaches this is layered at `max(pdf_max_bytes,
+        // image_max_bytes)` because one route serves both kinds, and a
+        // multipart part carries no ceiling of its own — so a 49 MB file part
+        // to `/capture` or `/ui/share` used to arrive unchecked no matter what
+        // `image_max_bytes` said. Those doors' comments already promised the
+        // ingest path re-imposed it; now it does.
+        if bytes.len() > self.capture.pdf_max_bytes {
+            return Err(Error::Validation(format!(
+                "that PDF is over the {} MB limit for a PDF capture",
+                self.capture.pdf_max_bytes / (1024 * 1024)
+            )));
+        }
         // Hashed before anything else touches it: the same PDF sent twice
         // costs one SHA-256 the second time, not an extraction.
         let hash = content_hash(&bytes);
@@ -602,6 +638,16 @@ impl Core {
             title_hint,
             note,
         } = c;
+        // The ceiling, imposed here rather than at each door — see
+        // `ingest_pdf_from`. Checked before the hash and long before the
+        // decode permit, so an oversize photo costs neither a SHA-256 nor a
+        // walk over its pixels.
+        if bytes.len() > self.capture.image_max_bytes {
+            return Err(Error::Validation(format!(
+                "that image is over the {} MB limit for an image capture",
+                self.capture.image_max_bytes / (1024 * 1024)
+            )));
+        }
         // Hashed and looked up before it is decoded: a photo sent twice costs
         // one SHA-256 the second time, not a full decode and re-encode.
         let hash = content_hash(&bytes);
@@ -1437,6 +1483,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
 
+    use crate::core::ingest::MAX_TEXT_BYTES;
     use crate::core::ingest::{
         Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_FETCH, ORIGIN_IMAGE,
         ORIGIN_PDF, PdfCapture,
@@ -1445,6 +1492,47 @@ mod tests {
     use crate::error::Error;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    /// The per-kind ceilings, imposed on the path rather than at each door.
+    ///
+    /// The doors are layered at `max(pdf_max_bytes, image_max_bytes)` because
+    /// one route serves both kinds, and a multipart part carries no ceiling of
+    /// its own — so `/capture` and `/ui/share` both used to walk a 49 MB photo
+    /// through a full decode however small `image_max_bytes` was set.
+    #[tokio::test]
+    async fn a_file_over_its_kind_s_ceiling_is_refused() {
+        let mut core = test_core().await;
+        core.capture.image_max_bytes = 1024 * 1024;
+        core.capture.pdf_max_bytes = 2 * 1024 * 1024;
+
+        // PNG magic and then padding: never a decodable image, which is the
+        // assertion. The ceiling is checked before the hash and long before
+        // the decode permit, so these bytes are refused on their weight alone.
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.resize(2 * 1024 * 1024, 0);
+        let err = core
+            .ingest_file(png, Some("photo.png".into()), None, None, "share")
+            .await
+            .expect_err("an oversize image is refused");
+        assert!(err.to_string().contains("1 MB limit"), "{err}");
+
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        pdf.resize(3 * 1024 * 1024, 0);
+        let err = core
+            .ingest_file(pdf, Some("book.pdf".into()), None, None, "share")
+            .await
+            .expect_err("an oversize PDF is refused");
+        assert!(err.to_string().contains("2 MB limit"), "{err}");
+
+        // And text, whose ceiling is not configuration: `/corpora/upload`
+        // refuses text over 8 MB and a `file` part used to sail past it.
+        let text = vec![b'a'; MAX_TEXT_BYTES + 1];
+        let err = core
+            .ingest_file(text, Some("notes.txt".into()), None, None, "share")
+            .await
+            .expect_err("an oversize text file is refused");
+        assert!(err.to_string().contains("8 MB limit"), "{err}");
+    }
 
     /// The two link doors share one path, and the path decides by what the
     /// URL held: a page is extracted here, a PDF is stored for `Stage::Extract`.

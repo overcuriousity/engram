@@ -24,10 +24,36 @@ const ASCII_BLOCKS: [char; 8] = ['.', '.', ':', ':', '-', '=', '#', '#'];
 const DIM: &str = "\u{1b}[2m";
 const RESET: &str = "\u{1b}[0m";
 
+/// The locale that decides whether the glyphs are drawable, in POSIX order.
+///
+/// `LC_ALL` overrides everything; `LC_CTYPE` is the category that actually
+/// governs character handling; `LANG` is the fallback. Reading `LANG` alone
+/// was wrong in both directions: macOS commonly ships `LC_CTYPE=UTF-8` with
+/// no `LANG` at all, and those terminals were handed the ASCII understudies
+/// though they render `▇` and `┃` perfectly — while `LC_ALL=C` alongside a
+/// UTF-8 `LANG` got box-drawing it cannot show.
+///
+/// An empty value is unset, which is what the shell means by `LC_ALL=`.
+///
+/// `get` is passed rather than read, for the reason `decide` takes its facts
+/// as arguments: two tests must not race on one process's environment.
+pub fn locale_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .filter_map(get)
+        .find(|v| !v.is_empty())
+}
+
+/// `locale_from`, against this process.
+pub fn locale() -> Option<String> {
+    locale_from(|k| std::env::var(k).ok())
+}
+
 impl Face {
     /// `is_tty`, `no_color` and `lang` are passed rather than read, so every
     /// rule about when the face appears is testable in a process that has no
     /// terminal and whose environment two tests would otherwise race on.
+    /// `lang` is the whole locale, resolved by `locale` — not `LANG`.
     pub fn decide(cli: &CliArgs, is_tty: bool, no_color: bool, lang: Option<&str>) -> Face {
         let on = match cli.fancy {
             Fancy::Always => true,
@@ -248,5 +274,54 @@ mod tests {
     fn a_pulse_is_not_started_when_the_face_is_off() {
         let off = Face::decide(&Default::default(), false, false, None);
         assert!(off.pulse("searching").is_none());
+    }
+
+    /// POSIX precedence, which is not what this used to read.
+    ///
+    /// macOS commonly ships `LC_CTYPE=UTF-8` with no `LANG` at all, and those
+    /// terminals were handed the ASCII understudies though they draw `▇` and
+    /// `┃` perfectly. The other direction was wrong too: `LC_ALL=C` alongside
+    /// a UTF-8 `LANG` got box-drawing it cannot render.
+    #[test]
+    fn the_locale_is_read_in_the_order_posix_says() {
+        let env = |pairs: &[(&str, &str)]| {
+            let owned: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            move |k: &str| {
+                owned
+                    .iter()
+                    .find(|(name, _)| name == k)
+                    .map(|(_, v)| v.clone())
+            }
+        };
+
+        assert_eq!(
+            super::locale_from(env(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")])).as_deref(),
+            Some("C"),
+            "LC_ALL overrides everything"
+        );
+        assert_eq!(
+            super::locale_from(env(&[("LC_CTYPE", "UTF-8")])).as_deref(),
+            Some("UTF-8"),
+            "LC_CTYPE with no LANG is the shipped macOS configuration"
+        );
+        assert_eq!(
+            super::locale_from(env(&[("LANG", "de_DE.UTF-8")])).as_deref(),
+            Some("de_DE.UTF-8"),
+            "LANG is the fallback, not the first choice"
+        );
+        // What a shell means by `LC_ALL=`.
+        assert_eq!(
+            super::locale_from(env(&[("LC_ALL", ""), ("LANG", "en_US.UTF-8")])).as_deref(),
+            Some("en_US.UTF-8"),
+            "an empty value is unset"
+        );
+        assert_eq!(super::locale_from(env(&[])), None);
+
+        // And the whole point of reading it: the glyphs follow.
+        assert!(super::Face::decide(&always(), true, false, Some("UTF-8")).unicode);
+        assert!(!super::Face::decide(&always(), true, false, Some("C")).unicode);
     }
 }
