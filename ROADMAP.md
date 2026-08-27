@@ -52,7 +52,29 @@ a `ctx` multivector scored with `max_sim`, with the blocks that decided each
 offer named beneath it and shown-against-clicked broken down by rung on Ops. A
 situation seen once or twice is offered too, saying so in words — "Twice
 before" — and held to a stricter match than an established one; with nothing
-learned about the situation a card is drawn at random and claims nothing.
+learned about the situation a card is drawn at random and claims nothing; one
+capture door that reads what it is handed rather than asking the client to
+classify it — a body that is one link is a link, a PDF and an image arrive as
+raw bytes, and a multipart share of four photos is four captures; engram in the
+phone's share sheet, answering with the corpus page because that is the surface
+that can say a share was held for review; and a bookmarklet and a Shortcut
+recipe carrying a token minted for one device on a press, revocable on its own;
+and the shell as a fourth door — capture, search and ask over HTTP like every
+other client, so a search typed at a prompt is a real recorded search the judge
+page can grade, drawn where a person is watching and plain wherever a machine
+might be.
+
+The doors that run while nobody is watching — a watched folder, directory
+import, feeds, email-in — are not built, and near-duplicate parking is the
+reason rather than the effort. Anything at or above `near_dupe_min` is stored
+and then held: not segmented, not embedded, not searchable until a person
+decides between it and what it resembles. That is right for every door where
+the operator is present at the moment of capture, and it is a queue nobody will
+ever drain for a door that runs overnight. A bulk door needs a bulk-safe
+near-duplicate policy first, and recency decaying from a document's own date
+rather than the moment engram saw it — both named in §8 of
+`docs/superpowers/specs/2026-08-27-capture-doors-design.md`.
+
 Design records live in `docs/superpowers/specs/`.
 
 Three constraints decide what is on this list and what was cut from it.

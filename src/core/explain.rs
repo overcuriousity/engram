@@ -9,7 +9,7 @@
 //! Nothing here is stored and nothing here reorders anything.
 
 /// What one stage did to one hit. `None` everywhere the stage did not apply.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StageEffect {
     /// Rank before the stage, where the stage reorders.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,7 +23,7 @@ pub struct StageEffect {
 }
 
 /// What the per-source diversity rule did to this hit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapEffect {
     /// No cap configured, or this hit never went through one.
@@ -45,7 +45,7 @@ pub enum CapEffect {
 }
 
 /// Why one hit is where it is.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HitExplanation {
     /// Rank as retrieval returned it — fusion *and* the scoring stage, since
     /// Qdrant applies both before anything comes back. Not the RRF rank on its
@@ -92,7 +92,7 @@ impl HitExplanation {
 }
 
 /// What cannot belong to a hit: the shape of the pool it was drawn from.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SearchExplanation {
     /// How wide the fetch was — `limit * CANDIDATE_MULTIPLIER`, or wider when
     /// capture asked for a bigger pool.

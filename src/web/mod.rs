@@ -8,6 +8,7 @@ pub mod judge;
 pub mod lineage_view;
 pub mod markdown;
 pub mod pair;
+pub mod share;
 pub mod state;
 pub mod tenant;
 #[cfg(test)]
@@ -46,9 +47,20 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// rewrites a plain page load: a GET outside `/api` and `/mcp`, and not an
 /// htmx fetch, which always carries `HX-Request` and expects a fragment or a
 /// real error, never a full-page redirect.
+///
+/// `POST /ui/share` is the one exception to the GET rule, and it is here
+/// rather than in the handler because this is where the rewrite lives. A
+/// share is dispatched by the platform, not by a page of ours, so it is the
+/// one POST that can arrive without the `SameSite=Lax` session cookie ever
+/// having been sent — and the reader is a person staring at a share sheet's
+/// webview, for whom `{"error":"unauthorized"}` is the end of the road and
+/// the shared content is gone. `303` rather than `307`, so the browser
+/// follows it as a GET onto the login page; the share itself is not replayed
+/// afterwards, which is the honest outcome — it was never stored.
 async fn redirect_unauthenticated_browsers(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    let is_page_load = req.method() == Method::GET
+    let is_share = req.method() == Method::POST && path == "/ui/share";
+    let is_page_load = (req.method() == Method::GET || is_share)
         && !req.headers().contains_key("hx-request")
         && !path.starts_with("/api/")
         && path != "/mcp";
@@ -80,6 +92,10 @@ pub fn router(state: AppState) -> Router {
         .merge(ui::ui_router())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
+        .merge(share::share_router(
+            state.config.capture.image_max_bytes,
+            state.config.capture.pdf_max_bytes,
+        ))
         .merge(judge::judge_router())
         .merge(insights::routes())
         .merge(crate::mcp::mcp_router(state.clone()))

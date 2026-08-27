@@ -1,0 +1,214 @@
+name: release
+
+# Triggered by `ci` finishing rather than by the push itself.
+#
+# Both workflows fire on the same push, so a release keyed to the push would
+# race the tests it depends on and could ship binaries from a master whose
+# suite had just gone red. `workflow_run` waits for the verdict, and every job
+# below checks out `workflow_run.head_sha` — the exact commit CI proved, not
+# whatever master has drifted to since.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [master]
+
+# Never cancel in flight: a release interrupted between `gh release create` and
+# the last asset upload leaves a published version with missing binaries, which
+# is worse than two runs queueing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: version
+    # A failed, cancelled or skipped CI run reaches here too, and only a
+    # successful one may ship.
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      tag: ${{ steps.pick.outputs.tag }}
+      release: ${{ steps.pick.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # The whole history and every tag: the counter below reads the tags
+          # already cut today, and the docs-only check needs the parent commit.
+          fetch-depth: 0
+
+      - name: Pick the version
+        id: pick
+        run: |
+          set -euo pipefail
+
+          # CalVer, `YYYY.MMDD.N`. Valid semver, and monotonic across a year
+          # because the day is one field: January is 101 and December is 1231.
+          # `10#` forces base ten, or `0827` would be read as octal and fail.
+          year=$(date -u +%Y)
+          mmdd=$((10#$(date -u +%m%d)))
+
+          # N counts what is already tagged today, so a second push the same
+          # day becomes `.1` rather than colliding.
+          n=$(git tag --list "v${year}.${mmdd}.*" | wc -l)
+          version="${year}.${mmdd}.${n}"
+          tag="v${version}"
+
+          # Refuse rather than overwrite: a tag that exists means the count was
+          # wrong, and a silently moved tag is a released version whose source
+          # nobody can find again.
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "::error::$tag already exists" >&2
+            exit 1
+          fi
+
+          # A README typo should not mint a version. A commit that touched
+          # nothing outside markdown and docs/ is not a release.
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            changed=$(git diff --name-only HEAD^ HEAD)
+          else
+            changed=$(git ls-tree --name-only -r HEAD)
+          fi
+          if echo "$changed" | grep -qvE '(\.md$|^docs/)'; then
+            release=yes
+          else
+            release=no
+            echo "::notice::documentation only — no release"
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: version
+    if: needs.version.outputs.release == 'yes'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One target failing must not delete the other's artifact: the release
+      # job below refuses to publish a partial set, and seeing both failures at
+      # once is worth the minutes.
+      fail-fast: false
+      matrix:
+        include:
+          # Statically linked, so one binary runs against any libc — Alpine and
+          # an ancient LTS alike. `libsqlite3-sys` compiles bundled C, which is
+          # why `musl-tools` is here and why this is a native build rather than
+          # a cross-compile.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            packages: musl-tools
+          # Native on GitHub's arm64 runners. Same reason: a cross-compiled
+          # SQLite would need a toolchain we would have to assemble ourselves.
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            packages: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install the C toolchain this target needs
+        if: matrix.packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Stamp the version into this checkout
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          # Only here, never committed back: master stays free of bot commits
+          # and the binary still reports the version it was released as —
+          # which is what `engram-cli/<version>` sends as its user agent.
+          sed -i '0,/^version = /s/^version = .*/version = "'"$v"'"/' Cargo.toml
+          # The lock carries engram's own version too, and `--locked` refuses a
+          # lock that disagrees with the manifest. This is the package's own
+          # entry; no dependency is touched.
+          sed -i '/^name = "engram"$/{n;s/^version = .*/version = "'"$v"'"/}' Cargo.lock
+          grep -m1 '^version = ' Cargo.toml
+
+      - name: Build
+        env:
+          # `cc` picks the host compiler otherwise, and the bundled SQLite
+          # would be linked against glibc inside a musl binary.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          name="engram-${v}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/engram" "dist/$name/"
+          strip "dist/$name/engram"
+          # What an operator needs beside the binary to get from download to a
+          # running service without opening a browser.
+          cp config.example.toml engram.service README.md "dist/$name/"
+          tar -czf "dist/${name}.tar.gz" -C dist "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engram-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      # Scoped to this job alone: nothing above it may write to the repository.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          # Every archive, or the release is not published. A missing target is
+          # a broken release rather than a smaller one.
+          test "$(ls -1 ./*.tar.gz | wc -l)" -eq 2
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `--prerelease` while the version is under 1.0: the tags are dates,
+          # not promises about compatibility.
+          gh release create "${{ needs.version.outputs.tag }}" \
+            --target "${{ github.event.workflow_run.head_sha }}" \
+            --title "${{ needs.version.outputs.tag }}" \
+            --prerelease \
+            --generate-notes \
+            dist/*.tar.gz dist/SHA256SUMS

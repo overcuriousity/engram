@@ -96,7 +96,10 @@ pub struct SearchOutcome {
     pub explanation: crate::core::explain::SearchExplanation,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// Deserialised as well as serialised, because the terminal client reads the
+/// very JSON this door writes. One type for both ends means a field added here
+/// cannot silently stop reaching the shell.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     pub artifact_id: String,
     pub corpus_id: String,

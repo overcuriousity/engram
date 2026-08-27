@@ -36,8 +36,23 @@ from the positions those searches actually gave.
 ## Features
 
 - **Capture** — paste text, fetch a URL, upload a PDF, drop or photograph an
-  image, or send from the browser extension. Originals are kept untouched and
-  served back. PDFs are read locally with no model; images need `[infer.vision]`.
+  image, send from the browser extension, share from a phone, or pipe from a
+  shell. Originals are kept untouched and served back. PDFs are read locally
+  with no model; images need `[infer.vision]`.
+- **One door for anything** — `POST /api/v1/capture` reads what it is handed
+  rather than asking the caller to classify it: a body that is one link is a
+  link, a PDF or an image arrives as raw bytes, and a multipart share of four
+  photos is four captures.
+- **On a phone** — installed on Android, engram joins the system share sheet.
+  On iOS, a bookmarklet and a Shortcut recipe do the same, each carrying a
+  token minted for that one device and revocable on its own.
+- **From a shell** — the same binary is a client of a running engram:
+  `engram -c notes.pdf` captures, `engram -s 40 "loop device"` searches as wide
+  as you ask, `engram -a "how did I mount it?"` streams an answer, and
+  `pbpaste | engram` captures what was piped. On a terminal the list is drawn —
+  a score as a bar, the cliff as a break in the trace beside it — and in a pipe
+  it is plain text with every one of those claims still said in words. Exit `1`
+  means nothing was found, so `engram -s "x" || …` is a usable branch.
 - **Search by meaning** — type the situation, not the keywords. Loose matches
   are labelled as loose, and where the scores fall off a cliff the hits past it
   are greyed: they keep their rank but stop claiming to be answers.
@@ -88,14 +103,21 @@ one click. No artifact spans two segments.
 
 ```bash
 cargo build --release        # target/release/engram
-docker compose up -d         # Qdrant on 127.0.0.1:6333
 cp config.example.toml config.toml
 ./target/release/engram --hash-password 'your password'   # paste into config.toml
 ./target/release/engram
 ```
 
-Qdrant's [released binary](https://github.com/qdrant/qdrant/releases) works just
-as well as the container; engram only needs its REST port.
+Qdrant has to be answering on the address in `config.toml` — `127.0.0.1:6333`
+by default — before that last line. How you run it is your business: the
+[released binary](https://github.com/qdrant/qdrant/releases) and a container
+are equally fine, and engram only ever speaks to its REST port.
+
+Released builds are on the [releases
+page](https://github.com/overcuriousity/engram/releases): a statically linked
+`x86_64` binary that needs no libc of any particular vintage, and an `aarch64`
+one. Versions are dates — `v2026.827.0` — and are marked pre-release while the
+shape of things is still moving.
 
 Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
 through `raw → embedding → ready` on Browse. `partial` means part of it has not

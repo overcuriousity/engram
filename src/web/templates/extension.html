@@ -46,6 +46,49 @@ after a deployment.</p>
 is no one-click path and no auto-update. An enterprise policy allowlist is the
 alternative, and is not the default here.</p>
 
+<h3>On a phone</h3>
+<p>On Android, install engram from the browser’s menu and it joins the system
+share sheet by itself — share from any app, and it lands here. Nothing below is
+needed for that.</p>
+<p>Safari has no share-target support, so on iOS the same gesture is reached
+through a bookmarklet, or through the Shortcuts app. Both carry a token minted
+for one device and revocable on its own under Settings → API tokens.</p>
+
+{% match device_token %}
+{% when Some with (token) %}
+<p class="muted">This is the only time this token is shown. Set it up on the
+phone now; if you lose it, press the button again for a new one and revoke this
+one.</p>
+<p><b>The bookmarklet.</b> Save this as a bookmark — drag it to the bar on a
+desktop, or add the page to favourites on the phone and edit the address to
+this. Pressing it captures the selection, or the page’s address when nothing
+is selected.</p>
+<p><a class="btn"
+      href="javascript:(function()&#123;fetch('{{ origin }}/api/v1/capture?title='+encodeURIComponent(document.title),&#123;method:'POST',headers:&#123;'content-type':'text/plain','authorization':'Bearer {{ token }}'&#125;,body:(window.getSelection().toString()||location.href)&#125;).then(function(r)&#123;alert(r.ok?'Captured.':'engram refused it: '+r.status)&#125;)&#125;)()">Capture
+to engram</a></p>
+
+<p><b>The Shortcut.</b> In the Shortcuts app: new shortcut, turn on <em>Show in
+Share Sheet</em>, accept text, URLs and images, then add one
+<em>Get Contents of URL</em> action with these:</p>
+<dl class="recipe">
+  <dt>URL</dt><dd><code>{{ origin }}/api/v1/capture</code></dd>
+  <dt>Method</dt><dd><code>POST</code></dd>
+  <dt>Header</dt><dd><code>Authorization: Bearer {{ token }}</code></dd>
+  <dt>Header</dt><dd><code>Content-Type: text/plain</code></dd>
+  <dt>Request Body</dt><dd>Shortcut Input</dd>
+</dl>
+<p class="muted">The four lines above are copied once, into Shortcuts. There is
+no importable file here on purpose: an unsigned <code>.shortcut</code> is a
+binary plist this server would have to fabricate, and one that imports wrongly
+is worse than four fields typed correctly.</p>
+{% when None %}
+<form method="post" action="/extension/phone">
+  <button class="btn btn-accent" type="submit">Mint a token for this phone</button>
+</form>
+<p class="muted">One press, one token, named <code>phone</code>. Nothing is
+minted by opening this page — a credential appears only when you ask for one.</p>
+{% endmatch %}
+
 <h3>Pairing</h3>
 <p>Open the panel and enter the address you reach engram at — most likely
 <strong>{{ origin }}</strong>, though a deployment behind a proxy can answer to
