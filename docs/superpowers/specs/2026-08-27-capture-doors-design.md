@@ -56,7 +56,7 @@ clients are never written.
 1. **`POST /api/v1/capture`** — one endpoint that dispatches on content type
    and ends in the ingest calls that already exist. §3.
 2. **`engram -c`, `-s`, `-a`** — a client on the existing binary, with stdin
-   support. §4.
+   support and a deliberately wide `-s N`. §4, and its tty rendering in §4a.
 3. **A Web Share Target** in the manifest, and `POST /ui/share` behind it. §5.
 4. **An iOS Shortcut and a bookmarklet**, generated pre-filled with a
    per-device token, on the page that already installs the extension. §6.
@@ -105,8 +105,23 @@ build, ship and version. The verb flags are mutually exclusive:
 - **`-c <PATH|URL|->`** — capture. Repeatable, so `engram -c *.pdf` is one
   invocation and several corpora. A path is uploaded with its sniffed type, a
   URL is sent as a URL, `-` reads stdin. `--title`, `--note`, `--tag`.
-- **`-s <QUERY>`** — search, one line per hit: rank, score, title, id, with the
-  excerpt indented beneath. `--limit`, `--tag`, `--category`, `--json`.
+- **`-s [N] <QUERY>`** — search, one line per hit: rank, score, title, id, with
+  the excerpt indented beneath. `--tag`, `--category`, `--json`. When the first
+  value parses as a bare integer it is the number of hits wanted, and the rest
+  is the query: `engram -s 40 "qdrant payload filter"`. A query that is itself
+  a number is reachable as `engram -s -- 42`.
+
+  The number is not cosmetic. `limit` sets the candidate pool at `limit *
+  CANDIDATE_MULTIPLIER` (`src/core/search.rs:12`), so asking for forty searches
+  wider than asking for ten rather than printing more of the same pool — and a
+  wider pool is precisely what gives `per_source_cap` something left to
+  redistribute when one document saturates a narrow one. The terminal is where
+  a deliberately wide read belongs: it costs one embedding and one Qdrant call
+  either way, and a shell can hold forty lines that a rail cannot. It is
+  clamped to `MAX_LIMIT = 50` (`src/core/search.rs:9`) like every other door.
+  Past fifty is one constant and no new code, but it is a change to what every
+  door may ask for and to the largest pool the server will assemble, so it is
+  not made here.
 - **`-a <QUESTION>`** — ask, streaming `/ask/stream` to stdout as it arrives,
   citations printed after the answer.
 
@@ -145,6 +160,74 @@ case is a mislabelled row in your own judge queue.
 
 **Exit codes.** `0` results, `1` none, `2` error, so `engram -s "x" || …` is a
 usable branch in a script.
+
+## 4a. The face of it
+
+The client is the door reached most often, from the place with the least
+patience, and it is also the only door with no design at all: a REST response
+rendered by `println!`. That is a waste of the one surface where engram's own
+vocabulary — activation, propagation, decay, a trace that falls off a cliff —
+can be drawn rather than described. So the tty rendering is deliberately
+alive, and bounded by three rules that make it safe to be.
+
+**It never survives a pipe.** With `stdout` not a terminal, or `NO_COLOR` set,
+or `--plain` given, the output is the dead-plain text §4 specifies: no escape
+codes, no animation, no glyphs outside ASCII. `--fancy never|auto|always`
+overrides the detection in both directions. Every assertion any script makes
+about this client's output is made against that form, and the fancy form is
+never the one a machine sees.
+
+**It never delays a result.** Animation runs on its own thread while a request
+is in flight and stops on the first byte that arrives. Nothing is buffered to
+make a frame land evenly, nothing is paced for effect, and no result is held
+back so an animation can finish. The client is measured by the time from
+keystroke to first hit, and that number must be indistinguishable from
+`--plain`.
+
+**It never decorates over meaning.** The cliff, the loose-match label, the
+badges for synthesized and captured artifacts, and the words `held for review`
+are text in both forms. Colour and motion are additive to them and never a
+substitute — a rendering that says "past the cliff" only by being dim is a
+rendering that says nothing to a colourblind reader, in a monochrome terminal,
+or in a screenshot.
+
+Within those rules, the vocabulary is the base's own:
+
+- **Waiting is a propagating pulse.** A short strand carries one bright cell
+  left to right with a decaying tail behind it — an impulse travelling, not a
+  spinner rotating. It is what the server is doing: one query embedded, one
+  pool assembled, activation read over it.
+- **A score is a dendrite.** Each hit's score is a bar in gradient blocks
+  drawn beside a vertical trace running down the list, and **the cliff is a
+  literal break in that trace**: above it the trace is solid, at it the glyph
+  snaps, below it the rows are dim and the trace is dotted. The rail's central
+  idea becomes the one thing you cannot miss in the output.
+- **Streaming is a readout.** Under `-a`, a single-line trace scrolls above the
+  answer with its amplitude driven by the actual token arrival rate — an
+  activity readout of a thing genuinely happening, not a fake one. Citations
+  draw afterwards as a rooted tree.
+- **Capture is sequencing.** `-c` fills a track as the body is read, and with
+  `--watch` shows extraction, segmentation and embedding as three lamps lit
+  from `GET /corpora/{id}`, so the operator sees the background stages the
+  other doors only describe in a sentence.
+
+**Two glyph sets, chosen by environment.** The Unicode set is used when the
+locale says UTF-8; otherwise an ASCII set with the same shapes. Frames are
+drawn by rewriting the current line — carriage return and erase-to-end — never
+on the alternate screen, so results stay in scrollback after the process
+exits and `engram -s 40 …` is still a thing you can scroll back through
+tomorrow.
+
+**Single binary, and it stays one.** The rendering needs terminal detection,
+cursor movement and colour capability, which is `crossterm` — pure Rust, no C
+dependency, no curses, statically linked like everything else in the tree. No
+part of this section adds a runtime dependency or a file that has to ship
+beside the executable.
+
+**It is built last.** §3 and §4 are the plumbing and stand alone: a plain,
+correct client is a shippable client, and every test in §9 is written against
+`--plain`. This section is a layer over a finished thing, and if it is cut for
+time nothing else in this document changes.
 
 ## 5. Android: the share target
 
@@ -264,6 +347,12 @@ neutral rather than corrosive to what is established.
   `-s` printing the cliff marker with stdout redirected; `-a` streaming;
   exit `1` on an empty result; the verb flags refusing each other; a tty stdin
   with no flag still starting the server.
+- **`-s 40` asks for forty and `-s 500` asks for fifty**, and `-s -- 42`
+  searches for `42`.
+- **The plain form is the tested form.** With `stdout` redirected, with
+  `NO_COLOR`, and with `--plain`, the output holds no escape byte at all — and
+  the cliff, the loose label and `held for review` appear as words in that
+  output, not only as colour.
 - **`-s` records a search** reachable from the judge queue, under `Door::Cli`,
   and an otherwise identical request without the client's user agent still
   records as `Api`.
