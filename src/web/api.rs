@@ -313,6 +313,62 @@ pub(crate) fn code_for(out: &crate::core::ingest::IngestOutcome) -> StatusCode {
     }
 }
 
+/// Every part of a capture upload: the text fields by name, and every file
+/// part in the order it arrived.
+///
+/// `read_upload` cannot serve this: it takes exactly one file and refuses a
+/// second, which is right for a door that stores one document and wrong for a
+/// share sheet handing over four photos at once. A part counts as a file when
+/// it carried a filename, which is what a browser and a platform share sheet
+/// both do and what a plain text field never does.
+pub(crate) async fn read_capture_parts(
+    mut multipart: axum::extract::Multipart,
+) -> Result<(std::collections::HashMap<String, String>, Vec<FilePart>)> {
+    let mut fields: std::collections::HashMap<String, String> = Default::default();
+    let mut files = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?
+    {
+        let Some(name) = field.name().map(str::to_string) else {
+            continue;
+        };
+        if field.file_name().is_some() {
+            let filename = field.file_name().map(str::to_string);
+            let declared = field.content_type().unwrap_or("").to_string();
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| Error::Validation(format!("upload failed: {e}")))?;
+            files.push(FilePart {
+                filename,
+                declared,
+                bytes,
+            });
+        } else {
+            let text = field
+                .text()
+                .await
+                .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?;
+            if !text.trim().is_empty() {
+                fields.insert(name, text);
+            }
+        }
+    }
+    Ok((fields, files))
+}
+
+/// One capture or several, in the shape a client can parse without a flag: an
+/// object for a body that held one thing, an array for a share that held more.
+/// Untagged, so neither is wrapped in a name the other lacks.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum Captured {
+    One(crate::core::ingest::IngestOutcome),
+    Many(Vec<crate::core::ingest::IngestOutcome>),
+}
+
 /// One door for a client that has not classified what it is holding.
 ///
 /// A share sheet hands over a blob and a maybe-URL; a shell hands over a path
@@ -361,6 +417,97 @@ async fn capture(
             }
         };
         return Ok((code_for(&out), Json(out)).into_response());
+    }
+
+    if content_type.starts_with("multipart/form-data") {
+        let m = axum::extract::Multipart::from_request(req, &())
+            .await
+            .map_err(|e| Error::Validation(format!("malformed upload: {e}")))?;
+        let (mut fields, files) = read_capture_parts(m).await?;
+        let title = q.title.or_else(|| fields.remove("title"));
+        let note = q.note.or_else(|| fields.remove("note"));
+        let mut out: Vec<crate::core::ingest::IngestOutcome> = Vec::new();
+
+        // A share sheet sends `url` and `text` for the same share, and the
+        // link is the better capture of the two: the text is usually the
+        // page's title repeated. So a `url` wins and takes the text with it,
+        // and the text is kept only where it stands alone.
+        let shared_url = fields.remove("url").or_else(|| {
+            fields
+                .get("text")
+                .and_then(|t| only_a_url(t).map(|u| u.to_string()))
+        });
+        if let Some(raw) = shared_url {
+            fields.remove("text");
+            let u = url::Url::parse(&raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
+            if !matches!(u.scheme(), "http" | "https") {
+                return Err(Error::Validation(format!(
+                    "url: `{}` is not a scheme a page is read over",
+                    u.scheme()
+                )));
+            }
+            out.push(
+                tenant
+                    .core
+                    .ingest_url(&u, title.clone(), note.clone())
+                    .await?,
+            );
+        } else if let Some(text) = fields.remove("text") {
+            out.push(
+                tenant
+                    .core
+                    .ingest_capture(
+                        crate::core::ingest::Capture::new(text, ORIGIN_WEB)
+                            .with_title(title.clone())
+                            .with_note(note.clone()),
+                    )
+                    .await?,
+            );
+        }
+
+        for f in files {
+            out.push(
+                tenant
+                    .core
+                    .ingest_file(
+                        f.bytes.to_vec(),
+                        f.filename,
+                        title.clone(),
+                        note.clone(),
+                        ORIGIN_WEB,
+                    )
+                    .await?,
+            );
+        }
+
+        return match out.len() {
+            0 => Err(Error::Validation(
+                "nothing to capture: send `text`, `url`, or at least one file part".into(),
+            )),
+            1 => {
+                let one = out.pop().expect("length checked");
+                Ok((code_for(&one), Json(Captured::One(one))).into_response())
+            }
+            _ => {
+                // The weakest true statement about the set: something here is
+                // still being read if anything is, and nothing is new only if
+                // every one of them was already held.
+                let code = if out.iter().all(|o| o.duplicate) {
+                    StatusCode::OK
+                } else if out.iter().any(|o| {
+                    matches!(
+                        o.status,
+                        crate::store::corpora::CorpusStatus::Extracting
+                            | crate::store::corpora::CorpusStatus::Describing
+                    )
+                }) {
+                    StatusCode::ACCEPTED
+                } else {
+                    StatusCode::CREATED
+                };
+                Ok((code, Json(Captured::Many(out))).into_response())
+            }
+        };
     }
 
     let kind_limit = if content_type.starts_with("application/pdf") {
@@ -421,11 +568,11 @@ fn named_txt(filename: Option<&str>) -> bool {
 }
 
 /// One file part of a multipart upload.
-struct FilePart {
-    filename: Option<String>,
+pub(crate) struct FilePart {
+    pub(crate) filename: Option<String>,
     /// The part's `Content-Type`, or "" when it carried none.
-    declared: String,
-    bytes: axum::body::Bytes,
+    pub(crate) declared: String,
+    pub(crate) bytes: axum::body::Bytes,
 }
 
 struct UploadParts {
@@ -3122,6 +3269,133 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(stored.title_hint.as_deref(), Some("A title"));
+    }
+
+    #[tokio::test]
+    async fn a_multipart_share_of_three_files_is_three_corpora() {
+        let (app, token) = app_and_token().await;
+        let png = a_png();
+        let res = app
+            .oneshot(multipart(
+                "/api/v1/capture",
+                &token,
+                &[],
+                &[
+                    FilePart {
+                        field: "file",
+                        filename: "a.txt",
+                        mime: Some("text/plain"),
+                        body: b"the first procedure",
+                    },
+                    FilePart {
+                        field: "file",
+                        filename: "b.txt",
+                        mime: Some("text/plain"),
+                        body: b"the second procedure",
+                    },
+                    FilePart {
+                        field: "file",
+                        filename: "c.png",
+                        mime: Some("image/png"),
+                        body: &png,
+                    },
+                ],
+            ))
+            .await
+            .unwrap();
+        let v = json_of(res).await;
+        let arr = v.as_array().expect("many files answer with an array");
+        assert_eq!(arr.len(), 3, "{v}");
+        assert!(arr.iter().all(|o| o["id"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn one_file_in_a_multipart_body_answers_with_one_object() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(multipart(
+                "/api/v1/capture",
+                &token,
+                &[("title", "A title")],
+                &[FilePart {
+                    field: "file",
+                    filename: "a.txt",
+                    mime: Some("text/plain"),
+                    body: b"a procedure worth keeping",
+                }],
+            ))
+            .await
+            .unwrap();
+        let v = json_of(res).await;
+        assert!(
+            v["id"].is_string(),
+            "one file is not wrapped in an array: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_multipart_share_may_carry_a_url_or_text_instead_of_a_file() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "<html><body><article><h1>Mounting</h1><p>Run mount, then check dmesg \
+                 for the device name and the filesystem it found. The label is what \
+                 fstab matches on, and it survives a reformat only if you set it \
+                 again afterwards, which is the step everyone forgets.</p><p>A loop \
+                 device needs losetup first, and the offset is in bytes rather than \
+                 sectors, which is where the arithmetic usually goes wrong.</p>\
+                 </article></body></html>",
+                "text/html",
+            ))
+            .mount(&server)
+            .await;
+
+        let (app, token, core) = app_token_and_core().await;
+        // A share sheet sends both for one share; the link is the better
+        // capture of the two, and the text is the title repeated.
+        let res = app
+            .oneshot(multipart(
+                "/api/v1/capture",
+                &token,
+                &[
+                    ("url", &format!("{}/a", server.uri())),
+                    ("text", "Mounting"),
+                ],
+                &[],
+            ))
+            .await
+            .unwrap();
+        let status = res.status();
+        let v = json_of(res).await;
+        assert!(status.is_success(), "{status}: {v}");
+        let stored = core
+            .store
+            .get_corpus(v["id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.origin,
+            crate::core::ingest::ORIGIN_FETCH,
+            "the link won, and the title beside it was not stored as a second capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_multipart_body_with_nothing_in_it_is_refused() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(multipart(
+                "/api/v1/capture",
+                &token,
+                &[("title", "only a title")],
+                &[],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
