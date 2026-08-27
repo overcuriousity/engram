@@ -68,6 +68,62 @@ pub async fn run(
     Ok(ids)
 }
 
+/// Follow a capture through the stages that run after it is stored.
+///
+/// The other doors describe those stages in a sentence and leave; a terminal is
+/// a place a person is already sitting, so it can show them happening. It ends
+/// at the first status nothing moves out of — including `NeedsReview`, the
+/// parked near-duplicate, which is precisely the one a client must not sit
+/// waiting on because only a person can move it.
+///
+/// Matched on the parsed variant rather than on the string: `CorpusStatus`
+/// spells `NeedsReview` two different ways depending on whether it is going to
+/// the database or to a response, and a comparison against either literal would
+/// be right half the time.
+pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Result<()> {
+    use crate::store::corpora::CorpusStatus;
+    let http = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let lamps = face.pulse("reading");
+    for _ in 0..WATCH_POLLS {
+        let res = http
+            .get(format!("{}/corpora/{id}", e.api("")))
+            .bearer_auth(&e.token)
+            .send()
+            .await
+            .map_err(|err| Error::Validation(format!("{err}")))?;
+        let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
+        let status: Option<CorpusStatus> = serde_json::from_value(body["status"].clone()).ok();
+        if let Some(s) = status {
+            if matches!(
+                s,
+                CorpusStatus::Ready
+                    | CorpusStatus::Partial
+                    | CorpusStatus::Failed
+                    | CorpusStatus::NeedsReview
+            ) {
+                drop(lamps);
+                println!("{id}  {}", s.as_str());
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(WATCH_EVERY).await;
+    }
+    drop(lamps);
+    // Said rather than hidden: a capture still moving after five minutes is
+    // information, and a client that exits silently claims a completion it
+    // never saw.
+    eprintln!("{id}: still being read — it carries on without this client");
+    Ok(())
+}
+
+/// Five minutes of polling, twice a second. Long enough for a book through
+/// extraction and short enough that a wedged queue is not watched all night.
+const WATCH_POLLS: usize = 600;
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The bytes to send and what to call them.
 ///
 /// A link is sent as `text/plain` and the server decides it is a link, which is
@@ -154,6 +210,43 @@ mod tests {
         .unwrap();
         let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
         assert_eq!(stored.title_hint.as_deref(), Some("A title with spaces"));
+    }
+
+    #[tokio::test]
+    async fn watching_ends_at_a_state_nothing_moves_out_of() {
+        use crate::store::corpora::CorpusStatus;
+        let (e, core) = endpoint().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "a procedure worth keeping").unwrap();
+        let ids = run(&e, &[file.display().to_string()], None, None)
+            .await
+            .unwrap();
+        let face = crate::cli::face::Face::decide(&Default::default(), false, true, None);
+
+        // A fresh capture is `raw`, which a worker moves along — so the client
+        // is right to keep waiting there, and this drives it to each state
+        // that nothing moves out of instead. `NeedsReview` is the one that
+        // matters most: only a person can move a parked near-duplicate, so a
+        // client that waited on it would wait for ever.
+        for terminal in [
+            CorpusStatus::Ready,
+            CorpusStatus::Partial,
+            CorpusStatus::Failed,
+            CorpusStatus::NeedsReview,
+        ] {
+            core.store
+                .set_corpus_status(&ids[0], terminal.clone())
+                .await
+                .expect("set the status");
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                watch(&e, &ids[0], &face),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("watching did not end at {terminal:?}"))
+            .expect("watching must not fail");
+        }
     }
 
     #[tokio::test]

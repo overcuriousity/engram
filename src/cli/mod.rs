@@ -61,6 +61,20 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                     for id in &ids {
                         println!("{id}");
                     }
+                    if cli.watch {
+                        let face = face::Face::decide(
+                            cli,
+                            std::io::IsTerminal::is_terminal(&std::io::stdout()),
+                            std::env::var_os("NO_COLOR").is_some(),
+                            std::env::var("LANG").ok().as_deref(),
+                        );
+                        for id in &ids {
+                            if let Err(e) = capture::watch(&endpoint, id, &face).await {
+                                eprintln!("{e}");
+                                return 2;
+                            }
+                        }
+                    }
                     0
                 }
                 Err(e) => {
