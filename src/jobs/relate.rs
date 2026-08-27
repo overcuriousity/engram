@@ -263,6 +263,21 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
     //
     // It survives as a prior in the prompt and as the input to the merge
     // verification. It is no longer an admission gate. See the design, §6.5.
+    // A passage is the verbatim substrate, not a claim anyone made twice.
+    // Passages under one heading are alike for how they were cut, and passages
+    // from different documents on one subject are alike because the subject is
+    // taught more than once — neither is duplication. The narrow rule above
+    // asks for one corpus and one `segment_idx` and so covers only the first;
+    // this is the same statement `run` already makes about the asking side (a
+    // passage never queries), applied to the side that gets filed.
+    //
+    // Below the containment block on purpose: a passage wholly inside another
+    // in the same corpus is still superseded, deterministically and without a
+    // call. What ends here is the model question, not the hygiene.
+    if a.provenance == Provenance::Passage || b.provenance == Provenance::Passage {
+        return Ok(false);
+    }
+
     core.store.record_pair(&a.id, &b.id, score).await?;
     Ok(false)
 }
@@ -410,6 +425,137 @@ mod tests {
             core.store.get_artifact(&ids[0]).await.unwrap(),
             core.store.get_artifact(&ids[1]).await.unwrap(),
         )
+    }
+
+    /// One passage under a corpus of its own. `seed_rows` writes `captured`
+    /// rows, and the case under test is two passages from two documents.
+    async fn seed_passage(core: &Core, corpus: &str, text: &str) -> String {
+        let src = core.store.insert_corpus(corpus, "web", None).await.unwrap();
+        core.store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: text.to_string(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+                Provenance::Passage,
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id
+    }
+
+    #[tokio::test]
+    async fn two_passages_from_different_documents_about_one_subject_are_not_a_pair() {
+        // The guard this joins asked for one corpus AND one `segment_idx`, so
+        // it never saw two passages from two documents — on the live base it
+        // fired on none of thirty-three pairs. Thirteen scripts teaching one
+        // subject produced passages at 0.89 to 0.93 that duplicate nothing, and
+        // they were merged into one synthetic document.
+        let core = test_core().await;
+        let a_id = seed_passage(&core, "skript-a", "Spuren sind materielle Veraenderungen.").await;
+        let b_id =
+            seed_passage(&core, "skript-b", "Als Spur gilt jede materielle Veraenderung.").await;
+        let a = core.store.get_artifact(&a_id).await.unwrap();
+        let b = core.store.get_artifact(&b_id).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "two passages from two documents are two sources, not a duplicate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_a_passage_on_either_side_is_never_filed() {
+        // Eleven of the live base's thirty-three pairs were a passage against a
+        // captured artifact, so the rule cannot be about two passages only.
+        let core = test_core().await;
+        let passage =
+            seed_passage(&core, "skript-a", "Spuren sind materielle Veraenderungen.").await;
+        let captured = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Als Spur gilt jede materielle Veraenderung.",
+            [0.99, 0.05],
+        )
+        .await;
+        let a = core.store.get_artifact(&passage).await.unwrap();
+        let b = core.store.get_artifact(&captured).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_passage_inside_one_corpus_is_still_superseded_by_containment() {
+        // What the new guard must not take away. Containment inside one corpus
+        // is deterministic, costs no call, and is the only ground on which
+        // anything is hidden unasked — so the guard sits below that block, not
+        // above it. Placed above, this hygiene disappears silently.
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("skript", "web", None)
+            .await
+            .unwrap();
+        let rows = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "Spuren sind materielle Veraenderungen an Personen oder Sachen."
+                            .into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: Some(0),
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "Spuren sind materielle Veraenderungen".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: Some(1),
+                        caveats: vec![],
+                    },
+                ],
+                Provenance::Passage,
+            )
+            .await
+            .unwrap();
+
+        classify_pair(&core, &rows[0], &rows[1], 0.97).await.unwrap();
+
+        let short = core.store.get_artifact(&rows[1].id).await.unwrap();
+        assert!(
+            !short.in_results(),
+            "a passage wholly inside another in one corpus is still hidden"
+        );
     }
 
     #[tokio::test]
