@@ -119,9 +119,19 @@ merging if your environment has it.
 
 The corpus-concentration measurement. Once this is deployed, the `explain`
 flag over MCP is what says whether `cap_per_corpus` is quietly failing —
-specifically `CapEffect::Refilled` on hits, and `displaced == refilled` on the
-pool line. That is the number that decides whether **Server-side grouping**
-(`ROADMAP.md:460`) is worth building or worth cutting.
+specifically `CapEffect::Refilled` on hits, and a non-zero `refilled` on the
+pool line, which reads as "*N* displaced, *M* still in the answer".
+
+Read `refilled`, not `displaced == refilled`. The first review of this branch
+found that comparison degenerate: `search_inner` hands `cap_per_corpus` the
+candidate pool as its refill target, so `kept` can never be short of it and
+every displaced hit is always taken back — the equality held on every search
+ever made, including the healthy ones. The cap's whole effect on the pool is
+an order, and what it removes is decided by the truncate to `limit` at the end
+of the search. `refilled` is therefore counted there, over the answer: any
+number above zero is a hit that reached the caller over its source's cap
+because there was nothing to put in its place. Zero is the rule holding, and
+`displaced` above it with `refilled` at zero is the rule working.
 
 Two things to know before gathering it. Nothing is stored — that was an
 explicit decision (spec §10), so the figure has to come from deliberate

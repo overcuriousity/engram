@@ -46,8 +46,8 @@ An explanation that names what the cap did closes both gaps with one object.
 1. **A `HitExplanation` on every result**, carrying what each stage did to that
    hit.
 2. **A `SearchExplanation` beside `SearchTiming`**, carrying what cannot belong
-   to a hit — how wide the pool was, how many corpora it held, and how many
-   hits the cap displaced and refilled.
+   to a hit — how wide the pool was, how many corpora it held, how many hits
+   the cap displaced, and how many of those reached the answer regardless.
 3. **Reconstruction of the three stages that run inside Qdrant**, from payload
    fields already fetched, at no additional query cost (§5).
 4. **One rendering, read by all three doors** — the rail, MCP's meta line, the

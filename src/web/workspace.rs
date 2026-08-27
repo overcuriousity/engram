@@ -77,6 +77,15 @@ struct WorkspaceTemplate {
     /// Whether the image door is open, i.e. `[infer.vision]` is configured.
     /// Off, the control offers text only rather than a picker that fails.
     vision_enabled: bool,
+    /// Whether this page asks the rail to say why each row ranked where it
+    /// did — `/ui?explain=1`. Carried onto the form as a hidden field and
+    /// named in `hx-params`, because that allowlist strips everything it does
+    /// not name and the fragment would otherwise never see the flag.
+    ///
+    /// A link rather than a control: the line is for an operator looking into
+    /// a ranking, and a page that paints it on every keystroke for everybody
+    /// is a page with a sentence under every row.
+    explain: bool,
     /// Whether a reranker serves the search path — `Core::reranks_search`.
     /// Rendered onto the form as `data-rerank`, which is what arms app.js's
     /// refining pass: without it no second request fires, ever, because it
@@ -243,6 +252,9 @@ async fn base_template(
         recommend: tenant.core.recommends(),
         vision_enabled: tenant.core.describer.is_some(),
         search_reranks: tenant.core.reranks_search(),
+        // The deep-link door sets it; every other door onto this page is not
+        // an operator looking into a ranking.
+        explain: false,
         eager: tenant.core.synthesis == crate::config::SynthesisMode::Eager,
         prefill_ask: String::new(),
         prefill_question: String::new(),
@@ -254,7 +266,9 @@ async fn base_template(
 }
 
 async fn page(tenant: Tenant, Query(p): Query<UiSearchParams>) -> Result<Response> {
-    let t = base_template(&tenant, p.q, p.category.unwrap_or_default(), "").await?;
+    let explain = p.explain.unwrap_or(false);
+    let mut t = base_template(&tenant, p.q, p.category.unwrap_or_default(), "").await?;
+    t.explain = explain;
     Ok(HtmlTemplate(t).into_response())
 }
 
@@ -1214,6 +1228,29 @@ mod tests {
         .unwrap()
     }
 
+    /// The rail's why-line is reachable only if the flag survives three
+    /// filters: the page's own query string, the hidden field, and the
+    /// `hx-params` allowlist. It shipped past the first two and died at the
+    /// third, so the line no operator could turn on was rendered by nothing
+    /// but its unit tests.
+    #[tokio::test]
+    async fn the_explain_flag_reaches_the_search_form_from_the_url() {
+        let plain = workspace("/ui").await;
+        assert!(
+            !plain.contains(r#"name="explain""#),
+            "an ordinary visit is not an operator looking into a ranking: \
+             {plain}"
+        );
+
+        let asked = workspace("/ui?explain=1").await;
+        assert!(
+            asked.contains(r#"<input type="hidden" name="explain" value="1">"#),
+            "the field the fragment request is built from is missing, so the \
+             rail is asked without the flag however the link was written: \
+             {asked}"
+        );
+    }
+
     /// The refining pass is a second request per settled query, and app.js
     /// decides whether to fire it by reading the form. A box with no search
     /// reranker must not advertise one: every pause would buy a second search
@@ -1245,10 +1282,12 @@ mod tests {
             "a reranker serving search is what arms the refining pass"
         );
         assert!(
-            html.contains(r#"hx-params="q,category,rerank""#),
+            html.contains(r#"hx-params="q,category,rerank,explain""#),
             "hx-params is the allowlist for what rides a search GET; without \
              `rerank` on it the refining pass's own flag is filtered off the \
-             wire and the server only ever runs the fast path"
+             wire and the server only ever runs the fast path — and `explain` \
+             was missing from it for exactly as long as the rail's why-line \
+             was unreachable"
         );
     }
 

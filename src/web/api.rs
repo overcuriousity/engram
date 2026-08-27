@@ -93,7 +93,7 @@ where
 /// spelling in every hand-written curl and every doc example — would be a 400
 /// rather than a flag. An empty value (`?explain`) is on, because writing the
 /// key at all is the request.
-fn query_flag<'de, D>(d: D) -> std::result::Result<Option<bool>, D::Error>
+pub(crate) fn query_flag<'de, D>(d: D) -> std::result::Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

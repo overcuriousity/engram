@@ -2109,7 +2109,14 @@ async fn the_reconstructed_recency_term_matches_what_qdrant_scored() {
     recent.payload.last_verified_at = Some(now);
     let mut old = point("old", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "concept");
     old.payload.last_verified_at = Some(now - half_life_secs as i64);
-    v.upsert(vec![recent, old]).await.unwrap();
+    // And one stamped a half-life into the future — clock skew between a
+    // writer and the query host, or an imported stamp. `exp_decay` measures
+    // `|x - target|`, so Qdrant decays this exactly as much as the old one;
+    // the reconstruction clamped the age at zero and reported the undecayed
+    // weight, which is the explanation contradicting the score.
+    let mut ahead = point("ahead", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "concept");
+    ahead.payload.last_verified_at = Some(now + half_life_secs as i64);
+    v.upsert(vec![recent, old, ahead]).await.unwrap();
 
     let hits = v
         .search_weighted(
@@ -2147,6 +2154,16 @@ async fn the_reconstructed_recency_term_matches_what_qdrant_scored() {
         (measured - reconstructed).abs() < 1e-4,
         "Qdrant scored a difference of {measured}; the reconstruction says \
          {reconstructed}. The explanation may not contradict the ranking."
+    );
+
+    let measured_ahead = hit_of("fresh").score - hit_of("ahead").score;
+    let reconstructed_ahead = term("fresh") - term("ahead");
+    assert!(
+        (measured_ahead - reconstructed_ahead).abs() < 1e-4,
+        "a stamp a half-life ahead of now: Qdrant scored a difference of \
+         {measured_ahead}, the reconstruction says {reconstructed_ahead}. \
+         `exp_decay` takes the absolute difference, so a future stamp decays \
+         like a past one and the explanation has to say so."
     );
     v.drop_collection().await.unwrap();
 }

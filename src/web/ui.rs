@@ -1106,9 +1106,16 @@ pub(crate) struct UiSearchParams {
     pub(crate) rerank: bool,
     /// Ask the rail to say why a row is where it is. Off unless the link
     /// carries it: the line is for an operator looking into a ranking, not
-    /// something every keystroke paints.
-    #[serde(default)]
-    pub(crate) explain: bool,
+    /// something every keystroke paints. `/ui?explain=1` puts it on the form
+    /// as a hidden field, and `hx-params` names it so the fragment request
+    /// keeps it.
+    ///
+    /// Through `query_flag` rather than a bare `bool`, which `serde_urlencoded`
+    /// reads only as `true`/`false`: `?explain=1` — the spelling the link and
+    /// every hand-written URL carry — was a 400 for the whole fragment, so
+    /// asking why a row ranked emptied the rail instead of explaining it.
+    #[serde(default, deserialize_with = "crate::web::api::query_flag")]
+    pub(crate) explain: Option<bool>,
 }
 
 /// Function words carry no signal and appear in every chunk, so highlighting
@@ -1195,6 +1202,7 @@ pub(crate) async fn search_results(
         .read()
         .expect("ranking lock")
         .per_source_cap;
+    let explain = p.explain.unwrap_or(false);
     let (hits, outcome) = tenant
         .core
         .search_with(
@@ -1208,7 +1216,7 @@ pub(crate) async fn search_results(
                 include_deprecated: false,
                 include_superseded: false,
                 rerank: p.rerank,
-                explain: p.explain,
+                explain,
             },
             cap,
             // Scoped to the operator, because coalescing folds a keystroke into
@@ -1230,7 +1238,7 @@ pub(crate) async fn search_results(
     let mut results: Vec<RenderedResult> = ranked
         .into_iter()
         .enumerate()
-        .map(|(i, h)| render_hit(i, h, &titles, p.explain))
+        .map(|(i, h)| render_hit(i, h, &titles, explain))
         .collect();
     // What each hit's document does next, in one read for the whole list. Only
     // over the ranked rows: an associated one is not an answer to the query,
@@ -1259,7 +1267,7 @@ pub(crate) async fn search_results(
     mark_continuations(&mut results, &next);
     let associated: Vec<RenderedResult> = recalled
         .into_iter()
-        .map(|h| render_hit(0, h, &titles, p.explain))
+        .map(|h| render_hit(0, h, &titles, explain))
         .collect();
     let mut res = HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
@@ -6935,6 +6943,24 @@ mod tests {
         assert!(!body.contains("Recalled by association"), "{body}");
     }
 
+    #[tokio::test]
+    async fn the_search_fragment_takes_the_explain_flag_as_a_url_writes_it() {
+        // `serde_urlencoded` reads a bare `bool` only as `true`/`false`, so
+        // `explain=1` — the spelling `/ui?explain=1` puts on the form and the
+        // one every hand-written URL carries — was a 400 for the whole
+        // fragment: asking why a row ranked emptied the rail instead.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["alpha text"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+
+        for spelling in ["explain=1", "explain=true", "explain=on", "explain"] {
+            let uri = format!("/ui/search/results?q=alpha&{spelling}");
+            // `get_body` asserts the 200 itself.
+            let body = get_body(&app, &cookie, &uri).await;
+            assert!(body.contains("rail-item"), "{uri} returned no rail: {body}");
+        }
+    }
+
     fn ranked(weak: bool) -> RenderedResult {
         RenderedResult {
             why_ranked: None,
@@ -7233,7 +7259,7 @@ mod tests {
     #[test]
     fn the_rail_sentence_names_a_cap_that_redistributed_nothing() {
         let e = crate::core::explain::HitExplanation {
-            retrieved_rank: 3,
+            retrieved_rank: Some(3),
             cap: crate::core::explain::CapEffect::Refilled,
             ..Default::default()
         };
@@ -7247,7 +7273,7 @@ mod tests {
     #[test]
     fn a_hit_no_stage_touched_says_nothing() {
         let e = crate::core::explain::HitExplanation {
-            retrieved_rank: 0,
+            retrieved_rank: Some(0),
             cap: crate::core::explain::CapEffect::Kept,
             ..Default::default()
         };
@@ -9717,8 +9743,13 @@ mod tests {
         // staged file sits inside it, so the serialisation is pinned to the
         // fields the search actually takes — without this, every keystroke
         // carries a filename into the query string. `rerank` is on the list
-        // for the refining pass, whose own flag rides this form's GET.
-        assert!(page.contains(r#"hx-params="q,category,rerank""#), "{page}");
+        // for the refining pass, whose own flag rides this form's GET, and
+        // `explain` for the same reason: a name missing here is a flag the
+        // fragment is never asked with, however carefully the rest is wired.
+        assert!(
+            page.contains(r#"hx-params="q,category,rerank,explain""#),
+            "{page}"
+        );
     }
 
     #[tokio::test]

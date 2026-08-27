@@ -267,8 +267,17 @@ fn note_reorder(
 #[derive(Debug, Default)]
 struct CapReport {
     corpora_in_pool: usize,
+    /// How many hits were over their cap in one of their corpora.
     displaced: usize,
-    /// Artifact ids that were over their cap and returned anyway.
+    /// Of those, the artifact ids the refill put back in the pool.
+    ///
+    /// Not the answer to "did the cap redistribute anything". The refill
+    /// target is the candidate pool rather than `limit`, so with a pool no
+    /// wider than the fetch there is always room for every displaced hit and
+    /// this set is always all of them. What the cap actually removes is
+    /// decided by the truncate at the end of the search, and only there:
+    /// `search_inner` counts how many of these are still in the answer once it
+    /// has cut to `limit`.
     refilled: std::collections::HashSet<String>,
 }
 
@@ -1131,6 +1140,17 @@ impl Core {
             .search_weighted(&vector, &sparse, candidates, &filter, recency_weight)
             .await?;
 
+        // Where retrieval put each hit, read before anything below reorders
+        // them. The cap moves its displaced hits to the tail, so enumerating
+        // the capped list — which is what this used to do — reports where the
+        // cap put a hit under a field whose whole claim is that it says where
+        // retrieval did.
+        let retrieved_rank: HashMap<String, usize> = hits
+            .iter()
+            .enumerate()
+            .map(|(rank, h)| (h.payload.artifact_id.clone(), rank))
+            .collect();
+
         // Cap before reranking, in vector order, so what leads per source is
         // that source's best. The refill target is the candidate pool rather
         // than the answer: refilling only to `limit` would hand the reranker
@@ -1163,7 +1183,9 @@ impl Core {
         };
         explanation.corpora_in_pool = cap_report.corpora_in_pool;
         explanation.displaced = cap_report.displaced;
-        explanation.refilled = cap_report.refilled.len();
+        // `explanation.refilled` is *not* set from the report: every displaced
+        // hit is refilled into the pool by construction. It is counted after
+        // the truncate, over the hits the caller will actually see.
         // Taken before the payloads are consumed: `mark_seen` needs each hit's
         // stored `hit_count` to increment it without reading it back.
         let hit_counts = counts_of(&hits);
@@ -1185,11 +1207,16 @@ impl Core {
         // overrides it and the sweep must be explained with the weight it ran.
         let half_life_secs = self.recency_half_life_days as u64 * 86_400;
         let pinned_boost = self.pinned_boost;
+        // Asked of the store, not of the configuration: the default
+        // `search_weighted` drops the weight and delegates to a plain
+        // `search`, so against `MemoryVectors` — and any future backend that
+        // does not override it — these two terms are configured and never
+        // applied. Reporting them then contradicts the ranking they explain.
+        let scored = self.vectors.applies_scoring_formula();
         let scored_at = now_secs();
         let mut results: Vec<SearchResult> = hits
             .into_iter()
-            .enumerate()
-            .map(|(rank, h)| {
+            .map(|h| {
                 // Demonstrated, never assumed: a hit with no similarity to
                 // read is one the lexical half matched verbatim.
                 let weak = h.similarity.is_some_and(|s| s < self.weak_below);
@@ -1204,18 +1231,21 @@ impl Core {
                     (true, true) => crate::core::explain::CapEffect::Refilled,
                     (true, false) => crate::core::explain::CapEffect::Kept,
                 };
-                let (recency, pinned) = crate::core::explain::scoring_terms(
-                    &h.payload,
-                    scored_at,
-                    recency_weight,
-                    half_life_secs,
-                    pinned_boost,
-                    crate::vector::qdrant::PINNED_TAG,
-                );
+                let (recency, pinned) = match scored {
+                    true => crate::core::explain::scoring_terms(
+                        &h.payload,
+                        scored_at,
+                        recency_weight,
+                        half_life_secs,
+                        pinned_boost,
+                        crate::vector::qdrant::PINNED_TAG,
+                    ),
+                    false => (None, None),
+                };
                 SearchResult {
                     weak,
                     explanation: Some(crate::core::explain::HitExplanation {
-                        retrieved_rank: rank,
+                        retrieved_rank: retrieved_rank.get(&h.payload.artifact_id).copied(),
                         recency,
                         pinned,
                         cap,
@@ -1361,6 +1391,20 @@ impl Core {
         }
 
         results.truncate(limit);
+        // Here, and not beside the cap: refilling puts every displaced hit
+        // back into the *pool*, so counting them there always answered
+        // "all of them" and the meta line always read as the failure case.
+        // The truncate is where the cap either removes something or does not,
+        // and a displaced hit that survives it is one the cap meant to drop
+        // and did not — a list one source filled.
+        explanation.refilled = results
+            .iter()
+            .filter(|r| {
+                r.explanation
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.cap, crate::core::explain::CapEffect::Refilled))
+            })
+            .count();
         // On the list the caller will see, in its final order: after priming,
         // after the truncate, and before association appends hits that never
         // competed for a place. Marks, never reorders or drops.
@@ -2211,7 +2255,14 @@ mod tests {
             .as_ref()
             .expect("a ranked hit explains itself");
 
-        assert_eq!(e.retrieved_rank, 0);
+        assert_eq!(e.retrieved_rank, Some(0));
+        assert!(
+            e.recency.is_none() && e.pinned.is_none(),
+            "`MemoryVectors` takes the default `search_weighted`, which drops \
+             the weight and delegates to a plain `search`: reporting a \
+             recency term here would explain a stage that never ran, on the \
+             very search it claims to explain"
+        );
         assert!(
             matches!(e.cap, crate::core::explain::CapEffect::Kept),
             "a hit inside its corpus's allowance was kept, not refilled"
@@ -2247,22 +2298,105 @@ mod tests {
         assert!(report.refilled.contains("a3") && report.refilled.contains("a4"));
     }
 
+    #[tokio::test]
+    async fn a_list_one_corpus_filled_says_the_cap_removed_nothing() {
+        // The failure the whole object exists to surface, read where it is
+        // actually decided: one corpus supplies everything, so a cap of one
+        // displaces the rest, the refill hands them all back to the pool, and
+        // the truncate cuts to an answer they are still in. The cap removed
+        // nothing.
+        let core = test_core().await;
+        let texts: Vec<(&str, &str, &[&str])> = (0..6)
+            .map(|_| ("mounting an image", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+
+        let mut query = q("mounting an image");
+        query.limit = 3;
+        let (hits, outcome) = core.search_with(&query, Some(1), Door::Ui).await.unwrap();
+
+        assert!(outcome.explanation.displaced > 0, "the cap had work to do");
+        assert!(
+            outcome.explanation.refilled > 0,
+            "hits over the cap are in the answer, which is the cap failing: \
+             {:?}",
+            outcome.explanation
+        );
+        assert!(
+            hits.iter()
+                .any(|h| h.explanation.as_ref().is_some_and(|e| {
+                    matches!(e.cap, crate::core::explain::CapEffect::Refilled)
+                })),
+            "the summary and the rows have to agree about which hits those are"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cap_the_answer_never_needed_to_break_reports_no_refill() {
+        // Two corpora, an answer narrower than what fits inside the cap: hits
+        // are displaced in the pool and every one of them is cut by the
+        // truncate, so nothing over its cap reaches the caller. Counting the
+        // refill against the pool instead of the answer called this the same
+        // failure as the test above, on a search where the rule held.
+        let core = test_core().await;
+        let texts: Vec<(&str, &str, &[&str])> = (0..4)
+            .map(|_| ("mounting an image", "note", &[][..]))
+            .collect();
+        seed_from(&core, "a", &texts).await;
+        seed_from(&core, "b", &texts).await;
+
+        let mut query = q("mounting an image");
+        query.limit = 4;
+        let (hits, outcome) = core.search_with(&query, Some(2), Door::Ui).await.unwrap();
+
+        assert_eq!(outcome.explanation.corpora_in_pool, 2);
+        assert!(outcome.explanation.displaced > 0, "the cap had work to do");
+        assert_eq!(
+            outcome.explanation.refilled, 0,
+            "the answer is filled from inside the cap, so the rule held: {:?}",
+            outcome.explanation
+        );
+        assert!(
+            hits.iter().all(|h| h
+                .explanation
+                .as_ref()
+                .is_some_and(|e| { matches!(e.cap, crate::core::explain::CapEffect::Kept) })),
+            "and no row may claim otherwise"
+        );
+    }
+
     #[test]
-    fn a_cap_that_actually_redistributed_reports_no_refill() {
+    fn the_cap_moves_its_displaced_hits_to_the_tail_rather_than_dropping_them() {
+        // The shape the real call site has: `search_inner` passes the pool it
+        // fetched as the target, so `kept` can never be short of it and the
+        // refill always takes every displaced hit back. The cap's effect on
+        // the pool is therefore an order and nothing else — which is why
+        // "how many were refilled" is a question only the truncated answer can
+        // be asked, and `a_list_one_corpus_filled_says_the_cap_removed_nothing`
+        // below is the test that asks it.
         let mixed = vec![
             hit("a1", "a", 0.9),
             hit("a2", "a", 0.8),
-            hit("b1", "b", 0.7),
-            hit("a3", "a", 0.6),
+            hit("a3", "a", 0.7),
+            hit("b1", "b", 0.6),
         ];
-        let (kept, report) = cap_per_corpus(mixed, 2, 3);
+        let (kept, report) = cap_per_corpus(mixed, 2, 4);
 
-        assert_eq!(kept.len(), 3);
-        assert_eq!(report.corpora_in_pool, 2);
+        assert_eq!(
+            kept.iter()
+                .map(|h| h.payload.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1", "a2", "b1", "a3"],
+            "the over-cap hit goes behind everything within its cap, and \
+             `b1` is lifted past it — that reordering is the whole effect"
+        );
         assert_eq!(report.displaced, 1);
-        assert!(
-            report.refilled.is_empty(),
-            "the target was met without the displaced hit, so the rule held"
+        assert_eq!(
+            report.refilled.len(),
+            1,
+            "with room for the whole pool the refill takes it all back; \
+             reading this as `the cap redistributed nothing` would call every \
+             search a failure"
         );
     }
 

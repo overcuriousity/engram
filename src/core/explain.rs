@@ -31,11 +31,16 @@ pub enum CapEffect {
     NotApplied,
     /// Took a place within its corpus's allowance.
     Kept,
-    /// Over its cap in one of its corpora, and present only because the
-    /// refill had nothing else to offer. The case the cap silently fails in:
-    /// a pool filled by one corpus leaves nothing to redistribute, so the
+    /// Over its cap in one of its corpora, and in the answer anyway because
+    /// the refill had nothing else to offer. The case the cap silently fails
+    /// in: a pool filled by one corpus leaves nothing to redistribute, so the
     /// displaced hits come straight back and the list is dominated despite a
     /// configured `per_source_cap`.
+    ///
+    /// Set on every displaced hit as the pool is built, which is honest only
+    /// because the truncate at the end of the search cuts the ones the cap did
+    /// hold out: a hit still carrying this when a door renders it is one that
+    /// reached the caller over its cap.
     Refilled,
 }
 
@@ -45,7 +50,16 @@ pub struct HitExplanation {
     /// Rank as retrieval returned it — fusion *and* the scoring stage, since
     /// Qdrant applies both before anything comes back. Not the RRF rank on its
     /// own: that would need a second query, which the design forbids.
-    pub retrieved_rank: usize,
+    ///
+    /// Read before the cap runs, because the cap reorders: enumerating the
+    /// capped list would report where the cap put a hit and call it where
+    /// retrieval did.
+    ///
+    /// `None` for a hit retrieval never returned — an associated one. A zero
+    /// here would read as rank #1, which is the one thing a recalled hit must
+    /// not claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieved_rank: Option<usize>,
     /// The recency term's contribution to the score, reconstructed locally.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recency: Option<f32>,
@@ -89,9 +103,16 @@ pub struct SearchExplanation {
     /// The cap in force, `None` when uncapped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capped: Option<usize>,
+    /// How many hits the cap found over their source's allowance, across the
+    /// whole candidate pool.
     pub displaced: usize,
-    /// How many of the displaced came straight back. Equal to `displaced`
-    /// means the cap redistributed nothing at all.
+    /// How many of those are in the answer regardless — counted after the
+    /// truncate, over the list the caller will see.
+    ///
+    /// Not counted over the pool, where the refill always takes every
+    /// displaced hit back and this could only ever equal `displaced`. Any
+    /// number above zero is the cap failing to redistribute: it wanted these
+    /// out and had nothing to put in their place.
     pub refilled: usize,
     pub reranked: bool,
 }
@@ -124,7 +145,11 @@ pub fn scoring_terms(
     let recency = (recency_weight > 0.0).then(|| {
         // Absent means `now`, exactly as the formula's `"defaults"` says.
         let stamp = payload.last_verified_at.unwrap_or(now);
-        let age = (now - stamp).max(0) as f64;
+        // Absolute, as `exp_decay`'s `|x - target|` is: a stamp in the future
+        // — clock skew between a writer and the query host, or an imported
+        // one — decays in Qdrant, and clamping to zero here would report the
+        // undecayed weight for a term the store had already cut.
+        let age = (now - stamp).abs() as f64;
         let decay = 0.5f64.powf(age / half_life_secs.max(1) as f64);
         recency_weight * decay as f32
     });
@@ -218,7 +243,7 @@ mod tests {
     #[test]
     fn a_stage_that_did_not_apply_serialises_to_nothing() {
         let e = HitExplanation {
-            retrieved_rank: 0,
+            retrieved_rank: Some(0),
             ..Default::default()
         };
         let json = serde_json::to_string(&e).unwrap();
@@ -237,6 +262,29 @@ mod tests {
         assert!(
             matches!(e.cap, CapEffect::NotApplied),
             "an associated hit never competed, so no stage may claim it acted"
+        );
+    }
+
+    #[test]
+    fn a_recalled_hit_claims_no_retrieved_rank() {
+        let json = serde_json::to_string(&HitExplanation::recalled("a1")).unwrap();
+        assert_eq!(
+            json, r#"{"cap":"not_applied","recalled_via":"a1"}"#,
+            "a rendered `retrieved_rank` of zero reads as #1 to every caller \
+             that does not also read `recalled_via` — the rank has to be \
+             absent, not zero"
+        );
+    }
+
+    #[test]
+    fn a_stamp_in_the_future_decays_the_same_as_one_that_far_past() {
+        let (ahead, _) = scoring_terms(&payload(Some(11_000), &[]), 10_000, 0.05, 1_000, 0.0, "p");
+        let (behind, _) = scoring_terms(&payload(Some(9_000), &[]), 10_000, 0.05, 1_000, 0.0, "p");
+        assert_eq!(
+            ahead, behind,
+            "`exp_decay` measures `|x - target|`, so a stamp a half-life ahead \
+             of now is decayed exactly as one a half-life behind it; reporting \
+             the full weight would contradict the score Qdrant returned"
         );
     }
 }

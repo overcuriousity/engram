@@ -1595,6 +1595,11 @@ impl VectorStore for QdrantVectors {
             .await
     }
 
+    /// This is the store `scoring_formula` was written for.
+    fn applies_scoring_formula(&self) -> bool {
+        true
+    }
+
     async fn search_weighted(
         &self,
         vector: &[f32],

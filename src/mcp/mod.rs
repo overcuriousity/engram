@@ -34,12 +34,19 @@ pub fn format_search_results(
                 Some(n) => format!(" · cap {n} per source"),
                 None => " · uncapped".to_string(),
             },
+            // Displaced counts the pool; refilled counts the answer. The
+            // refill puts every displaced hit back into the pool either way,
+            // so "how many were refilled" is only a question worth asking of
+            // the list that came back: an over-cap hit still in it is one the
+            // cap meant to drop and could not, because there was nothing else
+            // to put in its place.
             match (s.displaced, s.refilled) {
                 (0, _) => String::new(),
-                (d, r) if d == r => format!(
-                    " · {d} displaced and all {r} refilled — the cap redistributed nothing"
+                (d, 0) => format!(" · {d} displaced"),
+                (d, r) => format!(
+                    " · {d} displaced, {r} still in the answer — \
+                     the cap had nothing to redistribute to"
                 ),
-                (d, r) => format!(" · {d} displaced, {r} refilled"),
             },
         ),
         None => String::new(),
@@ -140,7 +147,16 @@ fn why_line(e: &crate::core::explain::HitExplanation) -> String {
     if let Some(via) = &e.recalled_via {
         return format!("\n_why it is here: recalled beside `{via}`; never ranked._");
     }
-    let mut parts = vec![format!("retrieved at #{}", e.retrieved_rank + 1)];
+    // Absent rather than zero for a hit retrieval never returned. `recalled_via`
+    // is the only case today and returns above, so this cannot go silent on a
+    // ranked hit — but a rendered "#1" for a rank that does not exist is the
+    // failure this field's `Option` is for, and reading it as one here is how
+    // that stays true of a future stage as well.
+    let mut parts: Vec<String> = e
+        .retrieved_rank
+        .map(|r| format!("retrieved at #{}", r + 1))
+        .into_iter()
+        .collect();
     if let Some(v) = e.recency {
         parts.push(format!("recency +{v:.3}"));
     }
@@ -157,7 +173,7 @@ fn why_line(e: &crate::core::explain::HitExplanation) -> String {
     // Kept says nothing: the cap holding is the ordinary case, and a line that
     // reports every no-op is one an agent stops reading.
     if matches!(e.cap, crate::core::explain::CapEffect::Refilled) {
-        parts.push("displaced, refilled".to_string());
+        parts.push("over its source's cap, kept anyway".to_string());
     }
     if let Some(s) = &e.prime {
         parts.push(format!(
@@ -168,6 +184,9 @@ fn why_line(e: &crate::core::explain::HitExplanation) -> String {
     }
     if e.past_cliff {
         parts.push("below the cliff".to_string());
+    }
+    if parts.is_empty() {
+        return String::new();
     }
     format!("\n_why it is here: {}._", parts.join(" · "))
 }
@@ -544,9 +563,7 @@ impl PkdbTools {
             .search_with(&query, cap, crate::store::feedback::Door::Mcp)
             .await
         {
-            Ok((r, outcome)) => {
-                format_search_results(&r, explain.then_some(&outcome.explanation))
-            }
+            Ok((r, outcome)) => format_search_results(&r, explain.then_some(&outcome.explanation)),
             Err(e) => format!("Search failed: {e}"),
         }
     }
@@ -852,10 +869,13 @@ mod tests {
         // Claude Code reads this list. A verbatim passage has no title by
         // design, and three headings reading "Untitled" is a list of a word
         // that says nothing where a name would say something.
-        let out = format_search_results(&[search_hit(
+        let out = format_search_results(
+            &[search_hit(
+                None,
+                "Die digitale Forensik unterscheidet sich zusätzlich",
+            )],
             None,
-            "Die digitale Forensik unterscheidet sich zusätzlich",
-        )], None);
+        );
         assert!(!out.contains("Untitled"), "{out}");
         assert!(out.contains("Die digitale Forensik"), "{out}");
     }
@@ -983,7 +1003,7 @@ mod tests {
     fn explained(id: &str) -> SearchResult {
         let mut r = hit(id, None);
         r.explanation = Some(crate::core::explain::HitExplanation {
-            retrieved_rank: 3,
+            retrieved_rank: Some(3),
             recency: Some(0.021),
             cap: crate::core::explain::CapEffect::Refilled,
             ..Default::default()
@@ -1021,7 +1041,7 @@ mod tests {
             "ranks are 1-based at every door: {out}"
         );
         assert!(
-            out.contains("displaced, refilled"),
+            out.contains("over its source's cap, kept anyway"),
             "the case the whole object exists for has to be readable rather \
              than inferred: {out}"
         );
@@ -1030,9 +1050,31 @@ mod tests {
             "the pool's shape belongs above the list, not on a hit: {out}"
         );
         assert!(
-            out.contains("redistributed nothing"),
-            "displaced and refilled in equal number is the failure, and it \
-             has to be named: {out}"
+            out.contains("4 displaced, 4 still in the answer")
+                && out.contains("nothing to redistribute to"),
+            "over-cap hits still in the answer is the failure, and it has to \
+             be named: {out}"
+        );
+    }
+
+    /// The ordinary case reads as ordinary. A cap that displaced hits and then
+    /// actually kept them out of the answer is the rule working, and a line
+    /// that cries failure over it is one an agent learns to skip.
+    #[test]
+    fn a_cap_that_kept_its_hits_out_of_the_answer_names_no_failure() {
+        let summary = crate::core::explain::SearchExplanation {
+            candidates_fetched: 30,
+            corpora_in_pool: 4,
+            capped: Some(3),
+            displaced: 4,
+            refilled: 0,
+            reranked: false,
+        };
+        let out = format_search_results(&[hit("a1", None)], Some(&summary));
+        assert!(
+            out.contains("4 displaced") && !out.contains("still in the answer"),
+            "nothing over its cap survived the truncate, so there is no \
+             failure to name: {out}"
         );
     }
 
@@ -1054,7 +1096,10 @@ mod tests {
     fn an_associated_result_says_it_was_recalled_rather_than_ranked() {
         // Straight into an agent's context: without this the extra result reads
         // as the fourth-best match for the query, which it is not.
-        let out = format_search_results(&[hit("ranked", None), hit("recalled", Some("ranked"))], None);
+        let out = format_search_results(
+            &[hit("ranked", None), hit("recalled", Some("ranked"))],
+            None,
+        );
         assert!(out.contains("recalled beside"), "{out}");
 
         // A bare ordinal is the strongest ranking signal there is: an agent
