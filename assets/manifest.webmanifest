@@ -17,5 +17,16 @@
   ],
   "shortcuts": [
     { "name": "Insights", "url": "/ui/insights" }
-  ]
+  ],
+  "share_target": {
+    "action": "/ui/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [{ "name": "file", "accept": ["image/*", "application/pdf", "text/*"] }]
+    }
+  }
 }

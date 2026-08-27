@@ -8,6 +8,7 @@ pub mod judge;
 pub mod lineage_view;
 pub mod markdown;
 pub mod pair;
+pub mod share;
 pub mod state;
 pub mod tenant;
 #[cfg(test)]
@@ -80,6 +81,10 @@ pub fn router(state: AppState) -> Router {
         .merge(ui::ui_router())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
+        .merge(share::share_router(
+            state.config.capture.image_max_bytes,
+            state.config.capture.pdf_max_bytes,
+        ))
         .merge(judge::judge_router())
         .merge(insights::routes())
         .merge(crate::mcp::mcp_router(state.clone()))
