@@ -33,9 +33,8 @@ pub struct CorpusSlice {
 /// The lines of `source` around `span`, labelled for the pane. Without a span
 /// the opening of the source is shown as context.
 ///
-/// One span through `slice_over`, so the single-passage pane and the appended
-/// run cannot drift apart: there is one definition of what a slice is and this
-/// is the narrow way into it.
+/// One span through `slice_over`, which is where the work happens: there is one
+/// definition of what a slice is and this is the way into it.
 pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
     match span {
         Some(sp) => slice_over(source, std::slice::from_ref(sp), context),
@@ -43,23 +42,15 @@ pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> Corp
     }
 }
 
-/// The lines of `source` covering a *run* of spans, labelled for the pane.
-///
-/// The detail pane appends the passages that follow the one it opened on, and
-/// the source column beside them has to grow in step. Recomputed over the whole
-/// run rather than appended a slice at a time: every slice carries context lines
-/// at both edges, so appending would print the lines between two adjacent
-/// passages twice — on the column whose whole job is to show what the text was
-/// drawn from.
+/// The lines of `source` covering a run of spans, labelled for the pane.
 ///
 /// `in_span` is true for a line inside *any* of the spans. What falls between
-/// two of them is context, and is marked as such: a run that stepped over a
-/// superseded row has a hole in it, and claiming those lines were read would be
-/// the one dishonesty this column must not commit.
+/// two of them is context, and is marked as such: claiming those lines were
+/// read would be the one dishonesty this column must not commit.
 ///
 /// An empty run is the headless case — no span, so the opening of the source
 /// stands as context.
-pub fn slice_over(source: &Corpus, spans: &[CorpusSpan], context: usize) -> CorpusSlice {
+fn slice_over(source: &Corpus, spans: &[CorpusSpan], context: usize) -> CorpusSlice {
     // An image corpus's lines are the model's reading of the picture, and a
     // PDF's are docling's extraction of it. The label says so in both cases: a
     // span into either is a claim about what was written down, not about what

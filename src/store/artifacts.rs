@@ -731,39 +731,6 @@ impl Store {
             .collect())
     }
 
-    /// The next `limit` *active* artifacts after `ordinal`, in reading order.
-    ///
-    /// `adjacent_artifacts` answers "what is either side of this one" and stops
-    /// at one row each way, which is what a sideways reach wants. A reader who
-    /// has asked to read on wants the run that follows, and wants it again when
-    /// they ask again — so the bound is the caller's and the position is an
-    /// ordinal rather than a page number. Contiguous by construction: each call
-    /// starts where the last one ended, so a document with rows hidden in the
-    /// middle still reads as one sequence.
-    ///
-    /// `status = 'active'` for the same reason it is there next door — a
-    /// superseded passage is not the next thing in the document, the row that
-    /// replaced it is. An empty run means the document ended, which is a state
-    /// the pane renders rather than an error.
-    pub async fn following_artifacts(
-        &self,
-        corpus_id: &str,
-        ordinal: i64,
-        limit: i64,
-    ) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
-            "SELECT * FROM artifacts
-             WHERE corpus_id = ? AND ordinal > ? AND status = 'active'
-             ORDER BY ordinal ASC LIMIT ?",
-        )
-        .bind(corpus_id)
-        .bind(ordinal)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
-    }
-
     pub async fn artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
         let rows = sqlx::query("SELECT * FROM artifacts WHERE corpus_id = ? ORDER BY ordinal")
             .bind(corpus_id)
@@ -2067,71 +2034,6 @@ mod tests {
             .unwrap();
         assert!(!got.contains_key(&merged.id));
         assert!(s.continuations_of(&[]).await.unwrap().is_empty());
-    }
-
-    /// Reading on is not the same question as reaching sideways. `adjacent`
-    /// answers "what is either side of this one" and stops at one row; a reader
-    /// who has said "append the next" wants the run that follows, in order, as
-    /// far as they keep asking.
-    #[tokio::test]
-    async fn following_artifacts_returns_the_run_after_an_ordinal_in_order() {
-        let s = Store::memory().await.unwrap();
-        let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        let new: Vec<NewArtifact> = (0..6).map(|i| nc(i, &format!("chunk {i}"))).collect();
-        s.insert_artifacts(&src.id, &new).await.unwrap();
-
-        let got = s.following_artifacts(&src.id, 1, 3).await.unwrap();
-        let ordinals: Vec<i64> = got.iter().map(|c| c.ordinal).collect();
-        assert_eq!(
-            ordinals,
-            vec![2, 3, 4],
-            "the run must follow in reading order"
-        );
-    }
-
-    /// The same lifecycle rule `adjacent_artifacts` already applies. A reader
-    /// asking to read on must not be handed what results hide: a superseded
-    /// passage is not the next thing in the document, the row that replaced it
-    /// is.
-    #[tokio::test]
-    async fn following_artifacts_skips_rows_that_are_not_active() {
-        let s = Store::memory().await.unwrap();
-        let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        let made = s
-            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b"), nc(2, "c"), nc(3, "d")])
-            .await
-            .unwrap();
-        s.set_superseded_by(&made[1].id, Some(&made[3].id))
-            .await
-            .unwrap();
-        s.set_artifact_status(&made[2].id, ArtifactStatus::Deprecated)
-            .await
-            .unwrap();
-
-        let got = s.following_artifacts(&src.id, 0, 3).await.unwrap();
-        assert_eq!(
-            got.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
-            vec!["d"]
-        );
-    }
-
-    /// What the pane reads to decide whether to offer the control at all. At
-    /// the end of a document the answer is an empty run, not an error — the
-    /// button is then replaced by the link to the document rather than
-    /// returning nothing on a click nobody could have known was pointless.
-    #[tokio::test]
-    async fn following_artifacts_at_the_end_of_the_document_is_empty() {
-        let s = Store::memory().await.unwrap();
-        let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        let new: Vec<NewArtifact> = (0..3).map(|i| nc(i, &format!("chunk {i}"))).collect();
-        s.insert_artifacts(&src.id, &new).await.unwrap();
-
-        assert!(
-            s.following_artifacts(&src.id, 2, 3)
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[tokio::test]

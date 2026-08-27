@@ -286,10 +286,7 @@
          render a dead link over an empty table — on the very artifact whose
          orphan notice matters most. #}
       {# One statement of which lines these are, and it is the link — see the
-         note above. The block is a partial because an append re-renders it out
-         of band: the run grew, so the claim about where the text came from has
-         to grow with it, and there must not be two accounts of what that block
-         looks like. #}
+         note above. #}
       {% if !d.merged %}{% include "_source_lines.html" %}{% endif %}
 
       {# A merge always shows its lineage, empty or not — the empty case is the
