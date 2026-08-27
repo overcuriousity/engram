@@ -8,6 +8,7 @@ pub mod args;
 pub mod ask;
 pub mod capture;
 pub mod endpoint;
+pub mod face;
 pub mod search;
 #[cfg(test)]
 pub(crate) mod test_support;

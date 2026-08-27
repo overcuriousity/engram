@@ -33,12 +33,21 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
         .user_agent(USER_AGENT)
         .build()
         .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let face = crate::cli::face::Face::decide(
+        cli,
+        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("LANG").ok().as_deref(),
+    );
+    let waiting = face.pulse("searching");
     let res = http
         .get(query_url(e, limit, query, cli))
         .bearer_auth(&e.token)
         .send()
-        .await
-        .map_err(|err| Error::Validation(format!("{err}")))?;
+        .await;
+    // The response is here; the animation ends now, before anything is printed.
+    drop(waiting);
+    let res = res.map_err(|err| Error::Validation(format!("{err}")))?;
     let status = res.status();
     let body = res
         .text()
@@ -62,7 +71,7 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
         // would be a second definition of the response shape.
         println!("{body}");
     } else {
-        print!("{}", render_plain(&hits));
+        print!("{}", face.render(&hits));
     }
     // `1` for nothing found, so `engram -s "x" || …` is a usable branch.
     Ok(if hits.is_empty() { 1 } else { 0 })
