@@ -363,6 +363,32 @@ async fn capture(
         return Ok((code_for(&out), Json(out)).into_response());
     }
 
+    let kind_limit = if content_type.starts_with("application/pdf") {
+        Some(("PDF", tenant.core.capture.pdf_max_bytes))
+    } else if content_type.starts_with("image/") {
+        Some(("image", tenant.core.capture.image_max_bytes))
+    } else {
+        None
+    };
+    if let Some((what, ceiling)) = kind_limit {
+        let bytes = axum::body::Bytes::from_request(req, &())
+            .await
+            .map_err(|e| Error::Validation(format!("body: {e}")))?;
+        // The route's ceiling is the widest branch's. Each kind re-imposes its
+        // own here, or widening the door for a book would widen it for a photo.
+        if bytes.len() > ceiling {
+            return Err(Error::Validation(format!(
+                "that {what} is over the {} MB limit for a {what} capture",
+                ceiling / (1024 * 1024)
+            )));
+        }
+        let out = tenant
+            .core
+            .ingest_file(bytes.to_vec(), None, q.title, q.note, ORIGIN_WEB)
+            .await?;
+        return Ok((code_for(&out), Json(out)).into_response());
+    }
+
     Err(Error::Validation(format!(
         "`{content_type}` is not a type this door reads — send text/plain, \
          application/pdf, an image, or multipart/form-data"
@@ -3096,6 +3122,55 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(stored.title_hint.as_deref(), Some("A title"));
+    }
+
+    #[tokio::test]
+    async fn a_pdf_body_reaches_the_pdf_path_and_answers_202() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(raw_post(
+                "/api/v1/capture",
+                &token,
+                "application/pdf",
+                b"%PDF-1.4 tiny",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::ACCEPTED,
+            "stored, extraction still queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_image_body_reaches_the_image_path() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(raw_post("/api/v1/capture", &token, "image/png", &a_png()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn each_branch_is_bounded_by_its_own_ceiling_not_the_widest_one() {
+        // The route's limit is the largest of the per-kind ones, because one
+        // route now carries what three carried. That must not hand the image
+        // branch the PDF's ceiling.
+        let core = crate::core::test_support::test_core().await;
+        let over = core.capture.image_max_bytes + 1;
+        let (app, token, _core) = app_from_core(core).await;
+        let res = app
+            .oneshot(raw_post(
+                "/api/v1/capture",
+                &token,
+                "image/png",
+                &vec![0u8; over],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
