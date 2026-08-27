@@ -150,13 +150,16 @@ recorded search that `/ui/judge` can grade later — the terminal becomes a
 fourth door rather than a way around the three.
 
 Those searches are recorded under a new `Door::Cli` (`src/store/feedback.rs:20`)
-rather than under `Api`, read from the `engram-cli/<version>` user agent the
-client sends. The reason is the one that earned `Extension` its own value: a
-query typed at a shell is composed before anything came back, about something
-the operator is looking at rather than something engram showed them, and that
-is the least contaminated question the base ever receives. A door label is
-self-declared and therefore spoofable; on a single-operator install the worst
-case is a mislabelled row in your own judge queue.
+rather than under `Api`. The mechanism already exists and is not extended: the
+client sends `?door=cli`, and `Door::from_client` (`src/store/feedback.rs:62`)
+adds one arm to the allowlist that has admitted only `extension` until now.
+Everything else a client names still falls back to `Api`, so `Ask` and `Judge`
+stay unclaimable and a contaminated query still cannot label itself clean.
+
+It earns its own value for the reason `Extension` did: a query typed at a shell
+is composed before anything came back, about something the operator is looking
+at rather than something engram showed them, and that is the least contaminated
+question the base receives.
 
 **Exit codes.** `0` results, `1` none, `2` error, so `engram -s "x" || …` is a
 usable branch in a script.
