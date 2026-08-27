@@ -2515,7 +2515,13 @@ async fn discard_pair_ui(
 ) -> Result<Response> {
     let pair = tenant.core.store.get_pair(pid).await?;
     let detail = pair.detail.clone();
-    crate::jobs::dedupe::discard_both(&tenant.core, &pair, detail.as_deref()).await?;
+    crate::jobs::dedupe::discard_both(
+        &tenant.core,
+        &pair,
+        detail.as_deref(),
+        crate::store::pairs::DecidedBy::Operator,
+    )
+    .await?;
     Ok(Redirect::to(back.path()).into_response())
 }
 

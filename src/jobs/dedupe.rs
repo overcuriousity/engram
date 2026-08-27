@@ -377,7 +377,9 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
         // artifacts waiting on a person holding no more evidence than the judge
         // had — and unlike a merge, nothing here is rewritten: both sides are
         // one press from active and still readable under `include_deprecated`.
-        Relation::Vacuous => discard_both(core, &s.pair, s.detail.as_deref()).await,
+        Relation::Vacuous => {
+            discard_both(core, &s.pair, s.detail.as_deref(), DecidedBy::Model).await
+        }
         Relation::Replaced => {
             let obsolete = s
                 .obsolete
@@ -482,10 +484,16 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
 /// both" button — reach it through here rather than each writing the sequence,
 /// because the orderings and the one refusal below are the whole of what makes
 /// it safe and none of them is obvious from the outside.
+///
+/// Which is also why `by` is a parameter and not `DecidedBy::Model`. The two
+/// callers are a judge and a person, and a shared helper that picked one of
+/// them would record every press of "Discard both" as the model's decision —
+/// the precise untruth `DecidedBy` exists to end.
 pub(crate) async fn discard_both(
     core: &Core,
     pair: &ArtifactPair,
     detail: Option<&str>,
+    by: DecidedBy,
 ) -> Result<()> {
     // Both sides read before either is retired. A side already hidden in
     // favour of another artifact — an applied supersede from a neighbouring
@@ -524,7 +532,7 @@ pub(crate) async fn discard_both(
                 hidden = hidden.join(", "),
                 "refused to retire an artifact others are hidden behind"
             );
-            return settle(
+            return settle_as(
                 core,
                 pair,
                 PairState::Contradiction,
@@ -532,6 +540,7 @@ pub(crate) async fn discard_both(
                     "One of these is the current version of another artifact, so retiring \
                      both would leave that one pointing at nothing. Resolve by hand.",
                 ),
+                by,
             )
             .await;
         }
@@ -559,19 +568,31 @@ pub(crate) async fn discard_both(
     // line rather than dropping it: it is the only record of why both sides
     // were retired, and `set_pair_state` writes `detail` unconditionally, so
     // `None` would null it.
-    settle(core, pair, PairState::Dismissed, detail).await
+    settle_as(core, pair, PairState::Dismissed, detail, by).await
 }
 
-/// One pair, one verdict.
+/// One pair, one verdict, decided by the judge.
+///
+/// Everything on this path is the model's: the unit runs unattended, and the
+/// rules it applies without asking are the judge's too (`DecidedBy::Model`).
 async fn settle(
     core: &Core,
     pair: &ArtifactPair,
     state: PairState,
     detail: Option<&str>,
 ) -> Result<()> {
-    core.store
-        .set_pair_state(pair.id, state, detail, DecidedBy::Model)
-        .await
+    settle_as(core, pair, state, detail, DecidedBy::Model).await
+}
+
+/// The same write, for the one path here a person can also reach.
+async fn settle_as(
+    core: &Core,
+    pair: &ArtifactPair,
+    state: PairState,
+    detail: Option<&str>,
+    by: DecidedBy,
+) -> Result<()> {
+    core.store.set_pair_state(pair.id, state, detail, by).await
 }
 
 #[cfg(test)]
@@ -594,6 +615,31 @@ mod tests {
             .find(|p| (p.a_id == a || p.b_id == a) && (p.a_id == b || p.b_id == b))
             .expect("the pair was just recorded")
             .id
+    }
+
+    /// The button and the judge reach one helper, and the row has to say which
+    /// of them pressed it — the whole point of the column.
+    #[tokio::test]
+    async fn discarding_both_records_whoever_asked_for_it() {
+        let core = test_core().await;
+        let ids = seed(&core, &[("a", [1.0, 0.0]), ("b", [0.93, 0.37])]).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        let row = core.store.get_pair(pair).await.unwrap();
+
+        discard_both(
+            &core,
+            &row,
+            Some("each body is its own file path"),
+            DecidedBy::Operator,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().decided_by,
+            Some(DecidedBy::Operator),
+            "a person's press was recorded as the model's decision"
+        );
     }
 
     #[tokio::test]
@@ -699,9 +745,14 @@ mod tests {
             .unwrap();
         let pair = core.store.get_pair(pid).await.unwrap();
 
-        discard_both(&core, &pair, Some("each body is its own file path"))
-            .await
-            .unwrap();
+        discard_both(
+            &core,
+            &pair,
+            Some("each body is its own file path"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             core.store.get_artifact(&ids[1]).await.unwrap().status,
@@ -741,9 +792,14 @@ mod tests {
         core.supersede(&ids[2], &ids[0]).await.unwrap();
         let pair = core.store.get_pair(pid).await.unwrap();
 
-        discard_both(&core, &pair, Some("each body is its own file path"))
-            .await
-            .unwrap();
+        discard_both(
+            &core,
+            &pair,
+            Some("each body is its own file path"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         for id in &ids[..2] {
             assert_eq!(
