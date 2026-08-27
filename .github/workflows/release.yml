@@ -162,7 +162,7 @@ jobs:
           strip "dist/$name/engram"
           # What an operator needs beside the binary to get from download to a
           # running service without opening a browser.
-          cp config.example.toml engram.service README.md "dist/$name/"
+          cp config.example.toml cli.example.toml engram.service README.md "dist/$name/"
           tar -czf "dist/${name}.tar.gz" -C dist "$name"
 
       - uses: actions/upload-artifact@v4

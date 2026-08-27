@@ -400,3 +400,24 @@ style = "tei"
   `POST /api/v1/ask` and the MCP `ask` tool are the JS-free ways in.
 
 `config.example.toml` carries every key with the reasoning behind each default.
+
+### The client
+
+Everything above is the server's `config.toml`. The client half of the same
+binary — `engram -c`, `-s`, `-a`, and the piped form — never reads it: it talks
+to a running engram over HTTP and needs only an address and a token, which it
+reads from `~/.config/engram/cli.toml`.
+
+```toml
+url = "http://127.0.0.1:8080"
+token = "engram_…"
+```
+
+| Key | Meaning |
+|---|---|
+| `url` | The engram to talk to. Defaults to `http://127.0.0.1:8080`, which is where a single-operator install listens. Overridden by `ENGRAM_URL`. |
+| `token` | An API token, minted under **/ui/settings** on that engram and revocable there on its own. Overridden by `ENGRAM_TOKEN`, which is what a script on a shared machine should use. |
+
+Run the client before either exists and it writes that file for you, commented
+and `0600`, then says to put a token in it — an existing config is never
+touched. `cli.example.toml` in the release archive is the same text.

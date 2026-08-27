@@ -1,0 +1,10 @@
+# engram client configuration, read by the client half of the binary from
+# ~/.config/engram/cli.toml. The server's own config is a different file
+# entirely — see config.example.toml.
+
+# The engram this client talks to. ENGRAM_URL overrides it.
+url = "http://127.0.0.1:8080"
+
+# An API token, minted under /ui/settings on that engram. ENGRAM_TOKEN
+# overrides it, which is what a script on a shared machine should use.
+# token = "engram_…"
