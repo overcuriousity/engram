@@ -331,6 +331,7 @@ mod tests {
             past_cliff: false,
             via: via.map(str::to_string),
             reason: None,
+            explanation: None,
             model_written: false,
             synthesized: false,
             origin_count: 0,

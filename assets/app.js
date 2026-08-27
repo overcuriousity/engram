@@ -1822,6 +1822,11 @@
       var values = { q: q, rerank: 'true' };
       var chip = form.querySelector('input[name="category"]:checked');
       if (chip && chip.value) values.category = chip.value;
+      // This request is built by hand, so `hx-params` on the form does not
+      // reach it: the flag has to be copied across or the refined answer
+      // silently drops the explanation the fast pass painted.
+      var why = form.querySelector('input[name="explain"]');
+      if (why && why.value) values.explain = why.value;
       var rows = document.querySelectorAll('#results .rail-item');
       // Nothing to refine: the server skips the rerank call over an empty
       // answer, so the request would buy a guaranteed-identical fragment.

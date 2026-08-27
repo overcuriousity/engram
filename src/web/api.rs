@@ -87,6 +87,20 @@ where
     serde::Deserialize::deserialize(d).map(Some)
 }
 
+/// A query-string flag, in the spellings a query string actually carries.
+///
+/// `serde_urlencoded` takes only `true` and `false`, so `?explain=1` — the
+/// spelling in every hand-written curl and every doc example — would be a 400
+/// rather than a flag. An empty value (`?explain`) is on, because writing the
+/// key at all is the request.
+pub(crate) fn query_flag<'de, D>(d: D) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = <Option<String> as serde::Deserialize>::deserialize(d)?;
+    Ok(raw.map(|v| matches!(v.trim(), "" | "1" | "true" | "yes" | "on")))
+}
+
 /// A chunk may carry this many tags, each this long.
 ///
 /// Tags are a filter dimension and a payload index in Qdrant, not a place to
@@ -701,12 +715,14 @@ pub struct SearchParams {
     /// `false` skips the reranker for this call — the typing opt-out.
     /// Absent means true: one deliberate question wants the best order.
     pub rerank: Option<bool>,
+    /// Ask for the ranking explanation. It changes the response shape — the
+    /// bare array becomes `{"results": […], "explanation": {…}}` — so only a
+    /// caller that asked for it sees the envelope. It never changes the order.
+    #[serde(default, deserialize_with = "query_flag")]
+    pub explain: Option<bool>,
 }
 
-async fn search(
-    tenant: Tenant,
-    Query(q): Query<SearchParams>,
-) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
+async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<serde_json::Value>> {
     use crate::store::feedback::Door;
     let door = q
         .door
@@ -722,6 +738,7 @@ async fn search(
     // reason; the panel has to as well. What an operator actually read is
     // stamped when they open the artifact, not while they are still typing.
     let typing = matches!(door, Door::Extension);
+    let explain = q.explain.unwrap_or(false);
     let query = SearchQuery {
         q: q.q,
         limit: q.limit.unwrap_or(0),
@@ -746,6 +763,7 @@ async fn search(
         // at vector-order speed. An explicit `rerank` still overrides either
         // way.
         rerank: q.rerank.unwrap_or(!typing),
+        explain,
     };
     // Coalescing folds a keystroke into the query it was an early spelling of,
     // and it folds only within one scope — so a box that types has to say who
@@ -756,7 +774,21 @@ async fn search(
     } else {
         door.into()
     };
-    Ok(Json(tenant.core.search(&query, origin).await?))
+    // The cap `Core::search` would have applied, read the same way, so asking
+    // for an explanation cannot change what this door returns.
+    let cap = tenant
+        .core
+        .ranking
+        .read()
+        .expect("ranking lock")
+        .per_source_cap;
+    let (results, outcome) = tenant.core.search_with(&query, cap, origin).await?;
+    Ok(Json(if explain {
+        serde_json::json!({ "results": results, "explanation": outcome.explanation })
+    } else {
+        serde_json::to_value(results)
+            .map_err(|e| Error::Internal(format!("serialising search results: {e}")))?
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -2626,6 +2658,35 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(json_of(res).await.is_array());
+    }
+
+    #[tokio::test]
+    async fn the_bare_search_response_is_still_an_array() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(get("/api/v1/search?q=anything", Some(&token)))
+            .await
+            .unwrap();
+        assert!(
+            json_of(res).await.is_array(),
+            "no existing client passes `explain`, so no existing client may see \
+             a different envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_wraps_the_results_and_adds_the_pool() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(get("/api/v1/search?q=anything&explain=1", Some(&token)))
+            .await
+            .unwrap();
+        let body = json_of(res).await;
+        assert!(body["results"].is_array(), "got {body}");
+        assert!(
+            body["explanation"]["candidates_fetched"].is_number(),
+            "the pool's shape is what a caller asks `explain` for: got {body}"
+        );
     }
 
     #[tokio::test]

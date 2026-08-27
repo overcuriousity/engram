@@ -48,6 +48,13 @@ pub struct SearchQuery {
     /// that reorders the rail.
     #[serde(default = "default_rerank")]
     pub rerank: bool,
+    /// Render the ranking explanation. Off by default: the object is computed
+    /// on every search either way, and this decides only whether a door says
+    /// any of it out loud. Making the computation conditional would be a
+    /// second path through the ranking stages, and the unexercised one is the
+    /// one that ships.
+    #[serde(default)]
+    pub explain: bool,
 }
 
 fn default_rerank() -> bool {
@@ -76,6 +83,17 @@ pub struct SearchTiming {
     /// from what the request asked for: a rerank that failed or was skipped
     /// answered in vector order, and the honest fragment stays silent.
     pub reranked: bool,
+}
+
+/// Everything a search says about itself, beside the results.
+///
+/// Two things that are not one thing: how long it took, and how it decided.
+/// They are returned together because a caller that wants either has already
+/// paid for both.
+#[derive(Debug, Clone)]
+pub struct SearchOutcome {
+    pub timing: SearchTiming,
+    pub explanation: crate::core::explain::SearchExplanation,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -145,6 +163,11 @@ pub struct SearchResult {
     /// What the judge said the relation is, where a link has been judged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Why this hit is where it is. `None` for a `SearchResult` that never
+    /// came out of a ranking — a stale candidate, a neighbour, a resurfaced
+    /// row. A `Default` there would claim a retrieved rank of zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::core::explain::HitExplanation>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -178,6 +201,7 @@ impl From<SearchHit> for SearchResult {
             past_cliff: false,
             via: None,
             reason: None,
+            explanation: None,
         }
     }
 }
@@ -200,12 +224,70 @@ pub(super) fn now_secs() -> i64 {
 /// knowledge base, and the case where throwing matches away hurts most. So the
 /// displaced hits go back on the end in rank order: one long document no longer
 /// leads the list, but it still fills it when nothing else can.
+/// Each hit's current position, for `note_reorder` to compare against.
+fn positions(results: &[SearchResult]) -> HashMap<String, usize> {
+    results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.artifact_id.clone(), i))
+        .collect()
+}
+
+/// Record what a reordering stage did, on the hits it actually moved.
+///
+/// A stage that left a hit alone writes nothing: "considered and kept" and
+/// "did not run" must not render the same, and only the second is silence.
+fn note_reorder(
+    results: &mut [SearchResult],
+    before: &HashMap<String, usize>,
+    field: impl Fn(
+        &mut crate::core::explain::HitExplanation,
+    ) -> &mut Option<crate::core::explain::StageEffect>,
+) {
+    for (to, r) in results.iter_mut().enumerate() {
+        let Some(&from) = before.get(&r.artifact_id) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        if let Some(e) = r.explanation.as_mut() {
+            *field(e) = Some(crate::core::explain::StageEffect {
+                from: Some(from),
+                to: Some(to),
+                delta: None,
+            });
+        }
+    }
+}
+
+/// What the cap did, for the explanation. Kept beside the returned list rather
+/// than derived from it, because "was displaced and came back" is not
+/// recoverable from the order alone.
+#[derive(Debug, Default)]
+struct CapReport {
+    corpora_in_pool: usize,
+    /// How many hits were over their cap in one of their corpora.
+    displaced: usize,
+    /// Of those, the artifact ids the refill put back in the pool.
+    ///
+    /// Not the answer to "did the cap redistribute anything". The refill
+    /// target is the candidate pool rather than `limit`, so with a pool no
+    /// wider than the fetch there is always room for every displaced hit and
+    /// this set is always all of them. What the cap actually removes is
+    /// decided by the truncate at the end of the search, and only there:
+    /// `search_inner` counts how many of these are still in the answer once it
+    /// has cut to `limit`.
+    refilled: std::collections::HashSet<String>,
+}
+
 fn cap_per_corpus(
     hits: Vec<crate::vector::SearchHit>,
     max: usize,
     target: usize,
-) -> Vec<crate::vector::SearchHit> {
+) -> (Vec<crate::vector::SearchHit>, CapReport) {
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut all_corpora: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut kept = Vec::with_capacity(hits.len());
     let mut displaced = Vec::new();
     for h in hits {
@@ -218,6 +300,7 @@ fn cap_per_corpus(
         } else {
             h.payload.origin_corpora.clone()
         };
+        all_corpora.extend(keys.iter().cloned());
         let over = keys
             .iter()
             .any(|k| seen.get(k).copied().unwrap_or(0) >= max);
@@ -234,11 +317,19 @@ fn cap_per_corpus(
             displaced.push(h);
         }
     }
+    let mut report = CapReport {
+        corpora_in_pool: all_corpora.len(),
+        displaced: displaced.len(),
+        refilled: Default::default(),
+    };
     if kept.len() < target {
         let room = target - kept.len();
-        kept.extend(displaced.into_iter().take(room));
+        for h in displaced.into_iter().take(room) {
+            report.refilled.insert(h.payload.artifact_id.clone());
+            kept.push(h);
+        }
     }
-    kept
+    (kept, report)
 }
 
 /// Each hit's stored retrieval count, keyed by artifact id. Absent means the
@@ -315,6 +406,9 @@ fn mark_past_cliff(results: &mut [SearchResult]) {
     if let Some(above) = cliff(&scores) {
         for r in results.iter_mut().skip(above) {
             r.past_cliff = true;
+            if let Some(e) = r.explanation.as_mut() {
+                e.past_cliff = true;
+            }
         }
     }
 }
@@ -784,6 +878,10 @@ impl Core {
                 primed: false,
                 in_sitting: false,
                 past_cliff: false,
+                // Set here, where `via` is known. Never ranked, so every other
+                // stage stays absent rather than defaulting to values that
+                // would read as facts about a competition that never happened.
+                explanation: Some(crate::core::explain::HitExplanation::recalled(&l.via)),
                 via: Some(l.via),
                 reason: l.reason,
                 model_written: false,
@@ -874,7 +972,7 @@ impl Core {
         query: &SearchQuery,
         cap: Option<usize>,
         origin: impl Into<Origin>,
-    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+    ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let weight = self.ranking.read().expect("ranking lock").recency_weight;
         self.search_inner(query, cap, weight, origin.into(), true)
             .await
@@ -896,7 +994,7 @@ impl Core {
         query: &SearchQuery,
         params: crate::core::ranking::RankingParams,
         origin: impl Into<Origin>,
-    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+    ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         self.search_inner(
             query,
             params.per_source_cap,
@@ -916,8 +1014,16 @@ impl Core {
         recency_weight: f32,
         origin: Origin,
         waited_on: bool,
-    ) -> Result<(Vec<SearchResult>, SearchTiming)> {
+    ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let door = origin.door;
+        // Filled in as the stages run. Always computed: a conditional path
+        // through the ranking would be a second pipeline, and the unexercised
+        // one is the one that ships. `query.explain` decides only what is
+        // rendered.
+        let mut explanation = crate::core::explain::SearchExplanation {
+            capped: cap,
+            ..Default::default()
+        };
         let q = query.q.trim();
         if q.is_empty() {
             return Err(Error::Validation("query is empty".into()));
@@ -1025,6 +1131,7 @@ impl Core {
         } else {
             candidates
         };
+        explanation.candidates_fetched = candidates;
         // The lexical half of the query. Computed locally and for free, so it
         // costs nothing when the store ignores it.
         let sparse = crate::vector::sparse::encode_query(query.q.trim());
@@ -1033,15 +1140,52 @@ impl Core {
             .search_weighted(&vector, &sparse, candidates, &filter, recency_weight)
             .await?;
 
+        // Where retrieval put each hit, read before anything below reorders
+        // them. The cap moves its displaced hits to the tail, so enumerating
+        // the capped list — which is what this used to do — reports where the
+        // cap put a hit under a field whose whole claim is that it says where
+        // retrieval did.
+        let retrieved_rank: HashMap<String, usize> = hits
+            .iter()
+            .enumerate()
+            .map(|(rank, h)| (h.payload.artifact_id.clone(), rank))
+            .collect();
+
         // Cap before reranking, in vector order, so what leads per source is
         // that source's best. The refill target is the candidate pool rather
         // than the answer: refilling only to `limit` would hand the reranker
         // exactly `limit` hits whenever a few sources dominate, which is the
         // case over-fetching exists for. The final truncate still cuts to size.
-        let hits = match cap {
+        // The pool's shape is recorded either way: how many corpora were on
+        // offer is what says whether one source dominating is the rule failing
+        // or no rule at all, and that question does not need a cap to be set.
+        let (hits, cap_report) = match cap {
             Some(max) => cap_per_corpus(hits, max, candidates),
-            None => hits,
+            None => {
+                let corpora: std::collections::HashSet<&str> = hits
+                    .iter()
+                    .flat_map(|h| match h.payload.origin_corpora.is_empty() {
+                        true => vec![h.payload.corpus_id.as_str()],
+                        false => h
+                            .payload
+                            .origin_corpora
+                            .iter()
+                            .map(String::as_str)
+                            .collect(),
+                    })
+                    .collect();
+                let report = CapReport {
+                    corpora_in_pool: corpora.len(),
+                    ..Default::default()
+                };
+                (hits, report)
+            }
         };
+        explanation.corpora_in_pool = cap_report.corpora_in_pool;
+        explanation.displaced = cap_report.displaced;
+        // `explanation.refilled` is *not* set from the report: every displaced
+        // hit is refilled into the pool by construction. It is counted after
+        // the truncate, over the hits the caller will actually see.
         // Taken before the payloads are consumed: `mark_seen` needs each hit's
         // stored `hit_count` to increment it without reading it back.
         let hit_counts = counts_of(&hits);
@@ -1056,14 +1200,57 @@ impl Core {
             HashMap::new()
         };
 
+        // Read once, and from the same configuration the vector store was
+        // built from: a second reading of these could drift from the formula
+        // that actually scored this search. `recency_weight` comes off the
+        // parameter rather than the lock, because `search_with_ranking`
+        // overrides it and the sweep must be explained with the weight it ran.
+        let half_life_secs = self.recency_half_life_days as u64 * 86_400;
+        let pinned_boost = self.pinned_boost;
+        // Asked of the store, not of the configuration: the default
+        // `search_weighted` drops the weight and delegates to a plain
+        // `search`, so against `MemoryVectors` — and any future backend that
+        // does not override it — these two terms are configured and never
+        // applied. Reporting them then contradicts the ranking they explain.
+        let scored = self.vectors.applies_scoring_formula();
+        let scored_at = now_secs();
         let mut results: Vec<SearchResult> = hits
             .into_iter()
             .map(|h| {
                 // Demonstrated, never assumed: a hit with no similarity to
                 // read is one the lexical half matched verbatim.
                 let weak = h.similarity.is_some_and(|s| s < self.weak_below);
+                // Kept and refilled are different claims: a refilled hit is
+                // over its cap and present only because nothing else was on
+                // offer, which is the case the cap fails silently in.
+                let cap = match (
+                    cap.is_some(),
+                    cap_report.refilled.contains(&h.payload.artifact_id),
+                ) {
+                    (false, _) => crate::core::explain::CapEffect::NotApplied,
+                    (true, true) => crate::core::explain::CapEffect::Refilled,
+                    (true, false) => crate::core::explain::CapEffect::Kept,
+                };
+                let (recency, pinned) = match scored {
+                    true => crate::core::explain::scoring_terms(
+                        &h.payload,
+                        scored_at,
+                        recency_weight,
+                        half_life_secs,
+                        pinned_boost,
+                        crate::vector::qdrant::PINNED_TAG,
+                    ),
+                    false => (None, None),
+                };
                 SearchResult {
                     weak,
+                    explanation: Some(crate::core::explain::HitExplanation {
+                        retrieved_rank: retrieved_rank.get(&h.payload.artifact_id).copied(),
+                        recency,
+                        pinned,
+                        cap,
+                        ..Default::default()
+                    }),
                     ..SearchResult::from(h)
                 }
             })
@@ -1074,6 +1261,7 @@ impl Core {
             && reranking
             && !results.is_empty()
         {
+            let before = positions(&results);
             let docs: Vec<String> = results.iter().map(|r| r.text.clone()).collect();
             // Reranked wider than the answer when the search is being recorded:
             // the reranker scores every document either way, so asking it to
@@ -1097,6 +1285,7 @@ impl Core {
                                 .map(|r| SearchResult { score, ..r.clone() })
                         })
                         .collect();
+                    note_reorder(&mut results, &before, |e| &mut e.rerank);
                 }
                 // A rerank failure degrades ordering, not availability; vector
                 // order is still a usable answer.
@@ -1122,6 +1311,7 @@ impl Core {
             && self.associate.prime_lift > 0
             && !matches!(door, Door::Ask | Door::Judge)
         {
+            let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let activation = self.activation_now(&ids).await;
             // Off by default and empty when off: this is the only part of the
@@ -1151,6 +1341,7 @@ impl Core {
                 self.associate.prime_lift,
                 &sitting,
             );
+            note_reorder(&mut results, &before, |e| &mut e.prime);
         }
 
         // Recorded here, where the list is still wider than the answer and the
@@ -1200,6 +1391,20 @@ impl Core {
         }
 
         results.truncate(limit);
+        // Here, and not beside the cap: refilling puts every displaced hit
+        // back into the *pool*, so counting them there always answered
+        // "all of them" and the meta line always read as the failure case.
+        // The truncate is where the cap either removes something or does not,
+        // and a displaced hit that survives it is one the cap meant to drop
+        // and did not — a list one source filled.
+        explanation.refilled = results
+            .iter()
+            .filter(|r| {
+                r.explanation
+                    .as_ref()
+                    .is_some_and(|e| matches!(e.cap, crate::core::explain::CapEffect::Refilled))
+            })
+            .count();
         // On the list the caller will see, in its final order: after priming,
         // after the truncate, and before association appends hits that never
         // competed for a place. Marks, never reorders or drops.
@@ -1235,10 +1440,16 @@ impl Core {
         );
         Ok((
             results,
-            SearchTiming {
-                embed_ms,
-                total_ms: started.elapsed().as_millis(),
-                reranked,
+            SearchOutcome {
+                timing: SearchTiming {
+                    embed_ms,
+                    total_ms: started.elapsed().as_millis(),
+                    reranked,
+                },
+                explanation: crate::core::explain::SearchExplanation {
+                    reranked,
+                    ..explanation
+                },
             },
         ))
     }
@@ -1373,9 +1584,32 @@ mod tests {
             // MCP make; the incremental case is exercised explicitly below.
             mark: true,
             rerank: true,
+            explain: false,
             include_deprecated: false,
             include_superseded: false,
         }
+    }
+
+    #[tokio::test]
+    async fn a_search_reports_the_shape_of_its_own_pool() {
+        let core = test_core().await;
+        seed(&core, &[("mounting an image", "procedure", &[])]).await;
+
+        let (_, outcome) = core
+            .search_with(&q("mount"), Some(3), Door::Ui)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.explanation.capped,
+            Some(3),
+            "the cap in force belongs in the explanation: a reader cannot tell \
+             whether one corpus dominating is the rule failing or no rule at all"
+        );
+        assert!(
+            outcome.explanation.candidates_fetched >= 3,
+            "the pool is wider than the answer whenever something narrows it"
+        );
     }
 
     #[tokio::test]
@@ -1855,13 +2089,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_cap_leads_with_the_highest_ranked_chunk_of_each_source() {
-        // Applied to a ranked list, what leads per source must be its best,
-        // not whichever chunk happened to be enumerated first.
-        use crate::vector::{SearchHit, VectorPayload};
-        let hit = |chunk: &str, src: &str, score: f32| SearchHit {
-            payload: VectorPayload {
+    /// A ranked hit from one corpus, for the cap's own tests.
+    fn hit(chunk: &str, src: &str, score: f32) -> crate::vector::SearchHit {
+        crate::vector::SearchHit {
+            payload: crate::vector::VectorPayload {
                 artifact_id: chunk.into(),
                 corpus_id: src.into(),
                 text: String::new(),
@@ -1879,7 +2110,18 @@ mod tests {
             },
             score,
             similarity: Some(score),
-        };
+        }
+    }
+
+    /// The ids of a capped list, in order.
+    fn ids(hits: Vec<crate::vector::SearchHit>) -> Vec<String> {
+        hits.iter().map(|h| h.payload.artifact_id.clone()).collect()
+    }
+
+    #[test]
+    fn the_cap_leads_with_the_highest_ranked_chunk_of_each_source() {
+        // Applied to a ranked list, what leads per source must be its best,
+        // not whichever chunk happened to be enumerated first.
         let ranked = || {
             vec![
                 hit("a1", "a", 0.9),
@@ -1888,15 +2130,14 @@ mod tests {
                 hit("a3", "a", 0.6),
             ]
         };
-        let ids = |hits: Vec<SearchHit>| -> Vec<String> {
-            hits.iter().map(|h| h.payload.artifact_id.clone()).collect()
-        };
-
         // Room for three: the cap holds and `a3` stays out.
-        assert_eq!(ids(cap_per_corpus(ranked(), 2, 3)), vec!["a1", "a2", "b1"]);
+        assert_eq!(
+            ids(cap_per_corpus(ranked(), 2, 3).0),
+            vec!["a1", "a2", "b1"]
+        );
         // Room for four and nothing else to offer: `a3` comes back, last.
         assert_eq!(
-            ids(cap_per_corpus(ranked(), 2, 4)),
+            ids(cap_per_corpus(ranked(), 2, 4).0),
             vec!["a1", "a2", "b1", "a3"],
             "a displaced hit must refill an otherwise short list"
         );
@@ -1911,7 +2152,7 @@ mod tests {
             hit("b1", "b", 0.7),
         ];
         assert_eq!(
-            ids(cap_per_corpus(with_merge, 2, 3)),
+            ids(cap_per_corpus(with_merge, 2, 3).0),
             vec!["a1", "a2", "b1"]
         );
         // And a merge that was displaced took no place in the corpora it never
@@ -1928,9 +2169,234 @@ mod tests {
             hit("b2", "b", 0.6),
         ];
         assert_eq!(
-            ids(cap_per_corpus(with_merge, 2, 4)),
+            ids(cap_per_corpus(with_merge, 2, 4).0),
             vec!["a1", "a2", "b1", "b2"],
             "a displaced hit must not spend a slot in a corpus it did not enter"
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_for_an_explanation_does_not_change_the_order() {
+        // The whole of what this branch promises not to break.
+        let core = test_core().await;
+        seed(
+            &core,
+            &[
+                ("mounting an image", "procedure", &[]),
+                ("mounting a share", "procedure", &[]),
+                ("unmounting cleanly", "procedure", &[]),
+            ],
+        )
+        .await;
+
+        let plain = core.search(&q("mount"), Door::Ui).await.unwrap();
+        let explained = core
+            .search(
+                &SearchQuery {
+                    explain: true,
+                    ..q("mount")
+                },
+                Door::Ui,
+            )
+            .await
+            .unwrap();
+
+        let ids = |v: &[SearchResult]| -> Vec<String> {
+            v.iter().map(|r| r.artifact_id.clone()).collect()
+        };
+        assert_eq!(
+            ids(&plain),
+            ids(&explained),
+            "an explanation is an observation, never a stage"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rerank_that_moved_a_hit_says_where_it_moved_it_from() {
+        // `FakeReranker` reverses the order it is given, so in a list of three
+        // every hit moves and the assertion cannot pass by accident.
+        let core = test_core_counting_reranked_docs().await.0;
+        seed(
+            &core,
+            &[("alpha", "c", &[]), ("beta", "c", &[]), ("gamma", "c", &[])],
+        )
+        .await;
+
+        let hits = core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
+        let moved: Vec<_> = hits
+            .iter()
+            .filter_map(|h| h.explanation.as_ref()?.rerank.as_ref())
+            .collect();
+
+        assert!(
+            !moved.is_empty(),
+            "a reranker that reordered must say so on the hits it moved"
+        );
+        for e in moved {
+            assert_ne!(
+                e.from, e.to,
+                "only a hit that actually moved carries the stage: \
+                 considered-and-kept and did-not-run must not render the same"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_ranked_hit_explains_its_retrieved_rank_and_the_cap() {
+        let core = test_core().await;
+        seed(&core, &[("mounting an image", "procedure", &[])]).await;
+
+        let (hits, _) = core
+            .search_with(&q("mount"), Some(3), Door::Ui)
+            .await
+            .unwrap();
+        let e = hits[0]
+            .explanation
+            .as_ref()
+            .expect("a ranked hit explains itself");
+
+        assert_eq!(e.retrieved_rank, Some(0));
+        assert!(
+            e.recency.is_none() && e.pinned.is_none(),
+            "`MemoryVectors` takes the default `search_weighted`, which drops \
+             the weight and delegates to a plain `search`: reporting a \
+             recency term here would explain a stage that never ran, on the \
+             very search it claims to explain"
+        );
+        assert!(
+            matches!(e.cap, crate::core::explain::CapEffect::Kept),
+            "a hit inside its corpus's allowance was kept, not refilled"
+        );
+        assert!(
+            e.recalled_via.is_none(),
+            "a ranked hit was not recalled by anything"
+        );
+    }
+
+    #[test]
+    fn a_pool_one_corpus_filled_reports_a_cap_that_redistributed_nothing() {
+        // The failure the whole explanation exists to make visible: with only
+        // one corpus in the pool there is nothing to promote, so everything
+        // the cap displaces comes straight back and the list is dominated
+        // despite `per_source_cap` being set.
+        let only_a = vec![
+            hit("a1", "a", 0.9),
+            hit("a2", "a", 0.8),
+            hit("a3", "a", 0.7),
+            hit("a4", "a", 0.6),
+        ];
+        let (kept, report) = cap_per_corpus(only_a, 2, 4);
+
+        assert_eq!(kept.len(), 4, "the refill still fills the list");
+        assert_eq!(report.corpora_in_pool, 1);
+        assert_eq!(report.displaced, 2);
+        assert_eq!(
+            report.refilled.len(),
+            2,
+            "every displaced hit came back: the cap redistributed nothing"
+        );
+        assert!(report.refilled.contains("a3") && report.refilled.contains("a4"));
+    }
+
+    #[tokio::test]
+    async fn a_list_one_corpus_filled_says_the_cap_removed_nothing() {
+        // The failure the whole object exists to surface, read where it is
+        // actually decided: one corpus supplies everything, so a cap of one
+        // displaces the rest, the refill hands them all back to the pool, and
+        // the truncate cuts to an answer they are still in. The cap removed
+        // nothing.
+        let core = test_core().await;
+        let texts: Vec<(&str, &str, &[&str])> = (0..6)
+            .map(|_| ("mounting an image", "note", &[][..]))
+            .collect();
+        seed(&core, &texts).await;
+
+        let mut query = q("mounting an image");
+        query.limit = 3;
+        let (hits, outcome) = core.search_with(&query, Some(1), Door::Ui).await.unwrap();
+
+        assert!(outcome.explanation.displaced > 0, "the cap had work to do");
+        assert!(
+            outcome.explanation.refilled > 0,
+            "hits over the cap are in the answer, which is the cap failing: \
+             {:?}",
+            outcome.explanation
+        );
+        assert!(
+            hits.iter()
+                .any(|h| h.explanation.as_ref().is_some_and(|e| {
+                    matches!(e.cap, crate::core::explain::CapEffect::Refilled)
+                })),
+            "the summary and the rows have to agree about which hits those are"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cap_the_answer_never_needed_to_break_reports_no_refill() {
+        // Two corpora, an answer narrower than what fits inside the cap: hits
+        // are displaced in the pool and every one of them is cut by the
+        // truncate, so nothing over its cap reaches the caller. Counting the
+        // refill against the pool instead of the answer called this the same
+        // failure as the test above, on a search where the rule held.
+        let core = test_core().await;
+        let texts: Vec<(&str, &str, &[&str])> = (0..4)
+            .map(|_| ("mounting an image", "note", &[][..]))
+            .collect();
+        seed_from(&core, "a", &texts).await;
+        seed_from(&core, "b", &texts).await;
+
+        let mut query = q("mounting an image");
+        query.limit = 4;
+        let (hits, outcome) = core.search_with(&query, Some(2), Door::Ui).await.unwrap();
+
+        assert_eq!(outcome.explanation.corpora_in_pool, 2);
+        assert!(outcome.explanation.displaced > 0, "the cap had work to do");
+        assert_eq!(
+            outcome.explanation.refilled, 0,
+            "the answer is filled from inside the cap, so the rule held: {:?}",
+            outcome.explanation
+        );
+        assert!(
+            hits.iter().all(|h| h
+                .explanation
+                .as_ref()
+                .is_some_and(|e| { matches!(e.cap, crate::core::explain::CapEffect::Kept) })),
+            "and no row may claim otherwise"
+        );
+    }
+
+    #[test]
+    fn the_cap_moves_its_displaced_hits_to_the_tail_rather_than_dropping_them() {
+        // The shape the real call site has: `search_inner` passes the pool it
+        // fetched as the target, so `kept` can never be short of it and the
+        // refill always takes every displaced hit back. The cap's effect on
+        // the pool is therefore an order and nothing else — which is why
+        // "how many were refilled" is a question only the truncated answer can
+        // be asked, and `a_list_one_corpus_filled_says_the_cap_removed_nothing`
+        // below is the test that asks it.
+        let mixed = vec![
+            hit("a1", "a", 0.9),
+            hit("a2", "a", 0.8),
+            hit("a3", "a", 0.7),
+            hit("b1", "b", 0.6),
+        ];
+        let (kept, report) = cap_per_corpus(mixed, 2, 4);
+
+        assert_eq!(
+            kept.iter()
+                .map(|h| h.payload.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1", "a2", "b1", "a3"],
+            "the over-cap hit goes behind everything within its cap, and \
+             `b1` is lifted past it — that reordering is the whole effect"
+        );
+        assert_eq!(report.displaced, 1);
+        assert_eq!(
+            report.refilled.len(),
+            1,
+            "with room for the whole pool the refill takes it all back; \
+             reading this as `the cap redistributed nothing` would call every \
+             search a failure"
         );
     }
 
@@ -2159,6 +2625,7 @@ mod tests {
                 past_cliff: false,
                 via: None,
                 reason: None,
+                explanation: None,
                 model_written: false,
                 synthesized: false,
                 origin_count: 0,
@@ -3109,6 +3576,7 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            explanation: None,
             model_written: false,
             synthesized: false,
             origin_count: 0,
@@ -3215,6 +3683,7 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            explanation: None,
             model_written: false,
             synthesized: false,
             origin_count: 0,

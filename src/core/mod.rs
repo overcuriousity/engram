@@ -1,6 +1,7 @@
 pub mod ask;
 pub mod background;
 pub mod context;
+pub mod explain;
 pub mod extract;
 pub mod fetch;
 pub mod gaps;
@@ -182,6 +183,13 @@ pub struct Core {
     /// Cosine similarity below which a result is reported as only loosely
     /// related. See `VectorConfig::weak_below`.
     pub weak_below: f32,
+    /// The recency decay's half-life and the pinned tag's boost — the two
+    /// terms the vector store folds into one score and never reports back.
+    /// Held here so the explanation reconstructs them from the same
+    /// configuration the store was built from, rather than from a second
+    /// reading that could drift. See `core::explain::scoring_terms`.
+    pub recency_half_life_days: u32,
+    pub pinned_boost: f32,
     /// The one switch over everything learned from what happens here. Read on
     /// the search path and by every sweep downstream of it, so it lives here
     /// rather than being threaded down. See `LearnConfig`.
@@ -326,6 +334,8 @@ impl Core {
             )),
             tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             weak_below: cfg.vector.weak_below,
+            recency_half_life_days: cfg.vector.recency_half_life_days.max(1),
+            pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
             feedback: cfg.feedback.clone(),
             capture: cfg.capture.clone(),
@@ -554,6 +564,8 @@ pub mod test_support {
             // search test would be asserting against noise. Tests that care
             // about the labelling set it themselves.
             weak_below: 0.0,
+            recency_half_life_days: 180,
+            pinned_boost: 0.15,
             // Off in tests, whatever ships: the tests that need a log switch
             // it on and the rest assert nothing is recorded.
             learn: crate::config::LearnConfig { enabled: false },

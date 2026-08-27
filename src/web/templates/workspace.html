@@ -54,8 +54,14 @@
                   input[!event.isComposing] changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() && open_with.is_empty() %},
                   load{% endif %}"
-      hx-params="q,category,rerank"
+      hx-params="q,category,rerank,explain"
       hx-indicator="#search-spinner"{% if search_reranks %} data-rerank="true"{% endif %}>
+  {# `/ui?explain=1` and nothing else. `hx-params` above is an allowlist, so
+     the name has to appear in both places or the fragment is asked without it
+     and the rail explains nothing — which is what it did for as long as this
+     field was missing. app.js's refining pass reads it here too, so the
+     second, reranked answer carries the same question the first one did. #}
+  {% if explain %}<input type="hidden" name="explain" value="1">{% endif %}
   {# A textarea from the first keystroke to the last. It grows to a ten-line
      cap and then scrolls inside itself; it never switches element type, and it
      never infers a verb from a length or a newline. What decides which of the

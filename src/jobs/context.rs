@@ -687,7 +687,7 @@ mod tests {
         assert!(
             later
                 .vectors
-                .context_query(&vec![0.1; CTX_DIM], 5, &Default::default())
+                .context_query(&[0.1; CTX_DIM], 5, &Default::default())
                 .await
                 .unwrap()
                 .is_empty(),

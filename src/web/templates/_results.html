@@ -94,11 +94,15 @@
          template, as a badge with the explanation hidden in a title attribute
          that only appears once you have hovered the thing you were unsure
          about. The badges stay, as the scannable form. #}
-      {% if r.primed || r.weak || r.model_written %}
+      {% if r.primed || r.weak || r.model_written || r.why_ranked.is_some() %}
       <p class="rail-why">
         {%- if r.primed %}{% if r.in_sitting %}moved up — you have been in this one already{% else %}moved up — you reach this one often{% endif %}{% endif -%}
         {%- if r.weak %}{% if r.primed %} · {% endif %}a loose match{% endif -%}
         {%- if r.model_written %}{% if r.primed || r.weak %} · {% endif %}written by a model{% if r.origin_count > 0 %} from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}{% endif %}{% endif -%}
+        {#- The ranking's own answer, on the same line rather than a second one:
+            two lines both saying why this row is here would be exactly the
+            disagreement the explanation object exists to end. -#}
+        {%- if let Some(why) = r.why_ranked %}{% if r.primed || r.weak || r.model_written %} · {% endif %}{{ why }}{% endif -%}
       </p>
       {% endif %}
       {# Its own line, under the ones that say why this row is *here*. This says

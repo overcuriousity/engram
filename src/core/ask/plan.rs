@@ -131,6 +131,7 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            explanation: None,
             model_written: false,
             synthesized: false,
             origin_count: 0,

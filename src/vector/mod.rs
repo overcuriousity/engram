@@ -287,6 +287,19 @@ pub trait VectorStore: Send + Sync {
         let _ = recency_weight;
         self.search(vector, sparse, limit, filter).await
     }
+    /// Whether this store actually runs the recency-decay and pinned-boost
+    /// formula over its scores.
+    ///
+    /// Default `false`, because the default `search_weighted` above drops the
+    /// weight on the floor and delegates to a plain `search`. Only a store
+    /// that overrides it scores those terms, and an explanation that reports a
+    /// `recency +0.05` for a stage that never ran contradicts the very
+    /// ranking it claims to explain — which is the one thing the design record
+    /// forbids. Asked, rather than assumed from the configuration, because the
+    /// configuration says what was *asked for* and this says what *happened*.
+    fn applies_scoring_formula(&self) -> bool {
+        false
+    }
     /// Record that these chunks were just shown. Merged into the stored
     /// payload, never written as a whole one. `last_seen_at` is stamped for
     /// every target; `hit_count` only for the ones marked `counts_as_hit`.

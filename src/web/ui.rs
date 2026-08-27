@@ -62,6 +62,10 @@ pub struct RenderedResult {
     pub origin_count: usize,
     /// The judge's line, where the link was judged.
     pub reason: Option<String>,
+    /// Why this row ranked where it did, in one sentence — but only where the
+    /// request asked for it. `None` on an ordinary search, so the quiet line
+    /// stays quiet: see `why_ranked`.
+    pub why_ranked: Option<String>,
     /// The document goes on past this passage, and what comes next did not
     /// place in this list. The answer to a question is often the paragraph
     /// after the one that matched, and the row says so rather than leaving the
@@ -1100,6 +1104,18 @@ pub(crate) struct UiSearchParams {
     /// the operator stops, whose answer reorders the rail it just painted.
     #[serde(default)]
     pub(crate) rerank: bool,
+    /// Ask the rail to say why a row is where it is. Off unless the link
+    /// carries it: the line is for an operator looking into a ranking, not
+    /// something every keystroke paints. `/ui?explain=1` puts it on the form
+    /// as a hidden field, and `hx-params` names it so the fragment request
+    /// keeps it.
+    ///
+    /// Through `query_flag` rather than a bare `bool`, which `serde_urlencoded`
+    /// reads only as `true`/`false`: `?explain=1` — the spelling the link and
+    /// every hand-written URL carry — was a 400 for the whole fragment, so
+    /// asking why a row ranked emptied the rail instead of explaining it.
+    #[serde(default, deserialize_with = "crate::web::api::query_flag")]
+    pub(crate) explain: Option<bool>,
 }
 
 /// Function words carry no signal and appear in every chunk, so highlighting
@@ -1186,7 +1202,8 @@ pub(crate) async fn search_results(
         .read()
         .expect("ranking lock")
         .per_source_cap;
-    let (hits, t) = tenant
+    let explain = p.explain.unwrap_or(false);
+    let (hits, outcome) = tenant
         .core
         .search_with(
             &SearchQuery {
@@ -1199,6 +1216,7 @@ pub(crate) async fn search_results(
                 include_deprecated: false,
                 include_superseded: false,
                 rerank: p.rerank,
+                explain,
             },
             cap,
             // Scoped to the operator, because coalescing folds a keystroke into
@@ -1220,7 +1238,7 @@ pub(crate) async fn search_results(
     let mut results: Vec<RenderedResult> = ranked
         .into_iter()
         .enumerate()
-        .map(|(i, h)| render_hit(i, h, &titles))
+        .map(|(i, h)| render_hit(i, h, &titles, explain))
         .collect();
     // What each hit's document does next, in one read for the whole list. Only
     // over the ranked rows: an associated one is not an answer to the query,
@@ -1249,7 +1267,7 @@ pub(crate) async fn search_results(
     mark_continuations(&mut results, &next);
     let associated: Vec<RenderedResult> = recalled
         .into_iter()
-        .map(|h| render_hit(0, h, &titles))
+        .map(|h| render_hit(0, h, &titles, explain))
         .collect();
     let mut res = HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
@@ -1265,13 +1283,18 @@ pub(crate) async fn search_results(
         // From the search's outcome, not from the request's intent: a rerank
         // that failed or was skipped answered in vector order, and the tick
         // would assert a confirmation that never took place.
-        reranked: t.reranked,
+        reranked: outcome.timing.reranked,
     })
     .into_response();
     // Measured as before, reported where a browser already knows to show it.
     // On the page it was a line of debug telemetry floated beside the results
     // — a number nobody searching has a use for, in a place the eye lands.
-    if let Ok(v) = format!("embed;dur={}, total;dur={}", t.embed_ms, t.total_ms).parse() {
+    if let Ok(v) = format!(
+        "embed;dur={}, total;dur={}",
+        outcome.timing.embed_ms, outcome.timing.total_ms
+    )
+    .parse()
+    {
         res.headers_mut().insert("server-timing", v);
     }
     Ok(res)
@@ -1291,10 +1314,31 @@ fn ranked_titles(
         .collect()
 }
 
+/// The rail's half of the explanation: the consequence, in a sentence.
+///
+/// Deliberately not the MCP form. An agent reads a list of stages; a person
+/// reads why this row is above the one below it, and a stage that changed
+/// nothing is not part of that answer.
+fn why_ranked(e: &crate::core::explain::HitExplanation) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(s) = &e.rerank
+        && s.from > s.to
+    {
+        parts.push("moved up by the reranker".to_string());
+    }
+    if matches!(e.cap, crate::core::explain::CapEffect::Refilled) {
+        parts.push("kept only because one source filled the list".to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 pub(crate) fn render_hit(
     position: usize,
     h: crate::core::search::SearchResult,
     titles: &std::collections::HashMap<String, String>,
+    // Whether the door asked for the explanation. The object is on every
+    // ranked hit either way — the flag gates rendering and nothing else.
+    explain: bool,
 ) -> RenderedResult {
     RenderedResult {
         artifact_id: h.artifact_id,
@@ -1321,6 +1365,9 @@ pub(crate) fn render_hit(
         past_cliff: h.past_cliff,
         via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
         reason: h.reason.clone(),
+        why_ranked: explain
+            .then(|| h.explanation.as_ref().and_then(why_ranked))
+            .flatten(),
         model_written: h.model_written,
         origin_count: h.origin_count,
         // Filled by `mark_continuations` over the finished list: whether a
@@ -3713,12 +3760,13 @@ mod tests {
                     include_deprecated: false,
                     include_superseded: false,
                     rerank: true,
+                    explain: false,
                 },
                 crate::store::feedback::Door::Ui,
             )
             .await
             .unwrap();
-        let r = super::render_hit(0, hits[0].clone(), &Default::default());
+        let r = super::render_hit(0, hits[0].clone(), &Default::default(), false);
 
         assert!(
             !r.artifact_id.is_empty(),
@@ -6392,15 +6440,19 @@ mod tests {
             past_cliff: false,
             via: None,
             reason: None,
+            explanation: None,
             model_written: false,
             synthesized: false,
             origin_count: 0,
         };
 
-        let loose = render_hit(0, result(true), &Default::default());
+        let loose = render_hit(0, result(true), &Default::default(), false);
         assert!(loose.weak);
         assert!(loose.rank.is_empty(), "a loose result was presented as #1");
-        assert_eq!(render_hit(0, result(false), &Default::default()).rank, "#1");
+        assert_eq!(
+            render_hit(0, result(false), &Default::default(), false).rank,
+            "#1"
+        );
 
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![loose],
@@ -6569,6 +6621,7 @@ mod tests {
     #[cfg(test)]
     fn row(id: &str, rank: &str) -> RenderedResult {
         RenderedResult {
+            why_ranked: None,
             artifact_id: id.into(),
             title: String::new(),
             html: String::new(),
@@ -6715,6 +6768,7 @@ mod tests {
             past_cliff: false,
             via: via.map(str::to_string),
             reason: None,
+            explanation: None,
             model_written: false,
             synthesized: false,
             origin_count: 0,
@@ -6724,11 +6778,11 @@ mod tests {
             titles.is_empty(),
             "an untitled hit must not lend its name to what it recalled: {titles:?}"
         );
-        let r = render_hit(0, hit(None, None), &titles);
+        let r = render_hit(0, hit(None, None), &titles, false);
         assert!(r.title.is_empty(), "{:?}", r.title);
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![r],
-            associated: vec![render_hit(0, hit(None, Some("a")), &titles)],
+            associated: vec![render_hit(0, hit(None, Some("a")), &titles, false)],
             all_weak: false,
             terms: String::new(),
             reranked: false,
@@ -6740,6 +6794,7 @@ mod tests {
 
     fn rendered(via: Option<&str>, reason: Option<&str>) -> RenderedResult {
         RenderedResult {
+            why_ranked: None,
             artifact_id: "a1".into(),
             title: "The one that was recalled".into(),
             html: String::new(),
@@ -6888,8 +6943,27 @@ mod tests {
         assert!(!body.contains("Recalled by association"), "{body}");
     }
 
+    #[tokio::test]
+    async fn the_search_fragment_takes_the_explain_flag_as_a_url_writes_it() {
+        // `serde_urlencoded` reads a bare `bool` only as `true`/`false`, so
+        // `explain=1` — the spelling `/ui?explain=1` puts on the form and the
+        // one every hand-written URL carries — was a 400 for the whole
+        // fragment: asking why a row ranked emptied the rail instead.
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["alpha text"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+
+        for spelling in ["explain=1", "explain=true", "explain=on", "explain"] {
+            let uri = format!("/ui/search/results?q=alpha&{spelling}");
+            // `get_body` asserts the 200 itself.
+            let body = get_body(&app, &cookie, &uri).await;
+            assert!(body.contains("rail-item"), "{uri} returned no rail: {body}");
+        }
+    }
+
     fn ranked(weak: bool) -> RenderedResult {
         RenderedResult {
+            why_ranked: None,
             artifact_id: "r1".into(),
             title: "The ranked hit".into(),
             html: String::new(),
@@ -7180,6 +7254,33 @@ mod tests {
         .unwrap();
         assert!(body.contains("rail-why"), "no provenance line: {body}");
         assert!(body.contains("you reach this one often"), "{body}");
+    }
+
+    #[test]
+    fn the_rail_sentence_names_a_cap_that_redistributed_nothing() {
+        let e = crate::core::explain::HitExplanation {
+            retrieved_rank: Some(3),
+            cap: crate::core::explain::CapEffect::Refilled,
+            ..Default::default()
+        };
+        let s = why_ranked(&e).expect("a refilled hit has something to say");
+        assert!(
+            s.contains("one source filled the list"),
+            "the operator gets the consequence, not the mechanism: got {s:?}"
+        );
+    }
+
+    #[test]
+    fn a_hit_no_stage_touched_says_nothing() {
+        let e = crate::core::explain::HitExplanation {
+            retrieved_rank: Some(0),
+            cap: crate::core::explain::CapEffect::Kept,
+            ..Default::default()
+        };
+        assert!(
+            why_ranked(&e).is_none(),
+            "a quiet stage renders nothing; a row of no-ops is noise"
+        );
     }
 
     #[test]
@@ -9642,8 +9743,13 @@ mod tests {
         // staged file sits inside it, so the serialisation is pinned to the
         // fields the search actually takes — without this, every keystroke
         // carries a filename into the query string. `rerank` is on the list
-        // for the refining pass, whose own flag rides this form's GET.
-        assert!(page.contains(r#"hx-params="q,category,rerank""#), "{page}");
+        // for the refining pass, whose own flag rides this form's GET, and
+        // `explain` for the same reason: a name missing here is a flag the
+        // fragment is never asked with, however carefully the rest is wired.
+        assert!(
+            page.contains(r#"hx-params="q,category,rerank,explain""#),
+            "{page}"
+        );
     }
 
     #[tokio::test]

@@ -534,6 +534,7 @@ impl Core {
                     // Whether ask reranks is the scope's decision, not this
                     // call's: nobody is typing here.
                     rerank: true,
+                    explain: false,
                 },
                 None,
                 // Deliberately not captured: the right answer to a question is
@@ -885,6 +886,8 @@ impl Core {
                 // What makes a reached artifact tellable apart from a retrieved
                 // one, by a reader and by a test alike: a ranked hit has no
                 // `via`, and this one names the hit it was reached from.
+                // Reached beside a ranked hit, never ranked itself.
+                explanation: Some(crate::core::explain::HitExplanation::recalled(&via)),
                 via: Some(via),
                 reason,
             });
@@ -2800,6 +2803,7 @@ mod tests {
                 past_cliff: false,
                 via: None,
                 reason: None,
+                explanation: None,
                 model_written: false,
                 synthesized: false,
                 origin_count: 0,
