@@ -278,6 +278,37 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
         return Ok(false);
     }
 
+    // A score says two texts are alike. Duplication says one of them adds
+    // nothing, and those are different claims — the comment above
+    // `contains_normalized` states the distinction plainly. On a base of two
+    // hundred documents teaching one subject, "alike" is the ordinary condition
+    // and says nothing at all about duplication: twenty-three of the thirty-
+    // three pairs the live base ever filed were two scripts covering one topic.
+    //
+    // So the cosine admits nothing on its own. One of two things has to hold:
+    // one text is wholly inside the other, or both came out of one document.
+    // Containment is what keeps the real cross-corpus case working — the same
+    // document ingested twice — while two scripts that merely cover one subject
+    // are refused.
+    //
+    // Refused, and nothing is written. Not a pair, and not a link either: a
+    // link means two artifacts were *used* together, `bump_link` takes the cue
+    // that bound them, and a bump derived from a cosine would put an
+    // observation about text into a table whose every other row is an
+    // observation about behaviour. Two documents on one subject link on their
+    // own, from the first search that shows them together.
+    let (longer, shorter) = if a.text.len() >= b.text.len() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let corroborated = contains_normalized(&longer.text, &shorter.text)
+        || (a.corpus_id.is_some() && a.corpus_id == b.corpus_id);
+    if !corroborated {
+        tracing::debug!(a = %a.id, b = %b.id, score, "alike, but nothing says duplicate");
+        return Ok(false);
+    }
+
     core.store.record_pair(&a.id, &b.id, score).await?;
     Ok(false)
 }
@@ -461,8 +492,12 @@ mod tests {
         // they were merged into one synthetic document.
         let core = test_core().await;
         let a_id = seed_passage(&core, "skript-a", "Spuren sind materielle Veraenderungen.").await;
-        let b_id =
-            seed_passage(&core, "skript-b", "Als Spur gilt jede materielle Veraenderung.").await;
+        let b_id = seed_passage(
+            &core,
+            "skript-b",
+            "Als Spur gilt jede materielle Veraenderung.",
+        )
+        .await;
         let a = core.store.get_artifact(&a_id).await.unwrap();
         let b = core.store.get_artifact(&b_id).await.unwrap();
 
@@ -502,6 +537,103 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_corpus_similarity_alone_does_not_reach_the_model() {
+        // Twenty-three of the live base's thirty-three pairs were this: two
+        // documents covering one subject at 0.89 to 0.93, duplicating nothing.
+        // Thirteen scripts agreeing is evidence that the claim is standard, and
+        // a merge erases that they agreed.
+        let core = test_core().await;
+        let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Spuren sind materielle Veraenderungen an Personen oder Sachen.",
+            [1.0, 0.0],
+        )
+        .await;
+        let b_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Als Spur gilt jede materielle Veraenderung an Person oder Objekt.",
+            [0.99, 0.05],
+        )
+        .await;
+        let a = core.store.get_artifact(&a_id).await.unwrap();
+        let b = core.store.get_artifact(&b_id).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn containment_across_corpora_still_reaches_the_model() {
+        // The case the corroborant keeps working: one document ingested twice.
+        // Containment is the predicate that says one side adds nothing, which
+        // is what duplication means — a score only says they are alike.
+        let core = test_core().await;
+        let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Spuren sind materielle Veraenderungen an Personen oder Sachen, \
+             die zur Tataufklaerung beitragen koennen.",
+            [1.0, 0.0],
+        )
+        .await;
+        let b_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Spuren sind materielle Veraenderungen an Personen oder Sachen,",
+            [0.99, 0.05],
+        )
+        .await;
+        let a = core.store.get_artifact(&a_id).await.unwrap();
+        let b = core.store.get_artifact(&b_id).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_pair_does_not_bump_a_link() {
+        // The link graph stays an observation about use. `bump_link` takes the
+        // cue that bound two artifacts, and the README calls the graph one
+        // learned from co-retrieval; a bump derived from a cosine would leave
+        // the recommendation surface unable to tell the two apart.
+        let core = test_core().await;
+        let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Spuren sind materielle Veraenderungen.",
+            [1.0, 0.0],
+        )
+        .await;
+        let b_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Als Spur gilt jede materielle Veraenderung.",
+            [0.99, 0.05],
+        )
+        .await;
+        let a = core.store.get_artifact(&a_id).await.unwrap();
+        let b = core.store.get_artifact(&b_id).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert!(
+            core.store.get_link(&a_id, &b_id).await.unwrap().is_none(),
+            "a cosine is not evidence that anyone used these together"
         );
     }
 
@@ -549,7 +681,9 @@ mod tests {
             .await
             .unwrap();
 
-        classify_pair(&core, &rows[0], &rows[1], 0.97).await.unwrap();
+        classify_pair(&core, &rows[0], &rows[1], 0.97)
+            .await
+            .unwrap();
 
         let short = core.store.get_artifact(&rows[1].id).await.unwrap();
         assert!(
