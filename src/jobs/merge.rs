@@ -209,6 +209,8 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
                 pair.id,
                 crate::store::pairs::PairState::Dismissed,
                 Some("merge undone"),
+                // The undo is the review: a person pressed it.
+                crate::store::pairs::DecidedBy::Operator,
             )
             .await?;
     }
@@ -888,6 +890,7 @@ mod tests {
                 verdict,
                 PairState::Contradiction,
                 Some("mount vs never mount"),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
             .unwrap();

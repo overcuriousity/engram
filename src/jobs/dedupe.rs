@@ -38,7 +38,7 @@ use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::infer::prompt::{MergedDraft, Relation};
 use crate::store::artifacts::Chunk;
-use crate::store::pairs::{ArtifactPair, PairState};
+use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
 
 /// What the model decided, with everything the write path needs already read.
 pub struct Settlement {
@@ -569,7 +569,9 @@ async fn settle(
     state: PairState,
     detail: Option<&str>,
 ) -> Result<()> {
-    core.store.set_pair_state(pair.id, state, detail).await
+    core.store
+        .set_pair_state(pair.id, state, detail, DecidedBy::Model)
+        .await
 }
 
 #[cfg(test)]

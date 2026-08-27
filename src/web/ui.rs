@@ -2484,7 +2484,12 @@ async fn dismiss_pair_ui(
     tenant
         .core
         .store
-        .set_pair_state(pid, crate::store::pairs::PairState::Dismissed, None)
+        .set_pair_state(
+            pid,
+            crate::store::pairs::PairState::Dismissed,
+            None,
+            crate::store::pairs::DecidedBy::Operator,
+        )
         .await?;
     Ok(Redirect::to(back.path()).into_response())
 }
@@ -2578,6 +2583,7 @@ async fn apply_pair_supersede_ui(
             pid,
             crate::store::pairs::PairState::Dismissed,
             pair.detail.as_deref(),
+            crate::store::pairs::DecidedBy::Operator,
         )
         .await?;
     Ok(Redirect::to(f.back.path()).into_response())
@@ -4672,6 +4678,7 @@ mod tests {
                 id,
                 crate::store::pairs::PairState::Contradiction,
                 Some("one says the opposite of the other"),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
             .unwrap();
@@ -7890,6 +7897,7 @@ mod tests {
                 pair.id,
                 crate::store::pairs::PairState::Contradiction,
                 Some("they disagree about the tag"),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
             .unwrap();
@@ -7975,6 +7983,7 @@ mod tests {
                 pair.id,
                 crate::store::pairs::PairState::Contradiction,
                 Some("30 seconds vs 90"),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
             .unwrap();
@@ -8051,6 +8060,7 @@ mod tests {
                 pair.id,
                 crate::store::pairs::PairState::Vacuous,
                 Some("each body is its own file path"),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
             .unwrap();

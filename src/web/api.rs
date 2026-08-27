@@ -1524,6 +1524,7 @@ pub(crate) mod tests {
                 pair.id,
                 crate::store::pairs::PairState::Contradiction,
                 Some("30 seconds vs 90"),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
             .unwrap();

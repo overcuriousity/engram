@@ -138,6 +138,48 @@ impl PairState {
     }
 }
 
+/// Who settled a pair.
+///
+/// Not derivable from `state`: `Dismissed` is written both by an operator
+/// pressing dismiss and by `dedupe` applying a `Replaced` verdict, and
+/// `NoConflict` both by the judge and by a lifecycle shortcut. Before this
+/// existed the only trace of a person's decision was whether a detail string
+/// happened to survive the write — `dismiss_pair_ui` passes `None` and
+/// `set_pair_state` writes `detail` unconditionally, so it nulled it, while
+/// `apply_supersede_ui` carries the judge's through on purpose.
+///
+/// Passed rather than defaulted at every call site, so that a new operator
+/// surface cannot be recorded as the model by forgetting to say otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecidedBy {
+    /// A judge's verdict, or a rule the background applied without asking.
+    Model,
+    /// A person pressed something.
+    Operator,
+}
+
+impl DecidedBy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DecidedBy::Model => "model",
+            DecidedBy::Operator => "operator",
+        }
+    }
+
+    /// Anything unrecognised reads as absent rather than as one of the two: a
+    /// row written by a version that did not have this column says nothing
+    /// about who decided, and guessing would be the untruth the column exists
+    /// to end.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "model" => Some(DecidedBy::Model),
+            "operator" => Some(DecidedBy::Operator),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ArtifactPair {
     pub id: i64,
@@ -147,6 +189,9 @@ pub struct ArtifactPair {
     pub state: PairState,
     pub detail: Option<String>,
     pub created_at: i64,
+    /// Who settled it, where that was recorded. `None` on an open pair, and on
+    /// every row written before the column existed.
+    pub decided_by: Option<DecidedBy>,
     /// Model calls this pair has already cost, successful or not. Orders the
     /// judge's queue so a pair it cannot read does not starve the rest.
     pub judge_attempts: i64,
@@ -201,6 +246,10 @@ pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
         state: PairState::parse(r.get::<String, _>("state").as_str()),
         detail: r.get("detail"),
         created_at: r.get("created_at"),
+        decided_by: r
+            .get::<Option<String>, _>("decided_by")
+            .as_deref()
+            .and_then(DecidedBy::parse),
         judge_attempts: r.get("judge_attempts"),
         judge_unreadable: r.get("judge_unreadable"),
         obsolete_id: r.get("obsolete_id"),
@@ -443,14 +492,16 @@ impl Store {
         id: i64,
         state: PairState,
         detail: Option<&str>,
+        by: DecidedBy,
     ) -> Result<()> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = ?, detail = ?, obsolete_id = NULL, merged_into = NULL
+                SET state = ?, detail = ?, decided_by = ?, obsolete_id = NULL, merged_into = NULL
               WHERE id = ?",
         )
         .bind(state.as_str())
         .bind(detail)
+        .bind(by.as_str())
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -618,6 +669,7 @@ impl Store {
                         p.id,
                         PairState::Dismissed,
                         Some("both of these went into the same merge"),
+                        DecidedBy::Model,
                     )
                     .await?;
                     continue;
@@ -627,6 +679,7 @@ impl Store {
                         p.id,
                         PairState::Dismissed,
                         Some("a pair between these two already exists"),
+                        DecidedBy::Model,
                     )
                     .await?;
                     continue;
@@ -778,6 +831,7 @@ impl Store {
                     p.id,
                     PairState::Stale,
                     Some("the supersession of these two answered this"),
+                    DecidedBy::Model,
                 )
                 .await?;
                 out.staled += 1;
@@ -788,6 +842,7 @@ impl Store {
                     p.id,
                     PairState::Stale,
                     Some("the artifact this proposed hiding is already hidden"),
+                    DecidedBy::Model,
                 )
                 .await?;
                 out.staled += 1;
@@ -801,6 +856,7 @@ impl Store {
                         "a vacuous verdict is about the two bodies it was read over, \
                           and one of them is hidden",
                     ),
+                    DecidedBy::Model,
                 )
                 .await?;
                 out.staled += 1;
@@ -822,6 +878,7 @@ impl Store {
                     p.id,
                     PairState::Stale,
                     Some("a pair between these two already exists"),
+                    DecidedBy::Model,
                 )
                 .await?;
                 out.staled += 1;
@@ -1395,6 +1452,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn who_settled_a_pair_is_recorded_rather_than_reconstructed() {
+        // Before this column the two were tellable apart only by accident:
+        // `dismiss_pair_ui` passes no detail and `set_pair_state` writes
+        // `detail` unconditionally, so a person's dismissal nulled the judge's
+        // reasoning, while `apply_supersede_ui` carried it through. Whether a
+        // string survived was the entire evidence that a human had decided.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+
+        assert_eq!(
+            s.get_pair(p).await.unwrap().decided_by,
+            None,
+            "an open pair has been decided by nobody"
+        );
+
+        s.set_pair_state(p, PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.get_pair(p).await.unwrap().decided_by,
+            Some(DecidedBy::Operator)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_row_written_before_the_column_existed_claims_no_author() {
+        // The reason `decided_by` is nullable with no default, and so belongs
+        // on the additive list at all. A default would have all 33 rows of an
+        // existing base assert an author none of them recorded.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        sqlx::query(
+            "UPDATE artifact_pairs SET state = 'dismissed', decided_by = NULL WHERE id = ?",
+        )
+        .bind(p)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        let read = s.get_pair(p).await.unwrap();
+        assert_eq!(read.state, PairState::Dismissed);
+        assert_eq!(read.decided_by, None, "silence is not a claim about anyone");
+    }
+
+    #[tokio::test]
     async fn an_oversized_pair_leaves_the_pending_queue_but_stays_visible() {
         // Past the fan-in cap nothing is merged, and the pair must not sit on
         // the pending queue costing a call per sweep for a decision that will
@@ -1404,9 +1511,14 @@ mod tests {
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(p, PairState::Oversized, Some("9 roots, cap is 8"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            p,
+            PairState::Oversized,
+            Some("9 roots, cap is 8"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert!(s.pairs_to_judge(10).await.unwrap().is_empty());
         let found = s.pairs_by_state(PairState::Oversized, 10).await.unwrap();
@@ -1433,7 +1545,9 @@ mod tests {
             s.record_pair(&a, &b, 0.91).await.unwrap();
             let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
             if state != PairState::Pending {
-                s.set_pair_state(p, state, None).await.unwrap();
+                s.set_pair_state(p, state, None, DecidedBy::Model)
+                    .await
+                    .unwrap();
             }
             assert_eq!(
                 s.get_pair(p).await.unwrap().state,
@@ -1525,7 +1639,7 @@ mod tests {
         s.record_pair(&m[1], &m[2], 0.90).await.unwrap();
         let all = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
         let (seed, other) = (all[0].id, all[1].id);
-        s.set_pair_state(other, PairState::Dismissed, None)
+        s.set_pair_state(other, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1578,7 +1692,7 @@ mod tests {
         let m = four_artifacts(&s).await;
         s.record_pair(&m[0], &m[1], 0.91).await.unwrap();
         let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(p, PairState::NoConflict, None)
+        s.set_pair_state(p, PairState::NoConflict, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1622,6 +1736,7 @@ mod tests {
             p.id,
             PairState::Contradiction,
             Some("version differs: 1.2 vs 1.4"),
+            DecidedBy::Model,
         )
         .await
         .unwrap();
@@ -1655,7 +1770,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        s.set_pair_state(p.id, PairState::Dismissed, None)
+        s.set_pair_state(p.id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1690,7 +1805,7 @@ mod tests {
             Some(a.as_str())
         );
 
-        s.set_pair_state(p.id, PairState::Dismissed, None)
+        s.set_pair_state(p.id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1727,7 +1842,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        s.set_pair_state(p.id, PairState::Dismissed, None)
+        s.set_pair_state(p.id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
         s.record_settled_pair(&a, &b, 0.91, PairState::NoConflict)
@@ -1750,7 +1865,8 @@ mod tests {
         // shorter than it is.
         let s = Store::memory().await.unwrap();
         assert!(matches!(
-            s.set_pair_state(9999, PairState::Dismissed, None).await,
+            s.set_pair_state(9999, PairState::Dismissed, None, DecidedBy::Model)
+                .await,
             Err(crate::error::Error::NotFound)
         ));
     }
@@ -1843,7 +1959,7 @@ mod tests {
             .await
             .unwrap();
         let id = s.pairs_by_state(PairState::NoConflict, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::Dismissed, None)
+        s.set_pair_state(id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1875,7 +1991,7 @@ mod tests {
         assert_eq!(p.merged_into.as_deref(), Some("merge-1"));
 
         // Leaving the settlement drops the record, exactly as obsolete_id does.
-        s.set_pair_state(id, PairState::Dismissed, None)
+        s.set_pair_state(id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
         assert_eq!(s.get_pair(id).await.unwrap().merged_into, None);
@@ -1965,9 +2081,14 @@ mod tests {
         let (b, c, m) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(c, m, 0.80).await.unwrap();
         let existing = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(existing, PairState::Dismissed, Some("operator"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            existing,
+            PairState::Dismissed,
+            Some("operator"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.record_pair(b, c, 0.91).await.unwrap();
 
         let moved = s
@@ -2023,7 +2144,7 @@ mod tests {
         let (b, c, m) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(b, c, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::NoConflict, None)
+        s.set_pair_state(id, PairState::NoConflict, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -2048,9 +2169,14 @@ mod tests {
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::Oversized, Some("12 sources, cap is 8"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Oversized,
+            Some("12 sources, cap is 8"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(s.reopen_oversized().await.unwrap(), 1);
 
@@ -2081,9 +2207,14 @@ mod tests {
             s.record_judge_attempt(id).await.unwrap();
             s.record_unreadable_judgement(id).await.unwrap();
         }
-        s.set_pair_state(id, PairState::Oversized, Some("12 sources, cap is 8"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Oversized,
+            Some("12 sources, cap is 8"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(s.reopen_oversized().await.unwrap(), 1);
 
@@ -2160,9 +2291,14 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         s.follow_supersession(loser, winner).await.unwrap();
 
@@ -2204,15 +2340,25 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let verdict = s.pair_between(loser, other).await.unwrap().unwrap().id;
-        s.set_pair_state(verdict, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            verdict,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         // Already judged, and judged the other way.
         s.record_pair(other, winner, 0.72).await.unwrap();
         let standing = s.pair_between(other, winner).await.unwrap().unwrap().id;
-        s.set_pair_state(standing, PairState::NoConflict, Some("nothing in common"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            standing,
+            PairState::NoConflict,
+            Some("nothing in common"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         s.follow_supersession(loser, winner).await.unwrap();
 
@@ -2243,14 +2389,24 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let verdict = s.pair_between(loser, other).await.unwrap().unwrap().id;
-        s.set_pair_state(verdict, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            verdict,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.record_pair(other, winner, 0.72).await.unwrap();
         let standing = s.pair_between(other, winner).await.unwrap().unwrap().id;
-        s.set_pair_state(standing, PairState::Dismissed, Some("not worth looking at"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            standing,
+            PairState::Dismissed,
+            Some("not worth looking at"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         s.follow_supersession(loser, winner).await.unwrap();
 
@@ -2277,6 +2433,7 @@ mod tests {
             id,
             PairState::Vacuous,
             Some("each body is its own file path"),
+            DecidedBy::Model,
         )
         .await
         .unwrap();
@@ -2350,9 +2507,14 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let id = s.pair_between(loser, other).await.unwrap().unwrap().id;
-        s.set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.set_superseded_by(loser, Some(winner)).await.unwrap();
 
         assert_eq!(
@@ -2399,9 +2561,14 @@ mod tests {
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
-        s.set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.set_artifact_status(&b, crate::store::artifacts::ArtifactStatus::Deprecated)
             .await
             .unwrap();
@@ -2487,6 +2654,7 @@ mod tests {
             existing.id,
             PairState::NoConflict,
             Some("nothing in common"),
+            DecidedBy::Model,
         )
         .await
         .unwrap();
@@ -2513,9 +2681,14 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::NoConflict, Some("nothing in common"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::NoConflict,
+            Some("nothing in common"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             s.follow_supersession(loser, winner)
@@ -2566,9 +2739,14 @@ mod tests {
         let ids = n_artifacts(&s, 3).await;
         s.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::Contradiction, Some("30 vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.set_superseded_by(&ids[0], Some(&ids[2])).await.unwrap();
 
         assert!(
