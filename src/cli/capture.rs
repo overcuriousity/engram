@@ -96,18 +96,18 @@ pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Res
             .map_err(|err| Error::Validation(format!("{err}")))?;
         let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
         let status: Option<CorpusStatus> = serde_json::from_value(body["status"].clone()).ok();
-        if let Some(s) = status {
-            if matches!(
+        if let Some(s) = status
+            && matches!(
                 s,
                 CorpusStatus::Ready
                     | CorpusStatus::Partial
                     | CorpusStatus::Failed
                     | CorpusStatus::NeedsReview
-            ) {
-                drop(lamps);
-                println!("{id}  {}", s.as_str());
-                return Ok(());
-            }
+            )
+        {
+            drop(lamps);
+            println!("{id}  {}", s.as_str());
+            return Ok(());
         }
         tokio::time::sleep(WATCH_EVERY).await;
     }
