@@ -31,6 +31,12 @@ pub enum Door {
     /// composed before anything came back, about text the operator is looking
     /// at rather than text engram showed them.
     Extension,
+    /// A search made from the terminal client. Recorded like `Ui` and `Api`,
+    /// and distinguished from them for the reason `Extension` is: a query
+    /// typed at a shell is composed before anything came back, about
+    /// something the operator is looking at rather than something engram
+    /// showed them.
+    Cli,
     /// The retrieval behind `ask`. Never captured either, for a different
     /// reason: its right answer is a synthesis across several artifacts, so
     /// "which one was it" has no well-defined meaning to judge.
@@ -44,24 +50,30 @@ impl Door {
             Door::Api => "api",
             Door::Mcp => "mcp",
             Door::Extension => "extension",
+            Door::Cli => "cli",
             Door::Judge => "judge",
             Door::Ask => "ask",
         }
     }
 
     pub fn captured(&self) -> bool {
-        matches!(self, Door::Ui | Door::Api | Door::Mcp | Door::Extension)
+        matches!(
+            self,
+            Door::Ui | Door::Api | Door::Mcp | Door::Extension | Door::Cli
+        )
     }
 
     /// The door a client is allowed to claim for itself.
     ///
-    /// Only `extension`. Everything else falls back to `Api`, because a client
+    /// Only `extension` and `cli`. Everything else falls back to `Api`,
+    /// because a client
     /// that could name `Ask` or `Judge` could mark a contaminated query as a
     /// clean one — or have a real one silently dropped — which is the exact
     /// thing the judging loop exists to prevent.
     pub fn from_client(raw: &str) -> Door {
         match raw {
             "extension" => Door::Extension,
+            "cli" => Door::Cli,
             _ => Door::Api,
         }
     }
@@ -866,6 +878,22 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_client_may_claim_the_cli_door_and_still_nothing_else() {
+        use super::Door;
+        assert_eq!(Door::from_client("cli"), Door::Cli);
+        assert_eq!(Door::from_client("extension"), Door::Extension);
+        // The gate that matters: a contaminated query still cannot label
+        // itself clean, and a real one cannot be made to disappear.
+        assert_eq!(Door::from_client("ask"), Door::Api);
+        assert_eq!(Door::from_client("judge"), Door::Api);
+        assert!(
+            Door::Cli.captured(),
+            "a query typed at a shell is judgeable"
+        );
+        assert_eq!(Door::Cli.as_str(), "cli");
+    }
 
     #[tokio::test]
     async fn an_offer_nobody_asked_for_does_not_keep_the_base_looking_busy() {

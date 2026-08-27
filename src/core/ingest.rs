@@ -18,6 +18,12 @@ pub const ORIGIN_PDF: &str = "pdf";
 pub const ORIGIN_WEB: &str = "web";
 /// A page read from a pasted link, by this server, as a stranger.
 pub const ORIGIN_FETCH: &str = "fetch";
+/// Text, a file or a link handed over by the terminal client.
+pub const ORIGIN_CLI: &str = "cli";
+/// A share from a phone's share sheet — the Android share target, the iOS
+/// Shortcut and the bookmarklet alike. One value for all three, because the
+/// distinction between them is one the operator cannot act on.
+pub const ORIGIN_SHARE: &str = "share";
 /// An answer the operator chose to keep. Its own value because a corpus whose
 /// text a model wrote must never read as one a person typed — that difference
 /// is the whole of what the keep-this-answer door concedes, and a bare literal
