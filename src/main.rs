@@ -318,6 +318,21 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // The client half, decided before anything is opened: it talks to a running
+    // engram over HTTP and needs neither this machine's config.toml nor its
+    // database. A terminal on stdin with no verb flag falls straight through,
+    // so `engram` alone is the server it has always been.
+    use std::io::IsTerminal;
+    if let Some(verb) = engram::cli::args::verb(&args.cli, !std::io::stdin().is_terminal(), || {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s)?;
+        Ok(s)
+    })? {
+        let code = engram::cli::run(verb, &args.cli).await;
+        std::process::exit(code);
+    }
+
     let cfg = Config::load(args.config.as_deref())?;
     if args.print_config {
         println!("{}", cfg.redacted());
