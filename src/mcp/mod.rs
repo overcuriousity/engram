@@ -194,53 +194,6 @@ fn why_line(e: &crate::core::explain::HitExplanation) -> String {
 /// The channel a tool call arrives through.
 const ORIGIN_MCP: &str = "mcp";
 
-/// Store a file an agent handed over as bytes, by what the bytes are: a PDF
-/// by its header, an image by its own, and otherwise UTF-8 text with its
-/// file facts, as the upload door records them. Anything else is refused by
-/// name: a corpus is quoted back verbatim, and bytes stored as mojibake would
-/// be a fidelity loss nothing downstream could detect.
-async fn ingest_file(
-    core: &Core,
-    bytes: Vec<u8>,
-    filename: Option<String>,
-    title: Option<String>,
-    note: Option<String>,
-) -> crate::error::Result<crate::core::ingest::IngestOutcome> {
-    if bytes.starts_with(b"%PDF-") {
-        return core
-            .ingest_pdf(crate::core::ingest::PdfCapture {
-                bytes,
-                filename,
-                title_hint: title,
-                note,
-            })
-            .await;
-    }
-    if image::guess_format(&bytes).is_ok() {
-        return core
-            .ingest_image(crate::core::ingest::ImageCapture {
-                bytes,
-                filename,
-                title_hint: title,
-                note,
-            })
-            .await;
-    }
-    let size = bytes.len();
-    let text = String::from_utf8(bytes).map_err(|_| {
-        Error::Validation(
-            "that file is neither a PDF, an image nor UTF-8 text — nothing here reads it".into(),
-        )
-    })?;
-    core.ingest_capture(
-        Capture::new(text, ORIGIN_MCP)
-            .with_title(title)
-            .with_note(note)
-            .with_file(filename.as_deref(), size, "text/plain"),
-    )
-    .await
-}
-
 /// One line above a document: what it is called and where it came from.
 fn corpus_head(c: &crate::store::corpora::Corpus) -> String {
     let title = c
@@ -446,7 +399,10 @@ impl PkdbTools {
         } else {
             let encoded = p.file_base64.expect("the one-of check");
             match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
-                Ok(bytes) => ingest_file(&core, bytes, p.filename, p.title, p.note).await,
+                Ok(bytes) => {
+                    core.ingest_file(bytes, p.filename, p.title, p.note, ORIGIN_MCP)
+                        .await
+                }
                 Err(e) => Err(Error::Validation(format!("file_base64 is not base64: {e}"))),
             }
         };

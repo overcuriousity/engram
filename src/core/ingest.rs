@@ -445,6 +445,58 @@ impl Core {
     /// No decode permit either — there is no pixel work to bound — and no
     /// preview, because rendering a first page needs pdfium and that is the ML
     /// build's dependency, not this one's.
+    /// Store a file by reading what its bytes say it is: a PDF, an image, or
+    /// UTF-8 text. Nothing else — bytes we cannot read are refused rather than
+    /// stored as a corpus nobody can search.
+    ///
+    /// `origin` is the caller's, because the doors that reach this differ in
+    /// the one way a person later cares about: `/mcp` is an agent, `cli` is a
+    /// shell, `share` is a phone's share sheet. It used to be a constant here,
+    /// which was only ever true because there was one caller.
+    pub async fn ingest_file(
+        &self,
+        bytes: Vec<u8>,
+        filename: Option<String>,
+        title: Option<String>,
+        note: Option<String>,
+        origin: &str,
+    ) -> Result<IngestOutcome> {
+        if bytes.starts_with(b"%PDF-") {
+            return self
+                .ingest_pdf(PdfCapture {
+                    bytes,
+                    filename,
+                    title_hint: title,
+                    note,
+                })
+                .await;
+        }
+        if image::guess_format(&bytes).is_ok() {
+            return self
+                .ingest_image(ImageCapture {
+                    bytes,
+                    filename,
+                    title_hint: title,
+                    note,
+                })
+                .await;
+        }
+        let size = bytes.len();
+        let text = String::from_utf8(bytes).map_err(|_| {
+            Error::Validation(
+                "that file is neither a PDF, an image nor UTF-8 text — nothing here reads it"
+                    .into(),
+            )
+        })?;
+        self.ingest_capture(
+            Capture::new(text, origin)
+                .with_title(title)
+                .with_note(note)
+                .with_file(filename.as_deref(), size, "text/plain"),
+        )
+        .await
+    }
+
     pub async fn ingest_pdf(&self, c: PdfCapture) -> Result<IngestOutcome> {
         self.ingest_pdf_from(c, None).await
     }
@@ -1498,6 +1550,51 @@ mod tests {
         // extraction is local, so nothing gates it.
         let core = crate::core::test_support::test_core_without_vision().await;
         assert!(core.ingest_pdf(a_pdf_capture()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_file_is_read_as_what_its_bytes_say_it_is_under_the_origin_given() {
+        let core = test_core().await;
+
+        let text = core
+            .ingest_file(
+                b"a procedure worth keeping".to_vec(),
+                Some("notes.txt".into()),
+                None,
+                None,
+                "cli",
+            )
+            .await
+            .expect("text file");
+        let stored = core.store.get_corpus(&text.id).await.expect("stored");
+        assert_eq!(
+            stored.origin, "cli",
+            "the caller's origin is what is recorded"
+        );
+
+        let png = core
+            .ingest_file(
+                a_seeded_png(9),
+                Some("shot.png".into()),
+                None,
+                None,
+                "share",
+            )
+            .await
+            .expect("image file");
+        assert_eq!(
+            png.status,
+            CorpusStatus::Describing,
+            "an image is read by a job"
+        );
+
+        let refused = core
+            .ingest_file(vec![0xff, 0xfe, 0x00], None, None, None, "cli")
+            .await;
+        assert!(
+            refused.is_err(),
+            "bytes that are no format we read are refused"
+        );
     }
 
     fn a_seeded_png(seed: u8) -> Vec<u8> {
