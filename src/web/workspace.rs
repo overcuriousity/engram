@@ -578,7 +578,7 @@ fn rail_fragment(hits: Vec<crate::core::search::SearchResult>) -> Result<String>
         citations: hits
             .into_iter()
             .enumerate()
-            .map(|(i, h)| render_hit(i, h, &Default::default()))
+            .map(|(i, h)| render_hit(i, h, &Default::default(), false))
             .collect(),
     }
     .render()
@@ -608,7 +608,7 @@ fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
             .citations
             .into_iter()
             .enumerate()
-            .map(|(i, h)| render_hit(i, h, &Default::default()))
+            .map(|(i, h)| render_hit(i, h, &Default::default(), false))
             .collect(),
         dropped: out.dropped,
         truncated: out.truncated,
