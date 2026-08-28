@@ -993,7 +993,15 @@ pub struct SearchParams {
     pub explain: Option<bool>,
 }
 
-async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<serde_json::Value>> {
+/// What both search doors make of one set of query parameters.
+///
+/// Extracted rather than repeated: `typing`, `mark` and `rerank` are decisions
+/// with reasons, and two doors reaching them separately is exactly the drift a
+/// second route must not introduce.
+fn search_request(
+    tenant: &Tenant,
+    q: SearchParams,
+) -> (SearchQuery, crate::store::feedback::Origin, bool) {
     use crate::store::feedback::Door;
     let door = q
         .door
@@ -1041,18 +1049,27 @@ async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<se
     // is typing, or two operators' panels fold into each other's queries. A
     // deliberate API call is one event and has nothing to fold with.
     let origin: crate::store::feedback::Origin = if typing {
-        door.by(tenant.user.subject)
+        door.by(tenant.user.subject.clone())
     } else {
         door.into()
     };
-    // The cap `Core::search` would have applied, read the same way, so asking
-    // for an explanation cannot change what this door returns.
-    let cap = tenant
+    (query, origin, explain)
+}
+
+/// The cap `Core::search` would have applied, read the same way, so asking for
+/// an explanation — or for the stages — cannot change what a door returns.
+fn search_cap(tenant: &Tenant) -> Option<usize> {
+    tenant
         .core
         .ranking
         .read()
         .expect("ranking lock")
-        .per_source_cap;
+        .per_source_cap
+}
+
+async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<serde_json::Value>> {
+    let cap = search_cap(&tenant);
+    let (query, origin, explain) = search_request(&tenant, q);
     let (results, outcome) = tenant.core.search_with(&query, cap, origin).await?;
     Ok(Json(if explain {
         serde_json::json!({ "results": results, "explanation": outcome.explanation })
@@ -1365,6 +1382,52 @@ async fn ask_stream(
 /// prompt fragments, and a stream is no less a door than a status code. This
 /// is also where the detail goes to the log, since a frame yielded from inside
 /// the body never reaches `IntoResponse` and would otherwise fail in silence.
+/// One search event as a JSON frame.
+///
+/// Deliberately not an arm of `api_sse_event`: a test over that function
+/// asserts the browser panel handles every frame name it mentions, and a
+/// search's stages are no business of the panel's.
+fn search_sse_event(ev: crate::core::search::SearchEvent) -> Result<SseEvent> {
+    use crate::core::search::SearchEvent::*;
+    let (name, data) = match ev {
+        Stages(v) => ("stages", serde_json::json!({ "stages": v })),
+        Stage(s) => ("stage", serde_json::json!({ "stage": s })),
+        Results(hits) => ("results", serde_json::json!({ "results": hits })),
+    };
+    Ok(SseEvent::default().event(name).data(
+        serde_json::to_string(&data)
+            .map_err(|e| Error::Internal(format!("serialising a search frame: {e}")))?,
+    ))
+}
+
+/// The same search, reporting each stage as it starts.
+///
+/// A second route rather than a header on the first: `GET /search` answers a
+/// bare array to the terminal client, the extension, `/mcp` and anything a
+/// person has scripted, and a route that answers two shapes depending on what
+/// was asked for is worse than two routes that each answer one.
+async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Response> {
+    use tokio_stream::StreamExt as _;
+    let cap = search_cap(&tenant);
+    let (query, origin, _explain) = search_request(&tenant, q);
+    let core = tenant.core.clone();
+    let events = async_stream::stream! {
+        let s = core.search_events(query, cap, origin);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            // Terminal by construction: the producer ends at its first error,
+            // so a client sees one `error` frame and nothing after it.
+            yield Ok::<_, Error>(match ev {
+                Ok(e) => search_sse_event(e).unwrap_or_else(|e| error_frame(&e)),
+                Err(e) => error_frame(&e),
+            });
+        }
+    };
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
 fn error_frame(e: &Error) -> SseEvent {
     if e.status().is_server_error() {
         tracing::error!(error = %e, "ask stream failed");
@@ -1455,6 +1518,7 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/corpora/{id}/reprocess", post(reprocess))
         .route("/corpora/{id}/resolve", post(resolve_near_dupe))
         .route("/search", get(search))
+        .route("/search/stream", get(search_stream))
         .route("/ask", post(ask))
         .route("/ask/stream", post(ask_stream))
         .route("/resurface", get(resurface))
@@ -1702,6 +1766,49 @@ pub(crate) mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).unwrap()
+    }
+
+    /// The whole SSE body of a GET, as text.
+    async fn sse_body(app: &axum::Router, uri: &str, token: &str) -> String {
+        let res = app.clone().oneshot(get(uri, Some(token))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        String::from_utf8(
+            axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_streaming_door_names_its_stages_and_then_answers() {
+        let (app, token) = app_and_token().await;
+        let body = sse_body(&app, "/api/v1/search/stream?q=journal&door=cli", &token).await;
+        assert!(body.contains("event: stages"), "{body}");
+        assert!(body.contains("\"embed\""), "{body}");
+        assert!(body.contains("event: results"), "{body}");
+        let (before, after) = body.split_once("event: results").expect("a terminal frame");
+        assert!(before.contains("event: stage"), "no stage was announced: {body}");
+        assert!(
+            !after.contains("event: stage"),
+            "a stage was reported after the results it preceded: {body}"
+        );
+    }
+
+    /// The shape four clients read. It is not this change's to alter.
+    #[tokio::test]
+    async fn the_plain_search_door_still_answers_a_bare_array() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(get("/api/v1/search?q=journal", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(v.is_array(), "{v}");
     }
 
     fn bg_point(id: &str, v: Vec<f32>) -> crate::vector::VectorPoint {
