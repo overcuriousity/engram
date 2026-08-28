@@ -908,7 +908,17 @@ impl Core {
         mut response: AskResponse,
         uncovered: &[String],
     ) -> Result<AskResponse> {
-        if !(self.learn.enabled && origin.door == Door::Ui) {
+        // `Ui` and `Cli`. Both are a person composing a question in a place
+        // where they will read the answer; neither is an agent on a token. A
+        // shell question was recorded nowhere at all until now, which made the
+        // strongest statement of a need engram can receive the one thing it
+        // never wrote down.
+        //
+        // A CLI ask carries no `event_id` back to the judging view, and that
+        // stays true: recorded and unjudged is a coherent state. The sweep
+        // learns what was needed; the judge still grades only answers somebody
+        // saw somewhere they could grade them.
+        if !(self.learn.enabled && matches!(origin.door, Door::Ui | Door::Cli)) {
             return Ok(response);
         }
         let ask = NewAsk {
@@ -1598,6 +1608,51 @@ mod tests {
             tags: vec![],
             category: None,
         }
+    }
+
+    /// A question typed at a shell is the strongest statement of a need engram
+    /// can receive, and it was written down nowhere at all: `record_ask`
+    /// admitted `Door::Ui` alone.
+    #[tokio::test]
+    async fn a_question_asked_at_a_shell_is_recorded() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(&core, 2, 2).await;
+        core.ask(&req("how do I do the thing"), Door::Cli.by("me"))
+            .await
+            .unwrap();
+        let asks = core
+            .store
+            .asks_between(0, crate::store::now() + 1)
+            .await
+            .unwrap();
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert_eq!(
+            asks[0].scope.as_deref(),
+            Some("me"),
+            "unscoped, the sweep cannot join it to anything"
+        );
+    }
+
+    /// And the doors that are not a person, which must stay out of the log.
+    #[tokio::test]
+    async fn a_question_from_an_agent_is_still_not_recorded() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(&core, 2, 2).await;
+        core.ask(&req("how do I do the thing"), Door::Api)
+            .await
+            .unwrap();
+        core.ask(&req("how do I do the other thing"), Door::Mcp)
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .asks_between(0, crate::store::now() + 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

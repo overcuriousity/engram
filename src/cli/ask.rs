@@ -198,7 +198,9 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
         .build()
         .map_err(|err| Error::Internal(format!("http client: {err}")))?;
     let res = http
-        .post(e.api("/ask/stream"))
+        // `door=cli`, exactly as `-s` names its door: a question typed at a
+        // shell is recorded, and the log should hold what it was.
+        .post(format!("{}?door=cli", e.api("/ask/stream")))
         .bearer_auth(&e.token)
         .json(&serde_json::json!({ "q": question }))
         .send()

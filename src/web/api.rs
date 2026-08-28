@@ -1108,18 +1108,44 @@ async fn stale(
 
 async fn ask(
     tenant: Tenant,
+    Query(q): Query<AskParams>,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Json<crate::core::ask::AskResponse>> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
-    Ok(Json(
-        tenant
-            .core
-            .ask(&req, crate::store::feedback::Door::Api)
-            .await?,
-    ))
+    let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Api);
+    Ok(Json(tenant.core.ask(&req, origin).await?))
+}
+
+/// Which door asked, in the query string, exactly as search names it.
+///
+/// A query parameter rather than a body field: `AskRequest` is the shape a
+/// dozen internal callers build by hand, and how a question arrived is a fact
+/// about the request rather than part of the question.
+#[derive(serde::Deserialize)]
+pub struct AskParams {
+    pub door: Option<String>,
+}
+
+/// Which door asked, and on whose behalf.
+///
+/// `default` is the door a caller that names none has always been treated as,
+/// which differs per route and is why it is a parameter. The scope rule is
+/// search's, for search's reasons: a door with a known person says who, and a
+/// bearer token is not a person.
+fn ask_origin(
+    q: &AskParams,
+    tenant: &Tenant,
+    default: crate::store::feedback::Door,
+) -> crate::store::feedback::Origin {
+    use crate::store::feedback::Door;
+    let door = q.door.as_deref().map(Door::from_client).unwrap_or(default);
+    match door {
+        Door::Extension | Door::Cli => door.by(tenant.user.subject.clone()),
+        _ => door.into(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1340,6 +1366,7 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
 /// One question, one request, and no handoff to expire.
 async fn ask_stream(
     tenant: Tenant,
+    Query(q): Query<AskParams>,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
@@ -1349,13 +1376,9 @@ async fn ask_stream(
     use tokio_stream::StreamExt as _;
 
     let core = tenant.core.clone();
-    // The door an ask came through, which names the caller and nothing more.
-    // Unlike search, where `door=extension` decides how the query is recorded,
-    // no ask is recorded from here: `record_ask` admits `Door::Ui` alone, so
-    // this answer carries no `event_id` and is never judged. Named anyway,
-    // because a question composed while reading is a different thing from one
-    // typed into an API client, and the log should not have to guess.
-    let origin = crate::store::feedback::Door::Extension.by(tenant.user.subject);
+    // The door an ask came through, named by the caller. The panel says
+    // nothing and keeps the door it has always had.
+    let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Extension);
     let events = async_stream::stream! {
         let s = core.ask_events(&req, origin);
         tokio::pin!(s);
@@ -1833,6 +1856,64 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].scope, None, "Door::Api must stay unscoped");
+    }
+
+    /// A question typed at a shell reaches the log; the panel, which names no
+    /// door, keeps the door it has always had and records nothing.
+    #[tokio::test]
+    async fn a_shell_question_is_recorded_and_the_panel_is_unchanged() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id).await.unwrap();
+
+        // Drained, not just received: the answer is produced while the body is
+        // read, and `record_ask` runs at the end of it.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/ask/stream?door=cli",
+                &token,
+                serde_json::json!({"q": "what is alpha"}),
+            ))
+            .await
+            .unwrap();
+        crate::web::test_support::body_of(res).await;
+        core.background.wait_idle().await;
+        let asks = core
+            .store
+            .asks_between(0, crate::store::now() + 1)
+            .await
+            .unwrap();
+        assert_eq!(asks.len(), 1, "a shell question reached nothing: {asks:?}");
+        assert!(asks[0].scope.is_some(), "{asks:?}");
+
+        // The same route, named by nobody: the panel, recording nothing, as
+        // it has since it was written.
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/ask/stream",
+                &token,
+                serde_json::json!({"q": "what is bravo"}),
+            ))
+            .await
+            .unwrap();
+        crate::web::test_support::body_of(res).await;
+        core.background.wait_idle().await;
+        assert_eq!(
+            core.store
+                .asks_between(0, crate::store::now() + 1)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the panel's asks are not recorded and that has not changed"
+        );
     }
 
     #[tokio::test]
