@@ -67,6 +67,38 @@ ranked on its own. Most are verbatim *passages*, split on the document's own
 headings. A *synthesized* or *captured* one was written by the model from a
 window, badged wherever it is shown, and retired with one click.
 
+## Three rules
+
+Everything on the issue tracker is weighed against these.
+
+**Inference happens at write time, not read time.** A search costs one
+embedding, one vector search and a few indexed SQLite reads — never a
+generation. Making retrieval better means making the background job do more,
+never adding a model call to the query path. *Ask* is the one door that
+generates at read time; every call it spends is bounded and visible on the page.
+
+**The trace is fixed; access is plastic.** Content is verbatim and never changes
+silently: a captured artifact is never rewritten in place, and nothing is
+deleted on a score. Consolidation is the one narrow exception and carries its
+own guards — originals kept and undoable, no value or literal lost. Everything
+about *how* an artifact is found may learn from use, within bounds that are
+shown: a primed hit says so, an associated hit says what recalled it, and no
+exact match is ever buried.
+
+**Lean beats clever.** Anything that adds a storage tier, a model dependency or
+a layer crossing without a measured retrieval gain does not go in. The
+evaluation harness is the only figure comparable across months; a default that
+changes ranking moves only after it has been run.
+
+Decided against, and not coming back: generated answer cards or answers stored
+as artifacts without the operator asking (a digest competing with the wording it
+was derived from); model-written "situations" as extra vectors (a guess deciding
+what surfaces); a resurfacing list of things you had forgotten (a different
+application); LLM excerpt compression at query time (the cliff and the reranker
+do it for free); late-interaction reranking (a model dependency to beat a
+baseline hybrid search already makes strong); quantization to save memory
+nobody has run out of.
+
 ## Requirements
 
 - Rust 1.94+ (the floor comes from sqlx 0.9).

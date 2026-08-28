@@ -2,7 +2,7 @@
 //!
 //! No new table, no sweep, and no model call: every figure here is a `COUNT`
 //! or a `GROUP BY` over rows some other part of the system already writes.
-//! That constraint is the one at the top of `ROADMAP.md`, and it is what makes
+//! That constraint is the first of the README's three rules, and it is what makes
 //! this page cheap enough to open whenever.
 //!
 //! With one exception, named where it lives: `fading` reads two columns of

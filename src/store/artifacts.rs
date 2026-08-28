@@ -1475,7 +1475,7 @@ mod tests {
         // violated in every one of its 135 merge-lineage rows. A merge over
         // passages rewrites the verbatim substrate into text that belongs to no
         // corpus and carries no span, and hides the wording someone captured
-        // behind it — the outcome `schema.sql` and the ROADMAP's fidelity rule
+        // behind it — the outcome `schema.sql` and the README's fidelity rule
         // exist to prevent.
         let s = Store::memory().await.unwrap();
         let root = a_passage(&s).await;

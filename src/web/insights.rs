@@ -763,7 +763,7 @@ mod tests {
 
     /// Read, never computed at request time.
     ///
-    /// The constraint at the top of `ROADMAP.md` holds here too: no embedding
+    /// The first of the README's three rules holds here too: no embedding
     /// and no model call on a page you open to look at numbers.
     #[tokio::test]
     async fn the_measures_embed_nothing() {

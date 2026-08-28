@@ -462,9 +462,9 @@ impl BlockWeights {
 /// Offering an artifact before it is asked for, from the situation the page was
 /// opened in.
 ///
-/// One gate and a table of numbers, on purpose: `ROADMAP.md` under
-/// `[Core Platform]` objects to eight gates over one faculty, and this does not
-/// add a ninth. The learning cadence is not here either — see
+/// One gate and a table of numbers, on purpose: eight gates over one faculty
+/// is the objection recorded in #72, and this does not add a ninth. The
+/// learning cadence is not here either — see
 /// `jobs::context::INTERVAL_HOURS`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
