@@ -82,7 +82,11 @@
                nothing where a name would say something — the same reasoning
                `render_hit` states for the search rail. The snippet below carries
                the row. #}
-            {% if !o.title.is_empty() %}<span class="judge-title">{{ o.title }}</span>{% endif %}
+            {# A borrowed name is marked, exactly as the search rail marks one
+               (`rail-title-corpus`). Several passages of one pasted note carry
+               the same note title, and unmarked they read as one artifact
+               offered N times. #}
+            {% if !o.title.is_empty() %}<span class="judge-title{% if o.titled_by_corpus %} judge-title-corpus{% endif %}"{% if o.titled_by_corpus %} title="The note this passage is from"{% endif %}>{{ o.title }}</span>{% endif %}
             {% if o.usable %}
             <span class="judge-snippet">{{ o.snippet }}</span>
             {% else %}

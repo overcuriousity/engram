@@ -154,8 +154,8 @@ struct InsightsTemplate {
     more_pairs: i64,
     /// How much is held, and how densely.
     held: crate::store::insights::Held,
-    /// What is falling out of reach, bucketed as a search would find it.
-    fading: Vec<crate::store::insights::Bucket>,
+    /// How much use is standing on the base, bucketed in units of an open.
+    used: Vec<crate::store::insights::Bucket>,
     /// recall@10 and MRR, read from the ranks judged searches actually gave.
     /// `None` where nothing is being recorded — an empty measure is worse than
     /// no measure, because a zero reads as a score.
@@ -518,10 +518,10 @@ async fn page(tenant: Tenant) -> Result<Response> {
 
     Ok(HtmlTemplate(InsightsTemplate {
         held: tenant.core.store.held().await?,
-        fading: tenant
+        used: tenant
             .core
             .store
-            .fading(tenant.core.activation.half_life_days, crate::store::now())
+            .used(tenant.core.activation.half_life_days, crate::store::now())
             .await?,
         // Read only where searches are being recorded at all. The measure is
         // read off judged searches, and on an installation that records none
@@ -730,9 +730,9 @@ mod tests {
 
         assert!(html.contains("What this memory is like"), "{html}");
         assert!(html.contains("Held"), "how much is held: {html}");
-        assert!(html.contains("Reach"), "what is fading: {html}");
+        assert!(html.contains("Use"), "how much use is standing: {html}");
         assert!(
-            html.contains("out of reach"),
+            html.contains("never reached"),
             "the band that is the point: {html}"
         );
     }

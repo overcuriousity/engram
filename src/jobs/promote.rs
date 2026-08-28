@@ -34,14 +34,13 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
         // elapsed time, and one day after capture it already took two. What the
         // threshold is meant to name is what use added, so that is what it is
         // compared against.
-        let earned =
-            crate::store::links::decayed(*value, *stamp, at, core.activation.half_life_days)
-                - crate::store::links::decayed(
-                    1.0,
-                    *created_at,
-                    at,
-                    core.activation.half_life_days,
-                );
+        let earned = crate::store::links::engagement_at(
+            *value,
+            *stamp,
+            *created_at,
+            at,
+            core.activation.half_life_days,
+        );
         if earned < core.promote.activation_above {
             continue;
         }
@@ -235,22 +234,39 @@ pub async fn supersede_covered(
     let mut n = 0;
     for (winner, losers) in by_winner {
         let ids: Vec<String> = losers.iter().map(|s| s.to_string()).collect();
+        // What moves is the engagement the passages *earned*, never the raw
+        // stored sum. Activation is a capture baseline plus use, and the
+        // baseline is anchored to each artifact's own `created_at`: the winner
+        // was written moments ago, so its baseline stands at a full `1.0`,
+        // while a passage captured six weeks back carries a baseline of almost
+        // nothing under whatever it earned. Transferring the raw sum read one
+        // against the other. A passage with 1.9 earned came to a raw ~2.0, and
+        // the winner set to 2.0 reported 1.0 of use — half of it lost. Worse
+        // below the line: 0.5 earned carried ~0.6, lost the `max` to the
+        // winner's own 1.0, and the artifact that was supposed to inherit the
+        // access came out at zero.
         let act = core.store.activation_of(&ids).await?;
         let carried = act
             .values()
-            .map(|(v, s, _)| crate::store::links::decayed(*v, *s, at, half_life))
-            .fold(f64::MIN, f64::max);
-        if carried > f64::MIN {
-            let own = core
-                .store
-                .activation_of(std::slice::from_ref(&winner.to_string()))
-                .await?
-                .get(winner)
-                .map(|(v, s, _)| crate::store::links::decayed(*v, *s, at, half_life))
-                .unwrap_or(1.0);
-            core.store
-                .set_activation(winner, carried.max(own), at)
-                .await?;
+            .map(|(v, s, c)| crate::store::links::engagement_at(*v, *s, *c, at, half_life))
+            .fold(0.0f64, f64::max);
+        let own = core
+            .store
+            .activation_of(std::slice::from_ref(&winner.to_string()))
+            .await?
+            .get(winner)
+            .copied();
+        if let Some((v, s, c)) = own {
+            let now = crate::store::links::decayed(v, s, at, half_life);
+            let earned = crate::store::links::engagement_at(v, s, c, at, half_life);
+            // Only ever upwards, and the winner's own baseline is left under
+            // it: what is written back is the same number with the larger of
+            // the two engagements standing on it.
+            if carried > earned {
+                core.store
+                    .set_activation(winner, now + (carried - earned), at)
+                    .await?;
+            }
         }
         for loser in &losers {
             for link in core.store.links_touching(loser).await? {
@@ -760,6 +776,61 @@ mod tests {
         assert!((a_val - expect).abs() < 1e-6, "got {a_val}, want {expect}");
         assert_eq!(a_at, 1_000);
         assert!(a_val > 1.0);
+    }
+
+    /// What crosses is the engagement, not the raw stored sum. The winner was
+    /// written moments ago, so its baseline stands at a full `1.0`, while an
+    /// old passage's baseline has almost decayed away under whatever it
+    /// earned: comparing the two raw numbers read one against the other. A
+    /// passage six weeks old with `1.9` of earned access carried a raw `0.36`,
+    /// lost the `max` to the winner's own `1.0`, and the artifact that was
+    /// supposed to inherit the access it earned came out at nothing.
+    #[tokio::test]
+    async fn the_artifact_inherits_what_the_passage_earned_and_not_its_raw_sum() {
+        let now = crate::store::now();
+        let earned_after = |captured: i64, earned: f64, core: &crate::core::Core| {
+            crate::store::links::decayed(earned, captured, now, core.activation.half_life_days)
+        };
+        // Six weeks — three half-lives — with 1.9 of earned access on it. The
+        // raw sum by then is below the winner's own untouched baseline.
+        for (age_days, earned) in [(42i64, 1.9f64), (14, 4.0)] {
+            let (core, corpus, passages, written) = promoted_fixture().await;
+            let captured = now - age_days * 86_400;
+            sqlx::query(
+                "UPDATE artifacts SET activation = ?, activated_at = ?, created_at = ? WHERE id = ?",
+            )
+            .bind(1.0 + earned)
+            .bind(captured)
+            .bind(captured)
+            .bind(&passages[1].id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+            supersede_covered(&core, &corpus, 0, &written, now)
+                .await
+                .unwrap();
+
+            let act = core
+                .store
+                .activation_of(&[written[0].id.clone()])
+                .await
+                .unwrap();
+            let (v, s, c) = act[&written[0].id];
+            let got =
+                crate::store::links::engagement_at(v, s, c, now, core.activation.half_life_days);
+            let want = earned_after(captured, earned, &core);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "at {age_days} days the artifact inherited {got} of the {want} the passage earned"
+            );
+            // And the baseline it is standing on is its own, still whole.
+            assert!(
+                (v - (1.0 + want)).abs() < 1e-6,
+                "the winner's own baseline was overwritten: {v}"
+            );
+            assert_eq!(s, now);
+        }
     }
 
     #[tokio::test]

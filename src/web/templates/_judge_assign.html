@@ -26,7 +26,10 @@
            search returns ten, so a full set would otherwise always end on a
            badge reading 10 that no key can press. #}
         <span class="judge-key">{% if let Some(k) = o.key %}{{ k }}{% endif %}</span>
-        <span class="judge-title">{{ o.title }}</span>
+        {# Marked where the name is the note's, as on the card and on the search
+           rail: this list is ten hits from one query, and several passages of
+           one note under one unmarked title read as one artifact ten times. #}
+        <span class="judge-title{% if o.titled_by_corpus %} judge-title-corpus{% endif %}"{% if o.titled_by_corpus %} title="The note this passage is from"{% endif %}>{{ o.title }}</span>
         <span class="judge-snippet">{{ o.snippet }}</span>
       </button>
       {# Same reason as on the card, and more so: here the operator is choosing

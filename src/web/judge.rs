@@ -27,6 +27,13 @@ const MISS_LIST_AT: i64 = 10;
 pub struct Choice {
     pub artifact_id: String,
     pub title: String,
+    /// Whether `title` is the note's name rather than the artifact's own — see
+    /// `SearchResult::titled_by_corpus`, which the search rail marks for the
+    /// same reason. Without the marker several passages of one pasted note
+    /// render as N options under one identical name, separable only by their
+    /// snippets, on the one surface whose whole purpose is an unambiguous
+    /// verdict about which of them was the one.
+    pub titled_by_corpus: bool,
     pub snippet: String,
     /// Whether confirming this one would produce a pair the benchmark can hold.
     /// A deprecated or superseded artifact is offered but not choosable — see
@@ -247,6 +254,7 @@ async fn card_for(tenant: &Tenant, event: PendingEvent) -> Result<Card> {
                     usable: a.in_results(),
                     artifact_id: a.id,
                     title: a.title.unwrap_or_default(),
+                    titled_by_corpus: false,
                     snippet: snippet_of(&a.text),
                     key: None,
                 })
@@ -277,6 +285,7 @@ async fn card_for(tenant: &Tenant, event: PendingEvent) -> Result<Card> {
                 {
                     if let Some(t) = corpus.as_ref().and_then(|id| titles.get(id)) {
                         c.title = t.clone();
+                        c.titled_by_corpus = true;
                     }
                 }
             }
@@ -698,6 +707,9 @@ async fn assign_results(
             .map(|(i, h)| Choice {
                 artifact_id: h.artifact_id,
                 title: h.title.unwrap_or_default(),
+                // The search already borrowed the note's name where the hit had
+                // none of its own (`Core::fill_titles`), and says so.
+                titled_by_corpus: h.titled_by_corpus,
                 snippet: snippet_of(&h.text),
                 // The search that produced these excluded deprecated and
                 // superseded artifacts, so everything offered here is something
@@ -1343,6 +1355,20 @@ mod tests {
             .unwrap();
         let body = get(&app, "/ui/judge", &cookie).await;
         assert!(body.contains("Sourdough"), "{body}");
+        // And the card says whose name it is. Unmarked, several passages of one
+        // pasted note are N options under one identical title, separable only
+        // by their snippets — on the surface whose whole purpose is recording
+        // which of them was the one.
+        assert!(
+            body.contains("judge-title-corpus"),
+            "a borrowed name went unmarked: {body}"
+        );
+        assert!(body.contains("The note this passage is from"), "{body}");
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            css.contains(".judge-title-corpus"),
+            "the marker has no rule"
+        );
     }
 
     #[tokio::test]

@@ -39,6 +39,29 @@ fn is_heading(line: &str) -> bool {
 /// `[](#NAME)NAME [top](#top_of_page)` whatever wrote it.
 pub fn heading_title(line: &str) -> String {
     let bare = line.trim().trim_start_matches('#');
+    // Read to a fixed point, because the shapes nest. An image inside a link —
+    // `## [![Logo](logo.png)](/)`, which is how a doc site or a Wikipedia
+    // heading hangs an icon off an anchor — cannot come out of one pass: the
+    // pass anchors on the *inner* `[`, so it emits the outer `[` as prose and
+    // leaves the outer `](/)` standing, and the title came out `[Logo](/)`,
+    // a stray bracket and an unstripped link. One more reading over that is an
+    // ordinary link and reduces it to `Logo`. Bounded rather than `loop`:
+    // each pass that changes anything strictly shortens the line, and a
+    // heading nested deeper than this is not a heading anybody wrote.
+    let mut title = bare.to_string();
+    for _ in 0..4 {
+        let next = strip_links(&title);
+        if next == title {
+            break;
+        }
+        title = next;
+    }
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// One pass of `[text](target)` → `text` over a heading. See `heading_title`
+/// for why it is run more than once.
+fn strip_links(bare: &str) -> String {
     let mut out = String::with_capacity(bare.len());
     let mut rest = bare;
     // `[text](target)` → `text`. Anything that is not exactly that shape is
@@ -85,7 +108,7 @@ pub fn heading_title(line: &str) -> String {
         rest = &rest[target + 1..];
     }
     out.push_str(rest);
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    out
 }
 
 /// The first heading among the next `n` lines, with all `n` consumed.
@@ -424,6 +447,21 @@ mod tests {
                 "## See [Loop device](https://en.wikipedia.org/wiki/Loop_device_(computing))"
             ),
             "See Loop device"
+        );
+        // An image inside a link — a logo or an icon hung off an anchor, which
+        // is how a doc site and a Wikipedia infobox heading are both built.
+        // One pass anchors on the inner `[`, so it emitted the outer one as
+        // prose and left the outer `](/)` standing: `[Logo](/)`, a stray
+        // bracket and an unstripped link, in a title.
+        assert_eq!(heading_title("## [![Logo](logo.png)](/)"), "Logo");
+        assert_eq!(
+            heading_title("## [![Logo](logo.png)](/) Reference"),
+            "Logo Reference"
+        );
+        // And the nesting is not the only thing on the line.
+        assert_eq!(
+            heading_title("## See [![icon](i.png)](https://x.test/a) for more"),
+            "See icon for more"
         );
     }
 

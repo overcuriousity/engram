@@ -417,8 +417,14 @@ pub const CLIFF_MIN_SHARE: f32 = 0.01;
 /// against its own list's other steps is scale-free: the cliff is the one gap
 /// that is larger than `CLIFF_FACTOR` times the mean of all the others, and at
 /// least `CLIFF_MIN_SHARE` of the top score. Below three hits there is one gap
-/// and nothing to compare it to. Gaps are read in list order and a negative one
-/// — a primed near-tie lifted past its neighbour — is a near-tie, not a fall.
+/// and nothing to compare it to.
+///
+/// **`scores` must be sorted descending**, and every caller sorts before
+/// calling. An out-of-order score is not a small negative gap to be shrugged
+/// off: clamping one to zero manufactured a large *positive* gap at the
+/// position before it, and a leading `0.80, 0.40, 0.78` then cut after the
+/// first hit and threw the 0.78 away. `mark_past_cliff` states how the answer
+/// is carried back to a list that is deliberately not in score order.
 ///
 /// This is also where `ask` will stop packing excerpts, which is why it is a
 /// function over scores rather than a step inside `search_with`.
@@ -426,7 +432,11 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
     if scores.len() < 3 {
         return None;
     }
-    let gaps: Vec<f32> = scores.windows(2).map(|w| (w[0] - w[1]).max(0.0)).collect();
+    debug_assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "cliff needs its scores sorted descending: {scores:?}"
+    );
+    let gaps: Vec<f32> = scores.windows(2).map(|w| w[0] - w[1]).collect();
     let (at, largest) = gaps
         .iter()
         .copied()
@@ -454,32 +464,40 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
 /// after hit #1 on almost every query. A reranker calibrates its scores, so
 /// once one has run they are the right input; without one, the cosine
 /// similarity is — it means the same thing from one query to the next, which
-/// is the property the largest-gap rule needs. A hit with no similarity — one
-/// only the lexical half found, or a store that reports none — cannot be
-/// placed on that scale, so the cliff is read over the longest leading run
-/// of hits that can be. A store that reports no similarity at all gives an
-/// empty run and no cliff.
-fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<f32> {
+/// is the property the largest-gap rule needs.
+///
+/// One entry per hit, `None` where the hit carries no similarity: one only the
+/// lexical half found, or a store that reports none. Such a hit cannot be
+/// placed on the scale, so it is left out of the gaps — but it is *not* an end
+/// to the reading. Read as a leading run this truncated at the first one, and
+/// an exact term match is both the commonest hit with no similarity and the
+/// likeliest to land at rank 1: a `None` at position 0 gave an empty run and
+/// no cliff at all, silently switching the feature off for every
+/// keyword-shaped query. Skipped instead, so the hits that do sit on the
+/// cosine scale are all read wherever they sit in the list. A store that
+/// reports no similarity anywhere still gives no cliff, which is right: there
+/// is nothing to measure.
+fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<Option<f32>> {
     if reranked {
-        return results.iter().map(|r| r.score).collect();
+        return results.iter().map(|r| Some(r.score)).collect();
     }
-    results.iter().map_while(|r| r.similarity).collect()
+    results.iter().map(|r| r.similarity).collect()
 }
 
 /// Flag every hit from the cliff on. The list is left in its order and at its
 /// length; nothing about the cliff is silent and nothing about it is a change.
 ///
-/// The gaps are measured over the run **sorted**, and the answer is carried
+/// The gaps are measured over the scores **sorted**, and the answer is carried
 /// back to the list as a score: the lowest score still above the fall, and
 /// everything after the last hit that reaches it is past the cliff. The list
 /// itself is not sorted by score, and cannot be — a fused list puts a hit both
 /// branches found above one only the dense branch ranked higher, which is the
 /// point of fusing, and priming moves more. Read position by position, an
-/// out-of-order hit did not merely vanish from the reading: `cliff` clamps a
-/// negative gap to zero, so it manufactured a large positive gap at the
-/// position *before* it and drew the fall there. A leading `0.80, 0.40, 0.78`
-/// cut after the first hit and threw away the 0.78 — in `ask`, out of the
-/// answer entirely, which is the failure this reading was changed to stop.
+/// out-of-order hit did not merely vanish from the reading: the old clamp of a
+/// negative gap to zero manufactured a large positive gap at the position
+/// *before* it and drew the fall there. A leading `0.80, 0.40, 0.78` cut after
+/// the first hit and threw away the 0.78 — in `ask`, out of the answer
+/// entirely, which is the failure this reading was changed to stop.
 ///
 /// Carried back as "after the last hit that reaches the cut" rather than as a
 /// per-hit test, so what is marked stays a tail. Every reader downstream is
@@ -488,17 +506,21 @@ fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<f32> {
 /// high in the list is left above the line — `weak` is the mark for that one,
 /// and cutting the good hits below it was the bug.
 fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
-    let run = cliff_scores(results, reranked);
-    let mut sorted = run.clone();
+    let scored = cliff_scores(results, reranked);
+    let mut sorted: Vec<f32> = scored.iter().flatten().copied().collect();
     sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let Some(above) = cliff(&sorted) else {
         return;
     };
     // The lowest score the cliff leaves standing, and the last place in the
-    // list that reaches it. A hit with no score at all is past the run and so
-    // past the cliff with the rest of the tail — it placed there.
+    // list that reaches it. A hit with no score at all reaches nothing, so it
+    // is kept where it sits above that place and marked with the tail below
+    // it — the cut is a line across the list, not a judgement of that hit.
     let cut = sorted[above - 1];
-    let from = run.iter().rposition(|s| *s >= cut).map_or(0, |i| i + 1);
+    let from = scored
+        .iter()
+        .rposition(|s| s.is_some_and(|s| s >= cut))
+        .map_or(0, |i| i + 1);
     for r in results.iter_mut().skip(from) {
         r.past_cliff = true;
         if let Some(e) = r.explanation.as_mut() {
@@ -507,11 +529,9 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
     }
 }
 
-/// What every artifact's activation starts at — `schema.sql`'s default — and
-/// decays from whether or not anything ever happens to it.
-const ACTIVATION_BASELINE: f64 = 1.0;
-
-/// Activation above the capture baseline: what use has added, and nothing else.
+/// Activation above the capture baseline, per artifact: what use has added,
+/// and nothing else. The arithmetic is `links::engagement_at`, which promotion
+/// and the insights page read the same quantity through.
 ///
 /// A never-opened artifact carries the baseline, decaying. Read raw, a fresh
 /// one at `1.0` out-activates an old one at `0.25` by more than any margin,
@@ -519,17 +539,6 @@ const ACTIVATION_BASELINE: f64 = 1.0;
 /// reached. With `retrieved` at zero only opened, confirmed and cited raise
 /// activation, so above the baseline it is engagement by construction — and a
 /// hit that has none cannot be primed.
-///
-/// The baseline is subtracted *decayed to now*, never as the flat `1.0` it
-/// started at. The stored number is a sum of two terms that fall at the same
-/// rate, and taking a whole baseline off a half-decayed sum is a subtraction of
-/// two different units: an artifact captured three half-lives ago and opened
-/// three times right after came to `4.0`, reads `0.5` today, and came out at
-/// nothing — indistinguishable from one nobody ever touched — while a single
-/// open on that same old artifact came out an eighth the size of the same open
-/// on a fresh one. Both are the baseline's decay leaking into the answer.
-/// `created_at` is the baseline's own age; `stamp` is not, because a bump moves
-/// it and the baseline's age does not move with it.
 fn engagement(
     rows: HashMap<String, (f64, i64, i64)>,
     at: i64,
@@ -537,10 +546,10 @@ fn engagement(
 ) -> HashMap<String, f64> {
     rows.into_iter()
         .map(|(id, (value, stamp, created_at))| {
-            let now = crate::store::links::decayed(value, stamp, at, half_life_days);
-            let baseline =
-                crate::store::links::decayed(ACTIVATION_BASELINE, created_at, at, half_life_days);
-            (id, (now - baseline).max(0.0))
+            (
+                id,
+                crate::store::links::engagement_at(value, stamp, created_at, at, half_life_days),
+            )
         })
         .collect()
 }
@@ -4149,12 +4158,15 @@ mod tests {
         assert_eq!(cliff(&[0.016, 0.016, 0.016, 0.004]), Some(3));
     }
 
-    /// Priming may lift a near-tie past its neighbour, which reads as a
-    /// negative gap. That is a near-tie, not a fall.
+    /// Priming may lift a near-tie past its neighbour. Read position by
+    /// position that was a negative gap, and clamping it to zero manufactured
+    /// a fall at the position before it; `mark_past_cliff` sorts instead, and
+    /// the four near-tied hits are then one plateau with one fall after it —
+    /// which is what the list is.
     #[test]
     fn a_primed_inversion_is_not_a_cliff() {
-        assert_eq!(cliff(&[0.90, 0.88, 0.89, 0.87, 0.30]), Some(4));
-        assert_eq!(cliff(&[0.50, 0.48, 0.49, 0.47, 0.46]), None);
+        assert_eq!(cliff(&[0.90, 0.89, 0.88, 0.87, 0.30]), Some(4));
+        assert_eq!(cliff(&[0.50, 0.49, 0.48, 0.47, 0.46]), None);
     }
 
     #[test]
@@ -4273,9 +4285,9 @@ mod tests {
             vec![false, false, false, true, true]
         );
 
-        // A hit the lexical half alone found has no similarity: the cliff is
-        // read over the run of hits before it, and it is past the cliff with
-        // the rest of the tail — it placed there.
+        // A hit the lexical half alone found has no similarity: it is left out
+        // of the gaps, and sitting in the tail it is past the cliff with the
+        // rest of it — it placed there.
         let mut tail = three.clone();
         tail[4].similarity = None;
         tail.iter_mut().for_each(|r| r.past_cliff = false);
@@ -4284,12 +4296,40 @@ mod tests {
             tail.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true]
         );
-        // Placed second, it leaves one measurable hit and nothing to compare.
+        // Placed second, it is skipped rather than treated as the end of the
+        // reading. Read as a leading run it left one measurable hit and nothing
+        // to compare, so a list with an obvious fall after the third had no
+        // cliff at all — and an exact term match, which is the commonest hit
+        // with no similarity, is exactly what lands high in a fused list.
         let mut mixed = three.clone();
         mixed[1].similarity = None;
         mixed.iter_mut().for_each(|r| r.past_cliff = false);
         mark_past_cliff(&mut mixed, false);
-        assert!(mixed.iter().all(|r| !r.past_cliff));
+        assert_eq!(
+            mixed.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true, true],
+            "a hit with no similarity ended the reading instead of being skipped"
+        );
+        // And at rank 1, which is where it killed the feature outright: every
+        // keyword-shaped query went to `ask` with its whole list.
+        let mut leading = three.clone();
+        leading[0].similarity = None;
+        leading.iter_mut().for_each(|r| r.past_cliff = false);
+        mark_past_cliff(&mut leading, false);
+        assert_eq!(
+            leading.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true, true],
+            "a lexical-only hit at rank 1 switched the cliff off"
+        );
+        // A store that reports no similarity anywhere still has nothing to
+        // measure, and says so rather than guessing.
+        let mut none = three.clone();
+        none.iter_mut().for_each(|r| {
+            r.similarity = None;
+            r.past_cliff = false;
+        });
+        mark_past_cliff(&mut none, false);
+        assert!(none.iter().all(|r| !r.past_cliff));
 
         // A fused list is not sorted by similarity — a hit both branches found
         // is lifted above one the dense branch alone ranked higher, which is
