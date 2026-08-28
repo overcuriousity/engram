@@ -12,6 +12,7 @@ pub mod face;
 pub mod last;
 pub mod search;
 pub mod show;
+pub mod status;
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -115,6 +116,13 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
             }
         }
         args::Verb::Show(which) => match show::run(&endpoint, &which, last::load()).await {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("{e}");
+                2
+            }
+        },
+        args::Verb::Status => match status::run(&endpoint, &face, cli.json).await {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("{e}");

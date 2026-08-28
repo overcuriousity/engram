@@ -65,6 +65,15 @@ pub struct CliArgs {
     /// of an id, or a whole id.
     #[arg(long, value_name = "RANK|ID", conflicts_with_all = ["capture", "search", "ask"])]
     pub show: Option<String>,
+    /// What the base holds, what it is working through, and what it has been
+    /// learning.
+    ///
+    /// One shot, like every other verb. There is no ambient status line and no
+    /// footer under an ordinary search: that would make the cheapest door in
+    /// the application pay a request for something nobody asked for at that
+    /// moment.
+    #[arg(long, conflicts_with_all = ["capture", "search", "ask", "show"])]
+    pub status: bool,
     // Every flag `--show` does not honour refuses it from the other side —
     // `--json`, `--tag`, `--category`, `--title`, `--note`, `--watch` — so the
     // conflict is declared once, on the flag whose own doc comment explains it.
@@ -93,6 +102,8 @@ pub enum Verb {
         query: String,
     },
     Ask(String),
+    /// What the base holds and what it has been learning.
+    Status,
     /// One artifact, read in full. Carries what the operator typed rather than
     /// an id: a rank means nothing until the remembered list is read, and that
     /// is a file, which is not something this decision touches.
@@ -120,6 +131,7 @@ pub fn verb(
         !args.search.is_empty(),
         !args.ask.is_empty(),
         args.show.is_some(),
+        args.status,
     ]
     .iter()
     .filter(|x| **x)
@@ -135,8 +147,9 @@ pub fn verb(
         // prompt below would then be handed EOF.
         if named > 0 {
             return Err(Error::Validation(
-                "`-c`, `-s`, `-a` and `--show` are the client half of this \
-                 binary; run them on their own, without the server's own flags"
+                "`-c`, `-s`, `-a`, `--show` and `--status` are the client half \
+                 of this binary; run them on their own, without the server's \
+                 own flags"
                     .into(),
             ));
         }
@@ -148,10 +161,16 @@ pub fn verb(
         // this is here for the caller that built `CliArgs` itself — which is
         // every test, and one day some other entry point.
         return Err(Error::Validation(
-            "one verb at a time: `-c`, `-s`, `-a` or `--show`".into(),
+            "one verb at a time: `-c`, `-s`, `-a`, `--show` or `--status`".into(),
         ));
     }
 
+    // Answered before the pipe is looked at, for the reason `--show` is:
+    // `engram --status | grep failed` is an ordinary thing to type, and without
+    // this the pipe would be taken for the capture gesture below.
+    if args.status {
+        return Ok(Some(Verb::Status));
+    }
     if let Some(which) = &args.show {
         // Answered before the pipe is looked at. `engram --show 3 | less` is
         // the ordinary way to read a long artifact, and without this the pipe
@@ -221,6 +240,42 @@ fn read(words: &[String], stdin: impl FnOnce() -> std::io::Result<String>) -> Re
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn status_is_a_verb_of_its_own() {
+        let a = CliArgs {
+            status: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            verb(&a, false, false, || Ok(String::new())).unwrap(),
+            Some(Verb::Status)
+        );
+    }
+
+    /// Answered before the pipe is looked at, exactly as `--show` is:
+    /// `engram --status | grep failed` is an ordinary thing to type.
+    #[test]
+    fn status_down_a_pipe_is_still_status_and_not_a_capture() {
+        let a = CliArgs {
+            status: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            verb(&a, false, true, || Ok("some piped text".into())).unwrap(),
+            Some(Verb::Status)
+        );
+    }
+
+    #[test]
+    fn status_does_not_share_an_invocation_with_another_verb() {
+        let a = CliArgs {
+            status: true,
+            search: vec!["x".into()],
+            ..Default::default()
+        };
+        assert!(verb(&a, false, false, || Ok(String::new())).is_err());
+    }
     use super::*;
 
     fn args() -> CliArgs {

@@ -58,6 +58,7 @@ const BOLD: &str = "1";
 const DIM: &str = "2";
 const GREEN: &str = "32";
 const RED: &str = "31";
+const YELLOW: &str = "33";
 const CYAN: &str = "36";
 const RESET: &str = "\u{1b}[0m";
 
@@ -97,6 +98,30 @@ pub enum Lamp {
     Done,
     /// Not finished, and not going to be.
     Stopped,
+}
+
+/// Every escape this module can emit, taken back out again.
+///
+/// Lives beside the writing of them rather than in a test module: two files
+/// assert "strip the escapes and the rendering is unchanged", and a second copy
+/// of this could fall behind the vocabulary and make both assertions weaker
+/// without either failing.
+#[cfg(test)]
+pub(crate) fn strip_sgr(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// One lamp, drawn. A free function because the capture stages and the search
@@ -565,6 +590,22 @@ impl Face {
             true => format!("\u{1b}[{code}m{s}{RESET}"),
             false => s.to_string(),
         }
+    }
+
+    /// Recessive: an id, a timing, a row that is already past.
+    pub fn ink_dim(&self, s: &str) -> String {
+        self.ink(DIM, s)
+    }
+
+    /// Something that failed, and can be acted on.
+    pub fn ink_bad(&self, s: &str) -> String {
+        self.ink(RED, s)
+    }
+
+    /// Something waiting on a person: a capture held for review, a partial
+    /// embedding.
+    pub fn ink_caution(&self, s: &str) -> String {
+        self.ink(YELLOW, s)
     }
 
     /// One lamp and the words beside it: `● retrieved 24, showing 6`.
@@ -1132,24 +1173,6 @@ mod tests {
         // And the whole point of reading it: the glyphs follow.
         assert!(super::Face::decide(&always(), true, false, Some("UTF-8")).unicode);
         assert!(!super::Face::decide(&always(), true, false, Some("C")).unicode);
-    }
-
-    /// Every escape this file can emit, taken back out again.
-    fn strip_sgr(s: &str) -> String {
-        let mut out = String::new();
-        let mut chars = s.chars();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                for c in chars.by_ref() {
-                    if c == 'm' {
-                        break;
-                    }
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
     }
 
     fn drawn(color: bool) -> Face {

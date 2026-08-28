@@ -168,6 +168,24 @@ pub struct StatusResponse {
     pub oldest_pending_secs: Option<i64>,
     pub chunks: i64,
     pub vectors: u64,
+    /// What the base has been learning, or `None` while `[learn]` is off.
+    ///
+    /// Absent rather than zeroed: four zeroes read like a faculty failing, and
+    /// a faculty that was never switched on is not failing.
+    pub learning: Option<Learning>,
+}
+
+/// The half of `status` that is not about machinery.
+///
+/// The counts the insights page renders, in the shape a shell can read. A
+/// pursuit closed unsatisfied is a hole in the base somebody went looking
+/// through and did not fill.
+#[derive(serde::Serialize)]
+pub struct Learning {
+    pub pursuits_open: i64,
+    pub pursuits_unsatisfied: i64,
+    pub from_pursuits: i64,
+    pub gaps_open: i64,
 }
 
 /// Capture channels. `origin` is derived from which field arrived, not
@@ -1338,7 +1356,41 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
         .await?
         .get("n");
 
+    // Read from the same store calls the insights page reads, so the sentence
+    // in a terminal and the screen in a browser cannot come apart.
+    let learning = match tenant.core.learn.enabled {
+        false => None,
+        true => {
+            let recent = tenant.core.store.recent_pursuits(50).await?;
+            let on_the_gap_list = tenant
+                .core
+                .store
+                .open_pursuit_gap_ids(tenant.core.embedder.model())
+                .await
+                .unwrap_or_default();
+            Some(Learning {
+                pursuits_open: recent.iter().filter(|p| p.state == "open").count() as i64,
+                // The ones still on the gap list: `unsatisfied` is how a run
+                // ended, and a capture that answers one afterwards leaves the
+                // word alone deliberately.
+                pursuits_unsatisfied: recent
+                    .iter()
+                    .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
+                    .count() as i64,
+                from_pursuits: tenant.core.store.synthesized_artifacts(200).await?.len() as i64,
+                gaps_open: tenant
+                    .core
+                    .store
+                    .open_gap_refs(tenant.core.embedder.model(), tenant.core.weak_below)
+                    .await
+                    .unwrap_or_default()
+                    .len() as i64,
+            })
+        }
+    };
+
     Ok(Json(StatusResponse {
+        learning,
         sources: corpus_rows
             .iter()
             .map(|r| (r.get("status"), r.get("n")))
@@ -1860,6 +1912,35 @@ pub(crate) mod tests {
 
     /// A question typed at a shell reaches the log; the panel, which names no
     /// door, keeps the door it has always had and records nothing.
+    /// The block is absent while the layer is off, and the fields every
+    /// existing reader of this endpoint depends on are untouched.
+    #[tokio::test]
+    async fn status_says_nothing_about_learning_while_the_layer_is_off() {
+        let (app, token) = app_and_token().await;
+        let v = json_of(app.oneshot(get("/api/v1/status", Some(&token))).await.unwrap()).await;
+        assert!(v["learning"].is_null(), "{v}");
+        assert!(v["chunks"].is_i64(), "{v}");
+        assert!(v["jobs"].is_array(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn status_counts_what_the_base_has_been_learning() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, _core) = app_from_core(core).await;
+        let v = json_of(app.oneshot(get("/api/v1/status", Some(&token))).await.unwrap()).await;
+        let l = &v["learning"];
+        assert!(l.is_object(), "{v}");
+        for k in [
+            "pursuits_open",
+            "pursuits_unsatisfied",
+            "from_pursuits",
+            "gaps_open",
+        ] {
+            assert!(l[k].is_i64(), "{k} is missing from {l}");
+        }
+    }
+
     #[tokio::test]
     async fn a_shell_question_is_recorded_and_the_panel_is_unchanged() {
         let mut core = crate::core::test_support::test_core().await;
