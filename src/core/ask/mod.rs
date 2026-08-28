@@ -554,8 +554,13 @@ impl Core {
         // is read for it: an excerpt below the cliff makes the answer worse as
         // well as dearer, and its caveats are a lookup spent on something that
         // will not be sent.
-        let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
-        let cliff_at = crate::core::search::cliff(&scores);
+        //
+        // Read off the marks the search made rather than recomputed here over
+        // `score`: which scale the cliff may be taken on — reranker scores,
+        // or cosine similarity, never the fused rank — is the search's
+        // knowledge, and a second computation over the wrong number is how
+        // this answered from one excerpt when three were relevant.
+        let cliff_at = hits.iter().position(|h| h.past_cliff);
         hits.truncate(retrieve::above_cliff(cliff_at, hits.len()));
         let ranked = hits.len();
 
@@ -883,6 +888,7 @@ impl Core {
                 in_sitting: false,
                 // The cliff was computed over scores this one was never in.
                 past_cliff: false,
+                similarity: None,
                 // What makes a reached artifact tellable apart from a retrieved
                 // one, by a reader and by a test alike: a ranked hit has no
                 // `via`, and this one names the hit it was reached from.
@@ -2856,6 +2862,7 @@ mod tests {
                 primed: false,
                 in_sitting: false,
                 past_cliff: false,
+                similarity: None,
                 via: None,
                 reason: None,
                 explanation: None,

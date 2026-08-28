@@ -329,6 +329,7 @@ mod tests {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: None,
             via: via.map(str::to_string),
             reason: None,
             explanation: None,

@@ -350,6 +350,7 @@ pub(crate) mod fixture {
             primed: false,
             in_sitting: false,
             past_cliff,
+            similarity: None,
             via: None,
             reason: None,
             explanation: None,

@@ -188,6 +188,12 @@ pub struct SearchResult {
     /// dropped — but the page stops claiming it is an answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
+    /// Cosine similarity between the query and this hit, when the store could
+    /// say. Comparable across queries where `score` is not, which is why the
+    /// cliff is read from it whenever no reranker has calibrated the scores.
+    /// `None` for a hit only the lexical half found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f32>,
     /// The ranked hit that recalled this one. `None` for a ranked hit — which
     /// is every hit inside `limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,6 +237,7 @@ impl From<SearchHit> for SearchResult {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: h.similarity,
             via: None,
             reason: None,
             explanation: None,
@@ -431,10 +438,30 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
     (largest > CLIFF_FACTOR * others).then_some(at + 1)
 }
 
+/// The scores a list's cliff is read from, or `None` when it has none to read.
+///
+/// Never the fused rank. An RRF score is `Σ 1/(k+rank)` per branch — a
+/// harmonic curve whose first gap is structurally its largest — so a cliff
+/// taken on it measured how many hits both branches agreed on, and landed
+/// after hit #1 on almost every query. A reranker calibrates its scores, so
+/// once one has run they are the right input; without one, the cosine
+/// similarity is — it means the same thing from one query to the next, which
+/// is the property the largest-gap rule needs. A list where any hit has no
+/// similarity — a lexical-only hit, or a store that reports none — has no
+/// scale every hit shares, and gets no cliff rather than a made-up one.
+fn cliff_scores(results: &[SearchResult], reranked: bool) -> Option<Vec<f32>> {
+    if reranked {
+        return Some(results.iter().map(|r| r.score).collect());
+    }
+    results.iter().map(|r| r.similarity).collect()
+}
+
 /// Flag every hit from the cliff on. The list is left in its order and at its
 /// length; nothing about the cliff is silent and nothing about it is a change.
-fn mark_past_cliff(results: &mut [SearchResult]) {
-    let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
+    let Some(scores) = cliff_scores(results, reranked) else {
+        return;
+    };
     if let Some(above) = cliff(&scores) {
         for r in results.iter_mut().skip(above) {
             r.past_cliff = true;
@@ -910,6 +937,7 @@ impl Core {
                 primed: false,
                 in_sitting: false,
                 past_cliff: false,
+                similarity: None,
                 // Set here, where `via` is known. Never ranked, so every other
                 // stage stays absent rather than defaulting to values that
                 // would read as facts about a competition that never happened.
@@ -1503,7 +1531,7 @@ impl Core {
         // On the list the caller will see, in its final order: after priming,
         // after the truncate, and before association appends hits that never
         // competed for a place. Marks, never reorders or drops.
-        mark_past_cliff(&mut results);
+        mark_past_cliff(&mut results, reranked);
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
@@ -2845,6 +2873,7 @@ mod tests {
                 primed: false,
                 in_sitting: false,
                 past_cliff: false,
+                similarity: None,
                 via: None,
                 reason: None,
                 explanation: None,
@@ -3796,6 +3825,7 @@ mod tests {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: None,
             via: None,
             reason: None,
             explanation: None,
@@ -3903,6 +3933,7 @@ mod tests {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: None,
             via: None,
             reason: None,
             explanation: None,
@@ -3916,7 +3947,8 @@ mod tests {
             dummy("c", 0.30),
             dummy("d", 0.28),
         ];
-        mark_past_cliff(&mut results);
+        // Reranked, so the scores are calibrated and the cliff is read from them.
+        mark_past_cliff(&mut results, true);
         assert_eq!(
             results.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, true, true]
@@ -3931,8 +3963,80 @@ mod tests {
         );
 
         let mut flat = vec![dummy("a", 0.5), dummy("b", 0.5), dummy("c", 0.5)];
-        mark_past_cliff(&mut flat);
+        mark_past_cliff(&mut flat, true);
         assert!(flat.iter().all(|r| !r.past_cliff));
+    }
+
+    /// The default configuration has no reranker, and the scores are then
+    /// RRF fusions: a harmonic curve whose first gap is always its largest.
+    /// The list reproduced here is the `loop device` query from the report —
+    /// three relevant notes, and a cliff drawn after the first of them on the
+    /// fused scores. Read on the cosine similarity instead, the divider lands
+    /// where the relevance actually falls, and not at all when it does not.
+    #[test]
+    fn without_a_reranker_the_cliff_is_read_from_similarity_and_never_from_the_fused_rank() {
+        let dummy = |id: &str, score: f32, similarity: Option<f32>| SearchResult {
+            artifact_id: id.into(),
+            corpus_id: "c".into(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            in_sitting: false,
+            past_cliff: false,
+            similarity,
+            via: None,
+            reason: None,
+            explanation: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+        };
+        let fused = [1.050, 0.633, 0.383, 0.250, 0.217];
+        // Sanity: on the fused scores alone the rule draws its line after #1.
+        assert_eq!(cliff(&fused), Some(1));
+
+        // Similarities that fall evenly: no cliff, whatever the fusion says.
+        let sims = [0.82, 0.80, 0.78, 0.76, 0.74];
+        let mut even: Vec<SearchResult> = fused
+            .iter()
+            .zip(sims)
+            .enumerate()
+            .map(|(i, (f, s))| dummy(&i.to_string(), *f, Some(s)))
+            .collect();
+        mark_past_cliff(&mut even, false);
+        assert!(
+            even.iter().all(|r| !r.past_cliff),
+            "a cliff was drawn on a list whose similarity falls evenly"
+        );
+
+        // Similarities that fall after the third hit: the cliff is there.
+        let sims = [0.82, 0.80, 0.78, 0.31, 0.29];
+        let mut three: Vec<SearchResult> = fused
+            .iter()
+            .zip(sims)
+            .enumerate()
+            .map(|(i, (f, s))| dummy(&i.to_string(), *f, Some(s)))
+            .collect();
+        mark_past_cliff(&mut three, false);
+        assert_eq!(
+            three.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true, true]
+        );
+
+        // A hit the lexical half alone found has no similarity, so the list
+        // has no one scale to read a cliff on — and gets none.
+        let mut mixed = three.clone();
+        mixed[1].similarity = None;
+        mixed.iter_mut().for_each(|r| r.past_cliff = false);
+        mark_past_cliff(&mut mixed, false);
+        assert!(mixed.iter().all(|r| !r.past_cliff));
     }
 
     #[tokio::test]
