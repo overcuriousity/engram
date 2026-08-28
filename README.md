@@ -2,93 +2,70 @@
 
 **A trace of everything worth keeping.**
 
-A self-hosted knowledge base you search by meaning. Paste text, a link, a PDF or
-a photo; engram splits it into passages, embeds them, and answers queries with
-ranked excerpts — your words, not a rewrite of your words. That distinction is
-the whole product, and most tools get it wrong. Three front doors over one
-backend: a web UI, a REST API at `/api/v1`, and an MCP server at `/mcp`, so an
-agent can read and write the base mid-session. Three doors. Nobody has ever
-needed a fourth.
+A self-hosted knowledge base you search by meaning. Paste anything — text, a
+link, a PDF, a photo. engram splits it, embeds it, and hands back the passages
+that answer you. Your words. Ranked. Never a rewrite.
 
-**Your text, not a summary of it.** Search returns the source wording, and every
-artifact stays anchored to the lines of the corpus it came from, so a result can
-always be read beside the original. Asking a question *across* artifacts is a
-separate endpoint you call deliberately. Nothing generated stands between you
-and your own notes unless you ask for it.
+Everybody else summarizes your notes and shows you the summary. Then the summary
+is all you have. We keep the original and we keep it in front of you.
 
-**Rewriting is earned.** Capture cannot know which of ten thousand paragraphs
-will ever be asked about, so engram spends no model call on them up front. A
-window is rewritten into a self-contained artifact once reading has shown it is
-worth rewriting — a passage opened often enough, or a run of searches that
-assembled an answer the base did not hold. Every synthesized artifact can name
-the use that earned it. The rest of your text stays exactly as you wrote it.
-That is `infer.synthesis = "earned"`, the default; `"eager"` rewrites everything
-at capture, `"off"` rewrites nothing and needs no chat model at all.
+Three doors, one backend: the web UI, a REST API at `/api/v1`, and an MCP server
+at `/mcp` so an agent can read and write mid-session. Three doors is enough.
 
-**It measures its own retrieval.** A test query written while looking at an
-artifact reuses that artifact's wording, and every retrieval system on earth
-passes it. Meaningless. The only honest question is one asked in earnest, before
-anything came back — so engram records real searches and lets you judge them
-later. The number on the judge page is not a proxy score. It is recall@10 and
-MRR, read from the positions those searches actually gave.
+**Nothing gets rewritten until it earns it.** Capture spends no model call on
+paragraphs nobody will ever ask about, and that is most of them. A passage is
+rewritten once you have actually used it, and it says so. That is
+`infer.synthesis = "earned"`, the default. `"eager"` rewrites everything up
+front; `"off"` rewrites nothing and needs no chat model at all.
+
+**Both halves of retrieval.** A dense embedding for meaning, a local BM25 vector
+for characters. Meaning finds the paragraph you half-remember. Characters find
+`E01` and `--dry-run`, which embeddings blur. You get both, fused, every query.
+
+**It grades itself, honestly.** A test query written while looking at the answer
+passes on every system ever built. Meaningless. engram records the searches you
+made in earnest and lets you judge them later — recall@10 and MRR, from the
+positions those searches really gave. Not a proxy score.
 
 ## What it does
 
-- **Capture** — paste text, fetch a URL, upload a PDF, drop or photograph an
-  image, send from the browser extension, share from a phone, or pipe from a
-  shell. Originals are kept untouched and served back. PDFs are read locally
-  with no model; images need `[infer.vision]`.
-- **One door for anything** — `POST /api/v1/capture` reads what it is handed
-  rather than asking the caller to classify it: a body that is one link is a
-  link, a PDF or an image arrives as raw bytes, and a multipart share of four
-  photos is four captures.
-- **On a phone** — installed on Android, engram joins the system share sheet.
-  On iOS, a bookmarklet and a Shortcut recipe do the same, each carrying a token
-  minted for that one device and revocable on its own.
-- **From a shell** — the same binary is a client of a running engram. Capture,
-  search, ask and read, drawn on a terminal and plain text in a pipe. See
-  [The client](#the-client).
-- **Search by meaning, and by the exact string** — a dense embedding and a
-  locally computed BM25 vector are fused per query, because meaning finds the
-  paragraph you half-remember and characters find `E01`, `--dry-run` and
-  `/usr/bin/env`, which embeddings blur. Loose matches are labelled loose, and
-  a divider marks where relevance falls off: the hits below it keep their rank
-  but stop claiming to be answers.
-- **Ask** — one question across the base, streamed, with planned retrieval for
-  questions spanning several subjects. Answers abstain out loud when the base
-  has nothing, and any command, path or flag the model wrote that appears in no
-  cited excerpt is badged as unsupported. Tremendously useful, that badge.
-- **Judging** — recorded searches and questions come back shuffled and
-  unlabelled, one keystroke each. Everything stays on the machine and one button
-  forgets all of it.
-- **Duplicate hygiene** — near-duplicates are parked at capture, close pairs go
-  to a review queue, and consolidation supersedes or merges only where it is
-  safe. Nothing is deleted, no merge drops a number, command or path, and every
-  action has an undo.
-- **Associative memory** — links learned from co-retrieval and a decaying
-  accessibility per artifact, so what you actually use stays reachable. Learned
-  from use; never rewrites what is stored.
-- **Knowledge gaps** — questions answered with nothing and searches judged as
-  gaps are grouped, named, and listed until you cover them.
+- **Capture anything** — paste, a URL, a PDF, a photo, the browser extension,
+  the phone share sheet, a shell pipe. One endpoint reads what it is handed
+  instead of asking you to classify it. Originals are stored untouched and
+  served back. PDFs are read locally with no model; images need
+  `[infer.vision]`.
+- **Search** — loose matches say they are loose, and a divider marks where
+  relevance falls off. Below the line, hits keep their rank and stop pretending.
+- **Ask** — one question across the whole base, streamed. It abstains out loud
+  when the base has nothing. Any command or path the model wrote that no excerpt
+  supports gets badged. That badge is the best part.
+- **From a shell** — capture, search, ask, read. Drawn on a terminal, plain text
+  in a pipe. See [The client](#the-client).
+- **Judge** — recorded searches come back shuffled and unlabelled, one keystroke
+  each. It all stays on your machine, and one button forgets it.
+- **Duplicates** — near-duplicates parked at capture, close pairs queued for a
+  person. Nothing deleted. No merge drops a number, a command or a path. Undo on
+  everything.
+- **Memory that learns** — links from co-retrieval, accessibility that decays,
+  so what you use stays reachable. It never rewrites what is stored.
+- **Gaps** — questions the base could not answer are grouped, named and listed
+  until you cover them.
 
 Everything after the paste runs on its own, and sweeps repair whatever was
 interrupted. You do not babysit it.
 
 ## Corpus, segment, artifact
 
-A **corpus** is what you captured — a chapter, a manual, a transcript, a photo,
-a PDF. Stored verbatim, never edited, and the provenance every answer traces
-back to.
+A **corpus** is what you captured. Stored verbatim, never edited, and the
+provenance every answer traces back to.
 
-A **segment** is a slice of one corpus, sized to fit the model's context. The
-split is local and mechanical, and it doubles as the memory that lets an
-interrupted run resume instead of restarting.
+A **segment** is a slice of one corpus, sized to the model's context. Local and
+mechanical, and it doubles as the memory that lets an interrupted run resume.
 
 An **artifact** is a unit of retrieval: text with a title, category and tags,
-embedded and ranked on its own. Most are *passages* — verbatim slices, split on
-the document's own headings. A *synthesized* or *captured* artifact is one the
-model wrote from a window, badged as such wherever it is shown, and retired with
-one click. No artifact spans two segments.
+ranked on its own. Most are verbatim *passages*, split on the document's own
+headings. A *synthesized* or *captured* one was written by the model from a
+window, badged wherever it is shown, and retired with one click.
 
 ## Requirements
 
