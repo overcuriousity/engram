@@ -143,7 +143,13 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
     )
     .await;
     if let Some(r) = &cfg.infer.rerank {
-        engram::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
+        engram::infer::openai::probe_path(
+            "rerank",
+            &r.base_url,
+            r.style.probe_path(),
+            r.api_key.as_deref(),
+        )
+        .await;
         if !r.applies_to(engram::config::RerankApply::Search) {
             tracing::info!("rerank scoped to ask; search returns vector order");
         }
