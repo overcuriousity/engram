@@ -59,7 +59,11 @@ fn needs_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Option
     if !face.on {
         return None;
     }
-    let said: Vec<&str> = data["queries"].as_array()?.iter().filter_map(|v| v.as_str()).collect();
+    let said: Vec<&str> = data["queries"]
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
     if said.is_empty() {
         return None;
     }
@@ -337,8 +341,11 @@ mod tests {
             false,
             Some("en_US.UTF-8"),
         );
-        let line = needs_line(&face, &serde_json::json!({"queries": ["journal rotation policy"]}))
-            .expect("a line");
+        let line = needs_line(
+            &face,
+            &serde_json::json!({"queries": ["journal rotation policy"]}),
+        )
+        .expect("a line");
         assert!(line.contains("journal rotation policy"), "{line}");
         // A round that named nothing is not a round that happened.
         assert!(needs_line(&face, &serde_json::json!({"queries": []})).is_none());
@@ -348,9 +355,7 @@ mod tests {
     #[test]
     fn a_face_that_is_off_says_nothing_between_the_frames() {
         let face = crate::cli::face::Face::decide(&Default::default(), false, false, None);
-        assert!(
-            retrieved_line(&face, &serde_json::json!({"retrieved": 1, "shown": 1})).is_none()
-        );
+        assert!(retrieved_line(&face, &serde_json::json!({"retrieved": 1, "shown": 1})).is_none());
         assert!(needs_line(&face, &serde_json::json!({"queries": ["x"]})).is_none());
     }
     use super::*;

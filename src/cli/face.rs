@@ -637,7 +637,11 @@ impl Face {
         if !self.on {
             return crate::cli::search::render_plain(hits);
         }
-        let (full, empty) = if self.unicode { ('▇', '░') } else { ('#', '.') };
+        let (full, empty) = if self.unicode {
+            ('▇', '░')
+        } else {
+            ('#', '.')
+        };
         // The list is its own scale. A score here is a fused rank rather than a
         // probability — `search::prime` says so about the same numbers — and a
         // whole list of them is routinely negative, so a fixed `0.0..=1.0`
@@ -648,7 +652,11 @@ impl Face {
         // Both halves measured: the count is the list, the time is what the
         // client timed. The query is not echoed — a terminal already has the
         // command that produced this two lines up, which a page does not.
-        let mut head = format!("{} hit{}", hits.len(), if hits.len() == 1 { "" } else { "s" });
+        let mut head = format!(
+            "{} hit{}",
+            hits.len(),
+            if hits.len() == 1 { "" } else { "s" }
+        );
         if let Some(ms) = elapsed_ms {
             head.push_str(&format!(" · {ms} ms"));
         }
@@ -781,7 +789,6 @@ impl Face {
             drawn: false,
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1024,7 +1031,10 @@ mod tests {
     #[test]
     fn the_cliff_is_said_where_it_falls() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
-        let drawn = f.render(&[hit("a", 0.9, false, false), hit("b", 0.2, true, true)], None);
+        let drawn = f.render(
+            &[hit("a", 0.9, false, false), hit("b", 0.2, true, true)],
+            None,
+        );
         // A mark made only of glyphs is a mark a screen reader, a screenshot
         // and a monochrome terminal never reach. The trace that used to break
         // here was exactly that, and the sentence says what it was for.
@@ -1065,14 +1075,20 @@ mod tests {
         h.artifact_id = "01J8Z4K2QW7NR3T9X0YB5C6D8E".into();
         let drawn = f.render(&[h], None);
         assert!(drawn.contains("01J8Z4K2"), "{drawn}");
-        assert!(!drawn.contains("01J8Z4K2QW"), "the whole id crowds the title: {drawn}");
+        assert!(
+            !drawn.contains("01J8Z4K2QW"),
+            "the whole id crowds the title: {drawn}"
+        );
     }
 
     /// Both halves of the header are measurements. Nothing else belongs in it.
     #[test]
     fn the_header_says_what_was_counted_and_what_was_timed() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
-        let drawn = f.render(&[hit("a", 0.9, false, false), hit("b", 0.2, false, false)], Some(412));
+        let drawn = f.render(
+            &[hit("a", 0.9, false, false), hit("b", 0.2, false, false)],
+            Some(412),
+        );
         assert!(drawn.contains("2 hits"), "{drawn}");
         assert!(drawn.contains("412 ms"), "{drawn}");
         // A client that timed nothing says nothing about time.
@@ -1096,7 +1112,10 @@ mod tests {
                   Aufgaben geeignet."
             .into();
         let drawn = f.render(&[h], None);
-        assert!(drawn.contains("zeitaufwendige"), "the tail was cut: {drawn}");
+        assert!(
+            drawn.contains("zeitaufwendige"),
+            "the tail was cut: {drawn}"
+        );
         for line in drawn.lines() {
             assert!(line.chars().count() <= 40, "over the width: {line:?}");
         }
@@ -1115,7 +1134,10 @@ mod tests {
         h.text = "Betriebssysteme f\u{fc}r Server\n\nDienste bezeichnen Anwendungen.\n".into();
         let drawn = f.render(&[h], None);
         assert!(drawn.contains("Betriebssysteme"), "{drawn}");
-        assert!(drawn.contains("Dienste bezeichnen"), "second line lost: {drawn}");
+        assert!(
+            drawn.contains("Dienste bezeichnen"),
+            "second line lost: {drawn}"
+        );
     }
 
     #[test]
@@ -1123,7 +1145,10 @@ mod tests {
         // The boundary that keeps the plain form the only one a script sees.
         let hits = [hit("a", 0.9, false, false), hit("b", 0.2, true, true)];
         let off = Face::decide(&Default::default(), false, false, Some("en_US.UTF-8"));
-        assert_eq!(off.render(&hits, None), crate::cli::search::render_plain(&hits));
+        assert_eq!(
+            off.render(&hits, None),
+            crate::cli::search::render_plain(&hits)
+        );
     }
 
     /// POSIX precedence, which is not what this used to read.
@@ -1211,7 +1236,10 @@ mod tests {
         s.start(&[Embed, Retrieve, Rerank]);
         let line = s.at_after(Retrieve, 500).expect("a line");
         assert!(line.contains("embed") && line.contains("retrieve") && line.contains("rerank"));
-        assert!(line.contains('●'), "the stage before it is finished: {line}");
+        assert!(
+            line.contains('●'),
+            "the stage before it is finished: {line}"
+        );
         assert!(line.contains('◉'), "the stage running: {line}");
         assert!(line.contains('·'), "the stage still to come: {line}");
     }
@@ -1296,4 +1324,3 @@ mod tests {
         }
     }
 }
-

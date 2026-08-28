@@ -68,7 +68,10 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
     if let Some(rows) = s["jobs"].as_array() {
         let mut line = counts(face, rows);
         if let Some(age) = s["oldest_pending_secs"].as_i64() {
-            line.push_str(&format!(" · {}", face.ink_dim(&format!("oldest {}", ago(age)))));
+            line.push_str(&format!(
+                " · {}",
+                face.ink_dim(&format!("oldest {}", ago(age)))
+            ));
         }
         out.push_str(&format!("  jobs       {line}\n"));
     }

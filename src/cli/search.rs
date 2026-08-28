@@ -20,13 +20,7 @@ pub fn stream_url(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs
     url_for(e, "/search/stream", limit, query, cli)
 }
 
-fn url_for(
-    e: &Endpoint,
-    path: &str,
-    limit: Option<usize>,
-    query: &str,
-    cli: &CliArgs,
-) -> String {
+fn url_for(e: &Endpoint, path: &str, limit: Option<usize>, query: &str, cli: &CliArgs) -> String {
     // `door=cli` rather than the default `api`: a query typed at a shell is
     // composed before anything came back, which is the least contaminated
     // question the base receives, and the judge queue should be able to tell.
@@ -254,9 +248,7 @@ pub(crate) fn excerpt(text: &str, budget: usize, width: usize) -> Vec<String> {
         for word in line.split_whitespace() {
             match out.last_mut() {
                 // `+ 1` is the space that joining would add.
-                Some(last)
-                    if !fresh && last.chars().count() + 1 + word.chars().count() <= room =>
-                {
+                Some(last) if !fresh && last.chars().count() + 1 + word.chars().count() <= room => {
                     last.push(' ');
                     last.push_str(word);
                 }
@@ -341,7 +333,10 @@ mod tests {
         h.text = "One\n\nTwo\n\nThree\n\nFour".into();
         let out = render_plain(&[h]);
         assert!(out.contains("Three"), "{out}");
-        assert!(!out.contains("Four"), "a fourth line is past the budget: {out}");
+        assert!(
+            !out.contains("Four"),
+            "a fourth line is past the budget: {out}"
+        );
     }
 
     #[test]
@@ -447,7 +442,12 @@ mod tests {
             ..Default::default()
         };
         let face = crate::cli::face::Face::decide(&cli, false, false, None);
-        assert!(streaming(&e, None, "journal", &cli, &face).await.unwrap().is_none());
+        assert!(
+            streaming(&e, None, "journal", &cli, &face)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

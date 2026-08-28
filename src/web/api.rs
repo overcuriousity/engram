@@ -1886,7 +1886,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
-        assert!(events[0].scope.is_some(), "an unscoped shell search: {events:?}");
+        assert!(
+            events[0].scope.is_some(),
+            "an unscoped shell search: {events:?}"
+        );
     }
 
     /// The other half of the rule, and the one that must not move: a token is
@@ -1917,7 +1920,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn status_says_nothing_about_learning_while_the_layer_is_off() {
         let (app, token) = app_and_token().await;
-        let v = json_of(app.oneshot(get("/api/v1/status", Some(&token))).await.unwrap()).await;
+        let v = json_of(
+            app.oneshot(get("/api/v1/status", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert!(v["learning"].is_null(), "{v}");
         assert!(v["chunks"].is_i64(), "{v}");
         assert!(v["jobs"].is_array(), "{v}");
@@ -1928,7 +1936,12 @@ pub(crate) mod tests {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         let (app, token, _core) = app_from_core(core).await;
-        let v = json_of(app.oneshot(get("/api/v1/status", Some(&token))).await.unwrap()).await;
+        let v = json_of(
+            app.oneshot(get("/api/v1/status", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
         let l = &v["learning"];
         assert!(l.is_object(), "{v}");
         for k in [
@@ -1951,7 +1964,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
-        crate::jobs::embed::run_corpus(&core, &out.id).await.unwrap();
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
 
         // Drained, not just received: the answer is produced while the body is
         // read, and `record_ask` runs at the end of it.
@@ -2005,7 +2020,10 @@ pub(crate) mod tests {
         assert!(body.contains("\"embed\""), "{body}");
         assert!(body.contains("event: results"), "{body}");
         let (before, after) = body.split_once("event: results").expect("a terminal frame");
-        assert!(before.contains("event: stage"), "no stage was announced: {body}");
+        assert!(
+            before.contains("event: stage"),
+            "no stage was announced: {body}"
+        );
         assert!(
             !after.contains("event: stage"),
             "a stage was reported after the results it preceded: {body}"
@@ -2021,9 +2039,12 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let v: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert!(v.is_array(), "{v}");
     }
 
