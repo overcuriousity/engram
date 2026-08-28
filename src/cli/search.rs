@@ -233,7 +233,12 @@ pub fn render_plain(hits: &[SearchResult]) -> String {
     let mut out = String::new();
     for (i, h) in hits.iter().enumerate() {
         let mark = if h.past_cliff { "." } else { " " };
-        let title = h.title.as_deref().unwrap_or("(untitled)");
+        // The server names a passage by its note when it has no heading; a
+        // merged artifact has no note, and is named by its own opening.
+        let title = match &h.title {
+            Some(t) => t.clone(),
+            None => crate::web::markdown::stand_in_title(&h.text, 60),
+        };
         out.push_str(&format!(
             "{mark}{:>2} {:.2}  {title}  {}\n",
             i + 1,
@@ -351,6 +356,7 @@ pub(crate) mod fixture {
             in_sitting: false,
             past_cliff,
             similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -400,6 +406,15 @@ mod tests {
         assert!(out.contains("0.83"), "{out}");
         assert!(out.contains("art-a"), "{out}");
         assert!(out.contains("the body of a"), "{out}");
+    }
+
+    #[test]
+    fn a_hit_with_no_title_is_named_by_its_opening_and_never_untitled() {
+        let mut h = hit("a", 0.83, false, false);
+        h.title = None;
+        let out = render_plain(&[h]);
+        assert!(out.contains("the body of a"), "{out}");
+        assert!(!out.contains("untitled"), "{out}");
     }
 
     #[tokio::test]

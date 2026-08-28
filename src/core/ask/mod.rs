@@ -570,6 +570,9 @@ impl Core {
         // `scores` is consumed above and never recomputed, so nothing appended
         // from here on can reach `cliff` at all.
         self.reach_sideways(&mut hits, cliff_at).await;
+        // The neighbours just appended came off the store, not the ranking,
+        // and so never passed the titling the ranked hits got.
+        self.fill_titles(&mut hits).await;
 
         Ok(Round {
             query: q.to_string(),
@@ -889,6 +892,7 @@ impl Core {
                 // The cliff was computed over scores this one was never in.
                 past_cliff: false,
                 similarity: None,
+                titled_by_corpus: false,
                 // What makes a reached artifact tellable apart from a retrieved
                 // one, by a reader and by a test alike: a ranked hit has no
                 // `via`, and this one names the hit it was reached from.
@@ -2863,6 +2867,7 @@ mod tests {
                 in_sitting: false,
                 past_cliff: false,
                 similarity: None,
+                titled_by_corpus: false,
                 via: None,
                 reason: None,
                 explanation: None,

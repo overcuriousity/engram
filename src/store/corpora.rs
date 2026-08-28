@@ -366,6 +366,33 @@ impl Store {
         }))
     }
 
+    /// The title hints of these corpora, by id, for the ones that have one.
+    ///
+    /// What a passage with no heading of its own is shown under: the note it
+    /// came from is one join away and is exactly what a person would call it.
+    pub async fn corpus_titles(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let holes = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id, title_hint FROM corpora WHERE title_hint IS NOT NULL AND id IN ({holes})"
+        )));
+        for id in ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("title_hint")))
+            .collect())
+    }
+
     pub async fn get_corpus(&self, id: &str) -> Result<Corpus> {
         let row = sqlx::query("SELECT * FROM corpora WHERE id = ?")
             .bind(id)

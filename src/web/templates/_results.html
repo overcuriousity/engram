@@ -77,7 +77,9 @@
            none by design, and "Untitled" is a word that says nothing standing
            where a name would say something. The snippet carries the row. #}
         {% if !r.title.is_empty() %}
-        <span class="rail-title">{{ r.title }}</span>
+        {# A passage with no heading is shown under its note's title, marked
+           so — a muted `·` before it — because a passage is not the note. #}
+        <span class="rail-title{% if r.titled_by_corpus %} rail-title-corpus{% endif %}"{% if r.titled_by_corpus %} title="The note this passage is from"{% endif %}>{{ r.title }}</span>
         {% endif %}
       </div>
       {# Rank, title, two lines. No tags: the pane beside this lists them in

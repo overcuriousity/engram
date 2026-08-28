@@ -194,6 +194,11 @@ pub struct SearchResult {
     /// `None` for a hit only the lexical half found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f32>,
+    /// `title` is the corpus's, not this passage's own. The stored title is
+    /// only ever a real heading; a passage without one is shown under the
+    /// note it came from, and said to be, so it is not mistaken for the whole.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub titled_by_corpus: bool,
     /// The ranked hit that recalled this one. `None` for a ranked hit — which
     /// is every hit inside `limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,6 +243,7 @@ impl From<SearchHit> for SearchResult {
             in_sitting: false,
             past_cliff: false,
             similarity: h.similarity,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -679,6 +685,43 @@ impl Core {
         }
     }
 
+    /// Give a passage with no heading of its own the title of its corpus.
+    ///
+    /// The stored `artifacts.title` is only ever a real heading — nothing is
+    /// inferred to fill that gap, and that stays true. But most pasted notes
+    /// have no heading, and a rail, an answer's citations and a judge card of
+    /// `(untitled)` rows is unreadable when the note's own title is one join
+    /// away. Done here, once, on the way out of the ranking: the CLI, MCP, the
+    /// web rail and the extension all inherit it. Said on the result
+    /// (`titled_by_corpus`) so a door can show that the name is the note's.
+    ///
+    /// Best-effort: a failed read costs the titles, never the results.
+    pub(crate) async fn fill_titles(&self, results: &mut [SearchResult]) {
+        let mut wanted: Vec<String> = results
+            .iter()
+            .filter(|r| r.title.is_none())
+            .map(|r| r.corpus_id.clone())
+            .collect();
+        wanted.sort();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return;
+        }
+        let titles = match self.store.corpus_titles(&wanted).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read corpus titles for untitled hits");
+                return;
+            }
+        };
+        for r in results.iter_mut().filter(|r| r.title.is_none()) {
+            if let Some(t) = titles.get(&r.corpus_id) {
+                r.title = Some(t.clone());
+                r.titled_by_corpus = true;
+            }
+        }
+    }
+
     /// Opening a chunk is the deliberate act that counts as remembering it,
     /// which is why the detail pane records it and an incremental search does
     /// not.
@@ -938,6 +981,7 @@ impl Core {
                 in_sitting: false,
                 past_cliff: false,
                 similarity: None,
+                titled_by_corpus: false,
                 // Set here, where `via` is known. Never ranked, so every other
                 // stage stays absent rather than defaulting to values that
                 // would read as facts about a competition that never happened.
@@ -1370,6 +1414,8 @@ impl Core {
                 }
             })
             .collect();
+
+        self.fill_titles(&mut results).await;
 
         let mut reranked = false;
         // Said on the same condition the stage list was built from, and before
@@ -2874,6 +2920,7 @@ mod tests {
                 in_sitting: false,
                 past_cliff: false,
                 similarity: None,
+                titled_by_corpus: false,
                 via: None,
                 reason: None,
                 explanation: None,
@@ -3396,6 +3443,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_passage_with_no_heading_is_shown_under_its_notes_title() {
+        // Most pasted notes have no markdown heading, so their passages are
+        // stored untitled — rightly: a passage claims no heading it lacks. But
+        // the note's own title is one join away, and it is what a person
+        // would call the passage. Filled once here, so every door inherits it.
+        let core = test_core().await;
+        let named = core
+            .store
+            .insert_corpus("feeding schedule", "web", Some("Sourdough"))
+            .await
+            .unwrap();
+        let unnamed = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        for (src, text) in [
+            (&named, "feeding schedule that finally worked"),
+            (&unnamed, "words"),
+        ] {
+            let new = vec![NewArtifact {
+                ordinal: 0,
+                text: text.to_string(),
+                corpus_span: None,
+                title: None,
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            }];
+            for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
+                crate::jobs::embed::run(&core, &c.id).await.unwrap();
+            }
+        }
+        let hits = core
+            .search(&q("feeding schedule"), Door::Judge)
+            .await
+            .unwrap();
+        let of = |src: &crate::store::corpora::Corpus| {
+            hits.iter().find(|h| h.corpus_id == src.id).unwrap()
+        };
+        assert_eq!(of(&named).title.as_deref(), Some("Sourdough"));
+        assert!(
+            of(&named).titled_by_corpus,
+            "the title must say it is the note's"
+        );
+        // Nothing is invented where the note has no title either.
+        assert_eq!(of(&unnamed).title, None);
+        assert!(!of(&unnamed).titled_by_corpus);
+    }
+
+    #[tokio::test]
     async fn a_reranked_search_stores_a_pool_wider_than_its_answer() {
         // The reranker returns at most `top_n`, so asking it for `limit` would
         // hand capture a pool exactly as wide as the answer — and a hit the
@@ -3826,6 +3921,7 @@ mod tests {
             in_sitting: false,
             past_cliff: false,
             similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -3934,6 +4030,7 @@ mod tests {
             in_sitting: false,
             past_cliff: false,
             similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -3991,6 +4088,7 @@ mod tests {
             in_sitting: false,
             past_cliff: false,
             similarity,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,

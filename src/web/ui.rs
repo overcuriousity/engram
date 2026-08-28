@@ -20,6 +20,9 @@ pub struct RenderedResult {
     /// Empty where the artifact has no title of its own. The rail then renders
     /// no heading at all — see `render_hit`.
     pub title: String,
+    /// The title is the corpus's — see `SearchResult::titled_by_corpus`. The
+    /// rail says so quietly rather than passing a passage off as the whole.
+    pub titled_by_corpus: bool,
     /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
     pub html: String,
     /// Markup-free preview for the rail, where rendered HTML would not fit.
@@ -1296,6 +1299,7 @@ pub(crate) fn render_hit(
         // and a rail of "Untitled" headings is a column of a word that says
         // nothing where a name would say something. The row shows its snippet.
         title: h.title.unwrap_or_default(),
+        titled_by_corpus: h.titled_by_corpus,
         html: markdown::render(&h.text),
         snippet: markdown::snippet(&h.text, 140),
         category: h.category,
@@ -6306,6 +6310,7 @@ mod tests {
             in_sitting: false,
             past_cliff: false,
             similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -6395,6 +6400,7 @@ mod tests {
             why_ranked: None,
             artifact_id: id.into(),
             title: String::new(),
+            titled_by_corpus: false,
             html: String::new(),
             snippet: String::new(),
             category: None,
@@ -6538,6 +6544,7 @@ mod tests {
             in_sitting: false,
             past_cliff: false,
             similarity: None,
+            titled_by_corpus: false,
             via: via.map(str::to_string),
             reason: None,
             explanation: None,
@@ -6569,6 +6576,7 @@ mod tests {
             why_ranked: None,
             artifact_id: "a1".into(),
             title: "The one that was recalled".into(),
+            titled_by_corpus: false,
             html: String::new(),
             snippet: "a snippet".into(),
             category: None,
@@ -6633,6 +6641,25 @@ mod tests {
         .unwrap();
         assert!(!flat.contains("Relevance falls off here"), "{flat}");
         assert!(!flat.contains("rail-past"), "{flat}");
+    }
+
+    #[test]
+    fn a_title_borrowed_from_the_note_is_marked_as_the_notes() {
+        let mut own = rendered(None, None);
+        own.title = "Sourdough".into();
+        let mut borrowed = own.clone();
+        borrowed.titled_by_corpus = true;
+        let body = ResultsTemplate {
+            results: vec![own, borrowed],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            reranked: false,
+        }
+        .render()
+        .unwrap();
+        assert_eq!(body.matches("Sourdough").count(), 2, "{body}");
+        assert_eq!(body.matches("rail-title-corpus").count(), 1, "{body}");
     }
 
     #[tokio::test]
@@ -6738,6 +6765,7 @@ mod tests {
             why_ranked: None,
             artifact_id: "r1".into(),
             title: "The ranked hit".into(),
+            titled_by_corpus: false,
             html: String::new(),
             snippet: "a snippet".into(),
             category: None,

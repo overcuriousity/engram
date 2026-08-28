@@ -324,7 +324,9 @@ function renderHits(hits, into) {
     link.href = deployment + '/ui/artifacts/' + h.artifact_id;
     link.target = '_blank';
     link.rel = 'noreferrer noopener';
-    link.textContent = h.title || 'Untitled';
+    // The server names a passage by its note when it has no heading of its
+    // own; what reaches here untitled has neither, and its opening is its name.
+    link.textContent = h.title || label({ raw_text: h.text }) || h.artifact_id;
     title.appendChild(link);
 
     const body = document.createElement('p');
@@ -624,11 +626,12 @@ $('recent-toggle').addEventListener('click', async () => {
 });
 
 /// A paste has no title, so it is named by its own first line — the same thing
-/// a person would call it.
+/// a person would call it. Empty when there is no line either, so the caller
+/// picks what stands in.
 function label(c) {
   if (c.title_hint) return c.title_hint;
   const first = (c.raw_text || '').split('\n').find((l) => l.trim());
-  if (!first) return 'Untitled';
+  if (!first) return '';
   const clipped = first.trim();
   return clipped.length > 60 ? clipped.slice(0, 60) + '…' : clipped;
 }

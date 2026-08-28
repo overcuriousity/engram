@@ -226,6 +226,8 @@ fn shuffled(event_id: &str, mut choices: Vec<Choice>) -> Vec<Choice> {
 /// `IN (?, ?, …)` would be the more fragile of the two.
 async fn card_for(tenant: &Tenant, event: PendingEvent) -> Result<Card> {
     let mut choices = Vec::with_capacity(event.candidates.len());
+    // Each choice's corpus, by position, for the titling below.
+    let mut corpora: Vec<Option<String>> = Vec::with_capacity(event.candidates.len());
     for c in &event.candidates {
         // A deleted artifact keeps its candidate row — the pool is history —
         // but it cannot be offered as something to choose. Only that: any other
@@ -233,21 +235,45 @@ async fn card_for(tenant: &Tenant, event: PendingEvent) -> Result<Card> {
         // operator judges anyway, and the verdict is recorded as though the
         // missing candidate had been seen and rejected.
         match tenant.core.store.get_artifact(&c.artifact_id).await {
-            Ok(a) => choices.push(Choice {
-                // Deprecated and superseded artifacts are shown greyed rather
-                // than dropped, for the reason just given: shortening the pool
-                // silently is what makes a verdict mean something it doesn't.
-                // `hit` refuses these anyway — `eval::export` would drop the
-                // pair — so showing them unchoosable says the same thing on the
-                // card, before the keystroke, instead of after it.
-                usable: a.in_results(),
-                artifact_id: a.id,
-                title: a.title.unwrap_or_default(),
-                snippet: snippet_of(&a.text),
-                key: None,
-            }),
+            Ok(a) => {
+                corpora.push(a.corpus_id.clone());
+                choices.push(Choice {
+                    // Deprecated and superseded artifacts are shown greyed rather
+                    // than dropped, for the reason just given: shortening the pool
+                    // silently is what makes a verdict mean something it doesn't.
+                    // `hit` refuses these anyway — `eval::export` would drop the
+                    // pair — so showing them unchoosable says the same thing on the
+                    // card, before the keystroke, instead of after it.
+                    usable: a.in_results(),
+                    artifact_id: a.id,
+                    title: a.title.unwrap_or_default(),
+                    snippet: snippet_of(&a.text),
+                    key: None,
+                })
+            }
             Err(crate::error::Error::NotFound) => continue,
             Err(e) => return Err(e),
+        }
+    }
+    // A candidate with no heading of its own is named by its note, the way a
+    // ranked hit is (`Core::fill_titles`): a card of twenty paragraphs with
+    // no names is a card nobody can read.
+    let untitled: Vec<String> = choices
+        .iter()
+        .zip(&corpora)
+        .filter(|(c, _)| c.title.is_empty())
+        .filter_map(|(_, corpus)| corpus.clone())
+        .collect();
+    if !untitled.is_empty() {
+        let titles = tenant.core.store.corpus_titles(&untitled).await?;
+        for (c, corpus) in choices
+            .iter_mut()
+            .zip(&corpora)
+            .filter(|(c, _)| c.title.is_empty())
+        {
+            if let Some(t) = corpus.as_ref().and_then(|id| titles.get(id)) {
+                c.title = t.clone();
+            }
         }
     }
     let mut choices = shuffled(&event.id, choices);
@@ -1255,6 +1281,59 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    #[tokio::test]
+    async fn a_candidate_with_no_heading_is_named_by_its_note_on_the_card() {
+        // Twenty unordered paragraphs is the card nobody can read; a pasted
+        // note's passages have no heading, and the note's title is what a
+        // person calls them — the same titling a ranked hit gets.
+        let (app, cookie, core, _) = judge_app(0, &[]).await;
+        let src = core
+            .store
+            .insert_corpus("feeding schedule", "web", Some("Sourdough"))
+            .await
+            .unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "feeding schedule that finally worked".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        core.store
+            .record_search(
+                NewEvent {
+                    query: "sourdough".into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![NewCandidate {
+                        artifact_id: made[0].id.clone(),
+                        score: 1.0,
+                        similarity: Some(0.5),
+                        shown: true,
+                    }],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains("Sourdough"), "{body}");
     }
 
     #[tokio::test]

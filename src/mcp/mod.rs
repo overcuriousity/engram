@@ -470,7 +470,9 @@ impl PkdbTools {
                     None => (
                         format!(
                             "**{}** · merged artifact `{}`",
-                            a.title.as_deref().unwrap_or("(untitled)"),
+                            a.title.clone().unwrap_or_else(
+                                || crate::web::markdown::stand_in_title(&a.text, 60)
+                            ),
                             a.id
                         ),
                         a.text,
@@ -812,6 +814,7 @@ mod tests {
             in_sitting: false,
             past_cliff: false,
             similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -948,6 +951,7 @@ mod tests {
             in_sitting: false,
             past_cliff: false,
             similarity: None,
+            titled_by_corpus: false,
             via: via.map(str::to_string),
             reason: None,
             explanation: None,
