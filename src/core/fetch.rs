@@ -49,6 +49,14 @@ pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
 /// Out of scope, deliberately: blocking loopback and private-range addresses.
 /// The endpoint is authenticated and single-operator, so the only caller who
 /// could aim it at the local network is the person who runs the machine.
+/// Who is asking, with somewhere to read about it: what a server that refuses
+/// anonymous clients wants to see.
+pub const USER_AGENT: &str = concat!(
+    "engram/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/overcuriousity/engram)"
+);
+
 pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Error::Validation(format!(
@@ -57,7 +65,19 @@ pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
         )));
     }
 
+    // Named, because Wikipedia — the single most likely thing to be pasted —
+    // answers the library's default `reqwest/x.y` with a 403. The `Accept`
+    // says what the extractor can take, in the order it would rather have it.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static(
+            "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8",
+        ),
+    );
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .default_headers(headers)
         .timeout(std::time::Duration::from_secs(cfg.fetch_timeout_secs))
         // A redirect chain that never ends is a timeout dressed up as
         // progress. Ten is what every other client settles on.
@@ -201,6 +221,35 @@ mod tests {
         let u = url::Url::parse(&format!("{}/page", server.uri())).unwrap();
         let body = fetch_html(&u, &cfg()).await.unwrap();
         assert!(body.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn the_request_says_who_is_asking() {
+        // Wikipedia answers an unnamed client with 403, and it is the most
+        // likely URL to be pasted first. Matched on the header, so a client
+        // that stopped sending it is a 404 here rather than a passing test.
+        //
+        // `header_regex` for the `Accept`: wiremock reads a comma in an exact
+        // value as a list of values, and this one is a list to nobody else.
+        use wiremock::matchers::{header, header_regex};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/named"))
+            .and(header("user-agent", USER_AGENT))
+            .and(header_regex(
+                "accept",
+                r"^text/html,application/xhtml\+xml,application/pdf;q=0\.9,\*/\*;q=0\.8$",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("<html><body><p>named</p></body></html>", "text/html"),
+            )
+            .mount(&server)
+            .await;
+        let u = url::Url::parse(&format!("{}/named", server.uri())).unwrap();
+        let body = fetch_html(&u, &cfg()).await.unwrap();
+        assert!(body.contains("named"));
+        assert!(USER_AGENT.starts_with("engram/"), "{USER_AGENT}");
     }
 
     #[tokio::test]

@@ -62,6 +62,9 @@ dom_smoothie = "0.18.0"
 # Wikipedia article. Also pre-1.0; the fallback if that becomes unacceptable is
 # still plain-text extraction, which costs the splitter its heading boundaries.
 htmd = "0.5.5"
+# What htmd builds its DOM from, named here for the one handler that reads
+# an anchor's parent and siblings. No new build: htmd already pulls it in.
+markup5ever_rcdom = "0.38"
 # Decoding fetched pages that are not UTF-8. Already in the tree by way of
 # the HTML crates; named here because this uses it directly.
 encoding_rs = "0.8.35"

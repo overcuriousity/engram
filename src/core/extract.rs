@@ -9,6 +9,33 @@ use std::sync::LazyLock;
 /// repeated for nothing, and `HtmlToMarkdown` is `Send + Sync`.
 static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
     HtmlToMarkdown::builder()
+        .add_handler(vec!["a"], |handlers: &dyn Handlers, el: Element| {
+            // An in-page link means nothing once the page is a corpus: there
+            // is no page left for `#NAME` to jump within. man7 and many docs
+            // sites write `<h2><a id="NAME"></a>NAME <a href="#top">[top]</a>
+            // </h2>`, and rendered faithfully that heading became the title
+            // `[](#NAME)NAME [top](#top_of_page)` on every card in the
+            // product. So: an anchor with no text is nothing; an in-page
+            // anchor is its text; and an in-page anchor inside a heading that
+            // follows the heading's own text is the back-link, and is nothing
+            // too. An ordinary link is the ordinary link.
+            let href = el
+                .attrs
+                .iter()
+                .find(|a| a.name.local.as_ref() == "href")
+                .map(|a| a.value.as_ref());
+            let content = handlers.walk_children(el.node);
+            if content.content.trim().is_empty() {
+                return None;
+            }
+            if !href.is_some_and(|h| h.starts_with('#')) {
+                return handlers.fallback(el);
+            }
+            if is_back_link(el.node) {
+                return None;
+            }
+            Some(content)
+        })
         .add_handler(vec!["img"], |_: &dyn Handlers, el: Element| {
             // A capture is text, so the image itself is not stored — but its
             // `alt` is not always decoration. Wikipedia renders every equation
@@ -28,6 +55,34 @@ static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
         })
         .build()
 });
+
+/// Whether an anchor is a heading's back-link: inside an `h1`–`h6`, after the
+/// heading's own text. The `[top]` at the end of every man7 section heading.
+fn is_back_link(node: &std::rc::Rc<htmd::Node>) -> bool {
+    use markup5ever_rcdom::NodeData;
+    let parent = node.parent.take();
+    node.parent.set(parent.clone());
+    let Some(parent) = parent.and_then(|w| w.upgrade()) else {
+        return false;
+    };
+    let heading = matches!(&parent.data, NodeData::Element { name, .. }
+        if matches!(name.local.as_ref(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6"));
+    if !heading {
+        return false;
+    }
+    fn has_text(node: &std::rc::Rc<htmd::Node>) -> bool {
+        match &node.data {
+            NodeData::Text { contents } => !contents.borrow().trim().is_empty(),
+            _ => node.children.borrow().iter().any(has_text),
+        }
+    }
+    parent
+        .children
+        .borrow()
+        .iter()
+        .take_while(|c| !std::rc::Rc::ptr_eq(c, node))
+        .any(has_text)
+}
 
 /// An `alt` as an inline text node rather than as markdown.
 ///
@@ -408,6 +463,34 @@ mod tests {
             md.contains('1'),
             "the citation marker itself was lost:\n{md}"
         );
+    }
+
+    #[test]
+    fn in_page_anchors_leave_a_heading_as_its_own_words() {
+        // man7's section headings, verbatim: an empty anchor carrying the id,
+        // the name, and a back-link to the top of the page. Sixteen artifacts
+        // titled `[](#NAME)NAME [top](#top_of_page)` came out of one man page.
+        let page = format!(
+            "<html><body><article>\
+             <h2><a id=\"NAME\"></a>NAME         <a href=\"#top_of_page\">[top]</a></h2>\
+             <p>{}</p>\
+             <h2><a id=\"OPTIONS\"></a>OPTIONS         <a href=\"#top_of_page\">[top]</a></h2>\
+             <p>See <a href=\"#NAME\">the name</a> and <a href=\"https://x.test/\">elsewhere</a>.</p>\
+             <p>{}</p>\
+             </article></body></html>",
+            "losetup is used to associate loop devices with regular files or block \
+             devices, to detach loop devices, and to query the status of a loop device, \
+             which is enough prose for readability to keep the section.",
+            "the options are many and this paragraph exists to be long enough to be \
+             kept as content by the readability pass rather than dropped as furniture.",
+        );
+        let md = html_to_markdown(&page, None, 10).unwrap();
+        let headings: Vec<&str> = md.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(headings, vec!["## NAME", "## OPTIONS"], "{md}");
+        // An in-page link in prose keeps its words; a real link stays a link.
+        assert!(md.contains("See the name and"), "{md}");
+        assert!(md.contains("[elsewhere](https://x.test/)"), "{md}");
+        assert!(!md.contains("[]("), "{md}");
     }
 
     #[test]

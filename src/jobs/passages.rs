@@ -31,8 +31,31 @@ fn is_heading(line: &str) -> bool {
 }
 
 /// "## Recovering deleted entries" → "Recovering deleted entries".
+///
+/// A link left in the heading is reduced to its words, and whitespace runs to
+/// one space. The HTML extractor already keeps in-page anchors out of a
+/// heading; this is the belt for every other way a heading reaches here — a
+/// pasted markdown document, another extractor — so that a title is never
+/// `[](#NAME)NAME [top](#top_of_page)` whatever wrote it.
 pub fn heading_title(line: &str) -> String {
-    line.trim().trim_start_matches('#').trim().to_string()
+    let bare = line.trim().trim_start_matches('#');
+    let mut out = String::with_capacity(bare.len());
+    let mut rest = bare;
+    // `[text](target)` → `text`. Anything that is not exactly that shape is
+    // left as written: a bracket in prose is not a link.
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find("](") else {
+            break;
+        };
+        let Some(end) = rest[open + close..].find(')') else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..open + close]);
+        rest = &rest[open + close + end + 1..];
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The first heading among the next `n` lines, with all `n` consumed.
@@ -338,6 +361,17 @@ mod tests {
         assert_eq!(derive_title(&long).unwrap().chars().count(), TITLE_MAX);
         assert_eq!(derive_title("   \n\t\n"), None);
         assert_eq!(heading_title("###   Deep heading  "), "Deep heading");
+        // A link is its words, an empty one is nothing, and runs of spaces are
+        // one — the man7 heading shape, arriving from any extractor at all.
+        assert_eq!(
+            heading_title("## [](#NAME)NAME         [top](#top_of_page)"),
+            "NAME top"
+        );
+        assert_eq!(
+            heading_title("## See [the docs](https://x.test/a)"),
+            "See the docs"
+        );
+        assert_eq!(heading_title("## Arrays [0] and [1]"), "Arrays [0] and [1]");
     }
 
     #[tokio::test]
