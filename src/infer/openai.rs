@@ -1311,8 +1311,15 @@ impl Describer for HttpDescriber {
 /// One cheap reachability check per role at startup. Failure is a warning, not
 /// a fatal error: ingest is designed to survive a dead inference endpoint.
 pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
+    probe_path(role, base_url, "models", api_key).await
+}
+
+/// Same as [`probe`], against a caller-chosen path instead of the OpenAI
+/// convention of `models` — for a server whose reachability isn't checked
+/// under that name.
+pub async fn probe_path(role: &str, base_url: &str, path: &str, api_key: Option<&str>) -> bool {
     let c = client(crate::config::DEFAULT_TIMEOUT_SECS);
-    let mut req = c.get(url(base_url, "models"));
+    let mut req = c.get(url(base_url, path));
     if let Some(k) = api_key {
         req = req.bearer_auth(k);
     }

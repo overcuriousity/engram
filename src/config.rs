@@ -1637,6 +1637,20 @@ pub enum RerankStyle {
     Vllm,
 }
 
+impl RerankStyle {
+    /// Where the startup probe checks this server is up. `base_url` for a
+    /// rerank role is the bare host — the request path itself carries any
+    /// `v1` prefix, per style, so the probe has to do the same rather than
+    /// assume `models` off the bare host. TEI has no model-list endpoint;
+    /// `info` is the one it actually serves.
+    pub fn probe_path(self) -> &'static str {
+        match self {
+            RerankStyle::Tei => "info",
+            RerankStyle::Cohere | RerankStyle::Vllm => "v1/models",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthConfig {
     pub mode: AuthMode,
