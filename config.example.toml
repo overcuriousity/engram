@@ -378,6 +378,17 @@ enabled = true
 # either way; parking only withholds the model call until you decide on Ops.
 near_dupe_min = 0.90
 # Cosine at or above which a pair of artifacts goes on the review queue.
+#
+# A floor, not an admission. Clearing it is necessary and not sufficient: a pair
+# reaches the model only when one text is wholly inside the other, or both came
+# out of one document. A cosine cannot tell "stored twice" from "taught by
+# thirteen authors", and on a corpus of scripts covering one subject the second
+# is the ordinary case — passages from different scripts sit at 0.89 to 0.93
+# while duplicating nothing. Two sources agreeing is evidence in its own right,
+# and merging them erases that they agreed.
+#
+# Passages are outside this entirely: they are the verbatim substrate and are
+# never one side of a pair, whatever they score.
 review_min = 0.88
 # Cosine at or above which the older artifact is hidden without asking. Well
 # clear of `review_min` on purpose: two genuinely distinct artifacts about one

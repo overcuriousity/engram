@@ -138,6 +138,48 @@ impl PairState {
     }
 }
 
+/// Who settled a pair.
+///
+/// Not derivable from `state`: `Dismissed` is written both by an operator
+/// pressing dismiss and by `dedupe` applying a `Replaced` verdict, and
+/// `NoConflict` both by the judge and by a lifecycle shortcut. Before this
+/// existed the only trace of a person's decision was whether a detail string
+/// happened to survive the write — `dismiss_pair_ui` passes `None` and
+/// `set_pair_state` writes `detail` unconditionally, so it nulled it, while
+/// `apply_supersede_ui` carries the judge's through on purpose.
+///
+/// Passed rather than defaulted at every call site, so that a new operator
+/// surface cannot be recorded as the model by forgetting to say otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecidedBy {
+    /// A judge's verdict, or a rule the background applied without asking.
+    Model,
+    /// A person pressed something.
+    Operator,
+}
+
+impl DecidedBy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DecidedBy::Model => "model",
+            DecidedBy::Operator => "operator",
+        }
+    }
+
+    /// Anything unrecognised reads as absent rather than as one of the two: a
+    /// row written by a version that did not have this column says nothing
+    /// about who decided, and guessing would be the untruth the column exists
+    /// to end.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "model" => Some(DecidedBy::Model),
+            "operator" => Some(DecidedBy::Operator),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ArtifactPair {
     pub id: i64,
@@ -147,6 +189,9 @@ pub struct ArtifactPair {
     pub state: PairState,
     pub detail: Option<String>,
     pub created_at: i64,
+    /// Who settled it, where that was recorded. `None` on an open pair, and on
+    /// every row written before the column existed.
+    pub decided_by: Option<DecidedBy>,
     /// Model calls this pair has already cost, successful or not. Orders the
     /// judge's queue so a pair it cannot read does not starve the rest.
     pub judge_attempts: i64,
@@ -201,6 +246,10 @@ pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
         state: PairState::parse(r.get::<String, _>("state").as_str()),
         detail: r.get("detail"),
         created_at: r.get("created_at"),
+        decided_by: r
+            .get::<Option<String>, _>("decided_by")
+            .as_deref()
+            .and_then(DecidedBy::parse),
         judge_attempts: r.get("judge_attempts"),
         judge_unreadable: r.get("judge_unreadable"),
         obsolete_id: r.get("obsolete_id"),
@@ -304,11 +353,13 @@ impl Store {
     ///
     /// `from` narrows the write to a row still in the state the caller wrote,
     /// so a decision that landed in between — a judge's, an operator's — is
-    /// never reopened underneath them.
+    /// never reopened underneath them. `decided_by` clears with the state, for
+    /// the reason `reopen_pair` gives: a pending row attributed to anyone is a
+    /// claim about a question nobody has answered.
     pub async fn unsettle_pair(&self, a: &str, b: &str, from: PairState) -> Result<bool> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
         let res = sqlx::query(
-            "UPDATE artifact_pairs SET state = 'pending'
+            "UPDATE artifact_pairs SET state = 'pending', decided_by = NULL
               WHERE a_id = ? AND b_id = ? AND state = ?",
         )
         .bind(a)
@@ -443,14 +494,16 @@ impl Store {
         id: i64,
         state: PairState,
         detail: Option<&str>,
+        by: DecidedBy,
     ) -> Result<()> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = ?, detail = ?, obsolete_id = NULL, merged_into = NULL
+                SET state = ?, detail = ?, decided_by = ?, obsolete_id = NULL, merged_into = NULL
               WHERE id = ?",
         )
         .bind(state.as_str())
         .bind(detail)
+        .bind(by.as_str())
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -469,18 +522,27 @@ impl Store {
     /// `set_pair_state` because this is the only path that writes
     /// `obsolete_id`, and a plain contradiction must never carry a stale value
     /// left over from a different pair.
+    ///
+    /// `by` is written for the reason `set_pair_state` writes it, and is passed
+    /// rather than defaulted for the reason `DecidedBy` gives: a settled row
+    /// with `decided_by` left `NULL` is indistinguishable from one written
+    /// before the column existed, so the review surface cannot tell a verdict
+    /// from a legacy row.
     pub async fn set_pair_superseded(
         &self,
         id: i64,
         obsolete_id: &str,
         detail: Option<&str>,
+        by: DecidedBy,
     ) -> Result<()> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'superseded', detail = ?, obsolete_id = ?, merged_into = NULL
+                SET state = 'superseded', detail = ?, decided_by = ?,
+                    obsolete_id = ?, merged_into = NULL
               WHERE id = ?",
         )
         .bind(detail)
+        .bind(by.as_str())
         .bind(obsolete_id)
         .bind(id)
         .execute(&self.pool)
@@ -494,18 +556,27 @@ impl Store {
     /// Settle a pair as answered by an applied merge. `merged_into` names the
     /// merged artifact, which is what lets the stranded-merge reap reopen
     /// exactly the pairs a merge that never embedded had closed.
+    ///
+    /// `by` for the reason `set_pair_superseded` takes it: without it the one
+    /// settlement this path writes — a merge the judge applied unattended —
+    /// landed as `decided_by = NULL`, which the column defines as "still open,
+    /// or written before the column existed". The merge is the most attributable
+    /// answer in the queue and was the only one saying nothing about who gave it.
     pub async fn set_pair_merged(
         &self,
         id: i64,
         merged_into: &str,
         detail: Option<&str>,
+        by: DecidedBy,
     ) -> Result<()> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'no_conflict', detail = ?, merged_into = ?, obsolete_id = NULL
+                SET state = 'no_conflict', detail = ?, decided_by = ?,
+                    merged_into = ?, obsolete_id = NULL
               WHERE id = ?",
         )
         .bind(detail)
+        .bind(by.as_str())
         .bind(merged_into)
         .bind(id)
         .execute(&self.pool)
@@ -520,10 +591,16 @@ impl Store {
     /// person. Contradiction rather than Pending on purpose: re-arming the
     /// model would regenerate the same unembeddable draft, at full price,
     /// forever.
+    ///
+    /// `decided_by` is rewritten and not left standing: the row is being moved
+    /// to a state nobody has answered yet by a rule the sweep applied on its
+    /// own, so the name on it is the model's — the same attribution
+    /// `follow_supersession` writes when it settles a row the same way.
     pub async fn reopen_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'contradiction', detail = ?, merged_into = NULL
+                SET state = 'contradiction', detail = ?, decided_by = 'model',
+                    merged_into = NULL
               WHERE merged_into = ?",
         )
         .bind(detail)
@@ -539,13 +616,26 @@ impl Store {
     /// pairs were settled the moment the merge was written. Dismissed, not
     /// Contradiction: an undo is an operator overruling the verdict, and
     /// `record_pair` respecting dismissed rows is what makes that last.
-    pub async fn dismiss_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
+    ///
+    /// `by` is a parameter for the reason `discard_both` takes one, and this is
+    /// the case that made it matter: `undo` settles the pairs it finds through
+    /// `pairs_among` as the operator who pressed it, and reached this — the
+    /// branch that covers an undo outrunning the embed, which before `finish`
+    /// runs is *every* undo — writing no name at all. One button recorded
+    /// itself two different ways depending on timing.
+    pub async fn dismiss_pairs_merged_into(
+        &self,
+        merged_id: &str,
+        detail: &str,
+        by: DecidedBy,
+    ) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'dismissed', detail = ?, merged_into = NULL
+                SET state = 'dismissed', detail = ?, decided_by = ?, merged_into = NULL
               WHERE merged_into = ?",
         )
         .bind(detail)
+        .bind(by.as_str())
         .bind(merged_id)
         .execute(&self.pool)
         .await?;
@@ -618,6 +708,7 @@ impl Store {
                         p.id,
                         PairState::Dismissed,
                         Some("both of these went into the same merge"),
+                        DecidedBy::Model,
                     )
                     .await?;
                     continue;
@@ -627,6 +718,7 @@ impl Store {
                         p.id,
                         PairState::Dismissed,
                         Some("a pair between these two already exists"),
+                        DecidedBy::Model,
                     )
                     .await?;
                     continue;
@@ -674,11 +766,17 @@ impl Store {
     /// them: the row is being asked again from nothing, and attempts earned
     /// under an older question would push it straight past the ceilings that
     /// decide whether it is worth a call.
+    ///
+    /// `decided_by` clears with them, and for a stronger reason than the
+    /// counters: an open pair carries nobody's decision, so leaving the old
+    /// value behind reads back as "pending, decided by operator" — a row that
+    /// says a person answered a question still being asked. The column exists
+    /// to end exactly that kind of untruth (`DecidedBy`).
     async fn reopen_pair(&self, id: i64) -> Result<()> {
         sqlx::query(
             "UPDATE artifact_pairs
                 SET state = 'pending', detail = NULL, obsolete_id = NULL, merged_into = NULL,
-                    judge_attempts = 0, judge_unreadable = 0
+                    decided_by = NULL, judge_attempts = 0, judge_unreadable = 0
               WHERE id = ?",
         )
         .bind(id)
@@ -778,6 +876,7 @@ impl Store {
                     p.id,
                     PairState::Stale,
                     Some("the supersession of these two answered this"),
+                    DecidedBy::Model,
                 )
                 .await?;
                 out.staled += 1;
@@ -788,6 +887,7 @@ impl Store {
                     p.id,
                     PairState::Stale,
                     Some("the artifact this proposed hiding is already hidden"),
+                    DecidedBy::Model,
                 )
                 .await?;
                 out.staled += 1;
@@ -801,6 +901,7 @@ impl Store {
                         "a vacuous verdict is about the two bodies it was read over, \
                           and one of them is hidden",
                     ),
+                    DecidedBy::Model,
                 )
                 .await?;
                 out.staled += 1;
@@ -822,6 +923,7 @@ impl Store {
                     p.id,
                     PairState::Stale,
                     Some("a pair between these two already exists"),
+                    DecidedBy::Model,
                 )
                 .await?;
                 out.staled += 1;
@@ -907,6 +1009,15 @@ impl Store {
     /// the question back (`reopen_stale_pairs`). Both ways out of results are
     /// reversible; settling these as somebody's decision would make the queue
     /// the one place where they are not.
+    ///
+    /// `decided_by` is overwritten rather than left alone, which is the same
+    /// distinction one level down: the *state* is nobody's answer, but the row
+    /// still has to say who last wrote it. These candidates come from
+    /// `('pending','contradiction','superseded','vacuous')`, and a
+    /// contradiction an operator escalated carries their name — left standing
+    /// beside `'stale'` it reads "an operator decided this went stale", which
+    /// they did not. `'model'`, like every other rule this file applies
+    /// unattended (`follow_supersession` settles `Stale` exactly so).
     pub async fn stale_unreachable_pairs(&self) -> Result<u64> {
         let rows = sqlx::query(
             "SELECT p.id AS pair_id, x.id AS side, x.superseded_by AS winner
@@ -959,6 +1070,7 @@ impl Store {
             let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE artifact_pairs
                     SET state = 'stale', obsolete_id = NULL, merged_into = NULL,
+                        decided_by = 'model',
                         detail = 'one of these artifacts is no longer in results'
                   WHERE id IN ({holes})"
             )));
@@ -989,11 +1101,16 @@ impl Store {
     /// does not put a question back that names another artifact somebody
     /// retired in the meantime. That row stays `Stale` and comes back with its
     /// own artifact.
+    ///
+    /// `decided_by` clears with the state (`reopen_pair`). These rows are the
+    /// case that makes it matter most: a pair an operator dismissed by hand is
+    /// reopened here, and keeping their name on it would attribute a pending
+    /// question to a person who answered a different one.
     pub async fn reopen_stale_pairs(&self, artifact_id: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
                 SET state = 'pending', detail = NULL, obsolete_id = NULL, merged_into = NULL,
-                    judge_attempts = 0, judge_unreadable = 0
+                    decided_by = NULL, judge_attempts = 0, judge_unreadable = 0
               WHERE state = 'stale'
                 AND (a_id = ?1 OR b_id = ?1)
                 AND NOT EXISTS (
@@ -1109,10 +1226,12 @@ impl Store {
     /// such a row can come back already at or past `MAX_UNREADABLE_JUDGEMENTS`
     /// — and `pairs_to_judge` holds those back, so it would sit pending for
     /// good, never judged and never surfaced.
+    ///
+    /// `decided_by` clears with them, for the reason `reopen_pair` gives.
     pub async fn reopen_oversized(&self) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'pending', detail = NULL,
+                SET state = 'pending', detail = NULL, decided_by = NULL,
                     judge_attempts = 0, judge_unreadable = 0
               WHERE state = 'oversized'",
         )
@@ -1395,6 +1514,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn who_settled_a_pair_is_recorded_rather_than_reconstructed() {
+        // Before this column the two were tellable apart only by accident:
+        // `dismiss_pair_ui` passes no detail and `set_pair_state` writes
+        // `detail` unconditionally, so a person's dismissal nulled the judge's
+        // reasoning, while `apply_supersede_ui` carried it through. Whether a
+        // string survived was the entire evidence that a human had decided.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+
+        assert_eq!(
+            s.get_pair(p).await.unwrap().decided_by,
+            None,
+            "an open pair has been decided by nobody"
+        );
+
+        s.set_pair_state(p, PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.get_pair(p).await.unwrap().decided_by,
+            Some(DecidedBy::Operator)
+        );
+    }
+
+    /// Reopening is the other half of that column meaning anything: a row put
+    /// back on the queue has been decided by nobody again.
+    ///
+    /// The case that makes it concrete is an operator's. They dismiss a pair,
+    /// the loser is later restored, `reopen_stale_pairs` puts the row back to
+    /// `pending` — and with `decided_by` left standing the row reads "pending,
+    /// decided by operator": a person's name on a question still being asked.
+    #[tokio::test]
+    async fn reopening_a_pair_takes_the_old_decider_off_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(
+            p,
+            PairState::Stale,
+            Some("its side was hidden"),
+            DecidedBy::Operator,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(s.reopen_stale_pairs(&a).await.unwrap(), 1);
+
+        let read = s.get_pair(p).await.unwrap();
+        assert_eq!(read.state, PairState::Pending);
+        assert_eq!(
+            read.decided_by, None,
+            "an open pair still named the person who answered a different question"
+        );
+    }
+
+    /// The same for the sweep's own reopening, which has no operator in it but
+    /// the identical failure: a `pending` row asserting an author.
+    #[tokio::test]
+    async fn reopening_an_oversized_pair_takes_the_old_decider_off_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(p, PairState::Oversized, Some("9 roots"), DecidedBy::Model)
+            .await
+            .unwrap();
+
+        assert_eq!(s.reopen_oversized().await.unwrap(), 1);
+
+        assert_eq!(s.get_pair(p).await.unwrap().decided_by, None);
+    }
+
+    /// And for the unsettle a failed side effect leaves behind.
+    #[tokio::test]
+    async fn unsettling_a_pair_takes_the_old_decider_off_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(p, PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        assert!(s.unsettle_pair(&a, &b, PairState::Dismissed).await.unwrap());
+
+        assert_eq!(s.get_pair(p).await.unwrap().decided_by, None);
+    }
+
+    #[tokio::test]
+    async fn a_row_written_before_the_column_existed_claims_no_author() {
+        // The reason `decided_by` is nullable with no default, and so belongs
+        // on the additive list at all. A default would have all 33 rows of an
+        // existing base assert an author none of them recorded.
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        sqlx::query(
+            "UPDATE artifact_pairs SET state = 'dismissed', decided_by = NULL WHERE id = ?",
+        )
+        .bind(p)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        let read = s.get_pair(p).await.unwrap();
+        assert_eq!(read.state, PairState::Dismissed);
+        assert_eq!(read.decided_by, None, "silence is not a claim about anyone");
+    }
+
+    #[tokio::test]
     async fn an_oversized_pair_leaves_the_pending_queue_but_stays_visible() {
         // Past the fan-in cap nothing is merged, and the pair must not sit on
         // the pending queue costing a call per sweep for a decision that will
@@ -1404,9 +1638,14 @@ mod tests {
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(p, PairState::Oversized, Some("9 roots, cap is 8"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            p,
+            PairState::Oversized,
+            Some("9 roots, cap is 8"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert!(s.pairs_to_judge(10).await.unwrap().is_empty());
         let found = s.pairs_by_state(PairState::Oversized, 10).await.unwrap();
@@ -1433,7 +1672,9 @@ mod tests {
             s.record_pair(&a, &b, 0.91).await.unwrap();
             let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
             if state != PairState::Pending {
-                s.set_pair_state(p, state, None).await.unwrap();
+                s.set_pair_state(p, state, None, DecidedBy::Model)
+                    .await
+                    .unwrap();
             }
             assert_eq!(
                 s.get_pair(p).await.unwrap().state,
@@ -1525,7 +1766,7 @@ mod tests {
         s.record_pair(&m[1], &m[2], 0.90).await.unwrap();
         let all = s.pairs_by_state(PairState::Pending, 10).await.unwrap();
         let (seed, other) = (all[0].id, all[1].id);
-        s.set_pair_state(other, PairState::Dismissed, None)
+        s.set_pair_state(other, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1578,7 +1819,7 @@ mod tests {
         let m = four_artifacts(&s).await;
         s.record_pair(&m[0], &m[1], 0.91).await.unwrap();
         let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(p, PairState::NoConflict, None)
+        s.set_pair_state(p, PairState::NoConflict, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1622,6 +1863,7 @@ mod tests {
             p.id,
             PairState::Contradiction,
             Some("version differs: 1.2 vs 1.4"),
+            DecidedBy::Model,
         )
         .await
         .unwrap();
@@ -1655,7 +1897,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        s.set_pair_state(p.id, PairState::Dismissed, None)
+        s.set_pair_state(p.id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1682,7 +1924,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        s.set_pair_superseded(p.id, &a, Some("a is stale"))
+        s.set_pair_superseded(p.id, &a, Some("a is stale"), DecidedBy::Model)
             .await
             .unwrap();
         assert_eq!(
@@ -1690,7 +1932,7 @@ mod tests {
             Some(a.as_str())
         );
 
-        s.set_pair_state(p.id, PairState::Dismissed, None)
+        s.set_pair_state(p.id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1727,7 +1969,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        s.set_pair_state(p.id, PairState::Dismissed, None)
+        s.set_pair_state(p.id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
         s.record_settled_pair(&a, &b, 0.91, PairState::NoConflict)
@@ -1750,7 +1992,8 @@ mod tests {
         // shorter than it is.
         let s = Store::memory().await.unwrap();
         assert!(matches!(
-            s.set_pair_state(9999, PairState::Dismissed, None).await,
+            s.set_pair_state(9999, PairState::Dismissed, None, DecidedBy::Model)
+                .await,
             Err(crate::error::Error::NotFound)
         ));
     }
@@ -1843,7 +2086,7 @@ mod tests {
             .await
             .unwrap();
         let id = s.pairs_by_state(PairState::NoConflict, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::Dismissed, None)
+        s.set_pair_state(id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1866,7 +2109,7 @@ mod tests {
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
 
-        s.set_pair_merged(id, "merge-1", Some("same claim"))
+        s.set_pair_merged(id, "merge-1", Some("same claim"), DecidedBy::Model)
             .await
             .unwrap();
 
@@ -1875,10 +2118,66 @@ mod tests {
         assert_eq!(p.merged_into.as_deref(), Some("merge-1"));
 
         // Leaving the settlement drops the record, exactly as obsolete_id does.
-        s.set_pair_state(id, PairState::Dismissed, None)
+        s.set_pair_state(id, PairState::Dismissed, None, DecidedBy::Model)
             .await
             .unwrap();
         assert_eq!(s.get_pair(id).await.unwrap().merged_into, None);
+    }
+
+    /// The settlement this whole column exists for. A merge the judge applied
+    /// unattended is the most attributable answer the queue has, and it was the
+    /// one row landing with `decided_by` unset — which the column defines as
+    /// "still open, or written before this existed". The review surface could
+    /// not tell an applied merge from a legacy row.
+    #[tokio::test]
+    async fn an_applied_merge_says_who_applied_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+
+        s.set_pair_merged(id, "merge-1", None, DecidedBy::Model)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_pair(id).await.unwrap().decided_by,
+            Some(DecidedBy::Model)
+        );
+
+        s.set_pair_superseded(id, &a, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_pair(id).await.unwrap().decided_by,
+            Some(DecidedBy::Operator),
+            "the proposed direction was recorded as nobody's"
+        );
+    }
+
+    /// One button, one attribution. `merge::undo` settles the pairs it finds
+    /// through `pairs_among` as the operator who pressed it and reaches this
+    /// for the rest — which before `finish` runs is *every* pair the merge
+    /// settled. Recording those two halves differently made how an undo is
+    /// remembered depend on whether the embed had landed yet.
+    #[tokio::test]
+    async fn dismissing_a_merge_s_pairs_carries_the_name_the_undo_gives_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_merged(id, "merge-1", None, DecidedBy::Model)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.dismiss_pairs_merged_into("merge-1", "merge undone", DecidedBy::Operator)
+                .await
+                .unwrap(),
+            1
+        );
+        let p = s.get_pair(id).await.unwrap();
+        assert_eq!(p.state, PairState::Dismissed);
+        assert_eq!(p.decided_by, Some(DecidedBy::Operator));
     }
 
     #[tokio::test]
@@ -1887,7 +2186,9 @@ mod tests {
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_merged(id, "merge-1", None).await.unwrap();
+        s.set_pair_merged(id, "merge-1", None, DecidedBy::Model)
+            .await
+            .unwrap();
 
         assert_eq!(
             s.reopen_pairs_merged_into("merge-other", "unrelated")
@@ -1905,6 +2206,11 @@ mod tests {
         let p = s.get_pair(id).await.unwrap();
         assert_eq!(p.state, PairState::Contradiction);
         assert_eq!(p.merged_into, None);
+        assert_eq!(
+            p.decided_by,
+            Some(DecidedBy::Model),
+            "the reap is a rule the sweep applied on its own; the row has to say so"
+        );
     }
 
     /// The whole point of re-pointing: C was a duplicate of B, B is now inside
@@ -1965,9 +2271,14 @@ mod tests {
         let (b, c, m) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(c, m, 0.80).await.unwrap();
         let existing = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(existing, PairState::Dismissed, Some("operator"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            existing,
+            PairState::Dismissed,
+            Some("operator"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.record_pair(b, c, 0.91).await.unwrap();
 
         let moved = s
@@ -2023,7 +2334,7 @@ mod tests {
         let (b, c, m) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(b, c, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::NoConflict, None)
+        s.set_pair_state(id, PairState::NoConflict, None, DecidedBy::Model)
             .await
             .unwrap();
 
@@ -2048,9 +2359,14 @@ mod tests {
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::Oversized, Some("12 sources, cap is 8"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Oversized,
+            Some("12 sources, cap is 8"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(s.reopen_oversized().await.unwrap(), 1);
 
@@ -2081,9 +2397,14 @@ mod tests {
             s.record_judge_attempt(id).await.unwrap();
             s.record_unreadable_judgement(id).await.unwrap();
         }
-        s.set_pair_state(id, PairState::Oversized, Some("12 sources, cap is 8"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Oversized,
+            Some("12 sources, cap is 8"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(s.reopen_oversized().await.unwrap(), 1);
 
@@ -2160,9 +2481,14 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         s.follow_supersession(loser, winner).await.unwrap();
 
@@ -2204,15 +2530,25 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let verdict = s.pair_between(loser, other).await.unwrap().unwrap().id;
-        s.set_pair_state(verdict, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            verdict,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         // Already judged, and judged the other way.
         s.record_pair(other, winner, 0.72).await.unwrap();
         let standing = s.pair_between(other, winner).await.unwrap().unwrap().id;
-        s.set_pair_state(standing, PairState::NoConflict, Some("nothing in common"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            standing,
+            PairState::NoConflict,
+            Some("nothing in common"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         s.follow_supersession(loser, winner).await.unwrap();
 
@@ -2243,14 +2579,24 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let verdict = s.pair_between(loser, other).await.unwrap().unwrap().id;
-        s.set_pair_state(verdict, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            verdict,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.record_pair(other, winner, 0.72).await.unwrap();
         let standing = s.pair_between(other, winner).await.unwrap().unwrap().id;
-        s.set_pair_state(standing, PairState::Dismissed, Some("not worth looking at"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            standing,
+            PairState::Dismissed,
+            Some("not worth looking at"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         s.follow_supersession(loser, winner).await.unwrap();
 
@@ -2277,6 +2623,7 @@ mod tests {
             id,
             PairState::Vacuous,
             Some("each body is its own file path"),
+            DecidedBy::Model,
         )
         .await
         .unwrap();
@@ -2336,6 +2683,29 @@ mod tests {
         assert_eq!(s.stale_unreachable_pairs().await.unwrap(), 1);
     }
 
+    /// `Stale` is not the operator's answer even when the row it lands on was
+    /// theirs. A contradiction a person escalated carries their name; leaving
+    /// it standing beside `'stale'` reads "an operator decided this went
+    /// stale", which is a lifecycle event nobody decided.
+    #[tokio::test]
+    async fn going_stale_does_not_leave_an_operator_s_name_on_the_row() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::Contradiction, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        s.set_artifact_status(&b, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        assert_eq!(s.stale_unreachable_pairs().await.unwrap(), 1);
+        let p = s.get_pair(id).await.unwrap();
+        assert_eq!(p.state, PairState::Stale);
+        assert_eq!(p.decided_by, Some(DecidedBy::Model));
+    }
+
     /// The stale pass ran unbounded straight after a repair pass that takes 200
     /// supersessions a sweep, so it reached everything the repair had not got to
     /// yet and settled it `Stale` first. That is a one-way door:
@@ -2350,9 +2720,14 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let id = s.pair_between(loser, other).await.unwrap().unwrap().id;
-        s.set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.set_superseded_by(loser, Some(winner)).await.unwrap();
 
         assert_eq!(
@@ -2399,9 +2774,14 @@ mod tests {
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
-        s.set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 seconds vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.set_artifact_status(&b, crate::store::artifacts::ArtifactStatus::Deprecated)
             .await
             .unwrap();
@@ -2451,7 +2831,7 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_superseded(id, loser, Some("the older reading"))
+        s.set_pair_superseded(id, loser, Some("the older reading"), DecidedBy::Model)
             .await
             .unwrap();
 
@@ -2487,6 +2867,7 @@ mod tests {
             existing.id,
             PairState::NoConflict,
             Some("nothing in common"),
+            DecidedBy::Model,
         )
         .await
         .unwrap();
@@ -2513,9 +2894,14 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::NoConflict, Some("nothing in common"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::NoConflict,
+            Some("nothing in common"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             s.follow_supersession(loser, winner)
@@ -2566,9 +2952,14 @@ mod tests {
         let ids = n_artifacts(&s, 3).await;
         s.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_state(id, PairState::Contradiction, Some("30 vs 90"))
-            .await
-            .unwrap();
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 vs 90"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
         s.set_superseded_by(&ids[0], Some(&ids[2])).await.unwrap();
 
         assert!(

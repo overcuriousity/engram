@@ -19,12 +19,14 @@ pub async fn run(
     targets: &[String],
     title: Option<&str>,
     note: Option<&str>,
+    face: &crate::cli::face::Face,
 ) -> Result<Vec<String>> {
     let http = client()?;
     let mut ids = Vec::new();
     for target in targets {
         let (bytes, content_type) = read_target(target)?;
-        ids.push(post(&http, e, bytes, &content_type, target, title, note).await?);
+        let meta = Meta { title, note };
+        ids.push(post(&http, e, bytes, &content_type, target, meta, face).await?);
     }
     Ok(ids)
 }
@@ -39,6 +41,7 @@ pub async fn run_piped(
     text: String,
     title: Option<&str>,
     note: Option<&str>,
+    face: &crate::cli::face::Face,
 ) -> Result<Vec<String>> {
     let http = client()?;
     let id = post(
@@ -47,8 +50,8 @@ pub async fn run_piped(
         text.into_bytes(),
         "text/plain",
         "stdin",
-        title,
-        note,
+        Meta { title, note },
+        face,
     )
     .await?;
     Ok(vec![id])
@@ -61,6 +64,17 @@ fn client() -> Result<reqwest::Client> {
         .map_err(|err| Error::Internal(format!("http client: {err}")))
 }
 
+/// What a door knows about a capture beyond its bytes.
+///
+/// The two travel together everywhere — `run`, `run_piped` and `post` each
+/// take both or neither — and threading them as a separate pair is what pushed
+/// `post` past the argument count that is worth reading at a call site.
+#[derive(Clone, Copy)]
+struct Meta<'a> {
+    title: Option<&'a str>,
+    note: Option<&'a str>,
+}
+
 /// One capture, answering with the corpus id. `label` is what the target is
 /// called when something goes wrong — a path, or `stdin`.
 async fn post(
@@ -69,23 +83,39 @@ async fn post(
     bytes: Vec<u8>,
     content_type: &str,
     label: &str,
-    title: Option<&str>,
-    note: Option<&str>,
+    meta: Meta<'_>,
+    face: &crate::cli::face::Face,
 ) -> Result<String> {
     let target = label;
     {
         let mut url = format!("{}?", e.api("/capture"));
-        if let Some(t) = title {
+        if let Some(t) = meta.title {
             url.push_str(&format!("title={}&", encode(t)));
         }
-        if let Some(n) = note {
+        if let Some(n) = meta.note {
             url.push_str(&format!("note={}", encode(n)));
         }
+        // The body is handed over in pieces so the track can fill as it goes.
+        // A book is tens of megabytes and the upload is the part of a capture
+        // an operator waits through; a client that showed nothing until the
+        // response arrived looked wedged for the whole of it.
+        //
+        // Where the face is off the whole vector goes at once, exactly as it
+        // did before: a pipe gets no chunked encoding it did not ask for.
+        //
+        // And where it is on, `content-length` is set by hand so the pieces are
+        // sent length-framed too. The length is known — it is `bytes.len()`,
+        // the whole reason the track can show a percentage — and without the
+        // header a streamed body goes out chunked, which made what the server
+        // and every proxy in front of it saw depend on nothing but whether the
+        // operator's stdout happened to be a terminal.
+        let len = bytes.len();
         let res = http
             .post(url.trim_end_matches(['?', '&']))
             .bearer_auth(&e.token)
             .header("content-type", content_type)
-            .body(bytes)
+            .header(reqwest::header::CONTENT_LENGTH, len)
+            .body(tracked_body(bytes, face))
             .send()
             .await
             .map_err(|err| Error::Validation(format!("{target}: {err}")))?;
@@ -114,6 +144,41 @@ async fn post(
     }
 }
 
+/// How much of the body goes out at a time. Small enough that the track moves
+/// on a slow link, large enough that a book is not a hundred thousand yields.
+const PIECE: usize = 64 * 1024;
+
+/// The request body, filling a track as the transport reads it.
+///
+/// One vector where the face is off, so nothing about a scripted capture
+/// changes: no track, and the length comes from the body itself.
+///
+/// The streamed form carries no length of its own, so the caller sets
+/// `content-length` from the vector before handing it over; both forms then go
+/// out identically framed.
+fn tracked_body(bytes: Vec<u8>, face: &crate::cli::face::Face) -> reqwest::Body {
+    if !face.on {
+        return reqwest::Body::from(bytes);
+    }
+    let total = bytes.len();
+    let mut fill = face.fill();
+    let stream = async_stream::stream! {
+        let mut at = 0usize;
+        while at < total {
+            let end = (at + PIECE).min(total);
+            let piece = bytes[at..end].to_vec();
+            at = end;
+            fill.show(at, total);
+            yield Ok::<Vec<u8>, std::io::Error>(piece);
+        }
+        // Before the response is read, and so before anything is printed. The
+        // request that never gets here — a reset, a refusal mid-upload — is
+        // covered by `Fill`'s own `Drop`, which this only makes earlier.
+        fill.clear();
+    };
+    reqwest::Body::wrap_stream(stream)
+}
+
 /// Follow a capture through the stages that run after it is stored.
 ///
 /// The other doors describe those stages in a sentence and leave; a terminal is
@@ -132,7 +197,12 @@ pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Res
         .user_agent(USER_AGENT)
         .build()
         .map_err(|err| Error::Internal(format!("http client: {err}")))?;
-    let lamps = face.pulse("reading");
+    // The three background stages, redrawn in place from each poll. The
+    // generic strand that used to sit here said only "something is happening";
+    // these say which of the three it is, which is the whole reason `--watch`
+    // exists. No poll is added for them: they are drawn from the answer the
+    // loop was already asking for.
+    let mut track = face.track();
     for _ in 0..WATCH_POLLS {
         let res = http
             .get(format!("{}/corpora/{id}", e.api("")))
@@ -151,29 +221,30 @@ pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Res
         // fixes.
         let code = res.status();
         if code.is_client_error() {
-            drop(lamps);
+            track.clear();
             return Err(Error::Validation(format!(
                 "{id}: the server would not say how it is getting on ({code})"
             )));
         }
         let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
         let status: Option<CorpusStatus> = serde_json::from_value(body["status"].clone()).ok();
-        if let Some(s) = status
-            && matches!(
+        if let Some(s) = status {
+            track.show(s);
+            if matches!(
                 s,
                 CorpusStatus::Ready
                     | CorpusStatus::Partial
                     | CorpusStatus::Failed
                     | CorpusStatus::NeedsReview
-            )
-        {
-            drop(lamps);
-            println!("{id}  {}", s.as_str());
-            return Ok(());
+            ) {
+                track.clear();
+                println!("{id}  {}", s.as_str());
+                return Ok(());
+            }
         }
         tokio::time::sleep(WATCH_EVERY).await;
     }
-    drop(lamps);
+    track.clear();
     // Said rather than hidden: a capture still moving after five minutes is
     // information, and a client that exits silently claims a completion it
     // never saw.
@@ -216,6 +287,12 @@ fn read_target(target: &str) -> Result<(Vec<u8>, String)> {
 
 #[cfg(test)]
 mod tests {
+    /// A face with nothing drawn: every assertion in this module is about the
+    /// bytes a capture sends, and a track on stderr is not one of them.
+    fn off() -> crate::cli::face::Face {
+        crate::cli::face::Face::decide(&Default::default(), false, false, None)
+    }
+
     use super::*;
 
     async fn endpoint() -> (Endpoint, crate::core::Core) {
@@ -230,12 +307,49 @@ mod tests {
         let file = dir.path().join("notes.txt");
         std::fs::write(&file, "a procedure worth keeping").unwrap();
 
-        let ids = run(&e, &[file.display().to_string()], None, None)
+        let ids = run(&e, &[file.display().to_string()], None, None, &off())
             .await
             .unwrap();
         assert_eq!(ids.len(), 1);
         let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
         assert!(stored.raw_text.contains("a procedure worth keeping"));
+    }
+
+    /// The one case `off()` cannot reach: with the face on the body goes out in
+    /// pieces, and the length is set by hand so it is framed the same way the
+    /// single vector is. Bigger than `PIECE`, so several chunks actually go.
+    ///
+    /// What this guards is that the two forms are the same request. Before the
+    /// header was set, a streamed body went out chunked with no
+    /// `content-length` — so what the server and any proxy in front of it saw
+    /// depended on nothing but whether the operator's stdout was a terminal.
+    #[tokio::test]
+    async fn a_body_sent_in_pieces_arrives_whole() {
+        let (e, core) = endpoint().await;
+        let face = crate::cli::face::Face::decide(
+            &crate::cli::args::CliArgs {
+                fancy: crate::cli::args::Fancy::Always,
+                ..Default::default()
+            },
+            true,
+            false,
+            None,
+        );
+        let body = "eine Zeile, die sich wiederholt\n".repeat(8_000);
+        assert!(body.len() > PIECE, "the test body fits in one piece");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lang.txt");
+        std::fs::write(&file, &body).unwrap();
+
+        let ids = run(&e, &[file.display().to_string()], None, None, &face)
+            .await
+            .unwrap();
+        let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
+        assert_eq!(
+            stored.raw_text.len(),
+            body.len(),
+            "the streamed body arrived a different length than it left"
+        );
     }
 
     #[tokio::test]
@@ -251,7 +365,7 @@ mod tests {
             std::fs::write(&p, body).unwrap();
             targets.push(p.display().to_string());
         }
-        let ids = run(&e, &targets, None, None).await.unwrap();
+        let ids = run(&e, &targets, None, None, &off()).await.unwrap();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1]);
     }
@@ -267,6 +381,7 @@ mod tests {
             &[file.display().to_string()],
             Some("A title with spaces"),
             None,
+            &off(),
         )
         .await
         .unwrap();
@@ -300,7 +415,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("notes.txt");
         std::fs::write(&file, "a procedure worth keeping").unwrap();
-        let ids = run(&e, &[file.display().to_string()], None, None)
+        let ids = run(&e, &[file.display().to_string()], None, None, &off())
             .await
             .unwrap();
         let face = crate::cli::face::Face::decide(&Default::default(), false, true, None);
@@ -317,7 +432,7 @@ mod tests {
             CorpusStatus::NeedsReview,
         ] {
             core.store
-                .set_corpus_status(&ids[0], terminal.clone())
+                .set_corpus_status(&ids[0], terminal)
                 .await
                 .expect("set the status");
             tokio::time::timeout(
@@ -333,7 +448,7 @@ mod tests {
     #[tokio::test]
     async fn a_target_that_stops_the_run_is_named_in_the_error() {
         let (e, _core) = endpoint().await;
-        let err = run(&e, &["/no/such/file/anywhere".into()], None, None)
+        let err = run(&e, &["/no/such/file/anywhere".into()], None, None, &off())
             .await
             .unwrap_err();
         assert!(
@@ -352,7 +467,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "anything").unwrap();
-        let err = run(&e, &[file.display().to_string()], None, None)
+        let err = run(&e, &[file.display().to_string()], None, None, &off())
             .await
             .unwrap_err();
         assert!(!err.to_string().is_empty());

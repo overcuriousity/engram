@@ -254,6 +254,16 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- Which merged artifact answered this pair, when the settlement was an
   -- applied merge. The stranded-merge reap reopens pairs by it.
   merged_into    TEXT,
+  -- Who settled this pair: 'model' or 'operator'. NULL for a row still open,
+  -- and for the rows a base carried before this column existed — an absence,
+  -- honestly, rather than a guess.
+  --
+  -- Reconstructing it was impossible before: `dismiss_pair_ui` passes no detail
+  -- and so nulls it, while `apply_supersede_ui` carries the judge's through, so
+  -- the only trace of a person's decision was which string survived. For a
+  -- subsystem whose defence is that every decision is reversible and
+  -- reviewable, who decided is not something to infer.
+  decided_by     TEXT,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);

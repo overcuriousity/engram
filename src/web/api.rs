@@ -1107,11 +1107,53 @@ async fn resurface(
     Ok(Json(tenant.core.resurface(p.limit.unwrap_or(5)).await?))
 }
 
-async fn get_artifact(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-) -> Result<Json<crate::store::artifacts::Chunk>> {
+/// Enough of a corpus to say where a passage came from, and no more.
+///
+/// Not the `Corpus` row itself: that carries `raw_text`, which for a captured
+/// book is the whole book. Shipping it beside every single-artifact read would
+/// make the cheapest door in the API the most expensive one, to say a name.
+#[derive(serde::Serialize)]
+pub struct SourceRef {
+    pub id: String,
+    pub title: Option<String>,
+    pub origin: String,
+    pub source_url: Option<String>,
+}
+
+/// One artifact, and the document it was captured from.
+///
+/// The chunk is flattened rather than nested, so every key this door has ever
+/// answered with is still at the top level and no reader of it had to change.
+/// `source` is `None` in the two cases that are not failures: a merged
+/// artifact belongs to no single corpus, and a corpus deleted since leaves its
+/// artifacts readable.
+#[derive(serde::Serialize)]
+pub struct ArtifactDetail {
+    #[serde(flatten)]
+    pub artifact: crate::store::artifacts::Chunk,
+    pub source: Option<SourceRef>,
+}
+
+async fn get_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<ArtifactDetail>> {
     let chunk = tenant.core.store.get_artifact(&cid).await?;
+    // A reading is not refused because the document behind it is gone: the
+    // artifact is the thing that was asked for and it is still here.
+    let source = match &chunk.corpus_id {
+        // `corpus_origin` and not `get_corpus`: the four columns below are the
+        // whole of what this answers with, and the row carries `raw_text`.
+        Some(id) => tenant
+            .core
+            .store
+            .corpus_origin(id)
+            .await?
+            .map(|c| SourceRef {
+                id: c.id,
+                title: c.title_hint,
+                origin: c.origin,
+                source_url: c.source_url,
+            }),
+        None => None,
+    };
     // Asking for one artifact by id is the same deliberate act the detail pane
     // records, and it is the whole of what this door can honestly say: there
     // is no navigation to have pivoted through, so no `via`, and no session to
@@ -1121,7 +1163,10 @@ async fn get_artifact(
     tenant
         .core
         .record_interaction(&cid, None, Some(&tenant.user.subject));
-    Ok(Json(chunk))
+    Ok(Json(ArtifactDetail {
+        artifact: chunk,
+        source,
+    }))
 }
 
 async fn patch_artifact(
@@ -1524,6 +1569,7 @@ pub(crate) mod tests {
                 pair.id,
                 crate::store::pairs::PairState::Contradiction,
                 Some("30 seconds vs 90"),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
             .unwrap();
@@ -1579,6 +1625,75 @@ pub(crate) mod tests {
         // The API has no navigation to pivot through and no session to belong
         // to: a bearer token is not a conversation.
         assert_eq!(got[0].via, None);
+    }
+
+    /// The terminal's `--show` reads one artifact in full, and the whole point
+    /// of it is that nothing is clipped: a rendering that shows two lines is
+    /// the rendering that made this door necessary. The source travels with it
+    /// because a passage without the document it came from is the citation
+    /// problem `-a` already has.
+    #[tokio::test]
+    async fn one_artifact_is_readable_in_full_with_the_document_it_came_from() {
+        let (app, token, core) = app_token_and_core().await;
+        let src = core
+            .store
+            .insert_corpus("der Rohtext", "web", Some("Handbuch Mobilforensik"))
+            .await
+            .unwrap();
+        let long = "eine Zeile\n".repeat(40);
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: long.clone(),
+                    corpus_span: None,
+                    title: Some("Physische Extraktion".into()),
+                    category: None,
+                    tags: vec!["forensik".into()],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(get(
+                &format!("/api/v1/artifacts/{}", made[0].id),
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = json_of(res).await;
+        assert_eq!(body["id"], made[0].id, "{body}");
+        assert_eq!(
+            body["text"].as_str().unwrap(),
+            long,
+            "the text arrived clipped, which is the one thing this door exists to prevent"
+        );
+        assert_eq!(body["title"], "Physische Extraktion", "{body}");
+        assert_eq!(
+            body["source"]["title"], "Handbuch Mobilforensik",
+            "the document it came from did not travel with it: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_that_is_not_there_is_a_404_rather_than_an_empty_reading() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(get(
+                "/api/v1/artifacts/01a00000-0000-7000-8000-000000000000",
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     fn get(uri: &str, token: Option<&str>) -> Request<Body> {

@@ -58,7 +58,7 @@ impl Reading {
 /// `as_str` writes `needs_review` for the database and serde writes
 /// `needsreview` for a response — and a client comparing strings would pick the
 /// wrong one and silently never match.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CorpusStatus {
     /// An image whose text has not been read yet. Only image corpora hold it.
@@ -108,6 +108,15 @@ impl CorpusStatus {
             _ => CorpusStatus::Raw,
         }
     }
+}
+
+/// The four columns that say where a corpus came from. See `corpus_origin`.
+#[derive(Debug, Clone)]
+pub struct CorpusOrigin {
+    pub id: String,
+    pub title_hint: Option<String>,
+    pub origin: String,
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -331,6 +340,30 @@ impl Store {
                 .await?;
         }
         Ok(Insertion::Created(src))
+    }
+
+    /// Where a corpus came from, without its text.
+    ///
+    /// `get_corpus` is `SELECT *`, and `raw_text` on a captured book is the
+    /// whole book. The single-artifact read needs four columns of it to name a
+    /// source, and reading the row to get them made the cheapest door in the
+    /// API load tens of megabytes per request — the cost `web::api::SourceRef`
+    /// was shaped to avoid on the wire and still paid in the query.
+    ///
+    /// `Ok(None)` and not `NotFound` for a corpus that is gone: a reading is
+    /// not refused because the document behind it was deleted.
+    pub async fn corpus_origin(&self, id: &str) -> Result<Option<CorpusOrigin>> {
+        let row =
+            sqlx::query("SELECT id, title_hint, origin, source_url FROM corpora WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|r| CorpusOrigin {
+            id: r.get("id"),
+            title_hint: r.get("title_hint"),
+            origin: r.get("origin"),
+            source_url: r.get("source_url"),
+        }))
     }
 
     pub async fn get_corpus(&self, id: &str) -> Result<Corpus> {
@@ -687,6 +720,26 @@ impl Store {
 mod tests {
     use super::*;
     use crate::store::Store;
+
+    /// Four columns and not the row: `raw_text` on a captured book is the whole
+    /// book, and the single-artifact read that needs a source name was loading
+    /// it on every request to print a title.
+    #[tokio::test]
+    async fn where_a_corpus_came_from_is_read_without_its_text() {
+        let s = Store::memory().await.unwrap();
+        let src = s
+            .insert_corpus("a very long body", "web", Some("Handbuch"))
+            .await
+            .unwrap();
+        let got = s.corpus_origin(&src.id).await.unwrap().unwrap();
+        assert_eq!(got.id, src.id);
+        assert_eq!(got.title_hint.as_deref(), Some("Handbuch"));
+        assert_eq!(got.origin, "web");
+
+        // A corpus deleted since is not a refusal: the artifact is still there
+        // to read, it just no longer says where it came from.
+        assert!(s.corpus_origin("gone").await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn insert_and_get_roundtrip() {

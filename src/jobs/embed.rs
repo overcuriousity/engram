@@ -336,7 +336,23 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
     // A passage is never a relate anchor: neighbours under one heading are
     // similar for structural reasons, and duplicate detection over verbatim
     // text waits until use promotes it (spec §6).
+    //
+    // A merged artifact is not an anchor either. It carries the union of its
+    // lineage's wording — `merge::losses` refuses a draft that drops a value or
+    // a machine literal of either side — so it scores above `review_min`
+    // against more of a subject than either side did, and every pair it files
+    // becomes the next merge. The artifact produces its own next question, and
+    // on the live base that walked thirteen documents in sixty-eight minutes.
+    // Nothing is lost: whichever ordinary artifact is embedded later still
+    // finds it, so a merge is simply never the second member of a new pair.
+    //
+    // `Merged` and not `is_model_written()`, which would also catch
+    // `Synthesized`: a synthesis is ordinary dedupe material, and
+    // `relate::classify_pair` lets two written rows from one window through on
+    // purpose — one call emitting the same passage twice is a defect worth
+    // finding.
     if chunk.provenance != crate::store::artifacts::Provenance::Passage
+        && chunk.provenance != crate::store::artifacts::Provenance::Merged
         && let Err(e) = crate::jobs::relate::arm(core, &chunk.id, 0).await
     {
         tracing::warn!(
@@ -1077,6 +1093,50 @@ mod tests {
             .fetch_optional(&core.store.control.pool)
             .await
             .unwrap()
+    }
+
+    /// A merged artifact over two captured roots, indexed and nothing more.
+    async fn merged_over(core: &Core, roots: &[String]) -> crate::store::artifacts::Chunk {
+        core.store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    title: Some("merged".into()),
+                    text: "both wordings".into(),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                roots,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_merged_artifact_does_not_arm_a_neighbour_query() {
+        // The feedback edge. A merge embeds, arms relate, finds the next
+        // document's passage on the same subject, and the ticker merges that
+        // too. Fifteen merges in sixty-eight minutes on the live base, roots
+        // running 2, 3, 4 … 16, ending at one synthetic artifact of ten
+        // thousand characters over sixteen passages from thirteen corpora.
+        let core = crate::core::test_support::test_core().await;
+        let roots = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("first wording", [1.0, 0.0]),
+                ("second wording", [0.99, 0.05]),
+            ],
+        )
+        .await;
+        let m = merged_over(&core, &roots).await;
+
+        mark_indexed(&core, &m).await.unwrap();
+
+        assert_eq!(
+            job_state(&core, Stage::Relate, &m.id).await,
+            None,
+            "a merge that queries its neighbours walks the corpus one passage at a time"
+        );
     }
 
     #[tokio::test]

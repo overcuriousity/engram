@@ -506,20 +506,54 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
             // reason is rendered verbatim in the "Seen together" pane and in
             // the associated-results rail, so it must not assert a handover
             // that did not happen.
-            let handed = core
+            //
+            // Except over passages, which are not consolidation's material at
+            // all. This handover writes a pair row directly, so none of the
+            // rules `relate::classify_pair` applies are in force here — and on
+            // the base this was written for, this is the path that started the
+            // damage: a link judge over two passages filed the pair, dedupe
+            // merged it, and the merge then walked thirteen documents one
+            // passage at a time. The link itself is sound and stays; only the
+            // handover is refused.
+            let over_passages = a.provenance == crate::store::artifacts::Provenance::Passage
+                || b.provenance == crate::store::artifacts::Provenance::Passage;
+            // Three outcomes and three sentences, because this one is rendered
+            // verbatim beside the link and must not claim a handover that did
+            // not happen — nor claim consolidation already holds a pair it was
+            // never offered.
+            //
+            // Four sentences and not three, because `over_passages` is an
+            // `||`: a passage beside a captured artifact refuses the handover
+            // for the same reason, but "both are stored source text" is false
+            // about one of them — and this string is rendered verbatim, so it
+            // must not describe an artifact as something it is not.
+            let reason = if over_passages {
+                tracing::debug!(
+                    a = %link.a_id, b = %link.b_id,
+                    "duplicate verdict over a passage; not handing it to consolidation"
+                );
+                if a.provenance == crate::store::artifacts::Provenance::Passage
+                    && b.provenance == crate::store::artifacts::Provenance::Passage
+                {
+                    "same content, and both are stored source text"
+                } else {
+                    "same content, and one of these is stored source text"
+                }
+            } else if core
                 .store
                 .record_pair_with_detail(&link.a_id, &link.b_id, 0.0, "link")
-                .await?;
+                .await?
+            {
+                "same content; handed to consolidation"
+            } else {
+                "same content; consolidation already has this pair"
+            };
             core.store
                 .set_link_state(
                     &link.a_id,
                     &link.b_id,
                     LinkState::Related,
-                    Some(if handed {
-                        "same content; handed to consolidation"
-                    } else {
-                        "same content; consolidation already has this pair"
-                    }),
+                    Some(reason),
                     revs,
                 )
                 .await?;
@@ -1316,6 +1350,136 @@ mod tests {
             .unwrap();
         assert_eq!(l.state, LinkState::Related);
         assert!(l.reason.as_deref().unwrap().contains("consolidation"));
+    }
+
+    /// Two passages, each in a corpus of its own, linked the way co-retrieval
+    /// links anything.
+    async fn seed_passages(core: &Core, n: usize) -> Vec<String> {
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let src = core
+                .store
+                .insert_corpus(&format!("skript {i}"), "web", None)
+                .await
+                .unwrap();
+            let made = core
+                .store
+                .insert_artifacts_with_provenance(
+                    &src.id,
+                    &[NewArtifact {
+                        ordinal: 0,
+                        text: format!("Spuren sind materielle Veraenderungen {i}"),
+                        corpus_span: None,
+                        title: Some(format!("t{i}")),
+                        category: None,
+                        tags: vec![],
+                        segment_idx: Some(0),
+                        caveats: vec![],
+                    }],
+                    crate::store::artifacts::Provenance::Passage,
+                )
+                .await
+                .unwrap();
+            ids.push(made[0].id.clone());
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_verdict_over_passages_is_not_handed_to_consolidation() {
+        // The hole the boundary in `relate::classify_pair` does not cover. This
+        // handover writes a pair directly, so every rule that pass applies is
+        // simply absent here — and on the live base this is what ignited the
+        // merge chain: at 07:13:47 a link judge over two passages filed pair 25
+        // with a score of 0.0, dedupe merged it, and the merge then walked
+        // thirteen documents one passage at a time.
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some(r#"{"relation":"duplicate","reason":"the same definition twice"}"#.into()),
+        }));
+        let ids = seed_passages(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .pair_state_between(&ids[0], &ids[1])
+                .await
+                .unwrap(),
+            None,
+            "a passage is substrate on this path too"
+        );
+        let l = core
+            .store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            l.state,
+            LinkState::Related,
+            "the reader should still see the connection"
+        );
+        assert_eq!(
+            l.reason.as_deref(),
+            Some("same content, and both are stored source text"),
+            "two passages are both source text, and the line may say so"
+        );
+    }
+
+    /// The refusal is an `||`, so a passage beside a captured artifact takes
+    /// the same branch — and eleven of the live base's thirty-three pairs were
+    /// exactly that shape. The sentence is rendered verbatim beside the link,
+    /// so it must describe the two artifacts that are actually there.
+    #[tokio::test]
+    async fn a_duplicate_over_one_passage_does_not_call_the_other_one_source_text() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
+            reply: Some(r#"{"relation":"duplicate","reason":"the same definition twice"}"#.into()),
+        }));
+        let passage = seed_passages(&core, 1).await.remove(0);
+        let captured = seed(&core, 1).await.remove(0);
+        core.store
+            .bump_link(
+                &passage,
+                &captured,
+                5.0,
+                Some("q"),
+                30.0,
+                crate::store::now(),
+            )
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&passage, &captured))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            core.store
+                .pair_state_between(&passage, &captured)
+                .await
+                .unwrap(),
+            None,
+            "the handover is refused whichever side the passage is on"
+        );
+        assert_eq!(
+            core.store
+                .get_link(&passage, &captured)
+                .await
+                .unwrap()
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("same content, and one of these is stored source text"),
+            "the line claimed something untrue about the captured artifact"
+        );
     }
 
     #[tokio::test]

@@ -78,7 +78,7 @@ impl IngestOutcome {
     fn existing(c: &Corpus) -> Self {
         IngestOutcome {
             id: c.id.clone(),
-            status: c.status.clone(),
+            status: c.status,
             duplicate: true,
             near_duplicate: None,
         }

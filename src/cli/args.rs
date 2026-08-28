@@ -22,9 +22,11 @@ pub struct CliArgs {
     /// Ask one question across the base.
     #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search"])]
     pub ask: Vec<String>,
-    #[arg(long, value_name = "TITLE")]
+    /// What to call this capture. Refused with every verb but `-c`, for the
+    /// reason `--tag` is refused with `-a`: a search has no title to set.
+    #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show"])]
     pub title: Option<String>,
-    #[arg(long, value_name = "NOTE")]
+    #[arg(long, value_name = "NOTE", conflicts_with_all = ["search", "ask", "show"])]
     pub note: Option<String>,
     /// Narrow a search to artifacts carrying this tag. Repeatable.
     ///
@@ -32,12 +34,20 @@ pub struct CliArgs {
     /// accepts all three over its JSON API, but no interactive door offers a
     /// filtered ask, and a flag that is accepted and then dropped is worse
     /// than one that is refused. See `cli::ask::run`.
-    #[arg(long = "tag", value_name = "TAG", conflicts_with = "ask")]
+    ///
+    /// Refused with `--show` for the plainer version of the same reason: one
+    /// artifact named by id is not a list there is anything to narrow.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show"])]
     pub tags: Vec<String>,
-    #[arg(long, value_name = "CATEGORY", conflicts_with = "ask")]
+    #[arg(long, value_name = "CATEGORY", conflicts_with_all = ["ask", "show"])]
     pub category: Option<String>,
     /// Print the results as JSON instead of for a person.
-    #[arg(long, conflicts_with = "ask")]
+    ///
+    /// `--show` refuses it rather than ignoring it: the reading door renders a
+    /// body for a person to read and has no JSON form, and being handed the
+    /// human rendering after asking for JSON is the failure this whole rule is
+    /// about.
+    #[arg(long, conflicts_with_all = ["ask", "show"])]
     pub json: bool,
     /// Never colour, never animate, never leave ASCII.
     #[arg(long)]
@@ -46,8 +56,18 @@ pub struct CliArgs {
     #[arg(long, value_name = "WHEN", default_value = "auto")]
     pub fancy: Fancy,
     /// After capturing, follow the background stages until they finish.
-    #[arg(long)]
+    ///
+    /// There is nothing to follow behind the other three verbs: they finish
+    /// when their response arrives.
+    #[arg(long, conflicts_with_all = ["search", "ask", "show"])]
     pub watch: bool,
+    /// Read one artifact in full: a rank from the last search, a leading piece
+    /// of an id, or a whole id.
+    #[arg(long, value_name = "RANK|ID", conflicts_with_all = ["capture", "search", "ask"])]
+    pub show: Option<String>,
+    // Every flag `--show` does not honour refuses it from the other side —
+    // `--json`, `--tag`, `--category`, `--title`, `--note`, `--watch` — so the
+    // conflict is declared once, on the flag whose own doc comment explains it.
 }
 
 /// When the drawn rendering is used. `Auto` is the only honest default: a pipe
@@ -73,6 +93,10 @@ pub enum Verb {
         query: String,
     },
     Ask(String),
+    /// One artifact, read in full. Carries what the operator typed rather than
+    /// an id: a rank means nothing until the remembered list is read, and that
+    /// is a file, which is not something this decision touches.
+    Show(String),
 }
 
 /// The verb, or `None` for "no verb was asked for — be the server".
@@ -95,6 +119,7 @@ pub fn verb(
         !args.capture.is_empty(),
         !args.search.is_empty(),
         !args.ask.is_empty(),
+        args.show.is_some(),
     ]
     .iter()
     .filter(|x| **x)
@@ -110,8 +135,8 @@ pub fn verb(
         // prompt below would then be handed EOF.
         if named > 0 {
             return Err(Error::Validation(
-                "`-c`, `-s` and `-a` are the client half of this binary; \
-                 run them on their own, without the server's own flags"
+                "`-c`, `-s`, `-a` and `--show` are the client half of this \
+                 binary; run them on their own, without the server's own flags"
                     .into(),
             ));
         }
@@ -123,10 +148,16 @@ pub fn verb(
         // this is here for the caller that built `CliArgs` itself — which is
         // every test, and one day some other entry point.
         return Err(Error::Validation(
-            "one verb at a time: `-c`, `-s` or `-a`".into(),
+            "one verb at a time: `-c`, `-s`, `-a` or `--show`".into(),
         ));
     }
 
+    if let Some(which) = &args.show {
+        // Answered before the pipe is looked at. `engram --show 3 | less` is
+        // the ordinary way to read a long artifact, and without this the pipe
+        // would be taken for the capture gesture the door below exists for.
+        return Ok(Some(Verb::Show(which.clone())));
+    }
     if !args.capture.is_empty() {
         // Not read here: a capture target may be a path or a link, and the
         // reading of each belongs to the verb that knows what to do with it.
@@ -272,6 +303,41 @@ mod tests {
         a.search = vec!["a".into()];
         a.ask = vec!["b".into()];
         assert!(verb(&a, false, false, piped("")).is_err());
+    }
+
+    #[test]
+    fn show_names_one_artifact_to_read_in_full() {
+        let a = CliArgs {
+            show: Some("3".into()),
+            ..Default::default()
+        };
+        let v = verb(&a, false, false, piped("")).unwrap().unwrap();
+        assert!(matches!(v, Verb::Show(ref which) if which == "3"));
+    }
+
+    /// A reading is its own verb, so it is refused alongside another one for
+    /// the same reason `-s` and `-a` are: quietly picking one loses the other.
+    #[test]
+    fn show_alongside_another_verb_is_refused() {
+        let a = CliArgs {
+            show: Some("3".into()),
+            search: vec!["forensik".into()],
+            ..Default::default()
+        };
+        assert!(verb(&a, false, false, piped("")).is_err());
+    }
+
+    /// And `engram --show 3 | less` must stay a reading. Without `show` in the
+    /// count, the pipe would be read as the capture gesture and the id would
+    /// be stored as a note.
+    #[test]
+    fn show_down_a_pipe_is_still_a_reading_and_not_a_capture() {
+        let a = CliArgs {
+            show: Some("3".into()),
+            ..Default::default()
+        };
+        let v = verb(&a, false, true, piped("something")).unwrap().unwrap();
+        assert!(matches!(v, Verb::Show(ref which) if which == "3"));
     }
 
     /// The gesture this guards: `--delete-user` prints a prompt, and the

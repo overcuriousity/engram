@@ -406,6 +406,7 @@ pub async fn run(core: &Core) -> Result<Outcome> {
                 p.id,
                 crate::store::pairs::PairState::NoConflict,
                 Some(&detail),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
         {
@@ -493,7 +494,12 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
         // because a pair can be retired while it waits.
         if !a_live || !b_live {
             core.store
-                .set_pair_state(p.id, crate::store::pairs::PairState::Dismissed, None)
+                .set_pair_state(
+                    p.id,
+                    crate::store::pairs::PairState::Dismissed,
+                    None,
+                    crate::store::pairs::DecidedBy::Model,
+                )
                 .await?;
             continue;
         }
@@ -733,7 +739,12 @@ pub(crate) mod tests {
             .unwrap()[0]
             .id;
         core.store
-            .set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
+            .set_pair_state(
+                id,
+                PairState::Contradiction,
+                Some("30 seconds vs 90"),
+                crate::store::pairs::DecidedBy::Model,
+            )
             .await
             .unwrap();
         // Behind the write path's back, which is what a crash between its two
@@ -826,7 +837,12 @@ pub(crate) mod tests {
             .unwrap()
             .id;
         core.store
-            .set_pair_state(id, PairState::Contradiction, Some("30 seconds vs 90"))
+            .set_pair_state(
+                id,
+                PairState::Contradiction,
+                Some("30 seconds vs 90"),
+                crate::store::pairs::DecidedBy::Model,
+            )
             .await
             .unwrap();
         core.deprecate(&ids[1]).await.unwrap();
@@ -2177,7 +2193,12 @@ pub(crate) mod tests {
             .unwrap()[0]
             .id;
         core.store
-            .set_pair_merged(pid, &m.id, Some("same claim"))
+            .set_pair_merged(
+                pid,
+                &m.id,
+                Some("same claim"),
+                crate::store::pairs::DecidedBy::Model,
+            )
             .await
             .unwrap();
         // The embed job has exhausted its retries and cannot succeed.
@@ -2257,6 +2278,7 @@ pub(crate) mod tests {
                 id,
                 crate::store::pairs::PairState::Oversized,
                 Some("12 sources, cap is 8"),
+                crate::store::pairs::DecidedBy::Model,
             )
             .await
             .unwrap();

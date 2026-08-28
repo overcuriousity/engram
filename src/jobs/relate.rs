@@ -36,9 +36,13 @@ pub async fn arm(core: &Core, artifact_id: &str, seq: i64) -> Result<()> {
 
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let me = core.store.get_artifact(artifact_id).await?;
-    // A passage is not anchored: see `embed::mark_indexed`. Said here too, so a
-    // unit armed some other way files nothing.
-    if me.provenance == Provenance::Passage {
+    // Neither a passage nor a merge is anchored: see `embed::mark_indexed` for
+    // why each is withheld. Said here too, so a unit armed some other way —
+    // the sweep's repair pass, an operator, a re-embed — files nothing.
+    //
+    // `Merged` and not `is_model_written()`, the same distinction the embed
+    // path draws: a synthesis is ordinary dedupe material and stays an anchor.
+    if me.provenance == Provenance::Passage || me.provenance == Provenance::Merged {
         return Ok(());
     }
     // A retired artifact has no duplicates worth recording. Every pair naming
@@ -263,6 +267,52 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
     //
     // It survives as a prior in the prompt and as the input to the merge
     // verification. It is no longer an admission gate. See the design, §6.5.
+    // A passage is the verbatim substrate, not a claim anyone made twice.
+    // Passages under one heading are alike for how they were cut, and passages
+    // from different documents on one subject are alike because the subject is
+    // taught more than once — neither is duplication. The narrow rule above
+    // asks for one corpus and one `segment_idx` and so covers only the first;
+    // this is the same statement `run` already makes about the asking side (a
+    // passage never queries), applied to the side that gets filed.
+    //
+    // Below the containment block on purpose: a passage wholly inside another
+    // in the same corpus is still superseded, deterministically and without a
+    // call. What ends here is the model question, not the hygiene.
+    if a.provenance == Provenance::Passage || b.provenance == Provenance::Passage {
+        return Ok(false);
+    }
+
+    // A score says two texts are alike. Duplication says one of them adds
+    // nothing, and those are different claims — the comment above
+    // `contains_normalized` states the distinction plainly. On a base of two
+    // hundred documents teaching one subject, "alike" is the ordinary condition
+    // and says nothing at all about duplication: twenty-three of the thirty-
+    // three pairs the live base ever filed were two scripts covering one topic.
+    //
+    // So the cosine admits nothing on its own. One of two things has to hold:
+    // one text is wholly inside the other, or both came out of one document.
+    // Containment is what keeps the real cross-corpus case working — the same
+    // document ingested twice — while two scripts that merely cover one subject
+    // are refused.
+    //
+    // Refused, and nothing is written. Not a pair, and not a link either: a
+    // link means two artifacts were *used* together, `bump_link` takes the cue
+    // that bound them, and a bump derived from a cosine would put an
+    // observation about text into a table whose every other row is an
+    // observation about behaviour. Two documents on one subject link on their
+    // own, from the first search that shows them together.
+    let (longer, shorter) = if a.text.len() >= b.text.len() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let corroborated = contains_normalized(&longer.text, &shorter.text)
+        || (a.corpus_id.is_some() && a.corpus_id == b.corpus_id);
+    if !corroborated {
+        tracing::debug!(a = %a.id, b = %b.id, score, "alike, but nothing says duplicate");
+        return Ok(false);
+    }
+
     core.store.record_pair(&a.id, &b.id, score).await?;
     Ok(false)
 }
@@ -272,6 +322,50 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::jobs::consolidate::tests::seed;
+
+    /// A merge is not an anchor, and the guard has to be here and not only in
+    /// `embed::mark_indexed`. The embed path withholds the arming; the sweep's
+    /// repair pass arms a unit for anything that has none, which after that
+    /// withholding is every merge on the base. Without this the merge is an
+    /// anchor again one tick later, and files the pair that becomes the next
+    /// merge.
+    #[tokio::test]
+    async fn a_merge_armed_by_the_repair_pass_still_files_nothing() {
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let m = crate::jobs::merge::write(
+            &core,
+            &crate::infer::prompt::MergedDraft {
+                text: "Attach the volume, then mount the filesystem, before writing.".into(),
+                title: Some("before writing".into()),
+                category: None,
+                tags: vec![],
+                caveats: vec![],
+            },
+            &ids,
+        )
+        .await
+        .unwrap();
+
+        run(&core, &m.id).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|p| p.a_id != m.id && p.b_id != m.id),
+            "the merge was an anchor after all"
+        );
+    }
 
     #[tokio::test]
     async fn an_artifact_finds_its_duplicate_the_moment_it_is_embedded() {
@@ -410,6 +504,240 @@ mod tests {
             core.store.get_artifact(&ids[0]).await.unwrap(),
             core.store.get_artifact(&ids[1]).await.unwrap(),
         )
+    }
+
+    /// One passage under a corpus of its own. `seed_rows` writes `captured`
+    /// rows, and the case under test is two passages from two documents.
+    async fn seed_passage(core: &Core, corpus: &str, text: &str) -> String {
+        let src = core.store.insert_corpus(corpus, "web", None).await.unwrap();
+        core.store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: text.to_string(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+                Provenance::Passage,
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id
+    }
+
+    #[tokio::test]
+    async fn two_passages_from_different_documents_about_one_subject_are_not_a_pair() {
+        // The guard this joins asked for one corpus AND one `segment_idx`, so
+        // it never saw two passages from two documents — on the live base it
+        // fired on none of thirty-three pairs. Thirteen scripts teaching one
+        // subject produced passages at 0.89 to 0.93 that duplicate nothing, and
+        // they were merged into one synthetic document.
+        let core = test_core().await;
+        let a_id = seed_passage(&core, "skript-a", "Spuren sind materielle Veraenderungen.").await;
+        let b_id = seed_passage(
+            &core,
+            "skript-b",
+            "Als Spur gilt jede materielle Veraenderung.",
+        )
+        .await;
+        let a = core.store.get_artifact(&a_id).await.unwrap();
+        let b = core.store.get_artifact(&b_id).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "two passages from two documents are two sources, not a duplicate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_a_passage_on_either_side_is_never_filed() {
+        // Eleven of the live base's thirty-three pairs were a passage against a
+        // captured artifact, so the rule cannot be about two passages only.
+        let core = test_core().await;
+        let passage =
+            seed_passage(&core, "skript-a", "Spuren sind materielle Veraenderungen.").await;
+        let captured = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Als Spur gilt jede materielle Veraenderung.",
+            [0.99, 0.05],
+        )
+        .await;
+        let a = core.store.get_artifact(&passage).await.unwrap();
+        let b = core.store.get_artifact(&captured).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_corpus_similarity_alone_does_not_reach_the_model() {
+        // Twenty-three of the live base's thirty-three pairs were this: two
+        // documents covering one subject at 0.89 to 0.93, duplicating nothing.
+        // Thirteen scripts agreeing is evidence that the claim is standard, and
+        // a merge erases that they agreed.
+        let core = test_core().await;
+        let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Spuren sind materielle Veraenderungen an Personen oder Sachen.",
+            [1.0, 0.0],
+        )
+        .await;
+        let b_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Als Spur gilt jede materielle Veraenderung an Person oder Objekt.",
+            [0.99, 0.05],
+        )
+        .await;
+        let a = core.store.get_artifact(&a_id).await.unwrap();
+        let b = core.store.get_artifact(&b_id).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn containment_across_corpora_still_reaches_the_model() {
+        // The case the corroborant keeps working: one document ingested twice.
+        // Containment is the predicate that says one side adds nothing, which
+        // is what duplication means — a score only says they are alike.
+        let core = test_core().await;
+        let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Spuren sind materielle Veraenderungen an Personen oder Sachen, \
+             die zur Tataufklaerung beitragen koennen.",
+            [1.0, 0.0],
+        )
+        .await;
+        let b_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Spuren sind materielle Veraenderungen an Personen oder Sachen,",
+            [0.99, 0.05],
+        )
+        .await;
+        let a = core.store.get_artifact(&a_id).await.unwrap();
+        let b = core.store.get_artifact(&b_id).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_pair_does_not_bump_a_link() {
+        // The link graph stays an observation about use. `bump_link` takes the
+        // cue that bound two artifacts, and the README calls the graph one
+        // learned from co-retrieval; a bump derived from a cosine would leave
+        // the recommendation surface unable to tell the two apart.
+        let core = test_core().await;
+        let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Spuren sind materielle Veraenderungen.",
+            [1.0, 0.0],
+        )
+        .await;
+        let b_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            &core,
+            "Als Spur gilt jede materielle Veraenderung.",
+            [0.99, 0.05],
+        )
+        .await;
+        let a = core.store.get_artifact(&a_id).await.unwrap();
+        let b = core.store.get_artifact(&b_id).await.unwrap();
+
+        classify_pair(&core, &a, &b, 0.93).await.unwrap();
+
+        assert!(
+            core.store.get_link(&a_id, &b_id).await.unwrap().is_none(),
+            "a cosine is not evidence that anyone used these together"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_passage_inside_one_corpus_is_still_superseded_by_containment() {
+        // What the new guard must not take away. Containment inside one corpus
+        // is deterministic, costs no call, and is the only ground on which
+        // anything is hidden unasked — so the guard sits below that block, not
+        // above it. Placed above, this hygiene disappears silently.
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("skript", "web", None)
+            .await
+            .unwrap();
+        let rows = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "Spuren sind materielle Veraenderungen an Personen oder Sachen."
+                            .into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: Some(0),
+                        caveats: vec![],
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "Spuren sind materielle Veraenderungen".into(),
+                        corpus_span: None,
+                        title: None,
+                        category: None,
+                        tags: vec![],
+                        segment_idx: Some(1),
+                        caveats: vec![],
+                    },
+                ],
+                Provenance::Passage,
+            )
+            .await
+            .unwrap();
+
+        classify_pair(&core, &rows[0], &rows[1], 0.97)
+            .await
+            .unwrap();
+
+        let short = core.store.get_artifact(&rows[1].id).await.unwrap();
+        assert!(
+            !short.in_results(),
+            "a passage wholly inside another in one corpus is still hidden"
+        );
     }
 
     #[tokio::test]

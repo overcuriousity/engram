@@ -154,11 +154,23 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 1] = [(
-            "artifacts",
-            "updated_at",
-            "ALTER TABLE artifacts ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
-        )];
+        const ADDITIVE: [(&str, &str, &str); 2] = [
+            (
+                "artifacts",
+                "updated_at",
+                "ALTER TABLE artifacts ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+            ),
+            // Nullable and with no default, which is the whole reason it
+            // qualifies: NULL on an existing row says "nobody recorded who
+            // decided this", which is exactly true of every row written before
+            // the column existed. A default would have those rows claim an
+            // author they never had.
+            (
+                "artifact_pairs",
+                "decided_by",
+                "ALTER TABLE artifact_pairs ADD COLUMN decided_by TEXT",
+            ),
+        ];
         for (table, column, ddl) in ADDITIVE {
             let key = format!("{table}.{column}");
             let Some(i) = missing.iter().position(|m| *m == key) else {

@@ -9,7 +9,9 @@ pub mod ask;
 pub mod capture;
 pub mod endpoint;
 pub mod face;
+pub mod last;
 pub mod search;
+pub mod show;
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -45,6 +47,16 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
             return 2;
         }
     };
+    // One face for the whole invocation. It used to be decided inside the
+    // `--watch` branch alone; now the upload track, the readout and the lamps
+    // all read the same decision, and a second `decide` could only disagree
+    // with the first.
+    let face = face::Face::decide(
+        cli,
+        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        std::env::var_os("NO_COLOR").is_some(),
+        crate::cli::face::locale().as_deref(),
+    );
     match verb {
         args::Verb::Capture(_) | args::Verb::CapturePiped(_) => {
             let captured = match &verb {
@@ -54,6 +66,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                         targets,
                         cli.title.as_deref(),
                         cli.note.as_deref(),
+                        &face,
                     )
                     .await
                 }
@@ -63,6 +76,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                         text.clone(),
                         cli.title.as_deref(),
                         cli.note.as_deref(),
+                        &face,
                     )
                     .await
                 }
@@ -76,12 +90,6 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                         println!("{id}");
                     }
                     if cli.watch {
-                        let face = face::Face::decide(
-                            cli,
-                            std::io::IsTerminal::is_terminal(&std::io::stdout()),
-                            std::env::var_os("NO_COLOR").is_some(),
-                            crate::cli::face::locale().as_deref(),
-                        );
                         for id in &ids {
                             if let Err(e) = capture::watch(&endpoint, id, &face).await {
                                 eprintln!("{e}");
@@ -106,7 +114,14 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                 }
             }
         }
-        args::Verb::Ask(question) => match ask::run(&endpoint, &question).await {
+        args::Verb::Show(which) => match show::run(&endpoint, &which, last::load()).await {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("{e}");
+                2
+            }
+        },
+        args::Verb::Ask(question) => match ask::run(&endpoint, &question, cli).await {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("{e}");

@@ -53,6 +53,11 @@ from the positions those searches actually gave.
   a score as a bar, the cliff as a break in the trace beside it — and in a pipe
   it is plain text with every one of those claims still said in words. Exit `1`
   means nothing was found, so `engram -s "x" || …` is a usable branch.
+  A list clips each hit to a couple of lines; `engram --show 3` then reads the
+  third of them in full, along with the document it was captured from. It takes
+  a rank from the last search, a leading piece of an id, or a whole id — and
+  the sources under an `-a` answer are numbered as the same kind of list, so
+  the `[9]` an answer cites is `engram --show 9`.
 - **Search by meaning** — type the situation, not the keywords. Loose matches
   are labelled as loose, and where the scores fall off a cliff the hits past it
   are greyed: they keep their rank but stop claiming to be answers.
@@ -101,23 +106,44 @@ one click. No artifact spans two segments.
 
 ## Deployment
 
+Install the released binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/overcuriousity/engram/master/install.sh | sh
+```
+
+It takes the build for the machine it runs on — a statically linked `x86_64`
+one that needs no libc of any particular vintage, or `aarch64` — checks it
+against the release's `SHA256SUMS` before unpacking it, and installs to
+`/usr/local/bin` where that is writable and `~/.local/bin` otherwise. It never
+reaches for sudo. `ENGRAM_INSTALL_DIR` says where to put it instead,
+`ENGRAM_VERSION` pins a tag rather than taking the newest. The script is
+[`install.sh`](install.sh) in this repository and is worth reading before you
+pipe it to a shell; the archives are on the [releases
+page](https://github.com/overcuriousity/engram/releases) if you would rather
+take them by hand. Versions are dates — `v2026.827.0` — and are marked
+pre-release while the shape of things is still moving.
+
+Or build it:
+
 ```bash
 cargo build --release        # target/release/engram
+```
+
+Either way the first run is the same — `engram` below is the installed binary,
+or `./target/release/engram` if you built it. `config.example.toml` is in this
+repository and in every release archive:
+
+```bash
 cp config.example.toml config.toml
-./target/release/engram --hash-password 'your password'   # paste into config.toml
-./target/release/engram
+engram --hash-password 'your password'   # paste into config.toml
+engram
 ```
 
 Qdrant has to be answering on the address in `config.toml` — `127.0.0.1:6333`
 by default — before that last line. How you run it is your business: the
 [released binary](https://github.com/qdrant/qdrant/releases) and a container
 are equally fine, and engram only ever speaks to its REST port.
-
-Released builds are on the [releases
-page](https://github.com/overcuriousity/engram/releases): a statically linked
-`x86_64` binary that needs no libc of any particular vintage, and an `aarch64`
-one. Versions are dates — `v2026.827.0` — and are marked pre-release while the
-shape of things is still moving.
 
 Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
 through `raw → embedding → ready` on Browse. `partial` means part of it has not
@@ -406,7 +432,9 @@ style = "tei"
 Everything above is the server's `config.toml`. The client half of the same
 binary — `engram -c`, `-s`, `-a`, and the piped form — never reads it: it talks
 to a running engram over HTTP and needs only an address and a token, which it
-reads from `~/.config/engram/cli.toml`.
+reads from `~/.config/engram/cli.toml`. On a laptop that is only ever a client,
+the [installer](#deployment) is the whole of the install, and
+`ENGRAM_INSTALL_DIR=~/.local/bin` keeps it out of a directory needing root.
 
 ```toml
 url = "http://127.0.0.1:8080"

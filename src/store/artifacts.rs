@@ -302,6 +302,31 @@ impl Store {
         // precisely the case the counter was added for.
         let root_ids: std::collections::BTreeSet<&String> = resolved.values().flatten().collect();
 
+        // The invariant stated above, checked rather than assumed. A merge over
+        // passages rewrites the verbatim substrate into text that belongs to no
+        // corpus and carries no span, and hides the wording someone captured
+        // behind it. On the base this was written for, every one of the merge
+        // path's root rows named a passage, silently, for as long as it ran.
+        //
+        // Here and not as a constraint on `artifact_sources`: the same table
+        // carries a synthesis's passage sources, where naming a passage is
+        // correct and intended.
+        //
+        // `Validation` and not `Internal` (`src/error.rs`): the caller sent a
+        // root it may not merge, which is a refused request and not a broken
+        // server.
+        for root in &root_ids {
+            let p: String = sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
+                .bind(root.as_str())
+                .fetch_one(&self.pool)
+                .await?;
+            if Provenance::parse(&p) != Provenance::Captured {
+                return Err(crate::error::Error::Validation(format!(
+                    "a merge root must be a captured artifact; {root} is {p}"
+                )));
+            }
+        }
+
         let mut tx = self.pool.begin().await?;
         let created_at = now();
         let c = Chunk {
@@ -585,20 +610,30 @@ impl Store {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        let holes = std::iter::repeat_n("?", ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT * FROM artifacts WHERE id IN ({holes})"
-        )));
-        for id in ids {
-            q = q.bind(id);
+        // Deduplicated and chunked, because the callers hand this whatever
+        // their own walk produced. `dedupe::run` passes every root of both
+        // members flattened together, which repeats an id whenever two members
+        // share a source and is bounded by nothing: the pre-merge check it
+        // feeds has no count-based cap by design. One `?` per id past
+        // SQLITE_MAX_VARIABLE_NUMBER — 999 on the builds predating 3.32 — is a
+        // prepare error, not a slow query, so the same 500 the pair repair
+        // chunks at is used here (`store::pairs::stale_unreachable_pairs`).
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        let unique: Vec<&String> = ids.iter().filter(|id| seen.insert(*id)).collect();
+        let mut out = Vec::with_capacity(unique.len());
+        for chunk in unique.chunks(500) {
+            let holes = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM artifacts WHERE id IN ({holes})"
+            )));
+            for id in chunk {
+                q = q.bind(*id);
+            }
+            out.extend(q.fetch_all(&self.pool).await?.iter().map(row_to_artifact));
         }
-        Ok(q.fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(row_to_artifact)
-            .collect())
+        Ok(out)
     }
 
     /// The caveats of many artifacts in one query, keyed by id.
@@ -1128,6 +1163,14 @@ impl Store {
     /// backstop for an arming that failed after the embed committed. A row
     /// survives its completion, so "no job at all" is exactly "never asked".
     ///
+    /// Neither passages nor merges are anchors, and both exclusions belong
+    /// here rather than only in `embed::mark_indexed`. A backstop for "never
+    /// asked" cannot distinguish an arming that failed from one that was
+    /// deliberately withheld: every merged artifact now has no relate row *by
+    /// design*, so a filter on passages alone would arm one for each of them on
+    /// the next repair tick and undo the rule the embed path applies. The
+    /// reason merges are not anchors is spelled out there.
+    ///
     /// Walked in windows behind a cursor, rather than always from the oldest
     /// artifact forward. The "never asked" test lives in the other database
     /// now, so it cannot be a `WHERE` clause any more and the `LIMIT` has to be
@@ -1161,7 +1204,7 @@ impl Store {
             "SELECT a.id, a.created_at FROM artifacts a
               WHERE a.status = 'active' AND a.superseded_by IS NULL
                 AND a.embed_state = 'embedded'
-                AND a.provenance <> 'passage'
+                AND a.provenance <> 'passage' AND a.provenance <> 'merged'
                 AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
               ORDER BY a.created_at ASC, a.id ASC
               LIMIT ?",
@@ -1398,6 +1441,70 @@ mod tests {
             read.source_count, 0,
             "a captured artifact was merged from something"
         );
+    }
+
+    /// One passage in a corpus of its own, for the root-provenance cases.
+    async fn a_passage(s: &Store) -> String {
+        let src = s.insert_corpus("skript", "web", None).await.unwrap();
+        let mut p = nc(0, "Spuren sind materielle Veraenderungen.");
+        p.segment_idx = Some(0);
+        s.insert_artifacts_with_provenance(&src.id, &[p], Provenance::Passage)
+            .await
+            .unwrap()
+            .remove(0)
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_merge_whose_root_is_a_passage_is_refused() {
+        // The invariant `insert_merged_artifact` documents and the live base
+        // violated in every one of its 135 merge-lineage rows. A merge over
+        // passages rewrites the verbatim substrate into text that belongs to no
+        // corpus and carries no span, and hides the wording someone captured
+        // behind it — the outcome `schema.sql` and the ROADMAP's fidelity rule
+        // exist to prevent.
+        let s = Store::memory().await.unwrap();
+        let root = a_passage(&s).await;
+
+        let refused = s
+            .insert_merged_artifact(
+                &NewMerged {
+                    title: Some("merged".into()),
+                    text: "rewritten".into(),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[root],
+            )
+            .await;
+
+        assert!(refused.is_err(), "a passage is not a merge root");
+    }
+
+    #[tokio::test]
+    async fn a_synthesized_artifact_may_still_name_passage_sources() {
+        // Why the check is on the merge path and not on `artifact_sources`. A
+        // synthesis draws on passages by design, and eleven rows in the live
+        // base are exactly that; a table constraint would break it.
+        let s = Store::memory().await.unwrap();
+        let root = a_passage(&s).await;
+
+        let made = s
+            .insert_synthesized_artifact(
+                &NewSynthesized {
+                    text: "Zusammenfassung".into(),
+                    title: Some("Spurenkunde".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![],
+                },
+                &[root],
+            )
+            .await;
+
+        assert!(made.is_ok(), "synthesis over passages is what synthesis is");
     }
 
     /// One query for every hit's caveats: each id maps to its own list, an id
@@ -1859,6 +1966,30 @@ mod tests {
         assert_eq!(texts, vec!["a", "c"]);
     }
 
+    /// One `?` per id, and the callers hand this whatever their own walk
+    /// produced: `dedupe::run` flattens every root of both members together,
+    /// which repeats a shared source and is capped by nothing. Past
+    /// SQLITE_MAX_VARIABLE_NUMBER that is a prepare error, not a slow query.
+    #[tokio::test]
+    async fn a_long_repetitive_list_of_ids_is_still_one_answer() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b")])
+            .await
+            .unwrap();
+        // Well past 999, and mostly repeats.
+        let mut ids: Vec<String> = (0..2_000).map(|i| format!("gone-{i}")).collect();
+        for _ in 0..40 {
+            ids.push(made[0].id.clone());
+            ids.push(made[1].id.clone());
+        }
+        let got = s.artifacts_by_ids(&ids).await.unwrap();
+        let mut texts: Vec<&str> = got.iter().map(|c| c.text.as_str()).collect();
+        texts.sort_unstable();
+        assert_eq!(texts, vec!["a", "b"], "a repeated id came back twice");
+    }
+
     #[tokio::test]
     async fn the_relate_backstop_never_lists_a_passage() {
         let s = Store::memory().await.unwrap();
@@ -1873,6 +2004,46 @@ mod tests {
         }
         let ids = s.list_unrelated_artifact_ids(10).await.unwrap();
         assert_eq!(ids, vec![c[0].id.clone()]);
+    }
+
+    /// Nor a merge, and for a reason the passage case does not carry: a merge
+    /// is *never* armed by the embed path (`embed::mark_indexed`), so the
+    /// backstop's own test — no relate row means the arming was lost — is true
+    /// of every merge on the base. Filtering passages alone therefore hands one
+    /// back on the very next repair tick and makes each merge an anchor again,
+    /// which is exactly the walk the withholding was added to stop.
+    #[tokio::test]
+    async fn the_relate_backstop_never_lists_a_merge_either() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b")])
+            .await
+            .unwrap();
+        let m = s
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "a and b".into(),
+                    title: Some("both".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[made[0].id.clone(), made[1].id.clone()],
+            )
+            .await
+            .unwrap();
+        for id in [&made[0].id, &made[1].id, &m.id] {
+            s.mark_embedded(id, "fake", 0).await.unwrap();
+        }
+
+        let ids = s.list_unrelated_artifact_ids(10).await.unwrap();
+
+        assert!(
+            !ids.contains(&m.id),
+            "the repair pass would arm a relate unit for a merge"
+        );
+        assert_eq!(ids.len(), 2, "it should still list the two captured rows");
     }
 
     /// The backstop has to be able to see past its own window.
