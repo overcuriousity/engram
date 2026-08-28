@@ -278,16 +278,24 @@ macro_rules! subject_gaps_sql {
 /// naming prompt keeps the first twelve members, and a member that is itself a
 /// paragraph of queries would crowd out eleven other gaps. `queries` is JSON,
 /// so the first element is read out in Rust rather than in SQL.
+/// Which pursuits are on the gap list, written once so that the page and the
+/// count of it cannot come to disagree about what "still unsatisfied" means.
+macro_rules! pursuit_gaps_from {
+    () => {
+        " FROM pursuits
+          WHERE state = 'unsatisfied' AND embed_model = ? AND vec_dim > 0
+            AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                             WHERE kind = 'pursuit' AND gap_id = pursuits.id)"
+    };
+}
+
 macro_rules! pursuit_gaps_sql {
     ($cols:literal) => {
         concat!(
             "SELECT id, queries",
             $cols,
-            " FROM pursuits
-              WHERE state = 'unsatisfied' AND embed_model = ? AND vec_dim > 0
-                AND NOT EXISTS (SELECT 1 FROM gap_coverage
-                                 WHERE kind = 'pursuit' AND gap_id = pursuits.id)
-              ORDER BY opened_at DESC, id DESC LIMIT ?"
+            pursuit_gaps_from!(),
+            " ORDER BY opened_at DESC, id DESC LIMIT ?"
         )
     };
 }
@@ -586,6 +594,23 @@ impl Store {
             .iter()
             .map(|r| r.get::<String, _>("id"))
             .collect())
+    }
+
+    /// How many pursuits are on the gap list, with no page over it.
+    ///
+    /// `open_pursuit_gap_ids` answers a page — `MAX_OPEN_GAPS` of them — because
+    /// its caller draws a list. A status line reports a total, and a total that
+    /// silently stops at the page size is a number that stops moving on exactly
+    /// the base whose operator most needs it to move.
+    pub async fn count_open_pursuit_gaps(&self, embed_model: &str) -> Result<i64> {
+        use sqlx::Row;
+        Ok(
+            sqlx::query(concat!("SELECT COUNT(*) AS n", pursuit_gaps_from!()))
+                .bind(embed_model)
+                .fetch_one(&self.pool)
+                .await?
+                .get("n"),
+        )
     }
 
     /// Query vectors from every recorded search and question under this
@@ -1470,6 +1495,55 @@ mod tests {
             .map(|g| (g.gap.id.as_str(), g.gap.text.as_str()))
             .collect();
         assert_eq!(mine, vec![(id.as_str(), "how do I mount an E01")]);
+    }
+
+    /// The count and the page are one predicate, and the count is not the page.
+    ///
+    /// `--status` read the length of a fifty-row page and printed it as a
+    /// total, so a base with more than fifty pursuits reported fifty for ever.
+    #[tokio::test]
+    async fn the_pursuit_gap_count_is_a_total_and_not_the_length_of_a_page() {
+        let store = Store::memory().await.unwrap();
+        for i in 0..60i64 {
+            let id = store
+                .insert_pursuit(
+                    i * 10,
+                    &[format!("how do I mount an E01 {i}")],
+                    &[],
+                    Some((&[1.0, 0.0], "fake")),
+                )
+                .await
+                .unwrap();
+            store
+                .close_pursuit(&id, "unsatisfied", "nothing strong was engaged", i * 10 + 5)
+                .await
+                .unwrap();
+        }
+        // Sixty, not the fifty a page of pursuits would have held.
+        assert_eq!(store.count_open_pursuit_gaps("fake").await.unwrap(), 60);
+        assert_eq!(store.count_pursuits("unsatisfied").await.unwrap(), 60);
+        assert_eq!(store.count_pursuits("open").await.unwrap(), 0);
+        // Under the gap list's own cap the two agree exactly, which is what
+        // keeps the predicate from drifting away from the count of it.
+        assert_eq!(
+            store.open_pursuit_gap_ids("fake").await.unwrap().len() as i64,
+            store.count_open_pursuit_gaps("fake").await.unwrap()
+        );
+        // A pursuit that has been answered leaves both.
+        store
+            .dismiss_gap(
+                GapKind::Pursuit,
+                store
+                    .open_pursuit_gap_ids("fake")
+                    .await
+                    .unwrap()
+                    .iter()
+                    .next()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.count_open_pursuit_gaps("fake").await.unwrap(), 59);
     }
 
     #[tokio::test]

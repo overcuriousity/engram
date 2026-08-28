@@ -1356,37 +1356,38 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
         .await?
         .get("n");
 
-    // Read from the same store calls the insights page reads, so the sentence
-    // in a terminal and the screen in a browser cannot come apart.
+    // Counted rather than paged. Every one of these was the length of a list
+    // the insights page draws — fifty pursuits, two hundred artifacts — which
+    // reads as a total right up to the base that has more than that, and then
+    // reports the page size for ever. `--status` is opened to find out whether
+    // a number is moving.
+    //
+    // The predicates are the same store's, so the sentence in a terminal and
+    // the screen in a browser still cannot come apart about what is being
+    // counted; only the cap is gone.
     let learning = match tenant.core.learn.enabled {
         false => None,
-        true => {
-            let recent = tenant.core.store.recent_pursuits(50).await?;
-            let on_the_gap_list = tenant
+        true => Some(Learning {
+            pursuits_open: tenant.core.store.count_pursuits("open").await?,
+            // The ones still on the gap list: `unsatisfied` is how a run ended,
+            // and a capture that answers one afterwards leaves the word alone
+            // deliberately.
+            pursuits_unsatisfied: tenant
                 .core
                 .store
-                .open_pursuit_gap_ids(tenant.core.embedder.model())
-                .await
-                .unwrap_or_default();
-            Some(Learning {
-                pursuits_open: recent.iter().filter(|p| p.state == "open").count() as i64,
-                // The ones still on the gap list: `unsatisfied` is how a run
-                // ended, and a capture that answers one afterwards leaves the
-                // word alone deliberately.
-                pursuits_unsatisfied: recent
-                    .iter()
-                    .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
-                    .count() as i64,
-                from_pursuits: tenant.core.store.synthesized_artifacts(200).await?.len() as i64,
-                gaps_open: tenant
-                    .core
-                    .store
-                    .open_gap_refs(tenant.core.embedder.model(), tenant.core.weak_below)
-                    .await
-                    .unwrap_or_default()
-                    .len() as i64,
-            })
-        }
+                .count_open_pursuit_gaps(tenant.core.embedder.model())
+                .await?,
+            from_pursuits: tenant.core.store.count_synthesized_artifacts().await?,
+            // `?`, not `unwrap_or_default`: a store that cannot be read has to
+            // say so. Reported as zero, a failure here reads as a healthy base
+            // on the one screen an operator opens because something is wrong.
+            gaps_open: tenant
+                .core
+                .store
+                .open_gap_refs(tenant.core.embedder.model(), tenant.core.weak_below)
+                .await?
+                .len() as i64,
+        }),
     };
 
     Ok(Json(StatusResponse {

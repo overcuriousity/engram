@@ -482,6 +482,20 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
+    /// How many artifacts a pursuit wrote, with no page over it. The predicate
+    /// is `synthesized_artifacts`', which answers a page for a table to be
+    /// drawn from and cannot be counted for a total.
+    pub async fn count_synthesized_artifacts(&self) -> Result<i64> {
+        use sqlx::Row;
+        Ok(sqlx::query(
+            "SELECT COUNT(*) AS n FROM artifacts
+              WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .get("n"))
+    }
+
     pub async fn insert_artifacts(
         &self,
         corpus_id: &str,
