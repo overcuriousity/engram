@@ -1344,6 +1344,14 @@ impl Core {
             .collect();
 
         let mut reranked = false;
+        // Said on the same condition the stage list was built from, and before
+        // the emptiness check below: a stage named in `stages` and never
+        // started is a client waiting on a step that is not coming. A search
+        // that retrieved nothing still enters the stage, finds nothing to order
+        // and leaves it.
+        if reranking && self.reranker.is_some() {
+            say(SearchEvent::Stage(SearchStage::Rerank));
+        }
         if let Some(reranker) = &self.reranker
             && reranking
             && !results.is_empty()
@@ -1361,7 +1369,6 @@ impl Core {
             } else {
                 limit
             };
-            say(SearchEvent::Stage(SearchStage::Rerank));
             match reranker.rerank(&query.q, &docs, top_n).await {
                 Ok(order) => {
                     reranked = true;
@@ -1654,6 +1661,32 @@ mod tests {
                 SearchEvent::Results(_) => {}
             }
         }
+        assert_eq!(named, started, "{seen:?}");
+    }
+
+    /// The case the rule was broken on: a rerank was promised whenever one was
+    /// configured, but the call itself was also guarded on there being
+    /// something to order, so a search that retrieved nothing named a stage it
+    /// never entered.
+    #[tokio::test]
+    async fn a_search_that_retrieves_nothing_still_runs_every_stage_it_named() {
+        let (core, _calls) = test_core_counting_reranked_docs().await;
+        let seen = events_of(&core, "journal", Door::Cli.into()).await;
+        let mut named: Vec<SearchStage> = Vec::new();
+        let mut started: Vec<SearchStage> = Vec::new();
+        let mut hits = 1;
+        for ev in &seen {
+            match ev {
+                SearchEvent::Stages(v) => named = v.clone(),
+                SearchEvent::Stage(s) => started.push(*s),
+                SearchEvent::Results(r) => hits = r.len(),
+            }
+        }
+        assert_eq!(hits, 0, "the empty base returned hits: {seen:?}");
+        assert!(
+            named.contains(&SearchStage::Rerank),
+            "the fixture stopped configuring a reranker: {named:?}"
+        );
         assert_eq!(named, started, "{seen:?}");
     }
 
