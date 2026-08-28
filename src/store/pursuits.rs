@@ -325,6 +325,22 @@ impl Store {
         Ok(rows.iter().map(row_to_pursuit).collect())
     }
 
+    /// How many pursuits are in one state, with no page over it.
+    ///
+    /// `recent_pursuits` answers a page for a list to be drawn from. Counting
+    /// that page reported the page size as a total the moment a base held more
+    /// pursuits than the page held rows.
+    pub async fn count_pursuits(&self, state: &str) -> Result<i64> {
+        use sqlx::Row;
+        Ok(
+            sqlx::query("SELECT COUNT(*) AS n FROM pursuits WHERE state = ?")
+                .bind(state)
+                .fetch_one(&self.pool)
+                .await?
+                .get("n"),
+        )
+    }
+
     /// Forget every pursuit and every interaction. Rows dropped.
     pub async fn purge_pursuits(&self) -> Result<u64> {
         let a = sqlx::query("DELETE FROM interaction_events")

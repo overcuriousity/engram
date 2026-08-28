@@ -162,24 +162,36 @@ pub struct GapRow {
 /// exactly like a grouping of all of them.
 pub const MAX_OPEN_GAPS: i64 = 500;
 
-/// The predicate both readers of the open gaps share, once.
+/// The predicate every reader of the open gaps shares, once.
 ///
-/// Two projections over one `WHERE`: the sweep needs `query_vec`, the capture
-/// page needs only the words. Written as a macro rather than as four statements
-/// because the two projections drifting apart would mean the page and the sweep
-/// disagreeing about what is open — and because nothing from a request reaches
-/// the statement text either way, the `embed_model` being bound.
+/// Three projections over one `WHERE`: the sweep needs `query_vec`, the capture
+/// page needs only the words, and `count_open_gaps` needs neither. Written as a
+/// macro rather than as separate statements because the projections drifting
+/// apart would mean the page, the sweep and the count disagreeing about what is
+/// open — and because nothing from a request reaches the statement text either
+/// way, the `embed_model` being bound.
+///
+/// The `WHERE` is split out from the `SELECT` for the reason
+/// `pursuit_gaps_from!` is: a total is a count over the predicate, and reading
+/// a page of rows to take its length is how a page size came to be printed as
+/// a total.
+macro_rules! ask_gaps_from {
+    () => {
+        " FROM ask_events
+          WHERE verdict = 'nothing_here' AND dismissed_at IS NULL
+            AND embed_model = ? AND vec_dim > 0
+            AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                             WHERE kind = 'ask' AND gap_id = ask_events.id)"
+    };
+}
+
 macro_rules! ask_gaps_sql {
     ($cols:literal) => {
         concat!(
             "SELECT id, question AS text",
             $cols,
-            " FROM ask_events
-              WHERE verdict = 'nothing_here' AND dismissed_at IS NULL
-                AND embed_model = ? AND vec_dim > 0
-                AND NOT EXISTS (SELECT 1 FROM gap_coverage
-                                 WHERE kind = 'ask' AND gap_id = ask_events.id)
-              ORDER BY judged_at DESC, id DESC LIMIT ?"
+            ask_gaps_from!(),
+            " ORDER BY judged_at DESC, id DESC LIMIT ?"
         )
     };
 }
@@ -195,18 +207,24 @@ macro_rules! ask_gaps_sql {
 /// that already answers it puts it back on the capture page as a fresh hole.
 /// The other direction cannot happen: `unmatched` is `verdict IS NULL`, so a
 /// judged search never enters by that door.
+macro_rules! search_gaps_from {
+    () => {
+        " FROM search_events
+          WHERE verdict = 'gap' AND dismissed_at IS NULL
+            AND embed_model = ? AND vec_dim > 0
+            AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                             WHERE kind IN ('search', 'unmatched')
+                               AND gap_id = search_events.id)"
+    };
+}
+
 macro_rules! search_gaps_sql {
     ($cols:literal) => {
         concat!(
             "SELECT id, query AS text",
             $cols,
-            " FROM search_events
-              WHERE verdict = 'gap' AND dismissed_at IS NULL
-                AND embed_model = ? AND vec_dim > 0
-                AND NOT EXISTS (SELECT 1 FROM gap_coverage
-                                 WHERE kind IN ('search', 'unmatched')
-                                   AND gap_id = search_events.id)
-              ORDER BY judged_at DESC, id DESC LIMIT ?"
+            search_gaps_from!(),
+            " ORDER BY judged_at DESC, id DESC LIMIT ?"
         )
     };
 }
@@ -233,19 +251,25 @@ macro_rules! search_gaps_sql {
 /// The guard this needs already exists. A typing burst folds into one event by
 /// `feedback.coalesce_secs`, so what is measured is the finished query and not
 /// its first two letters.
+macro_rules! unmatched_gaps_from {
+    () => {
+        " FROM search_events e
+          WHERE e.dismissed_at IS NULL AND e.embed_model = ? AND e.vec_dim > 0
+            AND e.verdict IS NULL
+            AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                             WHERE kind = 'unmatched' AND gap_id = e.id)
+            AND (SELECT MAX(c.similarity) FROM search_candidates c
+                  WHERE c.event_id = e.id AND c.similarity IS NOT NULL) < ?"
+    };
+}
+
 macro_rules! unmatched_gaps_sql {
     ($cols:literal) => {
         concat!(
             "SELECT e.id, e.query AS text",
             $cols,
-            " FROM search_events e
-              WHERE e.dismissed_at IS NULL AND e.embed_model = ? AND e.vec_dim > 0
-                AND e.verdict IS NULL
-                AND NOT EXISTS (SELECT 1 FROM gap_coverage
-                                 WHERE kind = 'unmatched' AND gap_id = e.id)
-                AND (SELECT MAX(c.similarity) FROM search_candidates c
-                      WHERE c.event_id = e.id AND c.similarity IS NOT NULL) < ?
-              ORDER BY e.created_at DESC, e.id DESC LIMIT ?"
+            unmatched_gaps_from!(),
+            " ORDER BY e.created_at DESC, e.id DESC LIMIT ?"
         )
     };
 }
@@ -256,18 +280,24 @@ macro_rules! unmatched_gaps_sql {
 /// `DELETE` cascades, and a base whose foreign keys are off still cannot return
 /// an orphan through this. `dismissed_at` and `gap_coverage` close it the same
 /// way they close the other four.
+macro_rules! subject_gaps_from {
+    () => {
+        " FROM ask_subjects s
+          JOIN ask_events e ON e.id = s.event_id
+          WHERE s.dismissed_at IS NULL
+            AND s.embed_model = ? AND s.vec_dim > 0
+            AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                             WHERE kind = 'subject' AND gap_id = s.id)"
+    };
+}
+
 macro_rules! subject_gaps_sql {
     ($cols:literal) => {
         concat!(
             "SELECT s.id, s.subject AS text",
             $cols,
-            " FROM ask_subjects s
-              JOIN ask_events e ON e.id = s.event_id
-              WHERE s.dismissed_at IS NULL
-                AND s.embed_model = ? AND s.vec_dim > 0
-                AND NOT EXISTS (SELECT 1 FROM gap_coverage
-                                 WHERE kind = 'subject' AND gap_id = s.id)
-              ORDER BY s.created_at DESC, s.id DESC LIMIT ?"
+            subject_gaps_from!(),
+            " ORDER BY s.created_at DESC, s.id DESC LIMIT ?"
         )
     };
 }
@@ -278,16 +308,24 @@ macro_rules! subject_gaps_sql {
 /// naming prompt keeps the first twelve members, and a member that is itself a
 /// paragraph of queries would crowd out eleven other gaps. `queries` is JSON,
 /// so the first element is read out in Rust rather than in SQL.
+/// Which pursuits are on the gap list, written once so that the page and the
+/// count of it cannot come to disagree about what "still unsatisfied" means.
+macro_rules! pursuit_gaps_from {
+    () => {
+        " FROM pursuits
+          WHERE state = 'unsatisfied' AND embed_model = ? AND vec_dim > 0
+            AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                             WHERE kind = 'pursuit' AND gap_id = pursuits.id)"
+    };
+}
+
 macro_rules! pursuit_gaps_sql {
     ($cols:literal) => {
         concat!(
             "SELECT id, queries",
             $cols,
-            " FROM pursuits
-              WHERE state = 'unsatisfied' AND embed_model = ? AND vec_dim > 0
-                AND NOT EXISTS (SELECT 1 FROM gap_coverage
-                                 WHERE kind = 'pursuit' AND gap_id = pursuits.id)
-              ORDER BY opened_at DESC, id DESC LIMIT ?"
+            pursuit_gaps_from!(),
+            " ORDER BY opened_at DESC, id DESC LIMIT ?"
         )
     };
 }
@@ -586,6 +624,60 @@ impl Store {
             .iter()
             .map(|r| r.get::<String, _>("id"))
             .collect())
+    }
+
+    /// How many pursuits are on the gap list, with no page over it.
+    ///
+    /// `open_pursuit_gap_ids` answers a page — `MAX_OPEN_GAPS` of them — because
+    /// its caller draws a list. A status line reports a total, and a total that
+    /// silently stops at the page size is a number that stops moving on exactly
+    /// the base whose operator most needs it to move.
+    /// How many gaps are open, all five kinds, with no page over any of them.
+    ///
+    /// `open_gap_refs` answers the capture page's list and caps each kind at
+    /// `MAX_OPEN_GAPS`, so its length saturates at five times that and then
+    /// stops moving — on exactly the base whose operator opened `--status` to
+    /// find out whether the number is moving. It also decoded every gap's text
+    /// to throw all of it away.
+    ///
+    /// The same five predicates the list is built from, so the sentence in a
+    /// terminal and the page in a browser cannot come apart about what is being
+    /// counted; only the cap is gone.
+    pub async fn count_open_gaps(&self, embed_model: &str, weak_below: f32) -> Result<i64> {
+        use sqlx::Row;
+        let mut n: i64 = 0;
+        for sql in [
+            concat!("SELECT COUNT(*) AS n", ask_gaps_from!()),
+            concat!("SELECT COUNT(*) AS n", search_gaps_from!()),
+            concat!("SELECT COUNT(*) AS n", subject_gaps_from!()),
+            concat!("SELECT COUNT(*) AS n", pursuit_gaps_from!()),
+        ] {
+            n += sqlx::query(sql)
+                .bind(embed_model)
+                .fetch_one(&self.pool)
+                .await?
+                .get::<i64, _>("n");
+        }
+        // One more bind than the other four, so it is read on its own — the
+        // same reason `open_gap_refs` reads it outside its loop.
+        n += sqlx::query(concat!("SELECT COUNT(*) AS n", unmatched_gaps_from!()))
+            .bind(embed_model)
+            .bind(weak_below)
+            .fetch_one(&self.pool)
+            .await?
+            .get::<i64, _>("n");
+        Ok(n)
+    }
+
+    pub async fn count_open_pursuit_gaps(&self, embed_model: &str) -> Result<i64> {
+        use sqlx::Row;
+        Ok(
+            sqlx::query(concat!("SELECT COUNT(*) AS n", pursuit_gaps_from!()))
+                .bind(embed_model)
+                .fetch_one(&self.pool)
+                .await?
+                .get("n"),
+        )
     }
 
     /// Query vectors from every recorded search and question under this
@@ -1472,6 +1564,55 @@ mod tests {
         assert_eq!(mine, vec![(id.as_str(), "how do I mount an E01")]);
     }
 
+    /// The count and the page are one predicate, and the count is not the page.
+    ///
+    /// `--status` read the length of a fifty-row page and printed it as a
+    /// total, so a base with more than fifty pursuits reported fifty for ever.
+    #[tokio::test]
+    async fn the_pursuit_gap_count_is_a_total_and_not_the_length_of_a_page() {
+        let store = Store::memory().await.unwrap();
+        for i in 0..60i64 {
+            let id = store
+                .insert_pursuit(
+                    i * 10,
+                    &[format!("how do I mount an E01 {i}")],
+                    &[],
+                    Some((&[1.0, 0.0], "fake")),
+                )
+                .await
+                .unwrap();
+            store
+                .close_pursuit(&id, "unsatisfied", "nothing strong was engaged", i * 10 + 5)
+                .await
+                .unwrap();
+        }
+        // Sixty, not the fifty a page of pursuits would have held.
+        assert_eq!(store.count_open_pursuit_gaps("fake").await.unwrap(), 60);
+        assert_eq!(store.count_pursuits("unsatisfied").await.unwrap(), 60);
+        assert_eq!(store.count_pursuits("open").await.unwrap(), 0);
+        // Under the gap list's own cap the two agree exactly, which is what
+        // keeps the predicate from drifting away from the count of it.
+        assert_eq!(
+            store.open_pursuit_gap_ids("fake").await.unwrap().len() as i64,
+            store.count_open_pursuit_gaps("fake").await.unwrap()
+        );
+        // A pursuit that has been answered leaves both.
+        store
+            .dismiss_gap(
+                GapKind::Pursuit,
+                store
+                    .open_pursuit_gap_ids("fake")
+                    .await
+                    .unwrap()
+                    .iter()
+                    .next()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.count_open_pursuit_gaps("fake").await.unwrap(), 59);
+    }
+
     #[tokio::test]
     async fn a_pursuit_written_before_the_vector_was_carried_is_not_a_gap() {
         // Nothing to group it by. The same rule `vec_dim > 0` already applies
@@ -1586,6 +1727,28 @@ mod tests {
             MAX_OPEN_GAPS,
             "the display path is bounded by the same cap"
         );
+        assert_eq!(
+            store.count_open_gaps("fake", 0.35).await.unwrap(),
+            MAX_OPEN_GAPS + 1,
+            "a total is not a page: `--status` is opened to find out whether \
+             the number is moving, and the length of a capped list stops"
+        );
+    }
+
+    /// The count and the list are the same five predicates, so `--status` and
+    /// the capture page cannot disagree about what is open.
+    #[tokio::test]
+    async fn the_count_of_open_gaps_is_the_length_of_the_list_it_is_under_the_cap() {
+        let store = Store::memory().await.unwrap();
+        nothing_here(&store, "q1", vec![1.0]).await;
+        let s = gap_search(&store, "s1", vec![1.0]).await;
+        assert_eq!(
+            store.count_open_gaps("fake", 0.35).await.unwrap(),
+            store.open_gap_refs("fake", 0.35).await.unwrap().len() as i64
+        );
+        assert_eq!(store.count_open_gaps("fake", 0.35).await.unwrap(), 2);
+        store.dismiss_gap(GapKind::Search, &s).await.unwrap();
+        assert_eq!(store.count_open_gaps("fake", 0.35).await.unwrap(), 1);
     }
 
     #[tokio::test]

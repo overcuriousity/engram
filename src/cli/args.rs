@@ -24,9 +24,9 @@ pub struct CliArgs {
     pub ask: Vec<String>,
     /// What to call this capture. Refused with every verb but `-c`, for the
     /// reason `--tag` is refused with `-a`: a search has no title to set.
-    #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show"])]
+    #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show", "status"])]
     pub title: Option<String>,
-    #[arg(long, value_name = "NOTE", conflicts_with_all = ["search", "ask", "show"])]
+    #[arg(long, value_name = "NOTE", conflicts_with_all = ["search", "ask", "show", "status"])]
     pub note: Option<String>,
     /// Narrow a search to artifacts carrying this tag. Repeatable.
     ///
@@ -37,9 +37,9 @@ pub struct CliArgs {
     ///
     /// Refused with `--show` for the plainer version of the same reason: one
     /// artifact named by id is not a list there is anything to narrow.
-    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show"])]
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status"])]
     pub tags: Vec<String>,
-    #[arg(long, value_name = "CATEGORY", conflicts_with_all = ["ask", "show"])]
+    #[arg(long, value_name = "CATEGORY", conflicts_with_all = ["ask", "show", "status"])]
     pub category: Option<String>,
     /// Print the results as JSON instead of for a person.
     ///
@@ -59,15 +59,29 @@ pub struct CliArgs {
     ///
     /// There is nothing to follow behind the other three verbs: they finish
     /// when their response arrives.
-    #[arg(long, conflicts_with_all = ["search", "ask", "show"])]
+    #[arg(long, conflicts_with_all = ["search", "ask", "show", "status"])]
     pub watch: bool,
     /// Read one artifact in full: a rank from the last search, a leading piece
     /// of an id, or a whole id.
     #[arg(long, value_name = "RANK|ID", conflicts_with_all = ["capture", "search", "ask"])]
     pub show: Option<String>,
+    /// What the base holds, what it is working through, and what it has been
+    /// learning.
+    ///
+    /// One shot, like every other verb. There is no ambient status line and no
+    /// footer under an ordinary search: that would make the cheapest door in
+    /// the application pay a request for something nobody asked for at that
+    /// moment.
+    #[arg(long, conflicts_with_all = ["capture", "search", "ask", "show"])]
+    pub status: bool,
     // Every flag `--show` does not honour refuses it from the other side —
     // `--json`, `--tag`, `--category`, `--title`, `--note`, `--watch` — so the
     // conflict is declared once, on the flag whose own doc comment explains it.
+    //
+    // `--status` is the same rule with one exception: it honours `--json` and
+    // nothing else, so the other five name it too. It had named none of them,
+    // which made `engram --status --watch` parse cleanly and then drop the
+    // flag — the failure the rule above exists to prevent.
 }
 
 /// When the drawn rendering is used. `Auto` is the only honest default: a pipe
@@ -93,6 +107,8 @@ pub enum Verb {
         query: String,
     },
     Ask(String),
+    /// What the base holds and what it has been learning.
+    Status,
     /// One artifact, read in full. Carries what the operator typed rather than
     /// an id: a rank means nothing until the remembered list is read, and that
     /// is a file, which is not something this decision touches.
@@ -120,6 +136,7 @@ pub fn verb(
         !args.search.is_empty(),
         !args.ask.is_empty(),
         args.show.is_some(),
+        args.status,
     ]
     .iter()
     .filter(|x| **x)
@@ -135,8 +152,9 @@ pub fn verb(
         // prompt below would then be handed EOF.
         if named > 0 {
             return Err(Error::Validation(
-                "`-c`, `-s`, `-a` and `--show` are the client half of this \
-                 binary; run them on their own, without the server's own flags"
+                "`-c`, `-s`, `-a`, `--show` and `--status` are the client half \
+                 of this binary; run them on their own, without the server's \
+                 own flags"
                     .into(),
             ));
         }
@@ -148,10 +166,16 @@ pub fn verb(
         // this is here for the caller that built `CliArgs` itself — which is
         // every test, and one day some other entry point.
         return Err(Error::Validation(
-            "one verb at a time: `-c`, `-s`, `-a` or `--show`".into(),
+            "one verb at a time: `-c`, `-s`, `-a`, `--show` or `--status`".into(),
         ));
     }
 
+    // Answered before the pipe is looked at, for the reason `--show` is:
+    // `engram --status | grep failed` is an ordinary thing to type, and without
+    // this the pipe would be taken for the capture gesture below.
+    if args.status {
+        return Ok(Some(Verb::Status));
+    }
     if let Some(which) = &args.show {
         // Answered before the pipe is looked at. `engram --show 3 | less` is
         // the ordinary way to read a long artifact, and without this the pipe
@@ -221,6 +245,42 @@ fn read(words: &[String], stdin: impl FnOnce() -> std::io::Result<String>) -> Re
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn status_is_a_verb_of_its_own() {
+        let a = CliArgs {
+            status: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            verb(&a, false, false, || Ok(String::new())).unwrap(),
+            Some(Verb::Status)
+        );
+    }
+
+    /// Answered before the pipe is looked at, exactly as `--show` is:
+    /// `engram --status | grep failed` is an ordinary thing to type.
+    #[test]
+    fn status_down_a_pipe_is_still_status_and_not_a_capture() {
+        let a = CliArgs {
+            status: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            verb(&a, false, true, || Ok("some piped text".into())).unwrap(),
+            Some(Verb::Status)
+        );
+    }
+
+    #[test]
+    fn status_does_not_share_an_invocation_with_another_verb() {
+        let a = CliArgs {
+            status: true,
+            search: vec!["x".into()],
+            ..Default::default()
+        };
+        assert!(verb(&a, false, false, || Ok(String::new())).is_err());
+    }
     use super::*;
 
     fn args() -> CliArgs {
@@ -295,6 +355,41 @@ mod tests {
             verb(&args(), false, false, piped("")).unwrap().is_none(),
             "`engram` alone must not change meaning"
         );
+    }
+
+    /// The conflict rules themselves, which every other test here walks past:
+    /// `verb` is handed a built `CliArgs`, so nothing in this file exercised
+    /// what clap does with a command line. `--status` named none of the five
+    /// flags it drops, and `engram --status --watch` parsed cleanly.
+    #[test]
+    fn status_refuses_every_flag_it_does_not_honour() {
+        #[derive(clap::Parser)]
+        struct OnlyTheClientHalf {
+            #[command(flatten)]
+            cli: CliArgs,
+        }
+        let parsed = |argv: &[&str]| {
+            <OnlyTheClientHalf as clap::Parser>::try_parse_from(
+                std::iter::once("engram").chain(argv.iter().copied()),
+            )
+        };
+        for dropped in [
+            vec!["--watch"],
+            vec!["--tag", "linux"],
+            vec!["--category", "forensik"],
+            vec!["--title", "x"],
+            vec!["--note", "x"],
+        ] {
+            let mut argv = vec!["--status"];
+            argv.extend_from_slice(&dropped);
+            assert!(
+                parsed(&argv).is_err(),
+                "accepted and then dropped: engram {}",
+                argv.join(" ")
+            );
+        }
+        // The one it does honour stays accepted.
+        assert!(parsed(&["--status", "--json"]).unwrap().cli.status);
     }
 
     #[test]

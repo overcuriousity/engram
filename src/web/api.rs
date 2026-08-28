@@ -168,6 +168,24 @@ pub struct StatusResponse {
     pub oldest_pending_secs: Option<i64>,
     pub chunks: i64,
     pub vectors: u64,
+    /// What the base has been learning, or `None` while `[learn]` is off.
+    ///
+    /// Absent rather than zeroed: four zeroes read like a faculty failing, and
+    /// a faculty that was never switched on is not failing.
+    pub learning: Option<Learning>,
+}
+
+/// The half of `status` that is not about machinery.
+///
+/// The counts the insights page renders, in the shape a shell can read. A
+/// pursuit closed unsatisfied is a hole in the base somebody went looking
+/// through and did not fill.
+#[derive(serde::Serialize)]
+pub struct Learning {
+    pub pursuits_open: i64,
+    pub pursuits_unsatisfied: i64,
+    pub from_pursuits: i64,
+    pub gaps_open: i64,
 }
 
 /// Capture channels. `origin` is derived from which field arrived, not
@@ -993,7 +1011,15 @@ pub struct SearchParams {
     pub explain: Option<bool>,
 }
 
-async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<serde_json::Value>> {
+/// What both search doors make of one set of query parameters.
+///
+/// Extracted rather than repeated: `typing`, `mark` and `rerank` are decisions
+/// with reasons, and two doors reaching them separately is exactly the drift a
+/// second route must not introduce.
+fn search_request(
+    tenant: &Tenant,
+    q: SearchParams,
+) -> (SearchQuery, crate::store::feedback::Origin, bool) {
     use crate::store::feedback::Door;
     let door = q
         .door
@@ -1036,23 +1062,42 @@ async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<se
         rerank: q.rerank.unwrap_or(!typing),
         explain,
     };
+    // Typing and scoped were one decision here, and they are two.
+    //
     // Coalescing folds a keystroke into the query it was an early spelling of,
     // and it folds only within one scope — so a box that types has to say who
-    // is typing, or two operators' panels fold into each other's queries. A
-    // deliberate API call is one event and has nothing to fold with.
-    let origin: crate::store::feedback::Origin = if typing {
-        door.by(tenant.user.subject)
-    } else {
-        door.into()
+    // is typing, or two operators' panels fold into each other's queries. But a
+    // shell is not a typing door and still has a subject: `--show` records the
+    // open it leads to with a scope, and `jobs/pursuit.rs` attaches an
+    // interaction to a search only when the scopes match. Unscoped, a
+    // shell-only session opened pursuits that collected no engagement at all
+    // and closed unsatisfied every time — it could widen a hole in the base and
+    // never fill one.
+    //
+    // `Api` and `Mcp` stay unscoped on purpose: a bearer token is not a person,
+    // and two agents sharing one would fold into each other's queries. The same
+    // reason `sitting.rs` keeps no sitting for them.
+    let origin: crate::store::feedback::Origin = match door {
+        Door::Extension | Door::Cli => door.by(tenant.user.subject.clone()),
+        _ => door.into(),
     };
-    // The cap `Core::search` would have applied, read the same way, so asking
-    // for an explanation cannot change what this door returns.
-    let cap = tenant
+    (query, origin, explain)
+}
+
+/// The cap `Core::search` would have applied, read the same way, so asking for
+/// an explanation — or for the stages — cannot change what a door returns.
+fn search_cap(tenant: &Tenant) -> Option<usize> {
+    tenant
         .core
         .ranking
         .read()
         .expect("ranking lock")
-        .per_source_cap;
+        .per_source_cap
+}
+
+async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<serde_json::Value>> {
+    let cap = search_cap(&tenant);
+    let (query, origin, explain) = search_request(&tenant, q);
     let (results, outcome) = tenant.core.search_with(&query, cap, origin).await?;
     Ok(Json(if explain {
         serde_json::json!({ "results": results, "explanation": outcome.explanation })
@@ -1081,18 +1126,44 @@ async fn stale(
 
 async fn ask(
     tenant: Tenant,
+    Query(q): Query<AskParams>,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Json<crate::core::ask::AskResponse>> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
         return Err(Error::NotFound);
     }
-    Ok(Json(
-        tenant
-            .core
-            .ask(&req, crate::store::feedback::Door::Api)
-            .await?,
-    ))
+    let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Api);
+    Ok(Json(tenant.core.ask(&req, origin).await?))
+}
+
+/// Which door asked, in the query string, exactly as search names it.
+///
+/// A query parameter rather than a body field: `AskRequest` is the shape a
+/// dozen internal callers build by hand, and how a question arrived is a fact
+/// about the request rather than part of the question.
+#[derive(serde::Deserialize)]
+pub struct AskParams {
+    pub door: Option<String>,
+}
+
+/// Which door asked, and on whose behalf.
+///
+/// `default` is the door a caller that names none has always been treated as,
+/// which differs per route and is why it is a parameter. The scope rule is
+/// search's, for search's reasons: a door with a known person says who, and a
+/// bearer token is not a person.
+fn ask_origin(
+    q: &AskParams,
+    tenant: &Tenant,
+    default: crate::store::feedback::Door,
+) -> crate::store::feedback::Origin {
+    use crate::store::feedback::Door;
+    let door = q.door.as_deref().map(Door::from_client).unwrap_or(default);
+    match door {
+        Door::Extension | Door::Cli => door.by(tenant.user.subject.clone()),
+        _ => door.into(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1285,7 +1356,41 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
         .await?
         .get("n");
 
+    // Counted rather than paged. Every one of these was the length of a list
+    // the insights page draws — fifty pursuits, two hundred artifacts — which
+    // reads as a total right up to the base that has more than that, and then
+    // reports the page size for ever. `--status` is opened to find out whether
+    // a number is moving.
+    //
+    // The predicates are the same store's, so the sentence in a terminal and
+    // the screen in a browser still cannot come apart about what is being
+    // counted; only the cap is gone.
+    let learning = match tenant.core.learn.enabled {
+        false => None,
+        true => Some(Learning {
+            pursuits_open: tenant.core.store.count_pursuits("open").await?,
+            // The ones still on the gap list: `unsatisfied` is how a run ended,
+            // and a capture that answers one afterwards leaves the word alone
+            // deliberately.
+            pursuits_unsatisfied: tenant
+                .core
+                .store
+                .count_open_pursuit_gaps(tenant.core.embedder.model())
+                .await?,
+            from_pursuits: tenant.core.store.count_synthesized_artifacts().await?,
+            // `?`, not `unwrap_or_default`: a store that cannot be read has to
+            // say so. Reported as zero, a failure here reads as a healthy base
+            // on the one screen an operator opens because something is wrong.
+            gaps_open: tenant
+                .core
+                .store
+                .count_open_gaps(tenant.core.embedder.model(), tenant.core.weak_below)
+                .await?,
+        }),
+    };
+
     Ok(Json(StatusResponse {
+        learning,
         sources: corpus_rows
             .iter()
             .map(|r| (r.get("status"), r.get("n")))
@@ -1313,6 +1418,7 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
 /// One question, one request, and no handoff to expire.
 async fn ask_stream(
     tenant: Tenant,
+    Query(q): Query<AskParams>,
     Json(req): Json<crate::core::ask::AskRequest>,
 ) -> Result<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
@@ -1322,13 +1428,9 @@ async fn ask_stream(
     use tokio_stream::StreamExt as _;
 
     let core = tenant.core.clone();
-    // The door an ask came through, which names the caller and nothing more.
-    // Unlike search, where `door=extension` decides how the query is recorded,
-    // no ask is recorded from here: `record_ask` admits `Door::Ui` alone, so
-    // this answer carries no `event_id` and is never judged. Named anyway,
-    // because a question composed while reading is a different thing from one
-    // typed into an API client, and the log should not have to guess.
-    let origin = crate::store::feedback::Door::Extension.by(tenant.user.subject);
+    // The door an ask came through, named by the caller. The panel says
+    // nothing and keeps the door it has always had.
+    let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Extension);
     let events = async_stream::stream! {
         let s = core.ask_events(&req, origin);
         tokio::pin!(s);
@@ -1342,8 +1444,8 @@ async fn ask_stream(
                 // Terminal by construction: the producer is a `try_stream!` and
                 // ends at its first error, so the panel sees one `error` frame
                 // and nothing after it.
-                Ok(e) => api_sse_event(e).unwrap_or_else(|e| error_frame(&e)),
-                Err(e) => error_frame(&e),
+                Ok(e) => api_sse_event(e).unwrap_or_else(|e| error_frame("ask", &e)),
+                Err(e) => error_frame("ask", &e),
             });
         }
     };
@@ -1365,11 +1467,60 @@ async fn ask_stream(
 /// prompt fragments, and a stream is no less a door than a status code. This
 /// is also where the detail goes to the log, since a frame yielded from inside
 /// the body never reaches `IntoResponse` and would otherwise fail in silence.
-fn error_frame(e: &Error) -> SseEvent {
+/// One search event as a JSON frame.
+///
+/// Deliberately not an arm of `api_sse_event`: a test over that function
+/// asserts the browser panel handles every frame name it mentions, and a
+/// search's stages are no business of the panel's.
+fn search_sse_event(ev: crate::core::search::SearchEvent) -> Result<SseEvent> {
+    use crate::core::search::SearchEvent::*;
+    let (name, data) = match ev {
+        Stages(v) => ("stages", serde_json::json!({ "stages": v })),
+        Stage(s) => ("stage", serde_json::json!({ "stage": s })),
+        Results(hits) => ("results", serde_json::json!({ "results": hits })),
+    };
+    Ok(SseEvent::default().event(name).data(
+        serde_json::to_string(&data)
+            .map_err(|e| Error::Internal(format!("serialising a search frame: {e}")))?,
+    ))
+}
+
+/// The same search, reporting each stage as it starts.
+///
+/// A second route rather than a header on the first: `GET /search` answers a
+/// bare array to the terminal client, the extension, `/mcp` and anything a
+/// person has scripted, and a route that answers two shapes depending on what
+/// was asked for is worse than two routes that each answer one.
+async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Response> {
+    use tokio_stream::StreamExt as _;
+    let cap = search_cap(&tenant);
+    let (query, origin, _explain) = search_request(&tenant, q);
+    let core = tenant.core.clone();
+    let events = async_stream::stream! {
+        let s = core.search_events(query, cap, origin);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            // Terminal by construction: the producer ends at its first error,
+            // so a client sees one `error` frame and nothing after it.
+            yield Ok::<_, Error>(match ev {
+                Ok(e) => search_sse_event(e).unwrap_or_else(|e| error_frame("search", &e)),
+                Err(e) => error_frame("search", &e),
+            });
+        }
+    };
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+/// `stream` is the route the failure came out of. Two routes yield these now,
+/// and a search that failed logged as `ask stream failed` sends whoever is
+/// reading the log to the wrong half of the application.
+fn error_frame(stream: &'static str, e: &Error) -> SseEvent {
     if e.status().is_server_error() {
-        tracing::error!(error = %e, "ask stream failed");
+        tracing::error!(error = %e, stream, "stream failed");
     } else {
-        tracing::debug!(error = %e, "ask stream rejected");
+        tracing::debug!(error = %e, stream, "stream rejected");
     }
     SseEvent::default()
         .event("error")
@@ -1455,6 +1606,7 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/corpora/{id}/reprocess", post(reprocess))
         .route("/corpora/{id}/resolve", post(resolve_near_dupe))
         .route("/search", get(search))
+        .route("/search/stream", get(search_stream))
         .route("/ask", post(ask))
         .route("/ask/stream", post(ask_stream))
         .route("/resurface", get(resurface))
@@ -1702,6 +1854,201 @@ pub(crate) mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).unwrap()
+    }
+
+    /// The whole SSE body of a GET, as text.
+    async fn sse_body(app: &axum::Router, uri: &str, token: &str) -> String {
+        let res = app.clone().oneshot(get(uri, Some(token))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        String::from_utf8(
+            axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    /// A shell has a subject, and the open it leads to is recorded with one.
+    /// Unscoped, the two could never be joined.
+    #[tokio::test]
+    async fn a_cli_search_is_recorded_against_whoever_ran_it() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+        app.clone()
+            .oneshot(get("/api/v1/search?q=journal&door=cli", Some(&token)))
+            .await
+            .unwrap();
+        // The recording is off the request path, as everything the learning
+        // layer writes is.
+        core.background.wait_idle().await;
+        let events = core
+            .store
+            .events_between(0, crate::store::now() + 1)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(
+            events[0].scope.is_some(),
+            "an unscoped shell search: {events:?}"
+        );
+    }
+
+    /// The other half of the rule, and the one that must not move: a token is
+    /// not a person, and two agents sharing one must not fold together.
+    #[tokio::test]
+    async fn a_bearer_token_is_still_not_a_person() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+        app.clone()
+            .oneshot(get("/api/v1/search?q=journal", Some(&token)))
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+        let events = core
+            .store
+            .events_between(0, crate::store::now() + 1)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].scope, None, "Door::Api must stay unscoped");
+    }
+
+    /// A question typed at a shell reaches the log; the panel, which names no
+    /// door, keeps the door it has always had and records nothing.
+    /// The block is absent while the layer is off, and the fields every
+    /// existing reader of this endpoint depends on are untouched.
+    #[tokio::test]
+    async fn status_says_nothing_about_learning_while_the_layer_is_off() {
+        let (app, token) = app_and_token().await;
+        let v = json_of(
+            app.oneshot(get("/api/v1/status", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(v["learning"].is_null(), "{v}");
+        assert!(v["chunks"].is_i64(), "{v}");
+        assert!(v["jobs"].is_array(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn status_counts_what_the_base_has_been_learning() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, _core) = app_from_core(core).await;
+        let v = json_of(
+            app.oneshot(get("/api/v1/status", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let l = &v["learning"];
+        assert!(l.is_object(), "{v}");
+        for k in [
+            "pursuits_open",
+            "pursuits_unsatisfied",
+            "from_pursuits",
+            "gaps_open",
+        ] {
+            assert!(l[k].is_i64(), "{k} is missing from {l}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shell_question_is_recorded_and_the_panel_is_unchanged() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+
+        // Drained, not just received: the answer is produced while the body is
+        // read, and `record_ask` runs at the end of it.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/ask/stream?door=cli",
+                &token,
+                serde_json::json!({"q": "what is alpha"}),
+            ))
+            .await
+            .unwrap();
+        crate::web::test_support::body_of(res).await;
+        core.background.wait_idle().await;
+        let asks = core
+            .store
+            .asks_between(0, crate::store::now() + 1)
+            .await
+            .unwrap();
+        assert_eq!(asks.len(), 1, "a shell question reached nothing: {asks:?}");
+        assert!(asks[0].scope.is_some(), "{asks:?}");
+
+        // The same route, named by nobody: the panel, recording nothing, as
+        // it has since it was written.
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/ask/stream",
+                &token,
+                serde_json::json!({"q": "what is bravo"}),
+            ))
+            .await
+            .unwrap();
+        crate::web::test_support::body_of(res).await;
+        core.background.wait_idle().await;
+        assert_eq!(
+            core.store
+                .asks_between(0, crate::store::now() + 1)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the panel's asks are not recorded and that has not changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_streaming_door_names_its_stages_and_then_answers() {
+        let (app, token) = app_and_token().await;
+        let body = sse_body(&app, "/api/v1/search/stream?q=journal&door=cli", &token).await;
+        assert!(body.contains("event: stages"), "{body}");
+        assert!(body.contains("\"embed\""), "{body}");
+        assert!(body.contains("event: results"), "{body}");
+        let (before, after) = body.split_once("event: results").expect("a terminal frame");
+        assert!(
+            before.contains("event: stage"),
+            "no stage was announced: {body}"
+        );
+        assert!(
+            !after.contains("event: stage"),
+            "a stage was reported after the results it preceded: {body}"
+        );
+    }
+
+    /// The shape four clients read. It is not this change's to alter.
+    #[tokio::test]
+    async fn the_plain_search_door_still_answers_a_bare_array() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(get("/api/v1/search?q=journal", Some(&token)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(v.is_array(), "{v}");
     }
 
     fn bg_point(id: &str, v: Vec<f32>) -> crate::vector::VectorPoint {
