@@ -307,6 +307,28 @@ impl Store {
         Ok(())
     }
 
+    /// The vector the pursuit's leading query was found by, and the model that
+    /// produced it. `None` when the sweep had none to store, or when the row is
+    /// gone.
+    ///
+    /// Kept off [`Pursuit`] because every other reader of a pursuit is drawing
+    /// a list — Ops, the insights page — and a 768-float blob per row is a page
+    /// of vectors nobody displays. The one caller that needs it asks for one.
+    pub async fn pursuit_vec(&self, id: &str) -> Result<Option<(Vec<f32>, String)>> {
+        let row = sqlx::query("SELECT query_vec, embed_model FROM pursuits WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        let blob: Vec<u8> = row.get("query_vec");
+        let model: Option<String> = row.get("embed_model");
+        let v = crate::store::feedback::blob_to_vec(&blob);
+        match model {
+            Some(m) if !v.is_empty() => Ok(Some((v, m))),
+            _ => Ok(None),
+        }
+    }
+
     pub async fn get_pursuit(&self, id: &str) -> Result<Pursuit> {
         let row = sqlx::query("SELECT * FROM pursuits WHERE id = ?")
             .bind(id)

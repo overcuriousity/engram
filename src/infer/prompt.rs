@@ -702,7 +702,16 @@ pub fn gap_label_prompt(questions: &[&str]) -> String {
 
 /// The generation behind a pursuit: one self-contained artifact written from
 /// the excerpts the operator engaged with, to answer the questions they asked.
-pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Answer the questions and nothing else: use only the excerpts that bear on them and leave the rest out, however much they say. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
+/// The abstention rule is the same one [`ASK_SYSTEM`] carries, and for the same
+/// reason: the excerpts here were chosen by what the operator *clicked*, not by
+/// what answers the question, so a pursuit over a base that held nothing on the
+/// subject arrives with four near misses and a question none of them touch. A
+/// model told only to write from the excerpts writes the refusal — "the
+/// provided excerpts do not contain information regarding …" — and the refusal
+/// is what gets stored, titled with the question, embedded, and returned to the
+/// next person who asks it. Giving the refusal a sanctioned shape is what lets
+/// the caller recognise it and close the pursuit instead.
+pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Answer the questions and nothing else: use only the excerpts that bear on them and leave the rest out, however much they say. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Abstain only when no excerpt mentions any part of the subject the questions ask about: then make the artifact text begin with the exact words `Not in the knowledge base.` and say what is missing. Never write an artifact whose subject is that the excerpts fall short. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
 pub fn generate_prompt(questions: &[String], sources: &[(String, String)]) -> String {
     let qs = questions

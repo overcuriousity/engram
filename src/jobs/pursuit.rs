@@ -49,6 +49,33 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         return Ok(());
     }
 
+    // A pursuit is swept once the operator has gone quiet, and the commonest
+    // thing they do between the last search and that quiet is answer the
+    // question themselves: they find nothing, go and capture the document that
+    // holds it, and read it. The engaged sources are then a record of what was
+    // clicked while the base was still empty, and writing them up produces an
+    // artifact about the wrong subject — or, worse, a refusal in the shape of
+    // one. So the question is asked of the base once more, with the vector the
+    // sweep already stored, and anything strong that arrived after the pursuit
+    // opened settles it: the need was met, by the operator, and there is
+    // nothing here to write.
+    //
+    // The engaged sources are excluded because they are what the searching
+    // *saw*; only what it could not see is news. Local throughout — one vector
+    // query, no model call — and any failure of it is left to the generation
+    // below rather than closing a pursuit on a search that did not run.
+    if let Some(found) = answered_since(core, &p).await? {
+        core.store
+            .close_pursuit(
+                pursuit_id,
+                "satisfied",
+                &format!("the base gained {found} after the searching stopped"),
+                now,
+            )
+            .await?;
+        return Ok(());
+    }
+
     // Packed to the window the way the dedupe judge packs: the questions and
     // the system prompt always go out; sources are dropped from the tail when
     // they would not fit.
@@ -96,6 +123,28 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     permit.finished();
     let g = prompt::parse_generation(&reply?)?;
 
+    // The model was given what the operator engaged with, not what answers the
+    // question, and near misses are exactly what a search over a base that
+    // holds nothing on the subject returns. When it says so, the saying is not
+    // an artifact: storing it titles the refusal with the question, embeds it,
+    // and hands it back to the next search for those words. The pursuit closes
+    // unsatisfied, which is what it was — a gap, recorded as one.
+    if prompt::abstained(&g.text) {
+        core.store
+            .close_pursuit(
+                pursuit_id,
+                "unsatisfied",
+                "the excerpts did not bear on the questions",
+                now,
+            )
+            .await?;
+        tracing::info!(
+            pursuit = pursuit_id,
+            "the generation abstained; nothing written up"
+        );
+        return Ok(());
+    }
+
     let ids: Vec<String> = sources.iter().map(|c| c.id.clone()).collect();
     let made = core
         .store
@@ -131,6 +180,55 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         .await?;
     tracing::info!(pursuit = pursuit_id, artifact_id = %made.id, sources = ids.len(), "generated an artifact from a pursuit");
     Ok(())
+}
+
+/// How many hits past the engaged sources the freshness probe reads. The
+/// sources can lead the list they were engaged from, and every one of them is
+/// skipped, so a probe of `sources.len()` alone could come back with nothing
+/// left to judge.
+const ANSWER_PROBE_EXTRA: usize = 3;
+
+/// An artifact the searching never saw that now answers the pursuit's query:
+/// at or above `weak_below`, not one of the engaged sources, and created after
+/// the pursuit opened.
+///
+/// `None` when the pursuit has no stored vector, when it was embedded by a
+/// model the base has since moved off — a cosine between two models' spaces is
+/// not a distance — or when nothing new reaches the line.
+async fn answered_since(
+    core: &Core,
+    p: &crate::store::pursuits::Pursuit,
+) -> Result<Option<String>> {
+    let Some((vec, model)) = core.store.pursuit_vec(&p.id).await? else {
+        return Ok(None);
+    };
+    if model != core.embedder.model() {
+        return Ok(None);
+    }
+    let k = p.sources.len() + ANSWER_PROBE_EXTRA;
+    let hits = core
+        .vectors
+        .search(&vec, &Default::default(), k, &Default::default())
+        .await?;
+    let fresh: Vec<String> = hits
+        .into_iter()
+        // `None` is "no opinion" rather than a low value — a lexical hit the
+        // dense half never returned — and closing a pursuit is a claim about
+        // distance, the same rule `gaps::cover` reads the line by.
+        .filter(|h| h.similarity.is_some_and(|s| s >= core.weak_below))
+        .map(|h| h.payload.artifact_id)
+        .filter(|id| !p.sources.contains(id))
+        .collect();
+    if fresh.is_empty() {
+        return Ok(None);
+    }
+    Ok(core
+        .store
+        .artifacts_by_ids(&fresh)
+        .await?
+        .into_iter()
+        .find(|c| c.created_at > p.opened_at && c.in_results())
+        .map(|c| c.id))
 }
 
 /// Cursor: the moment everything up to which has been grouped into pursuits.
@@ -668,6 +766,98 @@ mod tests {
         for id in &ids {
             assert!(core.store.get_artifact(id).await.unwrap().in_results());
         }
+    }
+
+    #[tokio::test]
+    async fn a_generation_that_abstains_writes_nothing_and_closes_unsatisfied() {
+        let mut core = test_core().await;
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![format!(
+                r#"{{"artifact":{{"title":"Mann-Whitney U Test","text":"{}. The excerpts are about lead isotopes.","category":"concept","tags":[],"caveats":[]}}}}"#,
+                prompt::ABSTAIN_PREFIX
+            )]),
+        ));
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(100, &["mann whitney u".into()], &ids, None)
+            .await
+            .unwrap();
+
+        generate(&core, &pid).await.unwrap();
+
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refusal was stored as an artifact"
+        );
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert!(p.artifact_id.is_none(), "{p:?}");
+    }
+
+    #[tokio::test]
+    async fn an_answer_captured_after_the_searching_closes_the_pursuit_satisfied() {
+        let mut core = test_core().await;
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"artifact":{"title":"T","text":"the model must never be asked","category":"concept","tags":[],"caveats":[]}}"#.into(),
+            ]),
+        ));
+        let ids = two_sources(&core).await;
+        let v = core.embedder.embed_query("read the journal").await.unwrap();
+        let opened_at = crate::store::now() - 100;
+        let pid = core
+            .store
+            .insert_pursuit(
+                opened_at,
+                &["read the journal".into()],
+                &ids,
+                Some((&v, core.embedder.model())),
+            )
+            .await
+            .unwrap();
+        // The operator answered their own question: a document captured after
+        // the searching stopped, embedded, and reaching the line.
+        let src = core
+            .ingest("read the journal at /var/log/journal", "web", None)
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        core.background.wait_idle().await;
+        core.weak_below = core
+            .vectors
+            .search(
+                &v,
+                &Default::default(),
+                1,
+                &crate::vector::SearchFilter {
+                    corpus_id: Some(src.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .first()
+            .and_then(|h| h.similarity)
+            .expect("the capture embedded nothing")
+            - 0.01;
+
+        generate(&core, &pid).await.unwrap();
+
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "wrote up a need the base had since answered"
+        );
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "satisfied", "{p:?}");
     }
 
     #[tokio::test]
