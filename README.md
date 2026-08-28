@@ -274,10 +274,12 @@ mode = "full"     # "off" | "learning" | "full"
   this one line starts and searches.
 - `learning` — searches and asks are recorded, activation and links are
   written, and nothing reads any of it on the query path: no priming, no
-  associative spread, no promotion, no offers under the search box. This is the
-  mode to run `cargo test --test eval` in. A default that changes ranking moves
-  only after it has been measured, and it cannot be measured while its own
-  inputs are moving the ranking it is measured against.
+  associative spread, no promotion, no offers under the search box, and no
+  pursuit generation — the corpus holds still as well as the ranking. This is
+  the mode to run `cargo test --test eval` in. A default that changes ranking
+  moves only after it has been measured, and it cannot be measured while its
+  own inputs are moving the ranking it is measured against, or growing the
+  corpus it is measured over.
 - `full` — the defaults, unchanged.
 
 Every key the mode stands for is still a key, and one written in the file wins

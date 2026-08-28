@@ -1916,6 +1916,7 @@ impl Config {
         cfg.normalize();
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
+        cfg.warn_on_defaulted_store(&raw);
         cfg.warn_on_inert_settings();
         cfg.warn_on_inferred_ceiling_param();
         cfg.warn_on_unplaced_plan_cost();
@@ -2001,7 +2002,6 @@ impl Config {
                 resolve!("associate.spread_max", self.associate.spread_max, 0);
                 resolve!("associate.prime_lift", self.associate.prime_lift, 0);
                 resolve!("sitting.prime", self.sitting.prime, false);
-                resolve!("recommend.enabled", self.recommend.enabled, false);
                 // Promotion is the other reader. It is gated on a threshold
                 // rather than a switch, so the way to say "never" in the keys
                 // that exist is a threshold no activation reaches — which is
@@ -2012,10 +2012,18 @@ impl Config {
                     self.promote.activation_above,
                     f64::INFINITY
                 );
+                // A pursuit is the third writer, and the one that writes a new
+                // artifact rather than reordering existing ones. Neither mode
+                // may grow the corpus from what was recorded: at `learning`
+                // that is the whole promise — a sweep that generates while it
+                // measures is measuring a corpus its own inputs have moved —
+                // and at `off` it follows from the rest. Said in the same
+                // shape as promotion, because it is the same kind of gate: an
+                // engagement total no pursuit reaches.
                 resolve!(
-                    "promote.resynthesize_after_unconfirmed",
-                    self.promote.resynthesize_after_unconfirmed,
-                    0
+                    "pursuit.min_engagement",
+                    self.pursuit.min_engagement,
+                    f64::INFINITY
                 );
             }
         }
@@ -2036,6 +2044,15 @@ impl Config {
             }
             LearnMode::Learning => {
                 resolve!("learn.enabled", self.learn.enabled, true);
+                // The offers under the search box are read from the recorded
+                // clusters, so they are a query-path reader and go off here.
+                // Not in the shared block: at `off` this key is what arms the
+                // retention sweep that ages the recorded rows out
+                // (`core/background.rs`), and `recommends()` already ands
+                // `learn.enabled`, so resolving it there would buy nothing and
+                // freeze every situation and interaction already written down
+                // in the database for ever.
+                resolve!("recommend.enabled", self.recommend.enabled, false);
             }
             LearnMode::Full => {}
         }
@@ -2195,6 +2212,27 @@ impl Config {
     /// letting an operator discover a faculty has been idle since they turned
     /// `[learn]` off. The combinations that used to be refused here are gone —
     /// there is one switch now, and it cannot disagree with itself.
+    /// `[store]` is defaulted rather than required, and a defaulted store is
+    /// indistinguishable at runtime from the one the operator meant.
+    ///
+    /// A missing section is the ordinary case — the five-section file this
+    /// mode exists for names none of it — but so is a mistyped `[stroe]` or a
+    /// section lost in an edit, and those start on a fresh control database in
+    /// the process's working directory rather than the base the operator has.
+    /// An empty base and a refusal are both survivable; an empty base that
+    /// says nothing is not. Say which paths are in force, once, at startup.
+    fn warn_on_defaulted_store(&self, raw: &config::Config) {
+        if raw.get::<config::Value>("store").is_ok() {
+            return;
+        }
+        tracing::info!(
+            control_path = %self.store.control_path,
+            dir = %self.store.dir,
+            "no [store] section: using the default paths, resolved against the working \
+             directory. If this base has data elsewhere, the section is missing or misspelt."
+        );
+    }
+
     fn warn_on_inert_settings(&self) {
         if self.infer.synthesis == SynthesisMode::Earned && !self.learn.enabled {
             tracing::warn!(
@@ -2948,12 +2986,39 @@ mode = "off"
         // the promotion it wanted one for cannot happen at `off` anyway.
         assert_eq!(cfg.infer.synthesis, SynthesisMode::Off);
         assert!(cfg.infer.synthesize.is_none());
-        assert!(!cfg.recommend.enabled);
         assert!(!cfg.consolidate.enabled);
         assert!(!cfg.sitting.prime);
         assert_eq!(cfg.associate.spread_max, 0);
         assert_eq!(cfg.associate.prime_lift, 0);
         assert!(cfg.promote.activation_above.is_infinite());
+        assert!(cfg.pursuit.min_engagement.is_infinite());
+        // Left alone on purpose. `recommends()` is already false through
+        // `learn.enabled`, and this key is what arms the retention sweep — an
+        // operator switching learning off is exactly who needs the situations
+        // and interactions already recorded to keep ageing out.
+        assert!(cfg.recommend.enabled);
+    }
+
+    #[test]
+    fn off_leaves_the_key_that_ages_recorded_rows_out_alone() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, &format!("{MINIMAL}\n[learn]\nmode = \"off\"\n"));
+        let cfg = Config::load(Some(&p)).unwrap();
+        // `core::background::periodic_units` arms `Stage::Retention` on
+        // `feedback.retain_days > 0 || learn.enabled || recommend.enabled`.
+        // At `off` the first two are false, so this key is the whole of what
+        // keeps `expire_context_events` and `expire_interactions` running.
+        assert!(!cfg.learn.enabled);
+        assert_eq!(cfg.feedback.retain_days, 0);
+        assert!(cfg.recommend.enabled);
+        // And the mode never says so, so nothing about it reads as decided.
+        assert!(
+            !cfg.learn
+                .resolved
+                .iter()
+                .any(|(k, _)| *k == "recommend.enabled")
+        );
     }
 
     #[test]
@@ -2970,6 +3035,9 @@ mode = "off"
         assert!(!cfg.sitting.prime);
         assert!(!cfg.recommend.enabled);
         assert!(cfg.promote.activation_above.is_infinite());
+        // Nothing new is written into the corpus either: a sweep that
+        // generates while it measures is measuring its own inputs.
+        assert!(cfg.pursuit.min_engagement.is_infinite());
         // Synthesis is not the mode's business here: `learning` is about what
         // moves a rank, and an eager base still writes what it always wrote.
         assert_eq!(cfg.infer.synthesis, SynthesisMode::Earned);

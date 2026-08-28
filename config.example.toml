@@ -32,10 +32,12 @@
 #          hash. What is left is capture, hybrid search and ask.
 # learning record searches and asks, write the activation and the links — and
 #          read none of it on the query path. No priming, no associative
-#          spread, no promotion, no offers under the search box. This is the
-#          mode to run the evaluation harness in: a default that changes
-#          ranking moves only after it has been measured, and it cannot be
-#          measured against a ranking its own inputs have already moved.
+#          spread, no promotion, no offers under the search box, and no
+#          pursuit generation, so the corpus holds still as well as the
+#          ranking. This is the mode to run the evaluation harness in: a
+#          default that changes ranking moves only after it has been measured,
+#          and it cannot be measured against a ranking its own inputs have
+#          already moved — nor against a corpus they have grown.
 # full     all of it, which is what the tuning section below describes.
 mode = "full"
 
@@ -596,7 +598,10 @@ idle_secs = 900
 # Fewer engaged artifacts than this is a promotion case, not generation.
 min_sources = 2
 # Engagement weight a pursuit needs before it is worth a call: opened 1.0,
-# pivoted 1.5, returned 2.0, confirmed 3.0.
+# pivoted 1.5, returned 2.0, confirmed 3.0. This is the key `learn.mode` sets
+# to `inf` at "off" and "learning" — a total no pursuit reaches is how "never
+# generate" is said in the keys that already exist, the same way
+# promote.activation_above says it for promotion.
 min_engagement = 3.0
 
 # ── A recommendation under the search box ────────────────────────────────────
@@ -614,6 +619,11 @@ min_engagement = 3.0
 # young base sees the bottom rung — a card drawn at random, claiming nothing —
 # until it has something to say.
 [recommend]
+# Not one of the keys `learn.mode = "off"` sets: the offers are already off
+# there through [learn] itself, and this key is also what arms the sweep that
+# ages the recorded situations and interactions out. Switching learning off is
+# when that data most needs to leave, so the mode leaves this alone and only
+# "learning" — which keeps recording — turns it off.
 enabled = true
 # Cosine above which an event joins a cluster rather than opening its own.
 cluster_merge_at = 0.82
