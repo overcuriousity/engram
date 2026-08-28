@@ -83,10 +83,16 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
 /// The streaming door: the hits and what the whole round trip took, or `None`
 /// where this client should ask the plain one instead.
 ///
-/// Every failure is a `None` rather than an error. The plain door runs the same
-/// search and has said why a search was refused since before this one existed,
-/// so one code path reports failure and it is the older one. Nothing is
-/// recorded twice by falling back: a search that fails records nothing at all.
+/// A failure before the search ran is a `None` rather than an error. The plain
+/// door runs the same search and has said why a search was refused since before
+/// this one existed, so one code path reports failure and it is the older one.
+///
+/// A failure after it ran is an error, and this is the whole of the difference.
+/// The server yields `results` only once `search_inner` has returned, so that
+/// frame is the line between "nothing happened" and "the search completed and
+/// the learning layer wrote the event down". Falling back across that line ran
+/// the same query a second time and recorded it a second time, which is a
+/// duplicate in the data nobody typed and nobody can tell from a real repeat.
 async fn streaming(
     e: &Endpoint,
     limit: Option<usize>,
@@ -117,8 +123,16 @@ async fn streaming(
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = String::new();
     let mut hits: Option<Vec<SearchResult>> = None;
+    // Whether a `results` frame has been seen at all — not whether it could be
+    // read. Once the server has sent one the search is behind us either way.
+    let mut ran = false;
     while let Some(chunk) = body.next().await {
-        let Ok(chunk) = chunk else { return Ok(None) };
+        let chunk = match chunk {
+            Ok(c) => c,
+            // Nothing has been recorded yet, so the older door can run it.
+            Err(_) if !ran => return Ok(None),
+            Err(err) => return Err(Error::Validation(format!("{err}"))),
+        };
         pending.extend_from_slice(&chunk);
         buf.push_str(&crate::cli::ask::decode(&mut pending)?);
         for (name, data) in crate::cli::ask::frames(&mut buf) {
@@ -134,6 +148,7 @@ async fn streaming(
                     }
                 }
                 "results" => {
+                    ran = true;
                     hits = serde_json::from_value(data["results"].clone()).ok();
                 }
                 // Said by the plain door, which is about to run this search
@@ -145,7 +160,17 @@ async fn streaming(
     }
     // Taken back before a result lands on top of half a stage line.
     stages.clear();
-    Ok(hits.map(|h| (h, began.elapsed().as_millis())))
+    match (hits, ran) {
+        (Some(h), _) => Ok(Some((h, began.elapsed().as_millis()))),
+        // A results frame arrived and could not be read. The search is already
+        // recorded, so the plain door must not be asked to run it again.
+        (None, true) => Err(Error::Validation(
+            "the search answered in a shape this client could not read".into(),
+        )),
+        // The stream ended before the search finished. Nothing was recorded and
+        // the older door can be asked cleanly.
+        (None, false) => Ok(None),
+    }
 }
 
 /// The door every version of the server has had, and the one that says why a
