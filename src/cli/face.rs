@@ -32,9 +32,30 @@ const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█
 const EXCERPT_LINES: usize = 4;
 const ASCII_BLOCKS: [char; 8] = ['.', '.', ':', ':', '-', '=', '#', '#'];
 
-/// Dim, and back. Written out rather than pulled from a styling crate: two
-/// escapes used in three places do not need a dependency's opinion.
-const DIM: &str = "\u{1b}[2m";
+/// Cells in a hit's score bar. One block said "this one ranks lower than that
+/// one" only to an eye that went looking; seven say it across the list at a
+/// glance, and cost six columns.
+const BAR_CELLS: usize = 7;
+
+/// `s`, or as much of it as `room` holds with an ellipsis for the rest.
+fn clip(s: &str, room: usize) -> String {
+    match s.chars().count() > room && room > 1 {
+        true => s.chars().take(room - 1).chain(['…']).collect(),
+        false => s.to_string(),
+    }
+}
+
+/// Bold, dim, and the four hues — the whole vocabulary, written out rather than
+/// pulled from a styling crate: seven codes used through one function do not
+/// need a dependency's opinion.
+///
+/// The ANSI 8 and nothing else. No 256-colour indices and no RGB: the terminal
+/// belongs to the person in front of it, their theme has already mapped these
+/// eight to inks that compose on their ground, and a hex value lifted from
+/// `app.css` composes on `#0e1015` and nowhere else.
+const BOLD: &str = "1";
+const DIM: &str = "2";
+const CYAN: &str = "36";
 const RESET: &str = "\u{1b}[0m";
 
 /// The locale that decides whether the glyphs are drawable, in POSIX order.
@@ -421,57 +442,128 @@ impl Face {
         }
     }
 
+    /// `s` wrapped in an SGR code, or `s` untouched.
+    ///
+    /// The one place in this file an escape is written, which is what makes
+    /// "strip every escape and the rendering is unchanged" a property the
+    /// tests can assert rather than a habit the next edit forgets.
+    pub fn ink(&self, code: &str, s: &str) -> String {
+        match self.color {
+            true => format!("\u{1b}[{code}m{s}{RESET}"),
+            false => s.to_string(),
+        }
+    }
+
     /// The ranked list, drawn.
     ///
     /// Falls straight through to the plain renderer when the face is off, so
     /// there is exactly one code path a script can ever see.
-    pub fn render(&self, hits: &[SearchResult]) -> String {
+    ///
+    /// `elapsed_ms` is what the client timed for the whole round trip, and
+    /// `None` where it did not time one. Reported rather than computed here:
+    /// this function draws, and a duration it invented would be the first
+    /// invented thing in the file.
+    pub fn render(&self, hits: &[SearchResult], elapsed_ms: Option<u128>) -> String {
         if !self.on {
             return crate::cli::search::render_plain(hits);
         }
-        let blocks = if self.unicode { BLOCKS } else { ASCII_BLOCKS };
-        // The trace running down the list, and what it becomes past the cliff.
-        let (solid, broken) = if self.unicode {
-            ('┃', '╵')
-        } else {
-            ('|', ':')
-        };
+        let (full, empty) = if self.unicode { ('▇', '░') } else { ('#', '.') };
         // The list is its own scale. A score here is a fused rank rather than a
         // probability — `search::prime` says so about the same numbers — and a
         // whole list of them is routinely negative, so a fixed `0.0..=1.0`
         // clamp put every hit on the bottom rung and the bar said nothing.
         let scale = Scale::over(hits);
         let mut out = String::new();
+
+        // Both halves measured: the count is the list, the time is what the
+        // client timed. The query is not echoed — a terminal already has the
+        // command that produced this two lines up, which a page does not.
+        let mut head = format!("{} hit{}", hits.len(), if hits.len() == 1 { "" } else { "s" });
+        if let Some(ms) = elapsed_ms {
+            head.push_str(&format!(" · {ms} ms"));
+        }
+        out.push_str(&format!("\n  {}\n\n", self.ink(DIM, &head)));
+
+        let mut said_cliff = false;
         for (i, h) in hits.iter().enumerate() {
-            let rung = scale.rung(h.score);
-            let trace = if h.past_cliff { broken } else { solid };
-            let (dim, reset) = if h.past_cliff { (DIM, RESET) } else { ("", "") };
-            out.push_str(&format!(
-                "{dim}{trace} {:>2} {} {:.2}  {}  {}{reset}\n",
-                i + 1,
-                blocks[rung],
-                h.score,
-                h.title.as_deref().unwrap_or("(untitled)"),
-                h.artifact_id
-            ));
-            // Drawn *and* said. The break in the trace is the thing you cannot
-            // miss; the words are the thing everyone else can still read.
-            if let Some(said) = crate::cli::search::badges(h) {
-                out.push_str(&format!("{dim}{trace}    [{said}]{reset}\n"));
+            // Said once, where the fall happens, and said in words. The `┃`
+            // trace this replaces marked it by breaking, which marks it for
+            // nobody reading a screenshot, a redirected file or a monochrome
+            // terminal — and once the sentence is on screen the trace beside it
+            // carries nothing at all.
+            if h.past_cliff && !said_cliff {
+                said_cliff = true;
+                out.push_str(&format!("  {}\n\n", self.ink(CYAN, &self.divider())));
             }
-            // Four wrapped lines, not two source lines. A passage's own blank
+            // Zero to seven rungs becomes one to seven lit cells: every hit in
+            // this list was returned by the search, so no row is drawn empty.
+            let lit = (scale.rung(h.score) + 1).min(BAR_CELLS);
+            let bar: String = (0..BAR_CELLS)
+                .map(|c| if c < lit { full } else { empty })
+                .collect();
+            // Eight characters: what `last::resolve` already accepts as a
+            // prefix, and what a person can carry across a terminal by eye. The
+            // whole 26 crowded the title off its own line and named nothing the
+            // eight do not.
+            let short: String = h.artifact_id.chars().take(8).collect();
+            let title = clip(
+                h.title.as_deref().unwrap_or("(untitled)"),
+                self.width.saturating_sub(25),
+            );
+            let (bar, title) = match h.past_cliff {
+                true => (self.ink(DIM, &bar), self.ink(DIM, &title)),
+                false => (self.ink(CYAN, &bar), self.ink(BOLD, &title)),
+            };
+            out.push_str(&format!(
+                "  {:>2}  {bar}  {title}   {}\n",
+                i + 1,
+                self.ink(DIM, &short)
+            ));
+            // Drawn *and* said, as the trace used to be: the words are what
+            // everyone else can still read.
+            if let Some(said) = crate::cli::search::badges(h) {
+                out.push_str(&format!(
+                    "      {}\n",
+                    self.ink(DIM, &said.replace(", ", " · "))
+                ));
+            }
+            // Four wrapped lines, not four source lines. A passage's own blank
             // lines are structure in the document and nothing at all here, and
             // a clip at the terminal's edge discarded the rest of a sentence
-            // rather than spending the next line on it — between them a
-            // captured PDF drew a list of one-line fragments with gaps under
-            // them. The budget is what you can read without the list stopping
-            // being a list; `--show` is still where a whole artifact is read.
-            for line in crate::cli::search::excerpt(&h.text, EXCERPT_LINES, self.width.saturating_sub(6)) {
-                out.push_str(&format!("{dim}{trace}    {line}{reset}\n"));
+            // rather than spending the next line on it.
+            for line in
+                crate::cli::search::excerpt(&h.text, EXCERPT_LINES, self.width.saturating_sub(6))
+            {
+                out.push_str(&format!("      {line}\n"));
             }
-            out.push_str(&format!("{trace}\n"));
+            out.push('\n');
+        }
+        // Named once, and only where it fits: a hint that wraps is worse than
+        // no hint.
+        if !hits.is_empty() && self.width >= 60 {
+            out.push_str(&format!(
+                "  {}\n",
+                self.ink(DIM, "engram --show 1   reads the first hit in full")
+            ));
         }
         out
+    }
+
+    /// The cliff, as a rule with the sentence in it, laid out to the width.
+    ///
+    /// A narrow terminal gets the sentence alone: the rules are what make it
+    /// read as a divider, and half a rule reads as damage.
+    fn divider(&self) -> String {
+        const SAID: &str = "relevance falls off here";
+        let dash = if self.unicode { '─' } else { '-' };
+        let room = self.width.saturating_sub(2);
+        match room.checked_sub(SAID.chars().count() + 4) {
+            Some(n) if n >= 6 => {
+                let side: String = std::iter::repeat_n(dash, n / 2).collect();
+                format!("{side}  {SAID}  {side}")
+            }
+            _ => SAID.to_string(),
+        }
     }
 
     /// A readout of the rate an answer's tokens are arriving at.
@@ -645,6 +737,15 @@ mod tests {
         assert!(r.strand(window).chars().all(|c| c == ' '));
     }
 
+    /// Lit cells per bar, one entry per hit.
+    fn lit_cells(drawn: &str) -> Vec<usize> {
+        drawn
+            .lines()
+            .map(|l| l.chars().filter(|c| *c == '▇').count())
+            .filter(|n| *n > 0)
+            .collect()
+    }
+
     fn always() -> CliArgs {
         CliArgs {
             fancy: Fancy::Always,
@@ -690,7 +791,7 @@ mod tests {
     fn a_locale_that_does_not_say_utf8_gets_the_ascii_shapes() {
         let f = Face::decide(&always(), true, false, Some("C"));
         assert!(!f.unicode);
-        let drawn = f.render(&[hit("a", 0.9, false, false)]);
+        let drawn = f.render(&[hit("a", 0.9, false, false)], None);
         assert!(
             !drawn.contains('█') && !drawn.contains('┃'),
             "a drawing glyph reached a non-UTF-8 terminal: {drawn}"
@@ -775,20 +876,20 @@ mod tests {
     #[test]
     fn the_bar_is_drawn_against_the_list_it_is_in() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
-        let drawn = f.render(&[
-            hit("a", -3.57, false, false),
-            hit("b", -4.42, false, false),
-            hit("c", -5.45, false, false),
-        ]);
-        let rungs: Vec<char> = drawn
-            .lines()
-            .filter_map(|l| l.chars().find(|c| BLOCKS.contains(c)))
-            .collect();
-        assert_eq!(rungs.len(), 3, "one bar per hit: {drawn}");
-        assert_eq!(rungs[0], '█', "the best hit of the list fills the bar");
-        assert_eq!(rungs[2], '▁', "and the worst empties it");
+        let drawn = f.render(
+            &[
+                hit("a", -3.57, false, false),
+                hit("b", -4.42, false, false),
+                hit("c", -5.45, false, false),
+            ],
+            None,
+        );
+        let bars = lit_cells(&drawn);
+        assert_eq!(bars.len(), 3, "one bar per hit: {drawn}");
+        assert_eq!(bars[0], BAR_CELLS, "the best hit of the list fills the bar");
+        assert_eq!(bars[2], 1, "and the worst is down to its last cell");
         assert!(
-            rungs[1] != rungs[0] && rungs[1] != rungs[2],
+            bars[1] != bars[0] && bars[1] != bars[2],
             "the middle hit got no step of its own: {drawn}"
         );
     }
@@ -798,28 +899,74 @@ mod tests {
     #[test]
     fn a_list_with_no_spread_still_draws() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
-        let drawn = f.render(&[hit("a", -2.0, false, false), hit("b", -2.0, false, false)]);
+        let drawn = f.render(
+            &[hit("a", -2.0, false, false), hit("b", -2.0, false, false)],
+            None,
+        );
         assert!(!drawn.contains("NaN"), "{drawn}");
-        let rungs: Vec<char> = drawn
-            .lines()
-            .filter_map(|l| l.chars().find(|c| BLOCKS.contains(c)))
-            .collect();
-        assert_eq!(rungs.len(), 2, "{drawn}");
-        assert_eq!(rungs[0], rungs[1], "nothing separates them: {drawn}");
+        let bars = lit_cells(&drawn);
+        assert_eq!(bars.len(), 2, "{drawn}");
+        assert_eq!(bars[0], bars[1], "nothing separates them: {drawn}");
     }
 
     #[test]
-    fn the_trace_breaks_where_the_cliff_is() {
+    fn the_cliff_is_said_where_it_falls() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
-        let drawn = f.render(&[hit("a", 0.9, false, false), hit("b", 0.2, true, true)]);
+        let drawn = f.render(&[hit("a", 0.9, false, false), hit("b", 0.2, true, true)], None);
+        // A mark made only of glyphs is a mark a screen reader, a screenshot
+        // and a monochrome terminal never reach. The trace that used to break
+        // here was exactly that, and the sentence says what it was for.
+        assert!(drawn.contains("relevance falls off here"), "{drawn}");
         assert!(
-            drawn.contains('┃') && drawn.contains('╵'),
-            "the trace must snap: {drawn}"
+            !drawn.contains('┃') && !drawn.contains('╵'),
+            "the trace says nothing the divider does not: {drawn}"
         );
-        // Drawn is not enough: a mark made only of glyphs is a mark a screen
-        // reader never reaches.
         assert!(drawn.contains("past the cliff"), "{drawn}");
         assert!(drawn.contains("loose match"), "{drawn}");
+    }
+
+    /// One hit is a list with nothing to fall off.
+    #[test]
+    fn a_list_that_does_not_fall_off_has_no_divider() {
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let drawn = f.render(&[hit("a", 0.9, false, false)], None);
+        assert!(!drawn.contains("relevance falls off"), "{drawn}");
+    }
+
+    /// The raw number was a fused rank printed to two decimals, and a whole
+    /// list of them is routinely negative. The bar says the only thing it
+    /// honestly said; `--json` still carries the float.
+    #[test]
+    fn the_raw_score_leaves_the_human_rendering() {
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let drawn = f.render(&[hit("a", -3.57, false, false)], None);
+        assert!(!drawn.contains("-3.57"), "{drawn}");
+        assert!(drawn.contains('▇'), "{drawn}");
+    }
+
+    /// Eight characters name the artifact and leave the title its line;
+    /// `last::resolve` has always accepted a prefix.
+    #[test]
+    fn the_id_is_cut_to_a_prefix_that_still_names_it() {
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let mut h = hit("a", 0.9, false, false);
+        h.artifact_id = "01J8Z4K2QW7NR3T9X0YB5C6D8E".into();
+        let drawn = f.render(&[h], None);
+        assert!(drawn.contains("01J8Z4K2"), "{drawn}");
+        assert!(!drawn.contains("01J8Z4K2QW"), "the whole id crowds the title: {drawn}");
+    }
+
+    /// Both halves of the header are measurements. Nothing else belongs in it.
+    #[test]
+    fn the_header_says_what_was_counted_and_what_was_timed() {
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let drawn = f.render(&[hit("a", 0.9, false, false), hit("b", 0.2, false, false)], Some(412));
+        assert!(drawn.contains("2 hits"), "{drawn}");
+        assert!(drawn.contains("412 ms"), "{drawn}");
+        // A client that timed nothing says nothing about time.
+        let untimed = f.render(&[hit("a", 0.9, false, false)], None);
+        assert!(untimed.contains("1 hit"), "{untimed}");
+        assert!(!untimed.contains(" ms"), "{untimed}");
     }
 
     /// A sentence past the terminal's edge is wrapped, not thrown away.
@@ -836,7 +983,7 @@ mod tests {
                   Oberflaeche. Sie sind fuer periodische und zeitaufwendige \
                   Aufgaben geeignet."
             .into();
-        let drawn = f.render(&[h]);
+        let drawn = f.render(&[h], None);
         assert!(drawn.contains("zeitaufwendige"), "the tail was cut: {drawn}");
         for line in drawn.lines() {
             assert!(line.chars().count() <= 40, "over the width: {line:?}");
@@ -854,7 +1001,7 @@ mod tests {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
         let mut h = hit("a", -4.18, false, false);
         h.text = "Betriebssysteme f\u{fc}r Server\n\nDienste bezeichnen Anwendungen.\n".into();
-        let drawn = f.render(&[h]);
+        let drawn = f.render(&[h], None);
         assert!(drawn.contains("Betriebssysteme"), "{drawn}");
         assert!(drawn.contains("Dienste bezeichnen"), "second line lost: {drawn}");
     }
@@ -864,7 +1011,7 @@ mod tests {
         // The boundary that keeps the plain form the only one a script sees.
         let hits = [hit("a", 0.9, false, false), hit("b", 0.2, true, true)];
         let off = Face::decide(&Default::default(), false, false, Some("en_US.UTF-8"));
-        assert_eq!(off.render(&hits), crate::cli::search::render_plain(&hits));
+        assert_eq!(off.render(&hits, None), crate::cli::search::render_plain(&hits));
     }
 
     #[test]
@@ -920,6 +1067,51 @@ mod tests {
         // And the whole point of reading it: the glyphs follow.
         assert!(super::Face::decide(&always(), true, false, Some("UTF-8")).unicode);
         assert!(!super::Face::decide(&always(), true, false, Some("C")).unicode);
+    }
+
+    /// Every escape this file can emit, taken back out again.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn drawn(color: bool) -> Face {
+        Face {
+            on: true,
+            color,
+            unicode: true,
+            width: 80,
+        }
+    }
+
+    /// The third rule of this file, as an assertion rather than a comment: a
+    /// claim made in colour is made in words as well, so the coloured
+    /// rendering and the bare one differ by escapes and by nothing else.
+    #[test]
+    fn colour_never_carries_a_claim_on_its_own() {
+        let hits = [hit("a", 0.9, false, false), hit("b", 0.2, true, true)];
+        assert_eq!(
+            strip_sgr(&drawn(true).render(&hits, Some(412))),
+            drawn(false).render(&hits, Some(412))
+        );
+    }
+
+    #[test]
+    fn ink_is_a_no_op_without_colour() {
+        assert_eq!(drawn(false).ink(CYAN, "x"), "x");
+        assert_eq!(drawn(true).ink(CYAN, "x"), "\u{1b}[36mx\u{1b}[0m");
     }
 
     /// `NO_COLOR` is about ink. It used to take the lamps, the upload track and

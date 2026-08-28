@@ -79,7 +79,7 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
         // would be a second definition of the response shape.
         println!("{body}");
     } else {
-        print!("{}", face.render(&hits));
+        print!("{}", face.render(&hits, None));
     }
     // `1` for nothing found, so `engram -s "x" || …` is a usable branch.
     Ok(if hits.is_empty() { 1 } else { 0 })
