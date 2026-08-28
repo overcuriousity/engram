@@ -568,7 +568,10 @@ pub mod test_support {
             pinned_boost: 0.15,
             // Off in tests, whatever ships: the tests that need a log switch
             // it on and the rest assert nothing is recorded.
-            learn: crate::config::LearnConfig { enabled: false },
+            learn: crate::config::LearnConfig {
+                enabled: false,
+                ..Default::default()
+            },
             feedback: crate::config::FeedbackConfig::default(),
             capture: crate::config::CaptureConfig::default(),
             // Inert in most tests whatever it says, because `learn` is off and

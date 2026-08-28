@@ -7,6 +7,49 @@
 # Secrets (client_secret, api_key) belong in the environment, NOT in this file.
 # The loader warns at startup if it finds one here.
 
+# ── Learning from what happens here ─────────────────────────────────────────
+# One dial over the whole layer: recording searches, learning links from
+# co-retrieval, activation, promotion, pursuits, and the area under the search
+# box. These were three separate flags — [feedback], [associate] and [pursuit]
+# each had their own — and two of their combinations were refused at startup
+# while a third was a warning, which is how you find out they were one setting
+# written three times. The sections further down keep their thresholds; this is
+# the one line that decides which of them agree with each other.
+#
+# The three old keys are refused at startup rather than ignored. Deserialization
+# drops what it does not recognise, and `[feedback] enabled = false` is a key
+# whose whole purpose was to say "keep none of this" — ignored, it would have
+# said nothing, and an upgrade would have turned recording back on for the
+# operator who had most explicitly refused it.
+#
+# On by default. Everything downstream of it moves only while the log is being
+# written, so off is the deliberate act. Nothing here leaves the machine, Ops
+# forgets all of it on one press, and off means nothing is recorded in the
+# first place.
+[learn]
+# off      record nothing, learn nothing, prime nothing, promote nothing;
+#          consolidate only the exact and near duplicates capture finds for a
+#          hash. What is left is capture, hybrid search and ask.
+# learning record searches and asks, write the activation and the links — and
+#          read none of it on the query path. No priming, no associative
+#          spread, no promotion, no offers under the search box, and no
+#          pursuit generation, so the corpus holds still as well as the
+#          ranking. This is the mode to run the evaluation harness in: a
+#          default that changes ranking moves only after it has been measured,
+#          and it cannot be measured against a ranking its own inputs have
+#          already moved — nor against a corpus they have grown.
+# full     all of it, which is what the tuning section below describes.
+mode = "full"
+
+# Every key the mode stands for is still a key, and a key written in this file
+# wins over what the mode would have said. `--print-config` prints the mode
+# first and then names the keys it decided, so the two are never a guess.
+#
+# `enabled` is the recording switch itself, left commented because the mode is
+# what sets it: "full" and "learning" record, "off" does not. Uncomment it to
+# say so regardless of the mode.
+#enabled = true
+
 [server]
 bind = "127.0.0.1:8080"
 # Background worker tasks draining the job queue. One is right when every role
@@ -416,26 +459,13 @@ interval_hours = 24
 # is ever asked about.
 dedupe_interval_mins = 15
 max_dedupe_per_tick = 5
-# ── Learning from what happens here ─────────────────────────────────────────
-# One switch over the whole layer: recording searches, learning links from
-# co-retrieval, activation, pursuits, and the area under the search box. These
-# were three separate flags — [feedback], [associate] and [pursuit] each had
-# their own — and two of their combinations were refused at startup while a
-# third was a warning, which is how you find out they were one setting written
-# three times. The sections below keep their thresholds; this is the switch.
+# ══ Tuning the learning layer ═══════════════════════════════════════════════
+# You do not need to read this unless you are tuning.
 #
-# The three old keys are refused at startup rather than ignored. Deserialization
-# drops what it does not recognise, and `[feedback] enabled = false` is a key
-# whose whole purpose was to say "keep none of this" — ignored, it would have
-# said nothing, and an upgrade would have turned recording back on for the
-# operator who had most explicitly refused it.
-#
-# On by default. Everything downstream of it moves only while the log is being
-# written, so off is the deliberate act. Nothing here leaves the machine, Ops
-# forgets all of it on one press, and off means nothing is recorded in the
-# first place.
-[learn]
-enabled = true
+# Every key from here to the end of [sitting] is one `learn.mode` above already
+# set to a value that agrees with the others. They are here because a dial with
+# no keys under it is a dial nobody can disagree with, and because tuning is a
+# real thing people do — but a working base needs none of them.
 
 # Recording real searches so they can be judged later, and turned into the
 # query/artifact pairs the evaluation harness scores against.
@@ -568,7 +598,10 @@ idle_secs = 900
 # Fewer engaged artifacts than this is a promotion case, not generation.
 min_sources = 2
 # Engagement weight a pursuit needs before it is worth a call: opened 1.0,
-# pivoted 1.5, returned 2.0, confirmed 3.0.
+# pivoted 1.5, returned 2.0, confirmed 3.0. This is the key `learn.mode` sets
+# to `inf` at "off" and "learning" — a total no pursuit reaches is how "never
+# generate" is said in the keys that already exist, the same way
+# promote.activation_above says it for promotion.
 min_engagement = 3.0
 
 # ── A recommendation under the search box ────────────────────────────────────
@@ -586,6 +619,11 @@ min_engagement = 3.0
 # young base sees the bottom rung — a card drawn at random, claiming nothing —
 # until it has something to say.
 [recommend]
+# Not one of the keys `learn.mode = "off"` sets: the offers are already off
+# there through [learn] itself, and this key is also what arms the sweep that
+# ages the recorded situations and interactions out. Switching learning off is
+# when that data most needs to leave, so the mode leaves this alone and only
+# "learning" — which keeps recording — turns it off.
 enabled = true
 # Cosine above which an event joins a cluster rather than opening its own.
 cluster_merge_at = 0.82
@@ -638,6 +676,23 @@ environment = 0.2
 # Off. A monthly rhythm is real, but nothing has shown one here yet.
 month_cycle = 0.0
 
+# ── The sitting ──────────────────────────────────────────────────────────────
+# What this session has touched, carried between search, ask and capture. In
+# memory only: it dies with the process, because a working memory that survives
+# a restart is a long-term memory and engram has one of those already. The web
+# door only — an access token is not a conversation.
+#
+# Carrying is always on and changes no order: a prefilled ask box, the question
+# an answer answered, a rail of what you have been in.
+[sitting]
+# Let what this sitting has touched lift a result.
+#
+# The only part of the sitting that moves an order, and the same query ranking
+# differently in two sittings is exactly what is disorienting about it — so it
+# is off, the lift shares the one budget `associate.prime_lift` bounds, rank 0
+# never moves, and a hit it lifted says so on the row.
+prime = false
+
 # ── Scheduling ───────────────────────────────────────────────────────────────
 # The queue is the scheduler. Whether somebody is waiting on a unit is a
 # constant per stage rather than a setting: a priority you can set wrong
@@ -669,23 +724,6 @@ age_after_mins = 60
 # cancels the wait outright, because every producer already pulls a sleeping
 # unit forward, so a quiet base runs its sweeps late and never not at all.
 # backoff_max_hours = 24
-
-# ── The sitting ──────────────────────────────────────────────────────────────
-# What this session has touched, carried between search, ask and capture. In
-# memory only: it dies with the process, because a working memory that survives
-# a restart is a long-term memory and engram has one of those already. The web
-# door only — an access token is not a conversation.
-#
-# Carrying is always on and changes no order: a prefilled ask box, the question
-# an answer answered, a rail of what you have been in.
-[sitting]
-# Let what this sitting has touched lift a result.
-#
-# The only part of the sitting that moves an order, and the same query ranking
-# differently in two sittings is exactly what is disorienting about it — so it
-# is off, the lift shares the one budget `associate.prime_lift` bounds, rank 0
-# never moves, and a hit it lifted says so on the row.
-prime = false
 
 # ── Pacing ───────────────────────────────────────────────────────────────────
 # One gap in front of every inference call, whatever its role. The roles share

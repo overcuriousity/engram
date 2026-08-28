@@ -535,7 +535,10 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         weak_below: 0.0,
         recency_half_life_days: 180,
         pinned_boost: 0.15,
-        learn: engram::config::LearnConfig { enabled: false },
+        learn: engram::config::LearnConfig {
+            enabled: false,
+            ..Default::default()
+        },
         feedback: engram::config::FeedbackConfig::default(),
         capture: engram::config::CaptureConfig::default(),
         associate: engram::config::AssociateConfig::default(),
