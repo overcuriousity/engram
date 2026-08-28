@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[derive(Parser)]
 #[command(
     name = "engram",
-    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s or -a it is a client of one."
+    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s, -a, --show or --status it is a client of one."
 )]
 struct Args {
     #[arg(long)]

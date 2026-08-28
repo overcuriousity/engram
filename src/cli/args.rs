@@ -26,6 +26,7 @@ pub struct CliArgs {
     /// reason `--tag` is refused with `-a`: a search has no title to set.
     #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show", "status"])]
     pub title: Option<String>,
+    /// A note stored beside the capture: where it came from, why it matters.
     #[arg(long, value_name = "NOTE", conflicts_with_all = ["search", "ask", "show", "status"])]
     pub note: Option<String>,
     /// Narrow a search to artifacts carrying this tag. Repeatable.
@@ -39,6 +40,7 @@ pub struct CliArgs {
     /// artifact named by id is not a list there is anything to narrow.
     #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status"])]
     pub tags: Vec<String>,
+    /// Narrow a search to artifacts in this category. Refused with `-a`, like `--tag`.
     #[arg(long, value_name = "CATEGORY", conflicts_with_all = ["ask", "show", "status"])]
     pub category: Option<String>,
     /// Print the results as JSON instead of for a person.

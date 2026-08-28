@@ -867,6 +867,7 @@ struct RawSynthesizeRole {
     #[serde(default)]
     structured_output: Option<bool>,
     // Role-only, unchanged.
+    #[serde(default = "default_output_ratio")]
     output_ratio: f32,
     #[serde(default = "default_context_opening_tokens")]
     context_opening_tokens: usize,
@@ -1128,6 +1129,14 @@ pub struct SynthesizeRole {
 
 fn default_true() -> bool {
     true
+}
+
+/// The example file's number, so a minimal config does not fail at startup on
+/// the one field in this block that had no default. Sized for a small local
+/// model, which is what a first instance runs; see the example file for when
+/// to lower it.
+fn default_output_ratio() -> f32 {
+    8.0
 }
 
 fn default_context_opening_tokens() -> usize {
@@ -3020,7 +3029,6 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         max_output_tokens = 16384
         [infer.synthesize]
         tier = "efficient"
-        output_ratio = 8.0
         [infer.embed]
         base_url = "http://localhost:8000/v1"
         model = "bge-m3"
@@ -3031,6 +3039,9 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         "#,
         )
         .expect("tiered config parses");
+
+        // A minimal block: the one field that had no default has one now.
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().output_ratio, 8.0);
 
         assert_eq!(
             cfg.infer.synthesize.as_ref().unwrap().base_url,

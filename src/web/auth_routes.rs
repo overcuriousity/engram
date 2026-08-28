@@ -30,9 +30,6 @@ impl<T: Template> IntoResponse for HtmlTemplate<T> {
 #[derive(Template)]
 #[template(path = "login.html")]
 struct LoginTemplate {
-    /// Always `None`: the sign-in page has no nav, and a count of what is
-    /// waiting inside is not something to tell someone who is still outside.
-    judge_pending: Option<i64>,
     oidc: bool,
     error: Option<String>,
     /// The page that asked for this login, already checked by `safe_next`.
@@ -86,7 +83,6 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
                 return Ok(Redirect::to(&url).into_response());
             }
             Ok(HtmlTemplate(LoginTemplate {
-                judge_pending: None,
                 oidc: true,
                 error: None,
                 next: None,
@@ -94,7 +90,6 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
             .into_response())
         }
         AuthMode::Local => Ok(HtmlTemplate(LoginTemplate {
-            judge_pending: None,
             oidc: false,
             error: None,
             next: safe_next(q.go.as_deref()),
@@ -126,7 +121,6 @@ async fn login_submit(State(st): State<AppState>, Form(f): Form<LoginForm>) -> R
         return Ok((
             StatusCode::UNAUTHORIZED,
             HtmlTemplate(LoginTemplate {
-                judge_pending: None,
                 oidc: false,
                 error: Some("Incorrect username or password.".into()),
                 next: safe_next(f.next.as_deref()),
@@ -258,7 +252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_login_page_is_reachable_without_credentials() {
+    async fn the_login_page_is_reachable_without_credentials_and_shows_no_chrome() {
         let res = local_app()
             .await
             .oneshot(
@@ -270,6 +264,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        // Nobody signed out is offered Search · Insights · Settings, or an
+        // app to install, on the one page they can reach.
+        let body = String::from_utf8(
+            axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        for chrome in [
+            r#"class="tabbar""#,
+            r#"class="installnudge""#,
+            r#"class="topbar""#,
+        ] {
+            assert!(
+                !body.contains(chrome),
+                "{chrome} on the login page:\n{body}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -192,6 +192,7 @@ tier = "efficient"
 # ~2000 tokens of input per call. A 9B model that produces JSON which stops
 # parsing partway through wants a higher number, not a lower one: a shorter
 # segment is a shorter reply. Lower it (1.5-2.0) for a large hosted model.
+# 8.0 is the default when left out.
 output_ratio = 8.0
 # Any tier field can be overridden here for this role alone, e.g. a shorter
 # ceiling than the tier's:
