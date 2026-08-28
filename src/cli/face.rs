@@ -17,6 +17,14 @@ pub struct Face {
 /// The eight rungs of a score bar, and their ASCII understudies. The same eight
 /// steps either way, so the shape of a list does not change with the locale.
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Display lines of a hit's text the ranked list spends.
+///
+/// Two was the spec's number and it was too few to recognise a passage by:
+/// ten hits of one line each is a list of ids. Four is still a list — ten hits
+/// fit a screen — and it is enough text to tell two passages of one document
+/// apart, which is the decision the list exists to support.
+const EXCERPT_LINES: usize = 4;
 const ASCII_BLOCKS: [char; 8] = ['.', '.', ':', ':', '-', '=', '#', '#'];
 
 /// Dim, and back. Written out rather than pulled from a styling crate: two
@@ -442,10 +450,15 @@ impl Face {
             if let Some(said) = crate::cli::search::badges(h) {
                 out.push_str(&format!("{dim}{trace}    [{said}]{reset}\n"));
             }
-            for line in h.text.lines().take(2) {
-                let room = self.width.saturating_sub(6).max(20);
-                let clipped: String = line.chars().take(room).collect();
-                out.push_str(&format!("{dim}{trace}    {clipped}{reset}\n"));
+            // Four wrapped lines, not two source lines. A passage's own blank
+            // lines are structure in the document and nothing at all here, and
+            // a clip at the terminal's edge discarded the rest of a sentence
+            // rather than spending the next line on it — between them a
+            // captured PDF drew a list of one-line fragments with gaps under
+            // them. The budget is what you can read without the list stopping
+            // being a list; `--show` is still where a whole artifact is read.
+            for line in crate::cli::search::excerpt(&h.text, EXCERPT_LINES, self.width.saturating_sub(6)) {
+                out.push_str(&format!("{dim}{trace}    {line}{reset}\n"));
             }
             out.push_str(&format!("{trace}\n"));
         }
@@ -804,6 +817,42 @@ mod tests {
         assert!(drawn.contains("loose match"), "{drawn}");
     }
 
+    /// A sentence past the terminal's edge is wrapped, not thrown away.
+    #[test]
+    fn a_long_line_is_wrapped_onto_the_budget_rather_than_cut_at_the_edge() {
+        let f = Face {
+            on: true,
+            unicode: true,
+            width: 40,
+        };
+        let mut h = hit("a", -4.18, false, false);
+        h.text = "Dienste bezeichnen Anwendungen ohne eine graphische \
+                  Oberflaeche. Sie sind fuer periodische und zeitaufwendige \
+                  Aufgaben geeignet."
+            .into();
+        let drawn = f.render(&[h]);
+        assert!(drawn.contains("zeitaufwendige"), "the tail was cut: {drawn}");
+        for line in drawn.lines() {
+            assert!(line.chars().count() <= 40, "over the width: {line:?}");
+        }
+    }
+
+    /// The two lines a list spends are two lines that carry text.
+    ///
+    /// A passage opening with a heading and a blank line spent one of its two
+    /// on the blank, so a captured PDF drew a list where nearly every hit was
+    /// one line and a gap — the clip was working, it was just spending half
+    /// its budget on nothing.
+    #[test]
+    fn the_lines_a_hit_is_clipped_to_are_lines_with_something_on_them() {
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let mut h = hit("a", -4.18, false, false);
+        h.text = "Betriebssysteme f\u{fc}r Server\n\nDienste bezeichnen Anwendungen.\n".into();
+        let drawn = f.render(&[h]);
+        assert!(drawn.contains("Betriebssysteme"), "{drawn}");
+        assert!(drawn.contains("Dienste bezeichnen"), "second line lost: {drawn}");
+    }
+
     #[test]
     fn a_face_that_is_off_renders_exactly_what_the_plain_renderer_does() {
         // The boundary that keeps the plain form the only one a script sees.
@@ -867,3 +916,4 @@ mod tests {
         assert!(!super::Face::decide(&always(), true, false, Some("C")).unicode);
     }
 }
+

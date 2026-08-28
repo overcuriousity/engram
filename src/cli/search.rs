@@ -105,10 +105,65 @@ pub fn render_plain(hits: &[SearchResult]) -> String {
         if let Some(said) = badges(h) {
             out.push_str(&format!("      [{said}]\n"));
         }
-        for line in h.text.lines().take(3) {
+        for line in body_lines(&h.text, 3) {
             out.push_str(&format!("      {line}\n"));
         }
         out.push('\n');
+    }
+    out
+}
+
+/// The first `n` lines of a hit's text that have anything on them.
+///
+/// A clip is a budget for showing text, so a blank line must not consume any
+/// of it: an artifact whose first line is a heading spends line two on the gap
+/// beneath it, and the list shows one line where it promised `n`. Leading
+/// indentation goes with it — it positions text against a document that is not
+/// on screen here.
+pub(crate) fn body_lines(text: &str, n: usize) -> impl Iterator<Item = &str> {
+    text.lines()
+        .map(str::trim_end)
+        .map(str::trim_start)
+        .filter(|l| !l.is_empty())
+        .take(n)
+}
+
+/// A hit's text laid out to fit `width`, up to `budget` display lines.
+///
+/// Clipping a source line at the terminal's edge threw away the rest of the
+/// sentence and gave the space back to nobody — a hit whose one interesting
+/// clause sat past column 74 read as a fragment. Wrapping spends the same
+/// budget on text instead, and the budget is display lines rather than source
+/// lines so a document's own line breaks cannot decide how much you are shown.
+pub(crate) fn excerpt(text: &str, budget: usize, width: usize) -> Vec<String> {
+    let room = width.max(24);
+    let mut out: Vec<String> = Vec::new();
+    for line in body_lines(text, budget) {
+        // Each source line starts a new display line. Flowing one into the next
+        // would run a heading into the paragraph under it, which is the one
+        // break in a document that was carrying meaning.
+        let mut fresh = true;
+        for word in line.split_whitespace() {
+            match out.last_mut() {
+                // `+ 1` is the space that joining would add.
+                Some(last)
+                    if !fresh && last.chars().count() + 1 + word.chars().count() <= room =>
+                {
+                    last.push(' ');
+                    last.push_str(word);
+                }
+                _ => {
+                    if out.len() == budget {
+                        return out;
+                    }
+                    // A word longer than the line gets the line to itself and
+                    // is cut there; nothing else can be done with it, and the
+                    // alternative is a row that breaks the layout.
+                    out.push(word.chars().take(room).collect());
+                    fresh = false;
+                }
+            }
+        }
     }
     out
 }
@@ -170,6 +225,16 @@ pub(crate) mod fixture {
 mod tests {
     use super::*;
     use fixture::hit;
+
+    /// Same budget, same rule, in the form a pipe sees.
+    #[test]
+    fn the_plain_form_clips_to_lines_that_carry_text() {
+        let mut h = hit("a", -4.18, false, false);
+        h.text = "One\n\nTwo\n\nThree\n\nFour".into();
+        let out = render_plain(&[h]);
+        assert!(out.contains("Three"), "{out}");
+        assert!(!out.contains("Four"), "a fourth line is past the budget: {out}");
+    }
 
     #[test]
     fn the_plain_form_holds_no_escape_byte_at_all() {
