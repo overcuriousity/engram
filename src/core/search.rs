@@ -96,6 +96,35 @@ pub struct SearchOutcome {
     pub explanation: crate::core::explain::SearchExplanation,
 }
 
+/// A stage of the search pipeline, in the order it runs.
+///
+/// Named by the server rather than assumed by a client: whether the reranker
+/// runs at all is decided here, out of configuration and out of which door
+/// asked, and a client that drew a lamp for it regardless would be drawing work
+/// that is not going to happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchStage {
+    Embed,
+    Retrieve,
+    Rerank,
+}
+
+/// What one search emits while it happens.
+///
+/// The producer is `search_inner`, which is also what the blocking door runs:
+/// one pipeline reporting on itself, rather than a second description of a
+/// search that could drift from the search.
+#[derive(Debug, Clone)]
+pub enum SearchEvent {
+    /// The stages this search will pass through. Always first, always once.
+    Stages(Vec<SearchStage>),
+    /// This stage has started.
+    Stage(SearchStage),
+    /// Terminal, and exactly what the blocking door returns.
+    Results(Vec<SearchResult>),
+}
+
 /// Deserialised as well as serialised, because the terminal client reads the
 /// very JSON this door writes. One type for both ends means a field added here
 /// cannot silently stop reaching the shell.
@@ -977,7 +1006,7 @@ impl Core {
         origin: impl Into<Origin>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let weight = self.ranking.read().expect("ranking lock").recency_weight;
-        self.search_inner(query, cap, weight, origin.into(), true)
+        self.search_inner(query, cap, weight, origin.into(), true, None)
             .await
     }
 
@@ -1004,8 +1033,44 @@ impl Core {
             params.recency_weight,
             origin.into(),
             false,
+            None,
         )
         .await
+    }
+
+    /// `search_with`, reporting each stage as it starts.
+    ///
+    /// Why this lives in `Core` and not in the door that draws it: the terminal
+    /// client and the web box both show these, and two implementations of "what
+    /// a search is doing" would disagree inside a month. The producer is the
+    /// pipeline itself, so a stage cannot be reported for work that was not run
+    /// and cannot be missed for work that was.
+    ///
+    /// The blocking `GET /search` is untouched and still answers a bare array.
+    pub fn search_events(
+        &self,
+        query: SearchQuery,
+        cap: Option<usize>,
+        origin: Origin,
+    ) -> impl tokio_stream::Stream<Item = Result<SearchEvent>> + 'static {
+        let core = self.clone();
+        let weight = self.ranking.read().expect("ranking lock").recency_weight;
+        async_stream::try_stream! {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::spawn(async move {
+                core.search_inner(&query, cap, weight, origin, true, Some(tx)).await
+            });
+            // The sender lives inside the search and is dropped when it
+            // returns, so this ends exactly once every stage it reported has
+            // been handed on — and never before the results it preceded.
+            while let Some(ev) = rx.recv().await {
+                yield ev;
+            }
+            let joined = task
+                .await
+                .map_err(|e| Error::Internal(format!("the search task: {e}")))?;
+            yield SearchEvent::Results(joined?.0);
+        }
     }
 
     /// `waited_on` is whether a person is on the other end of this search. It
@@ -1017,8 +1082,16 @@ impl Core {
         recency_weight: f32,
         origin: Origin,
         waited_on: bool,
+        stages: Option<tokio::sync::mpsc::UnboundedSender<SearchEvent>>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let door = origin.door;
+        // A client that hung up must not fail a search that is already running:
+        // the send is the report, not the work.
+        let say = |ev: SearchEvent| {
+            if let Some(tx) = &stages {
+                let _ = tx.send(ev);
+            }
+        };
         // Filled in as the stages run. Always computed: a conditional path
         // through the ranking would be a second pipeline, and the unexercised
         // one is the one that ships. `query.explain` decides only what is
@@ -1050,6 +1123,29 @@ impl Core {
             n => n.min(MAX_LIMIT),
         };
 
+        // Whether the reranker runs on *this* search: one is configured, the
+        // scope covers this door, and the query did not opt out. The scope
+        // collapses every door but `Ask` into "search" — the judging view, the
+        // API, MCP and the extension all show the operator a ranked list, and
+        // `apply = ["ask"]` means none of them wait on a rerank call.
+        //
+        // Decided here rather than beside the call it guards, because the stage
+        // list below is a promise about work that is going to happen and it has
+        // to be made before any of it starts.
+        let reranking = query.rerank
+            && match door {
+                Door::Ask => self.reranks_ask(),
+                // The same predicate that arms the UI's refining pass: written
+                // once, so the form can never advertise a refine this search
+                // would not run.
+                _ => self.reranks_search(),
+            };
+        let mut will = vec![SearchStage::Embed, SearchStage::Retrieve];
+        if reranking && self.reranker.is_some() {
+            will.push(SearchStage::Rerank);
+        }
+        say(SearchEvent::Stages(will));
+
         // Embedding the query is a model call, and so is the reranker, so a
         // search is a person waiting on the endpoint exactly as `ask` is — and
         // it is the more common way in, through the UI and through MCP. Without
@@ -1068,6 +1164,7 @@ impl Core {
             false => Lane::Background(self.gate.background_light().await),
         };
 
+        say(SearchEvent::Stage(SearchStage::Embed));
         let started = std::time::Instant::now();
         // Prefixes repeat constantly inside one search and whole queries repeat
         // across sessions, so this is the difference between one embedding call
@@ -1098,20 +1195,6 @@ impl Core {
             // the coverage check's question, not a searcher's.
             corpus_id: None,
         };
-        // Whether the reranker runs on *this* search: one is configured, the
-        // scope covers this door, and the query did not opt out. The scope
-        // collapses every door but `Ask` into "search" — the judging view, the
-        // API, MCP and the extension all show the operator a ranked list, and
-        // `apply = ["ask"]` means none of them wait on a rerank call.
-        let reranking = query.rerank
-            && match door {
-                Door::Ask => self.reranks_ask(),
-                // The same predicate that arms the UI's refining pass: written
-                // once, so the form can never advertise a refine this search
-                // would not run.
-                _ => self.reranks_search(),
-            };
-
         // Over-fetch whenever something downstream narrows the list: both the
         // per-source cap and the reranker can only discard what they are given.
         let candidates = if cap.is_some() || reranking {
@@ -1138,6 +1221,7 @@ impl Core {
         // The lexical half of the query. Computed locally and for free, so it
         // costs nothing when the store ignores it.
         let sparse = crate::vector::sparse::encode_query(query.q.trim());
+        say(SearchEvent::Stage(SearchStage::Retrieve));
         let hits = self
             .vectors
             .search_weighted(&vector, &sparse, candidates, &filter, recency_weight)
@@ -1277,6 +1361,7 @@ impl Core {
             } else {
                 limit
             };
+            say(SearchEvent::Stage(SearchStage::Rerank));
             match reranker.rerank(&query.q, &docs, top_n).await {
                 Ok(order) => {
                     reranked = true;
@@ -1496,6 +1581,107 @@ mod tests {
             crate::jobs::embed::run(core, &c.id).await.unwrap();
         }
         src.id
+    }
+
+    /// Every event one search emitted, in order.
+    async fn events_of(core: &crate::core::Core, text: &str, origin: Origin) -> Vec<SearchEvent> {
+        use tokio_stream::StreamExt as _;
+        let s = core.search_events(q(text), None, origin);
+        tokio::pin!(s);
+        let mut seen = Vec::new();
+        while let Some(ev) = s.next().await {
+            seen.push(ev.expect("a search that was going to succeed"));
+        }
+        seen
+    }
+
+    /// A lamp drawn for work that is not going to happen is the one thing a
+    /// progress display must not do, so the client is told the stages up front
+    /// rather than left to assume the pipeline's shape.
+    #[tokio::test]
+    async fn a_search_names_the_stages_it_will_run_before_it_runs_them() {
+        let core = test_core().await;
+        seed(&core, &[("the journal is a ring buffer", "linux", &[])]).await;
+        let seen = events_of(&core, "journal", Door::Cli.into()).await;
+        match &seen[0] {
+            SearchEvent::Stages(v) => assert_eq!(
+                v,
+                &vec![SearchStage::Embed, SearchStage::Retrieve],
+                "no reranker is configured, so nothing may promise a rerank"
+            ),
+            other => panic!("the stage list is the first frame, not {other:?}"),
+        }
+        assert!(matches!(seen.last(), Some(SearchEvent::Results(_))));
+    }
+
+    #[tokio::test]
+    async fn a_configured_reranker_is_named_and_a_query_that_opts_out_is_not() {
+        use tokio_stream::StreamExt as _;
+        let (core, _calls) = test_core_counting_reranked_docs().await;
+        seed(&core, &[("the journal is a ring buffer", "linux", &[])]).await;
+        let seen = events_of(&core, "journal", Door::Cli.into()).await;
+        assert!(
+            matches!(&seen[0], SearchEvent::Stages(v) if v.contains(&SearchStage::Rerank)),
+            "{seen:?}"
+        );
+
+        let opted_out = SearchQuery {
+            rerank: false,
+            ..q("journal")
+        };
+        let s = core.search_events(opted_out, None, Door::Cli.into());
+        tokio::pin!(s);
+        let first = s.next().await.unwrap().unwrap();
+        assert!(
+            matches!(&first, SearchEvent::Stages(v) if !v.contains(&SearchStage::Rerank)),
+            "a query that opted out was promised a rerank: {first:?}"
+        );
+    }
+
+    /// The other half of the same rule: a stage promised and never started is
+    /// as much an invention as one drawn that never ran.
+    #[tokio::test]
+    async fn every_named_stage_is_also_announced_as_it_starts() {
+        let (core, _calls) = test_core_counting_reranked_docs().await;
+        seed(&core, &[("the journal is a ring buffer", "linux", &[])]).await;
+        let seen = events_of(&core, "journal", Door::Cli.into()).await;
+        let mut named: Vec<SearchStage> = Vec::new();
+        let mut started: Vec<SearchStage> = Vec::new();
+        for ev in &seen {
+            match ev {
+                SearchEvent::Stages(v) => named = v.clone(),
+                SearchEvent::Stage(s) => started.push(*s),
+                SearchEvent::Results(_) => {}
+            }
+        }
+        assert_eq!(named, started, "{seen:?}");
+    }
+
+    /// The stream is the same search, so it has to answer with the same hits.
+    #[tokio::test]
+    async fn the_streamed_search_returns_what_the_blocking_one_returns() {
+        let core = test_core().await;
+        seed(
+            &core,
+            &[
+                ("the journal is a ring buffer", "linux", &[]),
+                ("btrfs subvolume quotas", "linux", &[]),
+            ],
+        )
+        .await;
+        let blocking = core.search(&q("journal"), Door::Cli).await.unwrap();
+        let streamed = events_of(&core, "journal", Door::Cli.into())
+            .await
+            .into_iter()
+            .find_map(|ev| match ev {
+                SearchEvent::Results(hits) => Some(hits),
+                _ => None,
+            })
+            .expect("a terminal frame");
+        assert_eq!(
+            blocking.iter().map(|h| &h.artifact_id).collect::<Vec<_>>(),
+            streamed.iter().map(|h| &h.artifact_id).collect::<Vec<_>>()
+        );
     }
 
     /// Rewrite every vector payload from the current chunk rows.
