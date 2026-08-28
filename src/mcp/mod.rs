@@ -120,7 +120,9 @@ pub fn format_search_results(
                 Some(ArtifactStatus::Active) | None => {}
             }
             if r.primed {
-                facts.push("lifted: reached often".to_string());
+                facts.push(
+                    "lifted: opened, confirmed or cited more than what it passed".to_string(),
+                );
             }
             if r.in_sitting {
                 facts.push("lifted: open in this sitting".to_string());
@@ -470,7 +472,9 @@ impl PkdbTools {
                     None => (
                         format!(
                             "**{}** · merged artifact `{}`",
-                            a.title.as_deref().unwrap_or("(untitled)"),
+                            a.title.clone().unwrap_or_else(
+                                || crate::web::markdown::stand_in_title(&a.text, 60)
+                            ),
                             a.id
                         ),
                         a.text,
@@ -811,6 +815,8 @@ mod tests {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -946,6 +952,8 @@ mod tests {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: None,
+            titled_by_corpus: false,
             via: via.map(str::to_string),
             reason: None,
             explanation: None,
@@ -1121,7 +1129,10 @@ mod tests {
     fn a_lifted_result_says_why_it_moved_up() {
         let mut p = hit("often", None);
         p.primed = true;
-        assert!(format_search_results(&[p], None).contains("lifted: reached often"));
+        assert!(
+            format_search_results(&[p], None)
+                .contains("lifted: opened, confirmed or cited more than what it passed")
+        );
         let mut s = hit("open", None);
         s.in_sitting = true;
         assert!(format_search_results(&[s], None).contains("lifted: open in this sitting"));

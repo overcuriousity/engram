@@ -200,6 +200,12 @@
    hash, a German compound. `minmax(0, 1fr)` above stops such a word widening
    the column; this is what stops it spilling out of the one it is in. */
 .judge-title { font-weight: 500; overflow-wrap: anywhere; }
+/* A name borrowed from the note, drawn the way the search rail draws one
+   (`.rail-title-corpus`): lighter and prefixed, so N passages of one pasted
+   note read as N slices of that note rather than as the same artifact offered
+   N times. */
+.judge-title-corpus { font-weight: 400; color: var(--color-fg-secondary); }
+.judge-title-corpus::before { content: "· "; color: var(--color-fg-muted); }
 /* Two lines, which is what the old card gave a snippet as well. The clamp is
    what makes twenty candidates a predictable height instead of a variable one:
    the snippet is 140 characters and wraps to two lines or three depending on

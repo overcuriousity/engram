@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[derive(Parser)]
 #[command(
     name = "engram",
-    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s or -a it is a client of one."
+    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s, -a, --show or --status it is a client of one."
 )]
 struct Args {
     #[arg(long)]
@@ -143,7 +143,13 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
     )
     .await;
     if let Some(r) = &cfg.infer.rerank {
-        engram::infer::openai::probe("rerank", &r.base_url, r.api_key.as_deref()).await;
+        engram::infer::openai::probe_path(
+            "rerank",
+            &r.base_url,
+            r.style.probe_path(),
+            r.api_key.as_deref(),
+        )
+        .await;
         if !r.applies_to(engram::config::RerankApply::Search) {
             tracing::info!("rerank scoped to ask; search returns vector order");
         }

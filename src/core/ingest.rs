@@ -238,15 +238,19 @@ impl Core {
         let source_url = Some(url.to_string());
         match crate::core::fetch::fetch(url, &self.capture).await? {
             Fetched::Html(html) => {
-                let text = crate::core::extract::extract(
+                let page = crate::core::extract::extract(
                     html,
                     Some(url.clone()),
                     self.capture.min_extracted_chars,
                 )
                 .await?;
+                // A title the caller gave wins; the page's own is the fallback,
+                // ahead of the first heading `derive_title` would otherwise
+                // take — which, readability having dropped the `<h1>`, is the
+                // first *section* of the article.
                 self.ingest_capture(
-                    Capture::new(text, ORIGIN_FETCH)
-                        .with_title(title)
+                    Capture::new(page.markdown, ORIGIN_FETCH)
+                        .with_title(title.or(page.title))
                         .with_note(note)
                         .with_source_url(source_url),
                 )

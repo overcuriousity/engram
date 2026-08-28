@@ -554,8 +554,13 @@ impl Core {
         // is read for it: an excerpt below the cliff makes the answer worse as
         // well as dearer, and its caveats are a lookup spent on something that
         // will not be sent.
-        let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
-        let cliff_at = crate::core::search::cliff(&scores);
+        //
+        // Read off the marks the search made rather than recomputed here over
+        // `score`: which scale the cliff may be taken on — reranker scores,
+        // or cosine similarity, never the fused rank — is the search's
+        // knowledge, and a second computation over the wrong number is how
+        // this answered from one excerpt when three were relevant.
+        let cliff_at = hits.iter().position(|h| h.past_cliff);
         hits.truncate(retrieve::above_cliff(cliff_at, hits.len()));
         let ranked = hits.len();
 
@@ -565,6 +570,9 @@ impl Core {
         // `scores` is consumed above and never recomputed, so nothing appended
         // from here on can reach `cliff` at all.
         self.reach_sideways(&mut hits, cliff_at).await;
+        // The neighbours just appended came off the store, not the ranking,
+        // and so never passed the titling the ranked hits got.
+        self.fill_titles(&mut hits).await;
 
         Ok(Round {
             query: q.to_string(),
@@ -883,6 +891,8 @@ impl Core {
                 in_sitting: false,
                 // The cliff was computed over scores this one was never in.
                 past_cliff: false,
+                similarity: None,
+                titled_by_corpus: false,
                 // What makes a reached artifact tellable apart from a retrieved
                 // one, by a reader and by a test alike: a ranked hit has no
                 // `via`, and this one names the hit it was reached from.
@@ -2286,7 +2296,7 @@ mod tests {
         // Every excerpt was retrieved by the same searches, so they share a
         // baseline and the only difference left between them is the citation.
         let act = core.store.activation_of(&ids).await.unwrap();
-        let of = |id: &String| act.get(id).map(|(a, _)| *a).unwrap_or(0.0);
+        let of = |id: &String| act.get(id).map(|(a, _, _)| *a).unwrap_or(0.0);
         let uncited = of(&ids[1]);
         for id in &ids[2..] {
             assert_eq!(of(id), uncited, "the excerpts did not share a baseline");
@@ -2335,7 +2345,7 @@ mod tests {
                 .map(|c| c.artifact_id.clone())
                 .collect();
             let act = core.store.activation_of(&ids).await.unwrap();
-            let of = |id: &String| act.get(id).map(|(a, _)| *a).unwrap_or(0.0);
+            let of = |id: &String| act.get(id).map(|(a, _, _)| *a).unwrap_or(0.0);
             assert_eq!(
                 of(&ids[0]),
                 of(&ids[1]),
@@ -2856,6 +2866,8 @@ mod tests {
                 primed: false,
                 in_sitting: false,
                 past_cliff: false,
+                similarity: None,
+                titled_by_corpus: false,
                 via: None,
                 reason: None,
                 explanation: None,

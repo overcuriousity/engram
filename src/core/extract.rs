@@ -9,6 +9,49 @@ use std::sync::LazyLock;
 /// repeated for nothing, and `HtmlToMarkdown` is `Send + Sync`.
 static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
     HtmlToMarkdown::builder()
+        .add_handler(vec!["a"], |handlers: &dyn Handlers, el: Element| {
+            // An in-page link means nothing once the page is a corpus: there
+            // is no page left for `#NAME` to jump within. man7 and many docs
+            // sites write `<h2><a id="NAME"></a>NAME <a href="#top">[top]</a>
+            // </h2>`, and rendered faithfully that heading became the title
+            // `[](#NAME)NAME [top](#top_of_page)` on every card in the
+            // product. So: an anchor with no text is nothing; an in-page
+            // anchor is its text; and an in-page anchor that ends a heading,
+            // follows the heading's own text and is written the way a
+            // back-link is written is the back-link, and is nothing too. An
+            // ordinary link is the ordinary link.
+            let href = el
+                .attrs
+                .iter()
+                .find(|a| a.name.local.as_ref() == "href")
+                .map(|a| a.value.as_ref());
+            let content = handlers.walk_children(el.node);
+            if content.content.trim().is_empty() {
+                return None;
+            }
+            if !href.is_some_and(|h| h.starts_with('#')) {
+                return handlers.fallback(el);
+            }
+            if is_back_link(el.node) {
+                return None;
+            }
+            Some(content)
+        })
+        .add_handler(
+            vec!["b", "strong", "i", "em"],
+            |handlers: &dyn Handlers, el: Element| {
+                // Inside `<pre>` the output is a code block, and a code block is
+                // literal: the `**` htmd would write around a `<b>` is shown as
+                // two asterisks, not read as bold. man7 sets every option name
+                // bold inside one `<pre>`, and the rail showed `**-c**,
+                // **--set-capacity**` on every snippet from it. Plain text there;
+                // the ordinary markers everywhere else.
+                match has_ancestor(el.node, "pre") {
+                    true => Some(handlers.walk_children(el.node)),
+                    false => handlers.fallback(el),
+                }
+            },
+        )
         .add_handler(vec!["img"], |_: &dyn Handlers, el: Element| {
             // A capture is text, so the image itself is not stored — but its
             // `alt` is not always decoration. Wikipedia renders every equation
@@ -28,6 +71,110 @@ static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
         })
         .build()
 });
+
+/// The parent of a DOM node. `parent` is a `Cell` of a weak handle, so it is
+/// taken and put back rather than borrowed.
+fn parent_of(node: &std::rc::Rc<htmd::Node>) -> Option<std::rc::Rc<htmd::Node>> {
+    let parent = node.parent.take();
+    node.parent.set(parent.clone());
+    parent.and_then(|w| w.upgrade())
+}
+
+fn tag_of(node: &std::rc::Rc<htmd::Node>) -> Option<String> {
+    match &node.data {
+        markup5ever_rcdom::NodeData::Element { name, .. } => Some(name.local.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether any element above this node is `tag`.
+fn has_ancestor(node: &std::rc::Rc<htmd::Node>, tag: &str) -> bool {
+    let mut cur = parent_of(node);
+    while let Some(n) = cur {
+        if tag_of(&n).as_deref() == Some(tag) {
+            return true;
+        }
+        cur = parent_of(&n);
+    }
+    false
+}
+
+/// Whether an anchor is a heading's back-link: inside an `h1`–`h6`, after the
+/// heading's own text, with nothing but whitespace after it, and written the
+/// way a back-link is written — bracketed like man7's `[top]` at the end of
+/// every section heading, or a short `top`/`back`/`up`, or a bare arrow. Short
+/// either way, and never numbered: a bracketed number is a citation.
+///
+/// All three conditions, because position alone is not enough: a heading is
+/// allowed to end in an ordinary in-page link, and on that rule
+/// `<h2>Configuration and the <a href="#flags">flag list</a></h2>` lost the
+/// words "flag list" out of its own title.
+fn is_back_link(node: &std::rc::Rc<htmd::Node>) -> bool {
+    use markup5ever_rcdom::NodeData;
+    let Some(parent) = parent_of(node) else {
+        return false;
+    };
+    let heading = matches!(
+        tag_of(&parent).as_deref(),
+        Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+    );
+    if !heading {
+        return false;
+    }
+    fn has_text(node: &std::rc::Rc<htmd::Node>) -> bool {
+        match &node.data {
+            NodeData::Text { contents } => !contents.borrow().trim().is_empty(),
+            _ => node.children.borrow().iter().any(has_text),
+        }
+    }
+    fn text_of(node: &std::rc::Rc<htmd::Node>) -> String {
+        match &node.data {
+            NodeData::Text { contents } => contents.borrow().to_string(),
+            _ => node.children.borrow().iter().map(text_of).collect(),
+        }
+    }
+    let children = parent.children.borrow();
+    let after_text = children
+        .iter()
+        .skip_while(|c| !std::rc::Rc::ptr_eq(c, node))
+        .skip(1)
+        .any(has_text);
+    let before_text = children
+        .iter()
+        .take_while(|c| !std::rc::Rc::ptr_eq(c, node))
+        .any(has_text);
+    // Text before it and none after it: a back-link is what a heading ends
+    // with, never something it is written around.
+    if !before_text || after_text {
+        return false;
+    }
+    // And it has to *look* like one. Position alone called every heading that
+    // happens to end in an in-page link a back-link, and
+    // `<h2>Configuration and the <a href="#flags">flag list</a></h2>` lost the
+    // words "flag list" out of its own title. What a back-link is written as is
+    // narrow: man7's bracketed `[top]`, or a short word or arrow.
+    let text = text_of(node);
+    let t = text.trim();
+    // Both branches are bounded. Brackets alone are not the signal: a heading
+    // that cites something in brackets — `<h2>Requirement levels <a
+    // href="#refs">[RFC 2119]</a></h2>` — is written around that link, and an
+    // unbounded bracket rule dropped its words the same way position alone
+    // used to.
+    if t.chars().count() > 8 {
+        return false;
+    }
+    if let Some(inner) = t.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        // A digit inside the brackets makes it a reference, never navigation:
+        // `[1]`, `[12]`, `[§4.2]` are what a heading cites, and no back-link
+        // anywhere is numbered. Only digits, because an arrow — `[↑]` — is
+        // punctuation-only and *is* one.
+        return !inner.chars().any(|c| c.is_numeric());
+    }
+    let word = t
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    word.is_empty() || matches!(word.as_str(), "top" | "back" | "up")
+}
 
 /// An `alt` as an inline text node rather than as markdown.
 ///
@@ -205,8 +352,16 @@ fn closes(line: &str, marker: &str) -> bool {
 /// `html_to_markdown` off the async runtime's threads: the two parsers are a
 /// synchronous walk over whatever a page contained, seconds during which
 /// search, health and the queue poll on that thread would all wait.
-pub async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Result<String> {
-    tokio::task::spawn_blocking(move || html_to_markdown(&html, url.as_ref(), min_chars))
+/// What a page reduces to: its markdown, and the name readability found for
+/// it — the `<title>`, with the site's suffix taken off where readability can
+/// tell it from the article's heading. `None` when the page had none.
+pub struct Extracted {
+    pub title: Option<String>,
+    pub markdown: String,
+}
+
+pub async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Result<Extracted> {
+    tokio::task::spawn_blocking(move || html_to_document(&html, url.as_ref(), min_chars))
         .await
         // A `JoinError` is a panic in `dom_smoothie` or `htmd` — two parsers
         // fed whatever a remote page contained — or a cancelled runtime.
@@ -221,14 +376,37 @@ pub fn html_to_markdown(
     base_url: Option<&url::Url>,
     min_chars: usize,
 ) -> Result<String> {
-    let content = {
+    html_to_document(html, base_url, min_chars).map(|d| d.markdown)
+}
+
+/// `html_to_markdown`, with the page's title beside the text.
+///
+/// The title matters because readability drops the page's `<h1>` from the
+/// content it keeps, so a captured article's first heading is its first
+/// *section* — and with no title supplied, that section heading became the
+/// corpus's name: a capture of the Wikipedia article on loop devices was
+/// listed as "Uses of loop mounting" on the home screen.
+pub fn html_to_document(
+    html: &str,
+    base_url: Option<&url::Url>,
+    min_chars: usize,
+) -> Result<Extracted> {
+    let (title, content) = {
         let mut readability =
             dom_smoothie::Readability::new(html, base_url.map(url::Url::as_str), None)
                 .map_err(|e| Error::Validation(format!("could not read the page: {e}")))?;
         let article = readability
             .parse()
             .map_err(|e| Error::Validation(format!("could not read the page: {e}")))?;
-        article.content.to_string()
+        let title = article
+            .title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        (
+            (!title.is_empty()).then_some(title),
+            article.content.to_string(),
+        )
     };
 
     let converted = CONVERTER
@@ -258,7 +436,7 @@ pub fn html_to_markdown(
              the page was probably a login wall or an empty shell"
         )));
     }
-    Ok(markdown)
+    Ok(Extracted { title, markdown })
 }
 
 #[cfg(test)]
@@ -407,6 +585,136 @@ mod tests {
         assert!(
             md.contains('1'),
             "the citation marker itself was lost:\n{md}"
+        );
+    }
+
+    #[test]
+    fn bold_inside_a_pre_block_is_plain_text_not_asterisks() {
+        // man7 sets every option name in `<b>` inside one `<pre>`. A code
+        // block is literal, so the `**` written around them was shown.
+        let page = format!(
+            "<html><head><title>losetup(8) - Linux manual page</title></head><body><article>\
+             <h2>OPTIONS</h2><pre>       <b>-a</b>, <b>--all</b>\n           Show the status of all loop \
+             devices. <i>loopdev</i> names one.\n{}</pre>\
+             <p>Outside the block <b>bold</b> is still bold, and {}</p>\
+             </article></body></html>",
+            "           more lines of the manual page so that readability keeps it as content\n"
+                .repeat(6),
+            "this paragraph is long enough to be kept as content by the readability pass too."
+        );
+        let doc = html_to_document(&page, None, 10).unwrap();
+        assert!(!doc.markdown.contains("**-a**"), "{}", doc.markdown);
+        assert!(doc.markdown.contains("-a, --all"), "{}", doc.markdown);
+        assert!(!doc.markdown.contains("*loopdev*"), "{}", doc.markdown);
+        assert!(doc.markdown.contains("**bold**"), "{}", doc.markdown);
+        // And the page's own title comes out beside the text.
+        assert!(
+            doc.title
+                .as_deref()
+                .is_some_and(|t| t.starts_with("losetup(8)")),
+            "{:?}",
+            doc.title
+        );
+    }
+
+    #[test]
+    fn in_page_anchors_leave_a_heading_as_its_own_words() {
+        // man7's section headings, verbatim: an empty anchor carrying the id,
+        // the name, and a back-link to the top of the page. Sixteen artifacts
+        // titled `[](#NAME)NAME [top](#top_of_page)` came out of one man page.
+        let page = format!(
+            "<html><body><article>\
+             <h2><a id=\"NAME\"></a>NAME         <a href=\"#top_of_page\">[top]</a></h2>\
+             <p>{}</p>\
+             <h2><a id=\"OPTIONS\"></a>OPTIONS         <a href=\"#top_of_page\">[top]</a></h2>\
+             <p>See <a href=\"#NAME\">the name</a> and <a href=\"https://x.test/\">elsewhere</a>.</p>\
+             <p>{}</p>\
+             </article></body></html>",
+            "losetup is used to associate loop devices with regular files or block \
+             devices, to detach loop devices, and to query the status of a loop device, \
+             which is enough prose for readability to keep the section.",
+            "the options are many and this paragraph exists to be long enough to be \
+             kept as content by the readability pass rather than dropped as furniture.",
+        );
+        let md = html_to_markdown(&page, None, 10).unwrap();
+        let headings: Vec<&str> = md.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(headings, vec!["## NAME", "## OPTIONS"], "{md}");
+        // An in-page link in prose keeps its words; a real link stays a link.
+        assert!(md.contains("See the name and"), "{md}");
+        assert!(md.contains("[elsewhere](https://x.test/)"), "{md}");
+        assert!(!md.contains("[]("), "{md}");
+    }
+
+    #[test]
+    fn a_heading_that_ends_in_an_ordinary_in_page_link_keeps_its_words() {
+        // Position alone made every in-page anchor after a heading's own text
+        // a back-link, and a heading whose last words happen to be linked lost
+        // them: this one arrived as `## Configuration and the`. A back-link
+        // has to look like one as well as sit like one.
+        let page = format!(
+            "<html><body><article>\
+             <h2>Configuration and the <a href=\"#flags\">flag list</a></h2>\
+             <p>{}</p>\
+             <h2>Recovery <a href=\"#top\">top</a></h2>\
+             <p>{}</p>\
+             </article></body></html>",
+            "the configuration is read from one file and every flag in it has a long \
+             form and a short form, which is enough prose for the readability pass to \
+             keep this section rather than drop it as furniture.",
+            "recovery walks the journal from the last checkpoint forward and replays \
+             every record it finds there, which is again long enough to be kept as \
+             content rather than dropped.",
+        );
+        let md = html_to_markdown(&page, None, 10).unwrap();
+        let headings: Vec<&str> = md.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(
+            headings,
+            vec!["## Configuration and the flag list", "## Recovery"],
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn a_heading_that_ends_in_a_bracketed_citation_keeps_its_words() {
+        // The bracket branch of `is_back_link` was unbounded, so every heading
+        // whose last element is a link written in brackets — a citation, a
+        // pointer to a table — was read as man7's `[top]` and dropped. This one
+        // arrived as `## Requirement levels`. A numbered reference is refused
+        // whatever its length, and a bracketed arrow is still a back-link.
+        let body = |what: &str| {
+            format!(
+                "each {what} is stated once and referred to from everywhere else in \
+                 the document, which is enough prose for the readability pass to keep \
+                 this section rather than drop it as furniture."
+            )
+        };
+        let page = format!(
+            "<html><body><article>\
+             <h2>Requirement levels <a href=\"#refs\">[RFC 2119]</a></h2>\
+             <p>{}</p>\
+             <h2>Retry budgets <a href=\"#n1\">[1]</a></h2>\
+             <p>{}</p>\
+             <h2>Error codes <a href=\"#top\">[top]</a></h2>\
+             <p>{}</p>\
+             <h2>Wire format <a href=\"#top\">[↑]</a></h2>\
+             <p>{}</p>\
+             </article></body></html>",
+            body("requirement"),
+            body("budget"),
+            body("code"),
+            body("frame"),
+        );
+        let md = html_to_markdown(&page, None, 10).unwrap();
+        let headings: Vec<&str> = md.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(
+            headings,
+            vec![
+                "## Requirement levels \\[RFC 2119\\]",
+                "## Retry budgets \\[1\\]",
+                "## Error codes",
+                "## Wire format",
+            ],
+            "{md}"
         );
     }
 

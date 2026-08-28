@@ -129,6 +129,8 @@ mod tests {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,

@@ -247,19 +247,21 @@ async fn ingest(
         tenant.core.capture.min_extracted_chars
     };
 
+    let mut title = req.title;
     let (text, origin) = if let Some(text) = req.text {
         (text, ORIGIN_WEB)
     } else if let Some(html) = req.html {
-        (
-            extract(html, parsed_url.clone(), floor).await?,
-            ORIGIN_EXTENSION,
-        )
+        let page = extract(html, parsed_url.clone(), floor).await?;
+        // The page's own title, when the extension sent none: the same
+        // fallback the link door makes, for the same reason.
+        title = title.or(page.title);
+        (page.markdown, ORIGIN_EXTENSION)
     } else {
         // A link may hold a page, a PDF or an image; the core decides which,
         // the same way it does for the MCP door. 202 when what it stored is
         // still to be read, as the upload doors answer.
         let u = parsed_url.as_ref().expect("one-of check guarantees a url");
-        let out = tenant.core.ingest_url(u, req.title, None).await?;
+        let out = tenant.core.ingest_url(u, title, None).await?;
         let code = match (&out.status, out.duplicate) {
             (_, true) => StatusCode::OK,
             (
@@ -276,7 +278,7 @@ async fn ingest(
         .core
         .ingest_capture(
             crate::core::ingest::Capture::new(text, origin)
-                .with_title(req.title)
+                .with_title(title)
                 .with_source_url(parsed_url.map(|u| u.to_string())),
         )
         .await?;

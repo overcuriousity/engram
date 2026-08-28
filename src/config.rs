@@ -253,7 +253,9 @@ pub struct AssociateConfig {
     /// How much more activated a hit must be than the one above it to pass it.
     /// Normalised within one result list, so this is a fraction, not a weight.
     pub prime_margin: f64,
-    /// Positions a hit may climb. `0` turns priming off.
+    /// Positions a hit may climb. `0` turns priming off, and it ships off: an
+    /// unmeasured feature that reorders results and makes a claim about the
+    /// person should not be on until the harness has run with it off and on.
     pub prime_lift: usize,
 }
 
@@ -270,7 +272,7 @@ impl Default for AssociateConfig {
             spread_from: 3,
             spread_max: 3,
             prime_margin: 0.5,
-            prime_lift: 2,
+            prime_lift: 0,
         }
     }
 }
@@ -278,11 +280,18 @@ impl Default for AssociateConfig {
 /// When a passage has earned its window a synthesis call, and when an eager
 /// artifact has earned a second one.
 ///
-/// `activation_above` is read against `[activation]`: baseline `1.0`,
-/// `retrieved = 1.0`, `opened = 0.5`, `confirmed = 3.0`, half-life 14 days.
-/// Checked with `>=` after the bump, decay folded in, and only at the two
-/// engagement bumps — opened and confirmed — never at retrieved, so a passage
-/// that merely keeps appearing in result lists is never promoted.
+/// `activation_above` is read against `[activation]` and *above the capture
+/// baseline*: `retrieved = 0`, `opened = 1.0`, `confirmed = 3.0`, half-life 14
+/// days — so `3.0` is one confirmation, or three openings. The baseline every
+/// artifact carries decays at the same rate as what use adds, so it is
+/// subtracted decayed before the comparison; a threshold read against the raw
+/// sum meant something different at every age, and the `4.0` this was could
+/// only be reached by a confirmation at essentially zero elapsed time. Checked
+/// with `>=` after the bump, decay folded in, and only at the engagement bumps
+/// — opened, confirmed, cited — never at retrieved. With `retrieved` at zero
+/// that is a guarantee rather than a habit: a passage that merely keeps
+/// appearing in result lists cannot fill the tank for one open to fire,
+/// however often it is listed.
 ///
 /// `resynthesize_after_unconfirmed` is the `eager` counterpart: an artifact
 /// shown this many times with no confirmation recorded against it is
@@ -299,7 +308,7 @@ pub struct PromoteConfig {
 impl Default for PromoteConfig {
     fn default() -> Self {
         Self {
-            activation_above: 4.0,
+            activation_above: 3.0,
             resynthesize_after_unconfirmed: 0,
         }
     }
@@ -341,9 +350,13 @@ impl Default for PursuitConfig {
 #[serde(default)]
 pub struct ActivationConfig {
     pub half_life_days: f64,
-    /// Returned by a search the caller marked as seen.
+    /// Returned by a search the caller marked as seen. Zero: being listed is
+    /// exposure, and activation is read — by priming, by promotion — as use.
+    /// At `1.0` it was the strongest per-event signal there was, because it
+    /// was the most common thing that happened to an artifact, and "you reach
+    /// this one often" was said of artifacts nobody had ever opened.
     pub retrieved: f64,
-    /// Opened in the detail pane.
+    /// Opened in the detail pane. The unit the others are measured in.
     pub opened: f64,
     /// Judged the answer to a real question. The strong signal.
     pub confirmed: f64,
@@ -357,8 +370,8 @@ impl Default for ActivationConfig {
     fn default() -> Self {
         Self {
             half_life_days: 14.0,
-            retrieved: 1.0,
-            opened: 0.5,
+            retrieved: 0.0,
+            opened: 1.0,
             confirmed: 3.0,
             cited: 0.5,
         }
@@ -867,6 +880,7 @@ struct RawSynthesizeRole {
     #[serde(default)]
     structured_output: Option<bool>,
     // Role-only, unchanged.
+    #[serde(default = "default_output_ratio")]
     output_ratio: f32,
     #[serde(default = "default_context_opening_tokens")]
     context_opening_tokens: usize,
@@ -1128,6 +1142,14 @@ pub struct SynthesizeRole {
 
 fn default_true() -> bool {
     true
+}
+
+/// The example file's number, so a minimal config does not fail at startup on
+/// the one field in this block that had no default. Sized for a small local
+/// model, which is what a first instance runs; see the example file for when
+/// to lower it.
+fn default_output_ratio() -> f32 {
+    8.0
 }
 
 fn default_context_opening_tokens() -> usize {
@@ -1613,6 +1635,24 @@ pub enum RerankStyle {
     Tei,
     Cohere,
     Vllm,
+}
+
+impl RerankStyle {
+    /// Where the startup probe checks this server is up. The probe has to
+    /// carry the same prefix its style's *request* path does, because that is
+    /// what the configured `base_url` is written against: vLLM posts to
+    /// `v1/rerank` off a bare host, so the probe asks `v1/models`; Cohere
+    /// posts to a bare `rerank`, so its `base_url` already ends in `/v1` and
+    /// the probe must ask `models` — `v1/models` would request `/v1/v1/models`
+    /// and warn "rerank unreachable" at every startup. TEI has no model-list
+    /// endpoint; `info` is the one it actually serves.
+    pub fn probe_path(self) -> &'static str {
+        match self {
+            RerankStyle::Tei => "info",
+            RerankStyle::Cohere => "models",
+            RerankStyle::Vllm => "v1/models",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -2960,10 +3000,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert_eq!(a.half_life_days, 30.0);
         assert_eq!((a.show_min, a.judge_min, a.prune_below), (2.0, 4.0, 0.5));
         assert_eq!((a.spread_from, a.spread_max), (3, 3));
-        assert_eq!((a.prime_margin, a.prime_lift), (0.5, 2));
+        assert_eq!((a.prime_margin, a.prime_lift), (0.5, 0));
         let v = ActivationConfig::default();
         assert_eq!(v.half_life_days, 14.0);
-        assert_eq!((v.retrieved, v.opened, v.confirmed), (1.0, 0.5, 3.0));
+        assert_eq!((v.retrieved, v.opened, v.confirmed), (0.0, 1.0, 3.0));
     }
 
     #[test]
@@ -3020,7 +3060,6 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         max_output_tokens = 16384
         [infer.synthesize]
         tier = "efficient"
-        output_ratio = 8.0
         [infer.embed]
         base_url = "http://localhost:8000/v1"
         model = "bge-m3"
@@ -3031,6 +3070,9 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         "#,
         )
         .expect("tiered config parses");
+
+        // A minimal block: the one field that had no default has one now.
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().output_ratio, 8.0);
 
         assert_eq!(
             cfg.infer.synthesize.as_ref().unwrap().base_url,
@@ -3695,7 +3737,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "
         ))
         .unwrap();
-        assert_eq!(cfg.promote.activation_above, 4.0);
+        assert_eq!(cfg.promote.activation_above, 3.0);
         assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 0);
         // Opt-out now: promotion reads activation, and activation only moves
         // while searches are recorded.
@@ -3753,5 +3795,17 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         .unwrap();
         assert_eq!(cfg.pursuit.idle_secs, 60);
         assert!(!cfg.learn.enabled);
+    }
+
+    #[test]
+    fn the_rerank_probe_shares_the_prefix_of_its_style_request_path() {
+        // The probe is written against the same `base_url` the request is, so
+        // a style whose request path carries no `v1` must not have the probe
+        // add one: Cohere's `base_url` already ends in `/v1`, and `v1/models`
+        // asked for `/v1/v1/models` and warned "rerank unreachable" at every
+        // startup.
+        assert_eq!(RerankStyle::Cohere.probe_path(), "models");
+        assert_eq!(RerankStyle::Vllm.probe_path(), "v1/models");
+        assert_eq!(RerankStyle::Tei.probe_path(), "info");
     }
 }

@@ -196,10 +196,15 @@ pub fn render_citations(hits: &[serde_json::Value], unicode: bool) -> String {
     let room = hits.len().to_string().len();
     for (i, c) in hits.iter().enumerate() {
         let branch = if i + 1 == hits.len() { last } else { tee };
+        // Named by the note when the passage has no heading — the server did
+        // that — and by its own opening when there is no note either.
+        let title = match c["title"].as_str() {
+            Some(t) => t.to_string(),
+            None => crate::web::markdown::stand_in_title(c["text"].as_str().unwrap_or(""), 60),
+        };
         out.push_str(&format!(
-            "{branch} [{:>room$}] {}  {}\n",
+            "{branch} [{:>room$}] {title}  {}\n",
             i + 1,
-            c["title"].as_str().unwrap_or("(untitled)"),
             c["artifact_id"].as_str().unwrap_or(""),
         ));
     }
@@ -428,7 +433,7 @@ mod tests {
     use super::*;
 
     fn cite(title: Option<&str>, id: &str) -> serde_json::Value {
-        serde_json::json!({ "title": title, "artifact_id": id })
+        serde_json::json!({ "title": title, "artifact_id": id, "text": format!("the opening of {id}") })
     }
 
     /// The answer cites `[9]`, and until now the list under it was 22 unnumbered
@@ -452,7 +457,8 @@ mod tests {
             lines[2].contains("JTAG") && lines[2].contains("id-c"),
             "{out}"
         );
-        assert!(lines[1].contains("(untitled)"), "{out}");
+        assert!(lines[1].contains("the opening of id-b"), "{out}");
+        assert!(!out.contains("untitled"), "{out}");
     }
 
     /// A reading follows a citation: the numbers under an answer are a list

@@ -102,6 +102,11 @@
      only identity. Hidden above 40rem, where the top row does the same job.
      The same links as the top row, so an installed window and a desktop tab
      are the same app rather than two arrangements of one. #}
+  {# Chrome for a signed-in person, like the top row: a page with no session
+     — the login — empties this block as it empties `nav`, so nobody is shown
+     Search · Insights · Settings and invited to install an app they are
+     locked out of. #}
+  {% block tabbar %}
   <nav class="tabbar" aria-label="Sections">
     {# Three entries, not five. Capture and Ask were destinations when they were
        pages; they are verbs on the box now, and the box is on this screen. #}
@@ -135,5 +140,6 @@
     <button type="button" class="btn btn-sm" data-install hidden>Install</button>
     <button type="button" class="btn btn-ghost btn-sm" data-dismiss-install>Not now</button>
   </div>
+  {% endblock %}
 </body>
 </html>

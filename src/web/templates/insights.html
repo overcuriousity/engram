@@ -35,11 +35,14 @@
   </div>
 
   <div class="measure">
-    <div class="label pane-label">Reach</div>
-    {# Accessibility decays, so this is what a search would find now rather
-       than what was last written down. The bottom band is the point of the
-       whole row: what is falling out of reach before it is unreachable. #}
-    {% for b in fading %}
+    <div class="label pane-label">Use</div>
+    {# Activation above the capture baseline, decayed — what opening,
+       confirming and citing put there, in units of one open. Not "what a
+       search would find": with `associate.prime_lift` at zero activation moves
+       no result, and with `retrieved` at zero a raw reading only ever counted
+       the days since capture. The bottom band is the point of the row: how
+       much of this base nobody has ever reached for. #}
+    {% for b in used %}
     <p class="measure-row"><span>{{ b.label }}</span><span class="mono">{{ b.count }}</span></p>
     {% endfor %}
   </div>

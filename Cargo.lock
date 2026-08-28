@@ -1659,6 +1659,7 @@ dependencies = [
  "htmd",
  "image",
  "kamadak-exif",
+ "markup5ever_rcdom",
  "mime_guess",
  "openidconnect",
  "pulldown-cmark",

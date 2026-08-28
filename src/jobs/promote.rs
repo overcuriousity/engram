@@ -23,12 +23,25 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
     let activation = core.store.activation_of(ids).await?;
     let mut armed = 0;
     for id in ids {
-        let Some((value, stamp)) = activation.get(id) else {
+        let Some((value, stamp, created_at)) = activation.get(id) else {
             continue;
         };
-        let now_value =
-            crate::store::links::decayed(*value, *stamp, at, core.activation.half_life_days);
-        if now_value < core.promote.activation_above {
+        // Above the capture baseline, decayed to the same instant — never the
+        // raw stored number. Both terms fall at the same rate, so a threshold
+        // read against the raw sum means something different at every age: with
+        // the baseline at `1.0` and a confirmation at `3.0`, a threshold of
+        // `4.0` was reachable only by a confirmation at essentially zero
+        // elapsed time, and one day after capture it already took two. What the
+        // threshold is meant to name is what use added, so that is what it is
+        // compared against.
+        let earned = crate::store::links::engagement_at(
+            *value,
+            *stamp,
+            *created_at,
+            at,
+            core.activation.half_life_days,
+        );
+        if earned < core.promote.activation_above {
             continue;
         }
         let Ok(c) = core.store.get_artifact(id).await else {
@@ -71,7 +84,7 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
             artifact_id = %id,
             corpus_id,
             window = idx,
-            activation = now_value,
+            activation = earned,
             "promoting a window"
         );
         armed += 1;
@@ -221,22 +234,39 @@ pub async fn supersede_covered(
     let mut n = 0;
     for (winner, losers) in by_winner {
         let ids: Vec<String> = losers.iter().map(|s| s.to_string()).collect();
+        // What moves is the engagement the passages *earned*, never the raw
+        // stored sum. Activation is a capture baseline plus use, and the
+        // baseline is anchored to each artifact's own `created_at`: the winner
+        // was written moments ago, so its baseline stands at a full `1.0`,
+        // while a passage captured six weeks back carries a baseline of almost
+        // nothing under whatever it earned. Transferring the raw sum read one
+        // against the other. A passage with 1.9 earned came to a raw ~2.0, and
+        // the winner set to 2.0 reported 1.0 of use — half of it lost. Worse
+        // below the line: 0.5 earned carried ~0.6, lost the `max` to the
+        // winner's own 1.0, and the artifact that was supposed to inherit the
+        // access came out at zero.
         let act = core.store.activation_of(&ids).await?;
         let carried = act
             .values()
-            .map(|(v, s)| crate::store::links::decayed(*v, *s, at, half_life))
-            .fold(f64::MIN, f64::max);
-        if carried > f64::MIN {
-            let own = core
-                .store
-                .activation_of(std::slice::from_ref(&winner.to_string()))
-                .await?
-                .get(winner)
-                .map(|(v, s)| crate::store::links::decayed(*v, *s, at, half_life))
-                .unwrap_or(1.0);
-            core.store
-                .set_activation(winner, carried.max(own), at)
-                .await?;
+            .map(|(v, s, c)| crate::store::links::engagement_at(*v, *s, *c, at, half_life))
+            .fold(0.0f64, f64::max);
+        let own = core
+            .store
+            .activation_of(std::slice::from_ref(&winner.to_string()))
+            .await?
+            .get(winner)
+            .copied();
+        if let Some((v, s, c)) = own {
+            let now = crate::store::links::decayed(v, s, at, half_life);
+            let earned = crate::store::links::engagement_at(v, s, c, at, half_life);
+            // Only ever upwards, and the winner's own baseline is left under
+            // it: what is written back is the same number with the larger of
+            // the two engagements standing on it.
+            if carried > earned {
+                core.store
+                    .set_activation(winner, now + (carried - earned), at)
+                    .await?;
+            }
         }
         for loser in &losers {
             for link in core.store.links_touching(loser).await? {
@@ -472,9 +502,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retrieval_alone_never_promotes_but_one_open_afterwards_does() {
-        // The threshold is checked at the opened bump, not the retrieved one:
-        // ten retrievals leave the window verbatim; the first open promotes.
+    async fn twenty_listings_and_one_open_never_promote_but_a_confirmation_does() {
+        // "Rewritten once you have actually used it." Exposure must not fill
+        // the tank for one touch to pull the trigger: at `retrieved = 0.1`,
+        // twenty listings plus one open reached the threshold, and at `1.0`
+        // one listing did. Twenty retrievals and an open leave the window
+        // verbatim; a confirmation — the strong signal — promotes it.
         let (core, corpus, p) = earned_with_one_passage().await;
         let ids = vec![p.clone()];
         // Stamped now: `mark_artifact_seen` reads the clock, and a bump from
@@ -483,21 +516,88 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        for _ in 0..10 {
+        for _ in 0..20 {
             core.store
                 .bump_activation(&ids, core.activation.retrieved, 14.0, now)
                 .await
                 .unwrap();
         }
-        assert_eq!(
-            core.store.segment_state(&corpus, 0).await.unwrap(),
-            Some(SegmentState::Verbatim)
-        );
         core.mark_artifact_seen(&p);
         core.background.wait_idle().await;
         assert_eq!(
             core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim),
+            "listed twenty times and opened once, and that promoted it"
+        );
+        core.store
+            .bump_activation(&ids, core.activation.confirmed, 14.0, now)
+            .await
+            .unwrap();
+        assert!(maybe_promote(&core, &ids, now).await.unwrap() > 0);
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
             Some(SegmentState::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn one_confirmation_promotes_however_long_ago_the_passage_was_captured() {
+        // The threshold names what use added, and a confirmation adds the same
+        // amount whenever it lands. Read against the raw stored number it did
+        // not: the capture baseline decays out from under the line, so `4.0`
+        // was reachable only by a confirmation at essentially zero elapsed
+        // time — one day after capture it already took two, and on a passage
+        // this old it would have taken two forever.
+        let (core, corpus, p) = earned_with_one_passage().await;
+        let ids = vec![p.clone()];
+        let now = crate::store::now();
+        let captured = now - 90 * 86_400;
+        sqlx::query(
+            "UPDATE artifacts SET activation = 1.0, activated_at = ?, created_at = ? WHERE id = ?",
+        )
+        .bind(captured)
+        .bind(captured)
+        .bind(&p)
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+
+        core.store
+            .bump_activation(&ids, core.activation.confirmed, 14.0, now)
+            .await
+            .unwrap();
+        // What the old reading saw: a whole confirmation, and still short of 4.
+        let raw = core.store.activation_of(&ids).await.unwrap()[&p].0;
+        assert!(raw < 4.0, "the raw activation was {raw}");
+
+        assert!(maybe_promote(&core, &ids, now).await.unwrap() > 0);
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn age_alone_never_promotes_a_passage_nobody_touched() {
+        // The other direction: subtracting a decayed baseline must not turn a
+        // never-touched artifact into an engaged one at any age.
+        let (core, corpus, p) = earned_with_one_passage().await;
+        let ids = vec![p.clone()];
+        let now = crate::store::now();
+        let captured = now - 900 * 86_400;
+        sqlx::query(
+            "UPDATE artifacts SET activation = 1.0, activated_at = ?, created_at = ? WHERE id = ?",
+        )
+        .bind(captured)
+        .bind(captured)
+        .bind(&p)
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(maybe_promote(&core, &ids, now).await.unwrap(), 0);
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim)
         );
     }
 
@@ -670,12 +770,67 @@ mod tests {
             .activation_of(&[written[0].id.clone(), passages[1].id.clone()])
             .await
             .unwrap();
-        let (a_val, a_at) = act[&written[0].id];
-        let (p_val, p_at) = act[&passages[1].id];
+        let (a_val, a_at, _) = act[&written[0].id];
+        let (p_val, p_at, _) = act[&passages[1].id];
         let expect = crate::store::links::decayed(p_val, p_at, 1_000, 14.0);
         assert!((a_val - expect).abs() < 1e-6, "got {a_val}, want {expect}");
         assert_eq!(a_at, 1_000);
         assert!(a_val > 1.0);
+    }
+
+    /// What crosses is the engagement, not the raw stored sum. The winner was
+    /// written moments ago, so its baseline stands at a full `1.0`, while an
+    /// old passage's baseline has almost decayed away under whatever it
+    /// earned: comparing the two raw numbers read one against the other. A
+    /// passage six weeks old with `1.9` of earned access carried a raw `0.36`,
+    /// lost the `max` to the winner's own `1.0`, and the artifact that was
+    /// supposed to inherit the access it earned came out at nothing.
+    #[tokio::test]
+    async fn the_artifact_inherits_what_the_passage_earned_and_not_its_raw_sum() {
+        let now = crate::store::now();
+        let earned_after = |captured: i64, earned: f64, core: &crate::core::Core| {
+            crate::store::links::decayed(earned, captured, now, core.activation.half_life_days)
+        };
+        // Six weeks — three half-lives — with 1.9 of earned access on it. The
+        // raw sum by then is below the winner's own untouched baseline.
+        for (age_days, earned) in [(42i64, 1.9f64), (14, 4.0)] {
+            let (core, corpus, passages, written) = promoted_fixture().await;
+            let captured = now - age_days * 86_400;
+            sqlx::query(
+                "UPDATE artifacts SET activation = ?, activated_at = ?, created_at = ? WHERE id = ?",
+            )
+            .bind(1.0 + earned)
+            .bind(captured)
+            .bind(captured)
+            .bind(&passages[1].id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+            supersede_covered(&core, &corpus, 0, &written, now)
+                .await
+                .unwrap();
+
+            let act = core
+                .store
+                .activation_of(&[written[0].id.clone()])
+                .await
+                .unwrap();
+            let (v, s, c) = act[&written[0].id];
+            let got =
+                crate::store::links::engagement_at(v, s, c, now, core.activation.half_life_days);
+            let want = earned_after(captured, earned, &core);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "at {age_days} days the artifact inherited {got} of the {want} the passage earned"
+            );
+            // And the baseline it is standing on is its own, still whole.
+            assert!(
+                (v - (1.0 + want)).abs() < 1e-6,
+                "the winner's own baseline was overwritten: {v}"
+            );
+            assert_eq!(s, now);
+        }
     }
 
     #[tokio::test]

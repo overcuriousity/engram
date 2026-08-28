@@ -171,13 +171,15 @@ pub struct SearchResult {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub origin_count: usize,
     /// This hit moved up because it is more accessible than the ones it passed
-    /// — recently and often reached. Bounded by `associate.prime_lift`, never
-    /// past rank 1, and said out loud wherever it happened: nothing about the
-    /// order is silent.
+    /// — opened, confirmed or cited more, and more recently. Never for being
+    /// listed: activation above the capture baseline is what priming reads,
+    /// and only use raises it (`engagement`). Bounded by `associate.prime_lift`,
+    /// never past rank 1, and said out loud wherever it happened: nothing about
+    /// the order is silent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primed: bool,
     /// This sitting has already been in this artifact. Said beside `primed`,
-    /// because "you were just reading this" and "this is reached often" are
+    /// because "you were just reading this" and "this is used often" are
     /// two different reasons to be higher up the list and the page should not
     /// pass one off as the other.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -188,6 +190,17 @@ pub struct SearchResult {
     /// dropped — but the page stops claiming it is an answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
+    /// Cosine similarity between the query and this hit, when the store could
+    /// say. Comparable across queries where `score` is not, which is why the
+    /// cliff is read from it whenever no reranker has calibrated the scores.
+    /// `None` for a hit only the lexical half found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f32>,
+    /// `title` is the corpus's, not this passage's own. The stored title is
+    /// only ever a real heading; a passage without one is shown under the
+    /// note it came from, and said to be, so it is not mistaken for the whole.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub titled_by_corpus: bool,
     /// The ranked hit that recalled this one. `None` for a ranked hit — which
     /// is every hit inside `limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,6 +244,8 @@ impl From<SearchHit> for SearchResult {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: h.similarity,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -402,8 +417,14 @@ pub const CLIFF_MIN_SHARE: f32 = 0.01;
 /// against its own list's other steps is scale-free: the cliff is the one gap
 /// that is larger than `CLIFF_FACTOR` times the mean of all the others, and at
 /// least `CLIFF_MIN_SHARE` of the top score. Below three hits there is one gap
-/// and nothing to compare it to. Gaps are read in list order and a negative one
-/// — a primed near-tie lifted past its neighbour — is a near-tie, not a fall.
+/// and nothing to compare it to.
+///
+/// **`scores` must be sorted descending**, and every caller sorts before
+/// calling. An out-of-order score is not a small negative gap to be shrugged
+/// off: clamping one to zero manufactured a large *positive* gap at the
+/// position before it, and a leading `0.80, 0.40, 0.78` then cut after the
+/// first hit and threw the 0.78 away. `mark_past_cliff` states how the answer
+/// is carried back to a list that is deliberately not in score order.
 ///
 /// This is also where `ask` will stop packing excerpts, which is why it is a
 /// function over scores rather than a step inside `search_with`.
@@ -411,7 +432,11 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
     if scores.len() < 3 {
         return None;
     }
-    let gaps: Vec<f32> = scores.windows(2).map(|w| (w[0] - w[1]).max(0.0)).collect();
+    debug_assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "cliff needs its scores sorted descending: {scores:?}"
+    );
+    let gaps: Vec<f32> = scores.windows(2).map(|w| w[0] - w[1]).collect();
     let (at, largest) = gaps
         .iter()
         .copied()
@@ -431,18 +456,102 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
     (largest > CLIFF_FACTOR * others).then_some(at + 1)
 }
 
+/// The scores a list's cliff is read from, or `None` when it has none to read.
+///
+/// Never the fused rank. An RRF score is `Σ 1/(k+rank)` per branch — a
+/// harmonic curve whose first gap is structurally its largest — so a cliff
+/// taken on it measured how many hits both branches agreed on, and landed
+/// after hit #1 on almost every query. A reranker calibrates its scores, so
+/// once one has run they are the right input; without one, the cosine
+/// similarity is — it means the same thing from one query to the next, which
+/// is the property the largest-gap rule needs.
+///
+/// One entry per hit, `None` where the hit carries no similarity: one only the
+/// lexical half found, or a store that reports none. Such a hit cannot be
+/// placed on the scale, so it is left out of the gaps — but it is *not* an end
+/// to the reading. Read as a leading run this truncated at the first one, and
+/// an exact term match is both the commonest hit with no similarity and the
+/// likeliest to land at rank 1: a `None` at position 0 gave an empty run and
+/// no cliff at all, silently switching the feature off for every
+/// keyword-shaped query. Skipped instead, so the hits that do sit on the
+/// cosine scale are all read wherever they sit in the list. A store that
+/// reports no similarity anywhere still gives no cliff, which is right: there
+/// is nothing to measure.
+fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<Option<f32>> {
+    if reranked {
+        return results.iter().map(|r| Some(r.score)).collect();
+    }
+    results.iter().map(|r| r.similarity).collect()
+}
+
 /// Flag every hit from the cliff on. The list is left in its order and at its
 /// length; nothing about the cliff is silent and nothing about it is a change.
-fn mark_past_cliff(results: &mut [SearchResult]) {
-    let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
-    if let Some(above) = cliff(&scores) {
-        for r in results.iter_mut().skip(above) {
-            r.past_cliff = true;
-            if let Some(e) = r.explanation.as_mut() {
-                e.past_cliff = true;
-            }
+///
+/// The gaps are measured over the scores **sorted**, and the answer is carried
+/// back to the list as a score: the lowest score still above the fall, and
+/// everything after the last hit that reaches it is past the cliff. The list
+/// itself is not sorted by score, and cannot be — a fused list puts a hit both
+/// branches found above one only the dense branch ranked higher, which is the
+/// point of fusing, and priming moves more. Read position by position, an
+/// out-of-order hit did not merely vanish from the reading: the old clamp of a
+/// negative gap to zero manufactured a large positive gap at the position
+/// *before* it and drew the fall there. A leading `0.80, 0.40, 0.78` cut after
+/// the first hit and threw away the 0.78 — in `ask`, out of the answer
+/// entirely, which is the failure this reading was changed to stop.
+///
+/// Carried back as "after the last hit that reaches the cut" rather than as a
+/// per-hit test, so what is marked stays a tail. Every reader downstream is
+/// built on that: `ask` truncates at the first marked hit, and the face draws
+/// one divider where the fall happens. The cost is that a weak hit sitting
+/// high in the list is left above the line — `weak` is the mark for that one,
+/// and cutting the good hits below it was the bug.
+fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
+    let scored = cliff_scores(results, reranked);
+    let mut sorted: Vec<f32> = scored.iter().flatten().copied().collect();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let Some(above) = cliff(&sorted) else {
+        return;
+    };
+    // The lowest score the cliff leaves standing, and the last place in the
+    // list that reaches it. A hit with no score at all reaches nothing, so it
+    // is kept where it sits above that place and marked with the tail below
+    // it — the cut is a line across the list, not a judgement of that hit.
+    let cut = sorted[above - 1];
+    let from = scored
+        .iter()
+        .rposition(|s| s.is_some_and(|s| s >= cut))
+        .map_or(0, |i| i + 1);
+    for r in results.iter_mut().skip(from) {
+        r.past_cliff = true;
+        if let Some(e) = r.explanation.as_mut() {
+            e.past_cliff = true;
         }
     }
+}
+
+/// Activation above the capture baseline, per artifact: what use has added,
+/// and nothing else. The arithmetic is `links::engagement_at`, which promotion
+/// and the insights page read the same quantity through.
+///
+/// A never-opened artifact carries the baseline, decaying. Read raw, a fresh
+/// one at `1.0` out-activates an old one at `0.25` by more than any margin,
+/// and priming then said "you reach this one often" of something nobody had
+/// reached. With `retrieved` at zero only opened, confirmed and cited raise
+/// activation, so above the baseline it is engagement by construction — and a
+/// hit that has none cannot be primed.
+fn engagement(
+    rows: HashMap<String, (f64, i64, i64)>,
+    at: i64,
+    half_life_days: f64,
+) -> HashMap<String, f64> {
+    rows.into_iter()
+        .map(|(id, (value, stamp, created_at))| {
+            (
+                id,
+                crate::store::links::engagement_at(value, stamp, created_at, at, half_life_days),
+            )
+        })
+        .collect()
 }
 
 /// Move hits up on activation, within hard bounds.
@@ -652,6 +761,43 @@ impl Core {
         }
     }
 
+    /// Give a passage with no heading of its own the title of its corpus.
+    ///
+    /// The stored `artifacts.title` is only ever a real heading — nothing is
+    /// inferred to fill that gap, and that stays true. But most pasted notes
+    /// have no heading, and a rail, an answer's citations and a judge card of
+    /// `(untitled)` rows is unreadable when the note's own title is one join
+    /// away. Done here, once, on the way out of the ranking: the CLI, MCP, the
+    /// web rail and the extension all inherit it. Said on the result
+    /// (`titled_by_corpus`) so a door can show that the name is the note's.
+    ///
+    /// Best-effort: a failed read costs the titles, never the results.
+    pub(crate) async fn fill_titles(&self, results: &mut [SearchResult]) {
+        let mut wanted: Vec<String> = results
+            .iter()
+            .filter(|r| r.title.is_none())
+            .map(|r| r.corpus_id.clone())
+            .collect();
+        wanted.sort();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return;
+        }
+        let titles = match self.store.corpus_titles(&wanted).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read corpus titles for untitled hits");
+                return;
+            }
+        };
+        for r in results.iter_mut().filter(|r| r.title.is_none()) {
+            if let Some(t) = titles.get(&r.corpus_id) {
+                r.title = Some(t.clone());
+                r.titled_by_corpus = true;
+            }
+        }
+    }
+
     /// Opening a chunk is the deliberate act that counts as remembering it,
     /// which is why the detail pane records it and an incremental search does
     /// not.
@@ -768,28 +914,16 @@ impl Core {
         });
     }
 
-    /// Each artifact's activation, already decayed to now.
+    /// Each artifact's engagement — activation decayed to now, less the capture
+    /// baseline decayed to now.
     ///
     /// The one SQLite read the query path takes. It can only add: a failure is
     /// one warning and an empty map, and everything downstream then behaves
     /// exactly as it did before any of this existed.
-    async fn activation_now(&self, ids: &[String]) -> HashMap<String, f64> {
+    async fn engagement_now(&self, ids: &[String]) -> HashMap<String, f64> {
         let at = now_secs();
         match self.store.activation_of(ids).await {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|(id, (value, stamp))| {
-                    (
-                        id,
-                        crate::store::links::decayed(
-                            value,
-                            stamp,
-                            at,
-                            self.activation.half_life_days,
-                        ),
-                    )
-                })
-                .collect(),
+            Ok(rows) => engagement(rows, at, self.activation.half_life_days),
             Err(e) => {
                 tracing::warn!(error = %e, "could not read activation; results are unprimed");
                 HashMap::new()
@@ -910,6 +1044,8 @@ impl Core {
                 primed: false,
                 in_sitting: false,
                 past_cliff: false,
+                similarity: None,
+                titled_by_corpus: false,
                 // Set here, where `via` is known. Never ranked, so every other
                 // stage stays absent rather than defaulting to values that
                 // would read as facts about a competition that never happened.
@@ -1343,6 +1479,8 @@ impl Core {
             })
             .collect();
 
+        self.fill_titles(&mut results).await;
+
         let mut reranked = false;
         // Said on the same condition the stage list was built from, and before
         // the emptiness check below: a stage named in `stages` and never
@@ -1408,7 +1546,7 @@ impl Core {
         {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            let activation = self.activation_now(&ids).await;
+            let activation = self.engagement_now(&ids).await;
             // Off by default and empty when off: this is the only part of the
             // sitting that moves an order, and the same query ranking
             // differently in two sittings is what is disorienting about it.
@@ -1503,7 +1641,7 @@ impl Core {
         // On the list the caller will see, in its final order: after priming,
         // after the truncate, and before association appends hits that never
         // competed for a place. Marks, never reorders or drops.
-        mark_past_cliff(&mut results);
+        mark_past_cliff(&mut results, reranked);
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
@@ -1523,7 +1661,14 @@ impl Core {
             let recalled = self.associated(&results, &filter).await;
             if !recalled.is_empty() {
                 self.mark_seen(&recalled, &HashMap::new(), false);
+                let from = results.len();
                 results.extend(recalled);
+                // The earlier pass ran before these existed. Without this an
+                // associated passage with no heading of its own renders
+                // untitled beside ranked siblings from the same note that show
+                // its name — `retrieve_round` already re-runs it after
+                // `reach_sideways` for the same reason.
+                self.fill_titles(&mut results[from..]).await;
             }
         }
         tracing::info!(
@@ -1897,7 +2042,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_deliberate_search_makes_what_it_returned_more_accessible() {
+    async fn a_deliberate_search_leaves_what_it_returned_no_more_accessible() {
+        // Being listed is exposure, not use. At `retrieved = 1.0` this was the
+        // strongest signal there was — it happened to every hit of every
+        // search — and it primed, and promoted, artifacts nobody had opened.
+        // The path still runs (`[learn]` on, a marked search); the shipped
+        // weight is what makes it raise nothing.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
@@ -1919,7 +2069,8 @@ mod tests {
             .await
             .unwrap()[&id]
             .0;
-        assert!(after > before, "a retrieval raised nothing");
+        assert_eq!(after, before, "a retrieval raised activation");
+        assert_eq!(core.activation.retrieved, 0.0, "the shipped weight");
     }
 
     #[tokio::test]
@@ -1989,7 +2140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_an_artifact_makes_it_more_accessible_by_less_than_a_retrieval() {
+    async fn opening_an_artifact_makes_it_more_accessible_by_the_unit_the_rest_are_measured_in() {
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
@@ -2014,11 +2165,12 @@ mod tests {
         // re-reads it through decay, so the error grows with wall-clock time
         // between the artifact's creation and the bump (5.7e-7 after one
         // second, 1.15e-6 after two) and a loaded machine can straddle 1e-6.
-        // 1e-3 still separates `opened` (0.5) from `retrieved` (1.0) by three
-        // orders of magnitude, so it cannot mask a real regression — don't
-        // tighten it back without addressing the decay re-read instead.
+        // 1e-3 still separates `opened` (1.0) from nothing by three orders of
+        // magnitude, so it cannot mask a real regression — don't tighten it
+        // back without addressing the decay re-read instead.
         assert!((after - before - core.activation.opened).abs() < 1e-3);
-        assert!(core.activation.opened < core.activation.retrieved);
+        assert_eq!(core.activation.opened, 1.0);
+        assert!(core.activation.retrieved < core.activation.opened);
     }
 
     #[tokio::test]
@@ -2845,6 +2997,8 @@ mod tests {
                 primed: false,
                 in_sitting: false,
                 past_cliff: false,
+                similarity: None,
+                titled_by_corpus: false,
                 via: None,
                 reason: None,
                 explanation: None,
@@ -2969,6 +3123,81 @@ mod tests {
     }
 
     #[test]
+    fn a_never_opened_artifact_has_no_engagement_however_fresh_it_is() {
+        // Fresh at the baseline, old and decayed, and opened once: only the
+        // last has anything priming may read. The report's `primed` badge on
+        // a note that had only ever been listed came from reading the first
+        // two raw.
+        //
+        // `(value, activated_at, created_at)`, at day 0 and day 28 — two
+        // half-lives — with a 14-day half-life.
+        const DAY: i64 = 86_400;
+        let now = 28 * DAY;
+        let acts = HashMap::from([
+            ("fresh".to_string(), (1.0, now, now)),
+            ("old".to_string(), (1.0, 0, 0)),
+            ("opened".to_string(), (1.8, now, now)),
+        ]);
+        let e = engagement(acts, now, 14.0);
+        assert_eq!(e["fresh"], 0.0);
+        assert_eq!(e["old"], 0.0);
+        assert!((e["opened"] - 0.8).abs() < 1e-9);
+        let out = prime(
+            ranked(&["a", "fresh", "old"]),
+            &engagement(
+                HashMap::from([
+                    ("fresh".to_string(), (1.0, now, now)),
+                    ("old".to_string(), (1.0, 0, 0)),
+                ]),
+                now,
+                14.0,
+            ),
+            0.5,
+            2,
+            &Default::default(),
+        );
+        assert!(
+            out.iter().all(|r| !r.primed),
+            "primed without ever being opened"
+        );
+    }
+
+    #[test]
+    fn engagement_is_the_same_size_however_old_the_artifact_is() {
+        // The baseline decays with everything else, so subtracting a whole
+        // `1.0` from a half-decayed sum answered in units of nothing: an
+        // artifact captured six weeks ago and opened three times right after
+        // came to `4.0`, read `0.5` today, and came out with no engagement at
+        // all — while a single open on that same artifact came out an eighth
+        // the size of the same open on a fresh one. One open is one open.
+        const DAY: i64 = 86_400;
+        let now = 42 * DAY;
+        let e = engagement(
+            HashMap::from([
+                // Captured today, opened three times today: 1.0 + 3 × 1.0.
+                ("fresh".to_string(), (4.0, now, now)),
+                // Captured 42 days ago — three half-lives — and opened three
+                // times the same day. Stored `4.0`, stamped then.
+                ("old".to_string(), (4.0, 0, 0)),
+                // Captured 42 days ago, opened once *today*: the decayed
+                // remainder of the baseline, plus a whole open.
+                ("old_open_today".to_string(), (0.125 + 1.0, now, 0)),
+            ]),
+            now,
+            14.0,
+        );
+        assert!((e["fresh"] - 3.0).abs() < 1e-9);
+        // Three opens, three half-lives on: an eighth of three, not zero.
+        assert!((e["old"] - 0.375).abs() < 1e-9, "got {}", e["old"]);
+        // And a fresh open reads as a whole open whatever it landed on.
+        assert!(
+            (e["old_open_today"] - 1.0).abs() < 1e-9,
+            "got {}",
+            e["old_open_today"]
+        );
+    }
+
+    #[test]
     fn a_hit_climbs_exactly_the_lift_and_no_further_however_long_the_list_is() {
         // An insertion-sort-style implementation can let a row that already
         // spent its climb budget be mistaken for a fresh row once something
@@ -3089,9 +3318,10 @@ mod tests {
         // they opt in." With `[learn]` off, a large activation must not move
         // the ranked order — the order must be byte-identical to
         // `prime_lift = 0`, not merely bounded.
-        let core = test_core().await;
+        let mut core = test_core().await;
         assert!(!core.learn.enabled);
-        assert_eq!(core.associate.prime_lift, 2, "the shipped default");
+        // Priming on, so that `[learn]` off is the only thing holding it.
+        core.associate.prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -3364,6 +3594,54 @@ mod tests {
             capped[0].text, capped[1].text,
             "a cap of one must let the other source take the second place"
         );
+    }
+
+    #[tokio::test]
+    async fn a_passage_with_no_heading_is_shown_under_its_notes_title() {
+        // Most pasted notes have no markdown heading, so their passages are
+        // stored untitled — rightly: a passage claims no heading it lacks. But
+        // the note's own title is one join away, and it is what a person
+        // would call the passage. Filled once here, so every door inherits it.
+        let core = test_core().await;
+        let named = core
+            .store
+            .insert_corpus("feeding schedule", "web", Some("Sourdough"))
+            .await
+            .unwrap();
+        let unnamed = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        for (src, text) in [
+            (&named, "feeding schedule that finally worked"),
+            (&unnamed, "words"),
+        ] {
+            let new = vec![NewArtifact {
+                ordinal: 0,
+                text: text.to_string(),
+                corpus_span: None,
+                title: None,
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            }];
+            for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
+                crate::jobs::embed::run(&core, &c.id).await.unwrap();
+            }
+        }
+        let hits = core
+            .search(&q("feeding schedule"), Door::Judge)
+            .await
+            .unwrap();
+        let of = |src: &crate::store::corpora::Corpus| {
+            hits.iter().find(|h| h.corpus_id == src.id).unwrap()
+        };
+        assert_eq!(of(&named).title.as_deref(), Some("Sourdough"));
+        assert!(
+            of(&named).titled_by_corpus,
+            "the title must say it is the note's"
+        );
+        // Nothing is invented where the note has no title either.
+        assert_eq!(of(&unnamed).title, None);
+        assert!(!of(&unnamed).titled_by_corpus);
     }
 
     #[tokio::test]
@@ -3796,6 +4074,8 @@ mod tests {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -3878,12 +4158,15 @@ mod tests {
         assert_eq!(cliff(&[0.016, 0.016, 0.016, 0.004]), Some(3));
     }
 
-    /// Priming may lift a near-tie past its neighbour, which reads as a
-    /// negative gap. That is a near-tie, not a fall.
+    /// Priming may lift a near-tie past its neighbour. Read position by
+    /// position that was a negative gap, and clamping it to zero manufactured
+    /// a fall at the position before it; `mark_past_cliff` sorts instead, and
+    /// the four near-tied hits are then one plateau with one fall after it —
+    /// which is what the list is.
     #[test]
     fn a_primed_inversion_is_not_a_cliff() {
-        assert_eq!(cliff(&[0.90, 0.88, 0.89, 0.87, 0.30]), Some(4));
-        assert_eq!(cliff(&[0.50, 0.48, 0.49, 0.47, 0.46]), None);
+        assert_eq!(cliff(&[0.90, 0.89, 0.88, 0.87, 0.30]), Some(4));
+        assert_eq!(cliff(&[0.50, 0.49, 0.48, 0.47, 0.46]), None);
     }
 
     #[test]
@@ -3903,6 +4186,8 @@ mod tests {
             primed: false,
             in_sitting: false,
             past_cliff: false,
+            similarity: None,
+            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -3916,7 +4201,8 @@ mod tests {
             dummy("c", 0.30),
             dummy("d", 0.28),
         ];
-        mark_past_cliff(&mut results);
+        // Reranked, so the scores are calibrated and the cliff is read from them.
+        mark_past_cliff(&mut results, true);
         assert_eq!(
             results.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, true, true]
@@ -3931,8 +4217,152 @@ mod tests {
         );
 
         let mut flat = vec![dummy("a", 0.5), dummy("b", 0.5), dummy("c", 0.5)];
-        mark_past_cliff(&mut flat);
+        mark_past_cliff(&mut flat, true);
         assert!(flat.iter().all(|r| !r.past_cliff));
+    }
+
+    /// The default configuration has no reranker, and the scores are then
+    /// RRF fusions: a harmonic curve whose first gap is always its largest.
+    /// The list reproduced here is the `loop device` query from the report —
+    /// three relevant notes, and a cliff drawn after the first of them on the
+    /// fused scores. Read on the cosine similarity instead, the divider lands
+    /// where the relevance actually falls, and not at all when it does not.
+    #[test]
+    fn without_a_reranker_the_cliff_is_read_from_similarity_and_never_from_the_fused_rank() {
+        let dummy = |id: &str, score: f32, similarity: Option<f32>| SearchResult {
+            artifact_id: id.into(),
+            corpus_id: "c".into(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            in_sitting: false,
+            past_cliff: false,
+            similarity,
+            titled_by_corpus: false,
+            via: None,
+            reason: None,
+            explanation: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+        };
+        let fused = [1.050, 0.633, 0.383, 0.250, 0.217];
+        // Sanity: on the fused scores alone the rule draws its line after #1.
+        assert_eq!(cliff(&fused), Some(1));
+
+        // Similarities that fall evenly: no cliff, whatever the fusion says.
+        let sims = [0.82, 0.80, 0.78, 0.76, 0.74];
+        let mut even: Vec<SearchResult> = fused
+            .iter()
+            .zip(sims)
+            .enumerate()
+            .map(|(i, (f, s))| dummy(&i.to_string(), *f, Some(s)))
+            .collect();
+        mark_past_cliff(&mut even, false);
+        assert!(
+            even.iter().all(|r| !r.past_cliff),
+            "a cliff was drawn on a list whose similarity falls evenly"
+        );
+
+        // Similarities that fall after the third hit: the cliff is there.
+        let sims = [0.82, 0.80, 0.78, 0.31, 0.29];
+        let mut three: Vec<SearchResult> = fused
+            .iter()
+            .zip(sims)
+            .enumerate()
+            .map(|(i, (f, s))| dummy(&i.to_string(), *f, Some(s)))
+            .collect();
+        mark_past_cliff(&mut three, false);
+        assert_eq!(
+            three.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true, true]
+        );
+
+        // A hit the lexical half alone found has no similarity: it is left out
+        // of the gaps, and sitting in the tail it is past the cliff with the
+        // rest of it — it placed there.
+        let mut tail = three.clone();
+        tail[4].similarity = None;
+        tail.iter_mut().for_each(|r| r.past_cliff = false);
+        mark_past_cliff(&mut tail, false);
+        assert_eq!(
+            tail.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true, true]
+        );
+        // Placed second, it is skipped rather than treated as the end of the
+        // reading. Read as a leading run it left one measurable hit and nothing
+        // to compare, so a list with an obvious fall after the third had no
+        // cliff at all — and an exact term match, which is the commonest hit
+        // with no similarity, is exactly what lands high in a fused list.
+        let mut mixed = three.clone();
+        mixed[1].similarity = None;
+        mixed.iter_mut().for_each(|r| r.past_cliff = false);
+        mark_past_cliff(&mut mixed, false);
+        assert_eq!(
+            mixed.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true, true],
+            "a hit with no similarity ended the reading instead of being skipped"
+        );
+        // And at rank 1, which is where it killed the feature outright: every
+        // keyword-shaped query went to `ask` with its whole list.
+        let mut leading = three.clone();
+        leading[0].similarity = None;
+        leading.iter_mut().for_each(|r| r.past_cliff = false);
+        mark_past_cliff(&mut leading, false);
+        assert_eq!(
+            leading.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true, true],
+            "a lexical-only hit at rank 1 switched the cliff off"
+        );
+        // A store that reports no similarity anywhere still has nothing to
+        // measure, and says so rather than guessing.
+        let mut none = three.clone();
+        none.iter_mut().for_each(|r| {
+            r.similarity = None;
+            r.past_cliff = false;
+        });
+        mark_past_cliff(&mut none, false);
+        assert!(none.iter().all(|r| !r.past_cliff));
+
+        // A fused list is not sorted by similarity — a hit both branches found
+        // is lifted above one the dense branch alone ranked higher, which is
+        // the point of fusing. Read position by position, the clamp turned that
+        // inversion into a large gap at the position *before* it and cut there,
+        // throwing away the 0.78 hit below. Sorted, the three leading hits are
+        // an even fall and there is no cliff at all.
+        let mut inverted: Vec<SearchResult> = [0.80, 0.40, 0.78]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| dummy(&i.to_string(), 1.0 - i as f32 * 0.1, Some(*s)))
+            .collect();
+        mark_past_cliff(&mut inverted, false);
+        assert!(
+            inverted.iter().all(|r| !r.past_cliff),
+            "an out-of-order hit manufactured a cliff above itself"
+        );
+
+        // And a real fall is still found with an inversion sitting above it.
+        // Sorted that is `0.90 0.85 0.20 0.10`, the fall is after the second,
+        // and the last hit in the *list* reaching 0.85 is the third — so the
+        // tail is the one hit below it. The 0.20 at rank two is left above the
+        // line, which is what `weak` is for.
+        let mut still: Vec<SearchResult> = [0.90, 0.20, 0.85, 0.10]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| dummy(&i.to_string(), 1.0 - i as f32 * 0.1, Some(*s)))
+            .collect();
+        mark_past_cliff(&mut still, false);
+        assert_eq!(
+            still.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true]
+        );
     }
 
     #[tokio::test]

@@ -31,8 +31,84 @@ fn is_heading(line: &str) -> bool {
 }
 
 /// "## Recovering deleted entries" → "Recovering deleted entries".
+///
+/// A link left in the heading is reduced to its words, and whitespace runs to
+/// one space. The HTML extractor already keeps in-page anchors out of a
+/// heading; this is the belt for every other way a heading reaches here — a
+/// pasted markdown document, another extractor — so that a title is never
+/// `[](#NAME)NAME [top](#top_of_page)` whatever wrote it.
 pub fn heading_title(line: &str) -> String {
-    line.trim().trim_start_matches('#').trim().to_string()
+    let bare = line.trim().trim_start_matches('#');
+    // Read to a fixed point, because the shapes nest. An image inside a link —
+    // `## [![Logo](logo.png)](/)`, which is how a doc site or a Wikipedia
+    // heading hangs an icon off an anchor — cannot come out of one pass: the
+    // pass anchors on the *inner* `[`, so it emits the outer `[` as prose and
+    // leaves the outer `](/)` standing, and the title came out `[Logo](/)`,
+    // a stray bracket and an unstripped link. One more reading over that is an
+    // ordinary link and reduces it to `Logo`. Bounded rather than `loop`:
+    // each pass that changes anything strictly shortens the line, and a
+    // heading nested deeper than this is not a heading anybody wrote.
+    let mut title = bare.to_string();
+    for _ in 0..4 {
+        let next = strip_links(&title);
+        if next == title {
+            break;
+        }
+        title = next;
+    }
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// One pass of `[text](target)` → `text` over a heading. See `heading_title`
+/// for why it is run more than once.
+fn strip_links(bare: &str) -> String {
+    let mut out = String::with_capacity(bare.len());
+    let mut rest = bare;
+    // `[text](target)` → `text`. Anything that is not exactly that shape is
+    // left as written: a bracket in prose is not a link.
+    while let Some(first) = rest.find('[') {
+        let Some(close_rel) = rest[first..].find("](") else {
+            break;
+        };
+        let close = first + close_rel;
+        // The link opens at the LAST bracket before `](`, not the first one on
+        // the line. Anchored on the first, a plain bracket standing in prose
+        // ahead of a real link swallowed everything between the two:
+        // `Arrays [0] and [the docs](…)` came out `Arrays 0] and [the docs`.
+        let open = rest[..close].rfind('[').unwrap_or(first);
+        // A markdown image is a link with a `!` in front. The alt text is the
+        // words; the `!` is syntax, and `![diagram](a.png) Overview` has no
+        // business becoming `!diagram Overview`.
+        let text_end = match rest[..open].ends_with('!') {
+            true => open - 1,
+            false => open,
+        };
+        // Parens nest. A bare `find(')')` stopped at the inner one of
+        // `[Loop device](https://en.wikipedia.org/wiki/Loop_device_(computing))`
+        // and left the outer `)` standing in the title as `See Loop device)`,
+        // and Wikipedia headings are exactly what this path is handed.
+        let mut depth = 0usize;
+        let target = rest[close + 2..].char_indices().find_map(|(i, c)| match c {
+            '(' => {
+                depth += 1;
+                None
+            }
+            ')' if depth == 0 => Some(close + 2 + i),
+            ')' => {
+                depth -= 1;
+                None
+            }
+            _ => None,
+        });
+        let Some(target) = target else {
+            break;
+        };
+        out.push_str(&rest[..text_end]);
+        out.push_str(&rest[open + 1..close]);
+        rest = &rest[target + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The first heading among the next `n` lines, with all `n` consumed.
@@ -338,6 +414,55 @@ mod tests {
         assert_eq!(derive_title(&long).unwrap().chars().count(), TITLE_MAX);
         assert_eq!(derive_title("   \n\t\n"), None);
         assert_eq!(heading_title("###   Deep heading  "), "Deep heading");
+        // A link is its words, an empty one is nothing, and runs of spaces are
+        // one — the man7 heading shape, arriving from any extractor at all.
+        assert_eq!(
+            heading_title("## [](#NAME)NAME         [top](#top_of_page)"),
+            "NAME top"
+        );
+        assert_eq!(
+            heading_title("## See [the docs](https://x.test/a)"),
+            "See the docs"
+        );
+        assert_eq!(heading_title("## Arrays [0] and [1]"), "Arrays [0] and [1]");
+        // A bracket in prose standing *before* a real link on the same line.
+        // Anchored on the first `[`, the stripper read from it all the way to
+        // the link's `](` and ate the words in between: this came out
+        // `Arrays 0] and [the docs`.
+        assert_eq!(
+            heading_title("## Arrays [0] and [the docs](https://x.test/a)"),
+            "Arrays [0] and the docs"
+        );
+        // An image is a link with a `!` in front. The alt text is words; the
+        // `!` is syntax, and `!diagram Overview` is neither.
+        assert_eq!(
+            heading_title("## ![diagram](a.png) Overview"),
+            "diagram Overview"
+        );
+        // A parenthesised URL — the Wikipedia disambiguation shape, which is
+        // most of what this path is handed. Stopping at the first `)` left the
+        // outer one behind as `See Loop device)`.
+        assert_eq!(
+            heading_title(
+                "## See [Loop device](https://en.wikipedia.org/wiki/Loop_device_(computing))"
+            ),
+            "See Loop device"
+        );
+        // An image inside a link — a logo or an icon hung off an anchor, which
+        // is how a doc site and a Wikipedia infobox heading are both built.
+        // One pass anchors on the inner `[`, so it emitted the outer one as
+        // prose and left the outer `](/)` standing: `[Logo](/)`, a stray
+        // bracket and an unstripped link, in a title.
+        assert_eq!(heading_title("## [![Logo](logo.png)](/)"), "Logo");
+        assert_eq!(
+            heading_title("## [![Logo](logo.png)](/) Reference"),
+            "Logo Reference"
+        );
+        // And the nesting is not the only thing on the line.
+        assert_eq!(
+            heading_title("## See [![icon](i.png)](https://x.test/a) for more"),
+            "See icon for more"
+        );
     }
 
     #[tokio::test]

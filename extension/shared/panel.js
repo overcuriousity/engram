@@ -324,7 +324,9 @@ function renderHits(hits, into) {
     link.href = deployment + '/ui/artifacts/' + h.artifact_id;
     link.target = '_blank';
     link.rel = 'noreferrer noopener';
-    link.textContent = h.title || 'Untitled';
+    // The server names a passage by its note when it has no heading of its
+    // own; what reaches here untitled has neither, and its opening is its name.
+    link.textContent = h.title || label({ raw_text: h.text }) || h.artifact_id;
     title.appendChild(link);
 
     const body = document.createElement('p');
@@ -624,12 +626,18 @@ $('recent-toggle').addEventListener('click', async () => {
 });
 
 /// A paste has no title, so it is named by its own first line — the same thing
-/// a person would call it.
+/// a person would call it. Empty when there is no line either, so the caller
+/// picks what stands in.
 function label(c) {
   if (c.title_hint) return c.title_hint;
   const first = (c.raw_text || '').split('\n').find((l) => l.trim());
-  if (!first) return 'Untitled';
-  const clipped = first.trim();
+  if (!first) return '';
+  // The same front trim the server's `stand_in_title` does: a list dash, a
+  // heading's hashes, a quote mark are structure rather than subject, and a
+  // name that opens with them names the markup. Without this the panel showed
+  // `- schneller Schreibzugriff` and `## 3.4.2 FESTE MFT RECORDS` where the
+  // CLI, MCP and web doors all showed the words alone.
+  const clipped = first.trim().replace(/^[-–—*#>·•|\s]+/, '').trim() || first.trim();
   return clipped.length > 60 ? clipped.slice(0, 60) + '…' : clipped;
 }
 
@@ -652,7 +660,11 @@ async function refreshRecent() {
       link.href = deployment + '/ui/corpora/' + c.id;
       link.target = '_blank';
       link.rel = 'noreferrer noopener';
-      link.textContent = label(c);
+      // Same floor the hit rows carry: `label` bottoms out at '' for a
+      // corpus with no `title_hint` and no usable first line — an image
+      // capture, a PDF whose `raw_text` this payload does not carry — and an
+      // empty anchor is an invisible, unclickable row.
+      link.textContent = label(c) || c.id;
 
       const state = document.createElement('span');
       state.className = 'state ' + c.status;
