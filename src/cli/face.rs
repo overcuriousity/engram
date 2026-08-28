@@ -8,6 +8,7 @@
 use crate::cli::args::{CliArgs, Fancy};
 use crate::core::search::SearchResult;
 
+#[derive(Clone, Copy)]
 pub struct Face {
     pub on: bool,
     /// The SGR escapes. Separate from `on` because `NO_COLOR` is a statement
@@ -56,6 +57,7 @@ fn clip(s: &str, room: usize) -> String {
 const BOLD: &str = "1";
 const DIM: &str = "2";
 const GREEN: &str = "32";
+const RED: &str = "31";
 const CYAN: &str = "36";
 const RESET: &str = "\u{1b}[0m";
 
@@ -100,7 +102,7 @@ pub enum Lamp {
 /// One lamp, drawn. A free function because the capture stages and the search
 /// stages are the same vocabulary seen at two doors, and two tables of glyphs
 /// would drift.
-fn lamp_glyph(l: Lamp, unicode: bool) -> char {
+pub(crate) fn lamp_glyph(l: Lamp, unicode: bool) -> char {
     match (l, unicode) {
         (Lamp::Waiting, true) => '·',
         (Lamp::Running, true) => '◉',
@@ -213,7 +215,7 @@ impl Fill {
     }
 }
 
-/// Taken back on drop, the way `Pulse` stops on drop.
+/// Taken back on drop, the way every line this file draws is.
 ///
 /// The one caller draws from inside a request body, and a request that fails
 /// partway — a reset connection, a 413 mid-upload — drops that stream without
@@ -287,9 +289,7 @@ const QUIET_FLOOR_MS: u128 = 120;
 /// server's to name — whether a rerank happens is decided there — so a lamp is
 /// never drawn for work that is not going to run.
 pub struct Stages {
-    on: bool,
-    color: bool,
-    unicode: bool,
+    face: Face,
     names: Vec<crate::core::search::SearchStage>,
     began: std::time::Instant,
     drawn: bool,
@@ -312,7 +312,7 @@ impl Stages {
         elapsed_ms: u128,
     ) -> Option<String> {
         use crate::core::search::SearchStage;
-        if !self.on || self.names.is_empty() || elapsed_ms < QUIET_FLOOR_MS {
+        if !self.face.on || self.names.is_empty() || elapsed_ms < QUIET_FLOOR_MS {
             return None;
         }
         let mut reached = false;
@@ -338,16 +338,7 @@ impl Stages {
                         SearchStage::Rerank => "rerank",
                     };
                     // Drawn *and* said, like every other lamp in this file.
-                    let cell = format!("{} {name}", lamp_glyph(lamp, self.unicode));
-                    let code = match lamp {
-                        Lamp::Running => CYAN,
-                        Lamp::Done => GREEN,
-                        _ => DIM,
-                    };
-                    match self.color {
-                        true => format!("\u{1b}[{code}m{cell}{RESET}"),
-                        false => cell,
-                    }
+                    self.face.lamp_line(lamp, name)
                 })
                 .collect::<Vec<_>>()
                 .join("   "),
@@ -576,6 +567,22 @@ impl Face {
         }
     }
 
+    /// One lamp and the words beside it: `● retrieved 24, showing 6`.
+    ///
+    /// The glyph is how you see at a glance which of several is moving; the
+    /// words are the claim, and they are what survives a screenshot, a
+    /// redirected file and a terminal with no colour.
+    pub fn lamp_line(&self, lamp: Lamp, said: &str) -> String {
+        let cell = format!("{} {said}", lamp_glyph(lamp, self.unicode));
+        let code = match lamp {
+            Lamp::Running => CYAN,
+            Lamp::Done => GREEN,
+            Lamp::Stopped => RED,
+            Lamp::Waiting => DIM,
+        };
+        self.ink(code, &cell)
+    }
+
     /// The ranked list, drawn.
     ///
     /// Falls straight through to the plain renderer when the face is off, so
@@ -706,9 +713,7 @@ impl Face {
     /// The stages of one search, for a client reading the streaming door.
     pub fn stages(&self) -> Stages {
         Stages {
-            on: self.on,
-            color: self.color,
-            unicode: self.unicode,
+            face: *self,
             names: Vec::new(),
             began: std::time::Instant::now(),
             drawn: false,
@@ -734,76 +739,6 @@ impl Face {
         }
     }
 
-    /// A pulse travelling along a strand while a request is in flight — an
-    /// impulse propagating, which is what the server is actually doing.
-    ///
-    /// `None` when the face is off, so a caller writes the same two lines
-    /// either way. It stops on drop, and drop happens the moment the response
-    /// arrives: nothing is buffered to let a frame land evenly, and no result
-    /// waits on an animation.
-    ///
-    /// Drawn on stderr, so a redirected stdout never receives a frame of it
-    /// even in the case where someone forced `--fancy always` into a pipe.
-    pub fn pulse(&self, label: &'static str) -> Option<Pulse> {
-        self.on.then(|| Pulse::start(label, self.unicode))
-    }
-}
-
-pub struct Pulse {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Pulse {
-    fn start(label: &'static str, unicode: bool) -> Pulse {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        let handle = std::thread::spawn(move || {
-            // One bright cell with a decaying tail behind it.
-            let cells = if unicode {
-                ['●', '◦', '·', '·']
-            } else {
-                ['O', 'o', '.', '.']
-            };
-            let span = 12usize;
-            let mut head = 0usize;
-            while !flag.load(Ordering::Relaxed) {
-                let strand: String = (0..span)
-                    .map(|i| {
-                        let behind = (span + head - i) % span;
-                        cells[behind.min(cells.len() - 1)]
-                    })
-                    .collect();
-                // Rewritten in place, never on the alternate screen: results
-                // have to stay in scrollback after the process exits.
-                eprint!("\r\u{1b}[2K{strand}  {label}");
-                use std::io::Write;
-                std::io::stderr().flush().ok();
-                head = (head + 1) % span;
-                std::thread::sleep(std::time::Duration::from_millis(80));
-            }
-            eprint!("\r\u{1b}[2K");
-            use std::io::Write;
-            std::io::stderr().flush().ok();
-        });
-        Pulse {
-            stop,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for Pulse {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            // Joined rather than detached: the line has to be erased before
-            // anything else prints, or a result lands on top of a half-drawn
-            // strand.
-            h.join().ok();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1146,12 +1081,6 @@ mod tests {
         let hits = [hit("a", 0.9, false, false), hit("b", 0.2, true, true)];
         let off = Face::decide(&Default::default(), false, false, Some("en_US.UTF-8"));
         assert_eq!(off.render(&hits, None), crate::cli::search::render_plain(&hits));
-    }
-
-    #[test]
-    fn a_pulse_is_not_started_when_the_face_is_off() {
-        let off = Face::decide(&Default::default(), false, false, None);
-        assert!(off.pulse("searching").is_none());
     }
 
     /// POSIX precedence, which is not what this used to read.

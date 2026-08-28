@@ -10,6 +10,65 @@ use crate::error::{Error, Result};
 /// the reader has to be able to say "not yet" and keep what it has. Split out of
 /// the request loop because that is the only way to test it against a split that
 /// actually happened rather than one that was imagined.
+/// One line on stderr, redrawn in place and taken back before anything else is
+/// written.
+///
+/// Its own small type because the rule is not about what it says: whatever is
+/// drawn here must be gone before the answer starts, or it survives into the
+/// scrollback the answer is read from tomorrow.
+#[derive(Default)]
+struct Note {
+    drawn: bool,
+}
+
+impl Note {
+    fn show(&mut self, line: Option<String>) {
+        let Some(line) = line else { return };
+        use std::io::Write;
+        eprint!("\r\u{1b}[2K  {line}");
+        std::io::stderr().flush().ok();
+        self.drawn = true;
+    }
+
+    fn clear(&mut self) {
+        if self.drawn {
+            use std::io::Write;
+            eprint!("\r\u{1b}[2K");
+            std::io::stderr().flush().ok();
+            self.drawn = false;
+        }
+    }
+}
+
+/// What a `retrieved` frame says, in words. `None` where the face is off, so a
+/// redirected answer receives none of it.
+fn retrieved_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Option<String> {
+    if !face.on {
+        return None;
+    }
+    let (got, shown) = (data["retrieved"].as_u64()?, data["shown"].as_u64()?);
+    Some(face.lamp_line(
+        crate::cli::face::Lamp::Done,
+        &format!("retrieved {got}, showing {shown}"),
+    ))
+}
+
+/// What a `needs` frame says: the subjects the model named as still missing,
+/// which is the second round beginning.
+fn needs_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Option<String> {
+    if !face.on {
+        return None;
+    }
+    let said: Vec<&str> = data["queries"].as_array()?.iter().filter_map(|v| v.as_str()).collect();
+    if said.is_empty() {
+        return None;
+    }
+    Some(face.lamp_line(
+        crate::cli::face::Lamp::Running,
+        &format!("still missing: {}", said.join(", ")),
+    ))
+}
+
 pub fn frames(buf: &mut String) -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();
     while let Some(end) = buf.find("\n\n") {
@@ -160,10 +219,12 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
     let mut buf = String::new();
     let mut citations = Vec::new();
     let mut said_anything = false;
-    // A strand travelling while nothing has arrived yet — the question is
-    // embedded, the pool assembled, the activation read — and then the readout
-    // takes over, driven by the answer's own arrival rate.
-    let mut waiting = face.pulse("thinking");
+    // What the ask says about itself while nothing has been written yet. It
+    // has emitted `retrieved`, `needs` and `citations` since it was written and
+    // this client dropped all three on the floor, drawing a strand on a timer
+    // over the gap instead. The readout takes over at the first token, driven
+    // by the answer's own arrival rate.
+    let mut note = Note::default();
     let mut readout = face.readout();
     let began = std::time::Instant::now();
     while let Some(chunk) = body.next().await {
@@ -172,12 +233,19 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
         buf.push_str(&decode(&mut pending)?);
         for (name, data) in frames(&mut buf) {
             match name.as_str() {
+                // A retrieval, said. The pool and what came out of it is the
+                // one number a reader can act on: a wide search that showed a
+                // handful is the fan-out working.
+                "retrieved" => note.show(retrieved_line(&face, &data)),
+                // Round two happening, in the model's own words for what the
+                // first round missed.
+                "needs" => note.show(needs_line(&face, &data)),
                 "token" => {
                     if let Some(t) = data["text"].as_str() {
                         use std::io::Write;
-                        // The waiting strand ends the moment there is something
-                        // to show, before a byte of the answer is printed.
-                        waiting.take();
+                        // The line ends the moment there is something to show,
+                        // before a byte of the answer is printed.
+                        note.clear();
                         print!("{}", readout.push(t, began.elapsed().as_millis() as u64));
                         // Flushed per token: an answer that appears a
                         // paragraph at a time is an answer that looks stalled.
@@ -190,6 +258,7 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
                 // that failed look identical on a terminal otherwise.
                 "error" => {
                     use std::io::Write;
+                    note.clear();
                     print!("{}", readout.finish());
                     // Flushed before a word goes to stderr. The erase is a
                     // bare escape with no newline, so stdout's line buffer
@@ -229,6 +298,59 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
 
 #[cfg(test)]
 mod tests {
+
+    /// The frames were being sent and dropped on the floor while a strand
+    /// animated over the gap. What they say is worth more than what it said.
+    #[test]
+    fn a_retrieved_frame_becomes_a_line_a_person_can_read() {
+        let face = crate::cli::face::Face::decide(
+            &crate::cli::args::CliArgs {
+                fancy: crate::cli::args::Fancy::Always,
+                ..Default::default()
+            },
+            true,
+            false,
+            Some("en_US.UTF-8"),
+        );
+        let line = retrieved_line(
+            &face,
+            &serde_json::json!({"round": 1, "retrieved": 24, "shown": 6, "dropped": 18, "cliff_at": 6}),
+        )
+        .expect("a line");
+        assert!(line.contains("24") && line.contains('6'), "{line}");
+        assert!(
+            line.contains("retrieved") && line.contains("showing"),
+            "a number with no word beside it is a number nobody can read: {line}"
+        );
+    }
+
+    #[test]
+    fn a_needs_frame_names_what_the_first_round_missed() {
+        let face = crate::cli::face::Face::decide(
+            &crate::cli::args::CliArgs {
+                fancy: crate::cli::args::Fancy::Always,
+                ..Default::default()
+            },
+            true,
+            false,
+            Some("en_US.UTF-8"),
+        );
+        let line = needs_line(&face, &serde_json::json!({"queries": ["journal rotation policy"]}))
+            .expect("a line");
+        assert!(line.contains("journal rotation policy"), "{line}");
+        // A round that named nothing is not a round that happened.
+        assert!(needs_line(&face, &serde_json::json!({"queries": []})).is_none());
+    }
+
+    /// A redirected answer receives none of it.
+    #[test]
+    fn a_face_that_is_off_says_nothing_between_the_frames() {
+        let face = crate::cli::face::Face::decide(&Default::default(), false, false, None);
+        assert!(
+            retrieved_line(&face, &serde_json::json!({"retrieved": 1, "shown": 1})).is_none()
+        );
+        assert!(needs_line(&face, &serde_json::json!({"queries": ["x"]})).is_none());
+    }
     use super::*;
 
     fn cite(title: Option<&str>, id: &str) -> serde_json::Value {
