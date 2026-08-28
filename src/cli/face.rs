@@ -39,10 +39,18 @@ const ASCII_BLOCKS: [char; 8] = ['.', '.', ':', ':', '-', '=', '#', '#'];
 const BAR_CELLS: usize = 7;
 
 /// `s`, or as much of it as `room` holds with an ellipsis for the rest.
-fn clip(s: &str, room: usize) -> String {
-    match s.chars().count() > room && room > 1 {
-        true => s.chars().take(room - 1).chain(['…']).collect(),
-        false => s.to_string(),
+///
+/// A `room` of one or zero is a real answer rather than a reason to give up: a
+/// narrow terminal is the case clipping exists for, and returning the whole
+/// string there put the one line nobody can widen over the edge.
+pub(crate) fn clip(s: &str, room: usize) -> String {
+    if s.chars().count() <= room {
+        return s.to_string();
+    }
+    match room {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => s.chars().take(room - 1).chain(['…']).collect(),
     }
 }
 
@@ -686,9 +694,13 @@ impl Face {
             // whole 26 crowded the title off its own line and named nothing the
             // eight do not.
             let short: String = h.artifact_id.chars().take(8).collect();
+            // 26, counted off the format below: two of indent, two of rank,
+            // two, the bar's seven, two, three, and the short id's eight. It
+            // was 25, and a title of exactly that length drew a line one column
+            // over the width, which every terminal wraps.
             let title = clip(
                 h.title.as_deref().unwrap_or("(untitled)"),
-                self.width.saturating_sub(25),
+                self.width.saturating_sub(26),
             );
             let (bar, title) = match h.past_cliff {
                 true => (self.ink(DIM, &bar), self.ink(DIM, &title)),
@@ -1119,6 +1131,52 @@ mod tests {
         for line in drawn.lines() {
             assert!(line.chars().count() <= 40, "over the width: {line:?}");
         }
+    }
+
+    /// The title's own budget, at the width where being one column out shows.
+    ///
+    /// A row spends 26 fixed columns around the title; the clip allowed 25, so
+    /// a title of exactly that length drew `width + 1` and wrapped. Walked
+    /// Walked at widths a terminal
+    /// actually has. Below about thirty the rendering has floors that clipping
+    /// a title cannot lift — the row spends 26 columns on the rank, the bar and
+    /// the short id, and `excerpt` will not wrap under 24 — so asserting the
+    /// width there would be asserting a promise this file does not make.
+    #[test]
+    fn a_title_that_fills_the_row_is_clipped_rather_than_wrapped() {
+        for width in [40usize, 60, 80, 120] {
+            let f = Face {
+                on: true,
+                color: false,
+                unicode: true,
+                width,
+            };
+            for len in [width.saturating_sub(26), width, width + 20] {
+                // Wrappable words rather than one long run: the excerpt under
+                // the row is word-wrapped, and an unbreakable token would fail
+                // this on a line the title's budget does not govern.
+                let title: String = "wort ".repeat(width).chars().take(len.max(1)).collect();
+                let drawn = f.render(&[hit(&title, -4.18, false, false)], None);
+                for line in drawn.lines() {
+                    assert!(
+                        line.chars().count() <= width,
+                        "width {width}, title of {len}: over the width: {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The narrow end of `clip`, which used to hand back the whole string.
+    #[test]
+    fn clipping_into_no_room_at_all_still_clips() {
+        assert_eq!(clip("Dienste", 7), "Dienste");
+        assert_eq!(clip("Dienste", 8), "Dienste");
+        assert_eq!(clip("Dienste", 6), "Diens…");
+        assert_eq!(clip("Dienste", 2), "D…");
+        assert_eq!(clip("Dienste", 1), "…");
+        assert_eq!(clip("Dienste", 0), "");
+        assert_eq!(clip("", 0), "");
     }
 
     /// The two lines a list spends are two lines that carry text.
