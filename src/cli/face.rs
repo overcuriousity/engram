@@ -55,6 +55,7 @@ fn clip(s: &str, room: usize) -> String {
 /// `app.css` composes on `#0e1015` and nowhere else.
 const BOLD: &str = "1";
 const DIM: &str = "2";
+const GREEN: &str = "32";
 const CYAN: &str = "36";
 const RESET: &str = "\u{1b}[0m";
 
@@ -96,6 +97,22 @@ pub enum Lamp {
     Stopped,
 }
 
+/// One lamp, drawn. A free function because the capture stages and the search
+/// stages are the same vocabulary seen at two doors, and two tables of glyphs
+/// would drift.
+fn lamp_glyph(l: Lamp, unicode: bool) -> char {
+    match (l, unicode) {
+        (Lamp::Waiting, true) => '·',
+        (Lamp::Running, true) => '◉',
+        (Lamp::Done, true) => '●',
+        (Lamp::Stopped, true) => '×',
+        (Lamp::Waiting, false) => '.',
+        (Lamp::Running, false) => 'o',
+        (Lamp::Done, false) => 'O',
+        (Lamp::Stopped, false) => 'x',
+    }
+}
+
 /// Extraction, segmentation and embedding — the three stages `-c --watch`
 /// follows, drawn from the one status the server reports.
 ///
@@ -129,20 +146,10 @@ impl Lamps {
     /// One line, drawn and said. The words are the claim; the glyphs are how
     /// you see at a glance which of the three is moving.
     pub fn render(&self, unicode: bool) -> String {
-        let glyph = |l: Lamp| match (l, unicode) {
-            (Lamp::Waiting, true) => '·',
-            (Lamp::Running, true) => '◉',
-            (Lamp::Done, true) => '●',
-            (Lamp::Stopped, true) => '×',
-            (Lamp::Waiting, false) => '.',
-            (Lamp::Running, false) => 'o',
-            (Lamp::Done, false) => 'O',
-            (Lamp::Stopped, false) => 'x',
-        };
         ["extract", "segment", "embed"]
             .iter()
             .zip(self.0)
-            .map(|(name, lamp)| format!("{} {name}", glyph(lamp)))
+            .map(|(name, lamp)| format!("{} {name}", lamp_glyph(lamp, unicode)))
             .collect::<Vec<_>>()
             .join("  ")
     }
@@ -262,6 +269,121 @@ impl Track {
             std::io::stderr().flush().ok();
             self.drawn = false;
         }
+    }
+}
+
+/// How long a search may take before anything at all is drawn.
+///
+/// Most searches on a warm box come back inside this, and a display that
+/// appears and disappears inside a tenth of a second is worse than no display:
+/// it reads as a flicker, not as progress. Nothing here delays a result — the
+/// floor decides what is drawn, never when the answer is printed.
+const QUIET_FLOOR_MS: u128 = 120;
+
+/// The stages of one search, redrawn in place as the server names them.
+///
+/// Holds no timer and invents no frames: it is redrawn from events that
+/// arrived, so it cannot run ahead of the work. The stages themselves are the
+/// server's to name — whether a rerank happens is decided there — so a lamp is
+/// never drawn for work that is not going to run.
+pub struct Stages {
+    on: bool,
+    color: bool,
+    unicode: bool,
+    names: Vec<crate::core::search::SearchStage>,
+    began: std::time::Instant,
+    drawn: bool,
+}
+
+impl Stages {
+    /// The stages this search said it will pass through.
+    pub fn start(&mut self, names: &[crate::core::search::SearchStage]) {
+        self.names = names.to_vec();
+    }
+
+    /// What this frame would draw, or `None` — the face is off, or the search
+    /// is still inside the quiet floor.
+    ///
+    /// `elapsed_ms` is passed rather than read so the floor is testable without
+    /// a clock, in the way `Face::decide` takes its facts as arguments.
+    pub fn at_after(
+        &self,
+        now: crate::core::search::SearchStage,
+        elapsed_ms: u128,
+    ) -> Option<String> {
+        use crate::core::search::SearchStage;
+        if !self.on || self.names.is_empty() || elapsed_ms < QUIET_FLOOR_MS {
+            return None;
+        }
+        let mut reached = false;
+        Some(
+            self.names
+                .iter()
+                .map(|s| {
+                    // Everything before the running stage is finished, and
+                    // everything after it is not: a client that started
+                    // watching late has missed the transitions and must still
+                    // draw the truth, exactly as `Lamps::of` does.
+                    let lamp = match (*s == now, reached) {
+                        (true, _) => {
+                            reached = true;
+                            Lamp::Running
+                        }
+                        (false, false) => Lamp::Done,
+                        (false, true) => Lamp::Waiting,
+                    };
+                    let name = match s {
+                        SearchStage::Embed => "embed",
+                        SearchStage::Retrieve => "retrieve",
+                        SearchStage::Rerank => "rerank",
+                    };
+                    // Drawn *and* said, like every other lamp in this file.
+                    let cell = format!("{} {name}", lamp_glyph(lamp, self.unicode));
+                    let code = match lamp {
+                        Lamp::Running => CYAN,
+                        Lamp::Done => GREEN,
+                        _ => DIM,
+                    };
+                    match self.color {
+                        true => format!("\u{1b}[{code}m{cell}{RESET}"),
+                        false => cell,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("   "),
+        )
+    }
+
+    /// Draw this frame's stage over the last one.
+    ///
+    /// On stderr and by rewriting the current line, for the reason `Track` is:
+    /// the results this precedes have to stay in scrollback and stay pipeable.
+    pub fn show(&mut self, now: crate::core::search::SearchStage) {
+        let Some(line) = self.at_after(now, self.began.elapsed().as_millis()) else {
+            return;
+        };
+        use std::io::Write;
+        eprint!("\r\u{1b}[2K  {line}");
+        std::io::stderr().flush().ok();
+        self.drawn = true;
+    }
+
+    /// Take the line back before anything else prints.
+    pub fn clear(&mut self) {
+        if self.drawn {
+            use std::io::Write;
+            eprint!("\r\u{1b}[2K");
+            std::io::stderr().flush().ok();
+            self.drawn = false;
+        }
+    }
+}
+
+/// Taken back on drop, the way `Fill` is: a search that fails partway leaves
+/// its error under a stage line describing work that stopped.
+impl Drop for Stages {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
@@ -578,6 +700,18 @@ impl Face {
             marks: Vec::new(),
             col: 0,
             tail: 0,
+        }
+    }
+
+    /// The stages of one search, for a client reading the streaming door.
+    pub fn stages(&self) -> Stages {
+        Stages {
+            on: self.on,
+            color: self.color,
+            unicode: self.unicode,
+            names: Vec::new(),
+            began: std::time::Instant::now(),
+            drawn: false,
         }
     }
 
@@ -1112,6 +1246,53 @@ mod tests {
     fn ink_is_a_no_op_without_colour() {
         assert_eq!(drawn(false).ink(CYAN, "x"), "x");
         assert_eq!(drawn(true).ink(CYAN, "x"), "\u{1b}[36mx\u{1b}[0m");
+    }
+
+    /// The stage line is drawn and said, like every other lamp in this file.
+    #[test]
+    fn a_stage_line_names_every_stage_and_marks_the_one_that_is_running() {
+        use crate::core::search::SearchStage::*;
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let mut s = f.stages();
+        s.start(&[Embed, Retrieve, Rerank]);
+        let line = s.at_after(Retrieve, 500).expect("a line");
+        assert!(line.contains("embed") && line.contains("retrieve") && line.contains("rerank"));
+        assert!(line.contains('●'), "the stage before it is finished: {line}");
+        assert!(line.contains('◉'), "the stage running: {line}");
+        assert!(line.contains('·'), "the stage still to come: {line}");
+    }
+
+    /// The client draws what it was told and nothing more: a search that named
+    /// two stages never grows a third.
+    #[test]
+    fn only_the_stages_the_server_named_are_drawn() {
+        use crate::core::search::SearchStage::*;
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let mut s = f.stages();
+        s.start(&[Embed, Retrieve]);
+        let line = s.at_after(Retrieve, 500).expect("a line");
+        assert!(!line.contains("rerank"), "{line}");
+    }
+
+    /// Most searches come back inside the floor, and a display that flickers
+    /// on and off is worse than none.
+    #[test]
+    fn a_search_answered_inside_the_quiet_floor_draws_nothing() {
+        use crate::core::search::SearchStage::*;
+        let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
+        let mut s = f.stages();
+        s.start(&[Embed, Retrieve]);
+        assert!(s.at_after(Embed, 40).is_none());
+        assert!(s.at_after(Retrieve, 300).is_some());
+    }
+
+    #[test]
+    fn a_face_that_is_off_draws_no_stage_at_all() {
+        use crate::core::search::SearchStage::*;
+        let off = Face::decide(&Default::default(), false, false, None);
+        let mut s = off.stages();
+        s.start(&[Embed, Retrieve]);
+        assert!(s.at_after(Embed, 5_000).is_none());
     }
 
     /// `NO_COLOR` is about ink. It used to take the lamps, the upload track and
