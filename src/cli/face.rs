@@ -10,6 +10,11 @@ use crate::core::search::SearchResult;
 
 pub struct Face {
     pub on: bool,
+    /// The SGR escapes. Separate from `on` because `NO_COLOR` is a statement
+    /// about ink and nothing else: the lamps, the upload track and the layout
+    /// are not colour, and folding the two together took the whole progress
+    /// display away from everyone who had ever set the variable.
+    pub color: bool,
     pub unicode: bool,
     pub width: usize,
 }
@@ -401,10 +406,14 @@ impl Face {
             Fancy::Never => false,
             // `--json` is off as well: its reader is a machine even when a
             // person is watching it arrive.
-            Fancy::Auto => is_tty && !no_color && !cli.plain && !cli.json,
+            Fancy::Auto => is_tty && !cli.plain && !cli.json,
         };
         Face {
             on,
+            // Never ink where nothing is drawn at all, and never against
+            // `NO_COLOR` however the drawn form was asked for — `--fancy
+            // always` says draw, which is not the same as saying colour.
+            color: on && !no_color,
             unicode: lang.is_some_and(|l| l.to_ascii_uppercase().contains("UTF-8")),
             width: crossterm::terminal::size()
                 .map(|(w, _)| w as usize)
@@ -657,10 +666,6 @@ mod tests {
             !Face::decide(&Default::default(), false, false, Some("en_US.UTF-8")).on,
             "a pipe"
         );
-        assert!(
-            !Face::decide(&Default::default(), true, true, Some("en_US.UTF-8")).on,
-            "NO_COLOR"
-        );
         let json = CliArgs {
             json: true,
             ..Default::default()
@@ -822,6 +827,7 @@ mod tests {
     fn a_long_line_is_wrapped_onto_the_budget_rather_than_cut_at_the_edge() {
         let f = Face {
             on: true,
+            color: false,
             unicode: true,
             width: 40,
         };
@@ -914,6 +920,53 @@ mod tests {
         // And the whole point of reading it: the glyphs follow.
         assert!(super::Face::decide(&always(), true, false, Some("UTF-8")).unicode);
         assert!(!super::Face::decide(&always(), true, false, Some("C")).unicode);
+    }
+
+    /// `NO_COLOR` is about ink. It used to take the lamps, the upload track and
+    /// the layout with it, so `NO_COLOR=1 engram -c big.pdf --watch` followed a
+    /// capture with no display of any kind.
+    #[test]
+    fn no_color_keeps_the_layout_and_drops_only_the_ink() {
+        let f = Face::decide(&Default::default(), true, true, Some("en_US.UTF-8"));
+        assert!(f.on, "the lamps and the layout are not colour");
+        assert!(!f.color);
+    }
+
+    /// The other direction, and the worse one: the flag that means "draw"
+    /// silently overrode a preference that was never about drawing.
+    #[test]
+    fn asking_for_the_drawn_form_does_not_override_no_color() {
+        let f = Face::decide(&always(), false, true, Some("en_US.UTF-8"));
+        assert!(f.on);
+        assert!(!f.color, "--fancy always says draw, not colour");
+    }
+
+    /// Everywhere the face is off there is no ink either: `color` can never be
+    /// the one thing left on when nothing is being drawn.
+    #[test]
+    fn nothing_is_drawn_and_nothing_is_coloured() {
+        let plain = CliArgs {
+            plain: true,
+            ..Default::default()
+        };
+        let json = CliArgs {
+            json: true,
+            ..Default::default()
+        };
+        let never = CliArgs {
+            fancy: Fancy::Never,
+            ..Default::default()
+        };
+        for (args, tty) in [
+            (plain, true),
+            (json, true),
+            (CliArgs::default(), false),
+            (never, true),
+        ] {
+            let f = Face::decide(&args, tty, false, Some("en_US.UTF-8"));
+            assert!(!f.on);
+            assert!(!f.color);
+        }
     }
 }
 
