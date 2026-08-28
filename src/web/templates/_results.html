@@ -59,7 +59,7 @@
         {% if r.in_sitting %}
         <span class="badge" title="Moved up: you have been in this one already today">primed · seen</span>
         {% else %}
-        <span class="badge" title="Moved up: you reach this one often">primed</span>
+        <span class="badge" title="Moved up: opened, confirmed or cited more than the hits it passed">primed</span>
         {% endif %}
         {% endif %}
         {% if r.model_written %}
@@ -89,8 +89,10 @@
       <div class="rail-snippet">{{ r.snippet }}</div>
       {# The badges above say what a result *is*. This says why it is *here* —
          one quiet line rather than a row of chips, because "moved up because
-         you reach this one often" is a sentence and `primed` is a word you
-         have to already know.
+         you opened this more" is a sentence and `primed` is a word you have
+         to already know. The sentence names the events it rests on — opened,
+         confirmed, cited — because those are what raise activation; "you
+         reach this one often" was said of things merely listed often.
 
          No new data and no new query: every one of these already reached the
          template, as a badge with the explanation hidden in a title attribute
@@ -98,7 +100,7 @@
          about. The badges stay, as the scannable form. #}
       {% if r.primed || r.weak || r.model_written || r.why_ranked.is_some() %}
       <p class="rail-why">
-        {%- if r.primed %}{% if r.in_sitting %}moved up — you have been in this one already{% else %}moved up — you reach this one often{% endif %}{% endif -%}
+        {%- if r.primed %}{% if r.in_sitting %}moved up — you have been in this one already{% else %}moved up — opened, confirmed or cited more than the hits it passed{% endif %}{% endif -%}
         {%- if r.weak %}{% if r.primed %} · {% endif %}a loose match{% endif -%}
         {%- if r.model_written %}{% if r.primed || r.weak %} · {% endif %}written by a model{% if r.origin_count > 0 %} from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}{% endif %}{% endif -%}
         {#- The ranking's own answer, on the same line rather than a second one:

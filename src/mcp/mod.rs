@@ -120,7 +120,9 @@ pub fn format_search_results(
                 Some(ArtifactStatus::Active) | None => {}
             }
             if r.primed {
-                facts.push("lifted: reached often".to_string());
+                facts.push(
+                    "lifted: opened, confirmed or cited more than what it passed".to_string(),
+                );
             }
             if r.in_sitting {
                 facts.push("lifted: open in this sitting".to_string());
@@ -1127,7 +1129,10 @@ mod tests {
     fn a_lifted_result_says_why_it_moved_up() {
         let mut p = hit("often", None);
         p.primed = true;
-        assert!(format_search_results(&[p], None).contains("lifted: reached often"));
+        assert!(
+            format_search_results(&[p], None)
+                .contains("lifted: opened, confirmed or cited more than what it passed")
+        );
         let mut s = hit("open", None);
         s.in_sitting = true;
         assert!(format_search_results(&[s], None).contains("lifted: open in this sitting"));

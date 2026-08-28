@@ -7053,7 +7053,10 @@ mod tests {
         .render()
         .unwrap();
         assert!(body.contains("rail-why"), "no provenance line: {body}");
-        assert!(body.contains("you reach this one often"), "{body}");
+        assert!(
+            body.contains("opened, confirmed or cited more than the hits it passed"),
+            "{body}"
+        );
     }
 
     #[test]

@@ -171,13 +171,15 @@ pub struct SearchResult {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub origin_count: usize,
     /// This hit moved up because it is more accessible than the ones it passed
-    /// — recently and often reached. Bounded by `associate.prime_lift`, never
-    /// past rank 1, and said out loud wherever it happened: nothing about the
-    /// order is silent.
+    /// — opened, confirmed or cited more, and more recently. Never for being
+    /// listed: activation above the capture baseline is what priming reads,
+    /// and only use raises it (`engagement`). Bounded by `associate.prime_lift`,
+    /// never past rank 1, and said out loud wherever it happened: nothing about
+    /// the order is silent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primed: bool,
     /// This sitting has already been in this artifact. Said beside `primed`,
-    /// because "you were just reading this" and "this is reached often" are
+    /// because "you were just reading this" and "this is used often" are
     /// two different reasons to be higher up the list and the page should not
     /// pass one off as the other.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -476,6 +478,25 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
             }
         }
     }
+}
+
+/// What every artifact's activation starts at — `schema.sql`'s default — and
+/// decays from whether or not anything ever happens to it.
+const ACTIVATION_BASELINE: f64 = 1.0;
+
+/// Activation above the capture baseline: what use has added, and nothing else.
+///
+/// A never-opened artifact carries the baseline, decaying. Read raw, a fresh
+/// one at `1.0` out-activates an old one at `0.25` by more than any margin,
+/// and priming then said "you reach this one often" of something nobody had
+/// reached. With `retrieved` at zero only opened, confirmed and cited raise
+/// activation, so above the baseline it is engagement by construction — and a
+/// hit that has none cannot be primed.
+fn engagement(activation: HashMap<String, f64>) -> HashMap<String, f64> {
+    activation
+        .into_iter()
+        .map(|(id, v)| (id, (v - ACTIVATION_BASELINE).max(0.0)))
+        .collect()
 }
 
 /// Move hits up on activation, within hard bounds.
@@ -1482,7 +1503,7 @@ impl Core {
         {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            let activation = self.activation_now(&ids).await;
+            let activation = engagement(self.activation_now(&ids).await);
             // Off by default and empty when off: this is the only part of the
             // sitting that moves an order, and the same query ranking
             // differently in two sittings is what is disorienting about it.
@@ -1971,7 +1992,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_deliberate_search_makes_what_it_returned_more_accessible() {
+    async fn a_deliberate_search_leaves_what_it_returned_no_more_accessible() {
+        // Being listed is exposure, not use. At `retrieved = 1.0` this was the
+        // strongest signal there was — it happened to every hit of every
+        // search — and it primed, and promoted, artifacts nobody had opened.
+        // The path still runs (`[learn]` on, a marked search); the shipped
+        // weight is what makes it raise nothing.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
@@ -1993,7 +2019,8 @@ mod tests {
             .await
             .unwrap()[&id]
             .0;
-        assert!(after > before, "a retrieval raised nothing");
+        assert_eq!(after, before, "a retrieval raised activation");
+        assert_eq!(core.activation.retrieved, 0.0, "the shipped weight");
     }
 
     #[tokio::test]
@@ -2063,7 +2090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_an_artifact_makes_it_more_accessible_by_less_than_a_retrieval() {
+    async fn opening_an_artifact_makes_it_more_accessible_by_the_unit_the_rest_are_measured_in() {
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
@@ -2088,11 +2115,12 @@ mod tests {
         // re-reads it through decay, so the error grows with wall-clock time
         // between the artifact's creation and the bump (5.7e-7 after one
         // second, 1.15e-6 after two) and a loaded machine can straddle 1e-6.
-        // 1e-3 still separates `opened` (0.5) from `retrieved` (1.0) by three
-        // orders of magnitude, so it cannot mask a real regression — don't
-        // tighten it back without addressing the decay re-read instead.
+        // 1e-3 still separates `opened` (1.0) from nothing by three orders of
+        // magnitude, so it cannot mask a real regression — don't tighten it
+        // back without addressing the decay re-read instead.
         assert!((after - before - core.activation.opened).abs() < 1e-3);
-        assert!(core.activation.opened < core.activation.retrieved);
+        assert_eq!(core.activation.opened, 1.0);
+        assert!(core.activation.retrieved < core.activation.opened);
     }
 
     #[tokio::test]
@@ -3045,6 +3073,37 @@ mod tests {
     }
 
     #[test]
+    fn a_never_opened_artifact_has_no_engagement_however_fresh_it_is() {
+        // Fresh at the baseline, old and decayed, and opened once: only the
+        // last has anything priming may read. The report's `primed` badge on
+        // a note that had only ever been listed came from reading the first
+        // two raw.
+        let acts = HashMap::from([
+            ("fresh".to_string(), 1.0),
+            ("old".to_string(), 0.25),
+            ("opened".to_string(), 1.8),
+        ]);
+        let e = engagement(acts);
+        assert_eq!(e["fresh"], 0.0);
+        assert_eq!(e["old"], 0.0);
+        assert!((e["opened"] - 0.8).abs() < 1e-9);
+        let out = prime(
+            ranked(&["a", "fresh", "old"]),
+            &engagement(HashMap::from([
+                ("fresh".to_string(), 1.0),
+                ("old".to_string(), 0.25),
+            ])),
+            0.5,
+            2,
+            &Default::default(),
+        );
+        assert!(
+            out.iter().all(|r| !r.primed),
+            "primed without ever being opened"
+        );
+    }
+
+    #[test]
     fn a_hit_climbs_exactly_the_lift_and_no_further_however_long_the_list_is() {
         // An insertion-sort-style implementation can let a row that already
         // spent its climb budget be mistaken for a fresh row once something
@@ -3165,9 +3224,10 @@ mod tests {
         // they opt in." With `[learn]` off, a large activation must not move
         // the ranked order — the order must be byte-identical to
         // `prime_lift = 0`, not merely bounded.
-        let core = test_core().await;
+        let mut core = test_core().await;
         assert!(!core.learn.enabled);
-        assert_eq!(core.associate.prime_lift, 2, "the shipped default");
+        // Priming on, so that `[learn]` off is the only thing holding it.
+        core.associate.prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();

@@ -472,9 +472,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retrieval_alone_never_promotes_but_one_open_afterwards_does() {
-        // The threshold is checked at the opened bump, not the retrieved one:
-        // ten retrievals leave the window verbatim; the first open promotes.
+    async fn twenty_listings_and_one_open_never_promote_but_a_confirmation_does() {
+        // "Rewritten once you have actually used it." Exposure must not fill
+        // the tank for one touch to pull the trigger: at `retrieved = 0.1`,
+        // twenty listings plus one open reached the threshold, and at `1.0`
+        // one listing did. Twenty retrievals and an open leave the window
+        // verbatim; a confirmation — the strong signal — promotes it.
         let (core, corpus, p) = earned_with_one_passage().await;
         let ids = vec![p.clone()];
         // Stamped now: `mark_artifact_seen` reads the clock, and a bump from
@@ -483,18 +486,24 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        for _ in 0..10 {
+        for _ in 0..20 {
             core.store
                 .bump_activation(&ids, core.activation.retrieved, 14.0, now)
                 .await
                 .unwrap();
         }
-        assert_eq!(
-            core.store.segment_state(&corpus, 0).await.unwrap(),
-            Some(SegmentState::Verbatim)
-        );
         core.mark_artifact_seen(&p);
         core.background.wait_idle().await;
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim),
+            "listed twenty times and opened once, and that promoted it"
+        );
+        core.store
+            .bump_activation(&ids, core.activation.confirmed, 14.0, now)
+            .await
+            .unwrap();
+        assert!(maybe_promote(&core, &ids, now).await.unwrap() > 0);
         assert_eq!(
             core.store.segment_state(&corpus, 0).await.unwrap(),
             Some(SegmentState::Pending)

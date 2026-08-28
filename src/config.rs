@@ -253,7 +253,9 @@ pub struct AssociateConfig {
     /// How much more activated a hit must be than the one above it to pass it.
     /// Normalised within one result list, so this is a fraction, not a weight.
     pub prime_margin: f64,
-    /// Positions a hit may climb. `0` turns priming off.
+    /// Positions a hit may climb. `0` turns priming off, and it ships off: an
+    /// unmeasured feature that reorders results and makes a claim about the
+    /// person should not be on until the harness has run with it off and on.
     pub prime_lift: usize,
 }
 
@@ -270,7 +272,7 @@ impl Default for AssociateConfig {
             spread_from: 3,
             spread_max: 3,
             prime_margin: 0.5,
-            prime_lift: 2,
+            prime_lift: 0,
         }
     }
 }
@@ -279,10 +281,12 @@ impl Default for AssociateConfig {
 /// artifact has earned a second one.
 ///
 /// `activation_above` is read against `[activation]`: baseline `1.0`,
-/// `retrieved = 1.0`, `opened = 0.5`, `confirmed = 3.0`, half-life 14 days.
-/// Checked with `>=` after the bump, decay folded in, and only at the two
-/// engagement bumps — opened and confirmed — never at retrieved, so a passage
-/// that merely keeps appearing in result lists is never promoted.
+/// `retrieved = 0`, `opened = 1.0`, `confirmed = 3.0`, half-life 14 days — so
+/// `4.0` is one confirmation, or three openings. Checked with `>=` after the
+/// bump, decay folded in, and only at the engagement bumps — opened, confirmed,
+/// cited — never at retrieved. With `retrieved` at zero that is a guarantee
+/// rather than a habit: a passage that merely keeps appearing in result lists
+/// cannot fill the tank for one open to fire, however often it is listed.
 ///
 /// `resynthesize_after_unconfirmed` is the `eager` counterpart: an artifact
 /// shown this many times with no confirmation recorded against it is
@@ -341,9 +345,13 @@ impl Default for PursuitConfig {
 #[serde(default)]
 pub struct ActivationConfig {
     pub half_life_days: f64,
-    /// Returned by a search the caller marked as seen.
+    /// Returned by a search the caller marked as seen. Zero: being listed is
+    /// exposure, and activation is read — by priming, by promotion — as use.
+    /// At `1.0` it was the strongest per-event signal there was, because it
+    /// was the most common thing that happened to an artifact, and "you reach
+    /// this one often" was said of artifacts nobody had ever opened.
     pub retrieved: f64,
-    /// Opened in the detail pane.
+    /// Opened in the detail pane. The unit the others are measured in.
     pub opened: f64,
     /// Judged the answer to a real question. The strong signal.
     pub confirmed: f64,
@@ -357,8 +365,8 @@ impl Default for ActivationConfig {
     fn default() -> Self {
         Self {
             half_life_days: 14.0,
-            retrieved: 1.0,
-            opened: 0.5,
+            retrieved: 0.0,
+            opened: 1.0,
             confirmed: 3.0,
             cited: 0.5,
         }
@@ -2969,10 +2977,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         assert_eq!(a.half_life_days, 30.0);
         assert_eq!((a.show_min, a.judge_min, a.prune_below), (2.0, 4.0, 0.5));
         assert_eq!((a.spread_from, a.spread_max), (3, 3));
-        assert_eq!((a.prime_margin, a.prime_lift), (0.5, 2));
+        assert_eq!((a.prime_margin, a.prime_lift), (0.5, 0));
         let v = ActivationConfig::default();
         assert_eq!(v.half_life_days, 14.0);
-        assert_eq!((v.retrieved, v.opened, v.confirmed), (1.0, 0.5, 3.0));
+        assert_eq!((v.retrieved, v.opened, v.confirmed), (0.0, 1.0, 3.0));
     }
 
     #[test]

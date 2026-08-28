@@ -512,18 +512,24 @@ spread_from = 3
 spread_max = 3
 # How much more accessible a hit must be than the one above it to pass it, as a
 # fraction of the most accessible hit in that list; and how many places it may
-# climb. 0 turns priming off. Neither default moves until the eval harness has
-# been run with it off and on against the frozen corpus.
+# climb. 0 turns priming off, and it ships off: a feature that reorders results
+# and says something about you does not go on until the eval harness has been
+# run with it off and on against the frozen corpus. Accessibility here is use
+# — opened, confirmed, cited — never how often something was listed.
 prime_margin = 0.5
-prime_lift = 2
+prime_lift = 0
 
 [activation]
 half_life_days = 14
-# Returned by a deliberate search, opened in the pane, judged the answer. Being
-# surfaced *because* of activation — resurfaced, or recalled by a link — raises
-# nothing: that is the loop this design exists to close.
-retrieved = 1.0
-opened = 0.5
+# Opened in the pane, judged the answer. Being returned by a search is
+# exposure, not use, and weighs nothing: at 1.0 it was the strongest signal
+# there was, being the most common, and "you reach this one often" was said of
+# artifacts nobody had opened. Above zero, twenty listings fill the tank for one
+# open to fire a rewrite. Being surfaced *because* of activation — resurfaced,
+# or recalled by a link — raises nothing either: that is the loop this design
+# exists to close.
+retrieved = 0.0
+opened = 1.0
 confirmed = 3.0
 # Cited by an answer /ask wrote. A model's use of an artifact, not a person's,
 # which is why it weighs what an open weighs and not what a confirmation does:
@@ -534,10 +540,10 @@ cited = 0.5
 # ── Promotion ────────────────────────────────────────────────────────────────
 # At synthesis = "earned", when a passage has earned its window a synthesis
 # call. Read against [activation]: baseline 1.0 at capture, so 4.0 is one
-# confirmation after a retrieval and an open, or about three engaged openings.
-# Checked only when a passage is opened, confirmed or cited by an answer —
-# never when it merely appears in results — and the window's new artifacts inherit the access the
-# passages earned.
+# confirmation, or three openings. Checked only when a passage is opened,
+# confirmed or cited by an answer — never when it merely appears in results,
+# which with retrieved = 0 also raises nothing — and the window's new
+# artifacts inherit the access the passages earned.
 [promote]
 activation_above = 4.0
 # At synthesis = "eager": an artifact shown this many times with no
