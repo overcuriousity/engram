@@ -101,13 +101,13 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
         ));
         for f in failed.iter().take(10) {
             let stage = f["stage"].as_str().unwrap_or("?");
-            let subject: String = f["subject_id"]
+            let subject: String = f["target_id"]
                 .as_str()
                 .unwrap_or("")
                 .chars()
                 .take(8)
                 .collect();
-            let why = f["error"].as_str().unwrap_or("no reason recorded");
+            let why = f["last_error"].as_str().unwrap_or("no reason recorded");
             out.push_str(&format!("     {stage:<8} {subject:<10} {why}\n"));
         }
     }
@@ -205,13 +205,25 @@ mod tests {
         assert!(out.contains("3 artifacts written from pursuits"), "{out}");
     }
 
+    /// Serialised from the struct the server actually sends, not from a
+    /// hand-written object: the keys drifted once already, and a fixture that
+    /// spells them itself cannot notice.
+    fn failed(target_id: &str, last_error: Option<&str>) -> serde_json::Value {
+        serde_json::to_value(crate::store::jobs::FailedJob {
+            id: 1,
+            stage: "embed".into(),
+            target_id: target_id.into(),
+            attempts: 5,
+            last_error: last_error.map(str::to_string),
+        })
+        .expect("a failed job serialises")
+    }
+
     /// A failed job nobody can name is a failed job nobody can retry.
     #[test]
     fn a_failed_job_is_named_and_not_only_counted() {
         let mut b = body(serde_json::Value::Null);
-        b["failed"] = serde_json::json!([
-            {"stage": "embed", "subject_id": "01J8Z4K2QW7NR3T9", "error": "connection refused"}
-        ]);
+        b["failed"] = serde_json::json!([failed("01J8Z4K2QW7NR3T9", Some("connection refused"))]);
         let out = render(&face(), &endpoint(), &b);
         assert!(out.contains("1 failed jobs"), "{out}");
         assert!(out.contains("01J8Z4K2"), "{out}");
@@ -228,9 +240,7 @@ mod tests {
         let mut b = body(serde_json::json!({
             "pursuits_open": 7, "pursuits_unsatisfied": 4, "from_pursuits": 3, "gaps_open": 11
         }));
-        b["failed"] = serde_json::json!([
-            {"stage": "embed", "subject_id": "01J8Z4K2", "error": "connection refused"}
-        ]);
+        b["failed"] = serde_json::json!([failed("01J8Z4K2", Some("connection refused"))]);
         let stripped = crate::cli::face::strip_sgr(&render(&face(), &endpoint(), &b));
         assert_eq!(stripped, render(&bare, &endpoint(), &b));
     }
