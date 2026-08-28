@@ -5,6 +5,10 @@ use std::path::Path;
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub server: ServerConfig,
+    /// Defaulted rather than required: every field under it already has a
+    /// default, and the file that names five sections and one mode should not
+    /// be refused over an empty table naming none of them.
+    #[serde(default)]
     pub store: StoreConfig,
     pub vector: VectorConfig,
     pub infer: InferConfig,
@@ -125,12 +129,65 @@ pub struct PacingConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct LearnConfig {
+    /// The named bundle. Every key it stands for is still a key, and a key
+    /// written in the file wins over what the mode would have said.
+    pub mode: LearnMode,
     pub enabled: bool,
+    /// What the mode decided, in the order it decided it, for
+    /// `--print-config` to show. Not a setting: it is filled in during
+    /// `load` and skipped by deserialization, so a file naming it is
+    /// ignored the way any unknown key is.
+    #[serde(skip)]
+    pub resolved: Vec<(&'static str, String)>,
 }
 
 impl Default for LearnConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            mode: LearnMode::default(),
+            enabled: true,
+            resolved: Vec::new(),
+        }
+    }
+}
+
+/// The dial: one word for a coherent bundle of the keys below it.
+///
+/// The keys did not go anywhere. What the mode does is decide the ones the
+/// file does not, which is what makes `off` a line rather than a page: the
+/// half-dozen settings that have to agree for "learn nothing" to mean
+/// anything are settings that only ever agreed by hand before, and the
+/// combinations that did not agree were refused at startup or warned about.
+/// A mode cannot disagree with itself.
+///
+/// `learning` is the one that did not exist. It is the mode the roadmap's own
+/// rule asks for — a default that changes ranking moves only after the harness
+/// has been run — and it is the only way to run the harness honestly: the log
+/// is written, activation and links accumulate, and nothing reads any of it on
+/// the query path, so a sweep compares a ranking against itself rather than
+/// against a ranking the sweep's own inputs have already moved.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LearnMode {
+    /// Record nothing, learn nothing, prime nothing, promote nothing;
+    /// consolidate only the exact and near duplicates capture finds for a
+    /// hash. What is left is capture, hybrid search and ask.
+    Off,
+    /// Record and accumulate, read none of it on the query path. The mode to
+    /// run the harness in before any of this is allowed to move a rank.
+    Learning,
+    /// Today's defaults, unchanged.
+    #[default]
+    Full,
+}
+
+impl LearnMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LearnMode::Off => "off",
+            LearnMode::Learning => "learning",
+            LearnMode::Full => "full",
+        }
     }
 }
 
@@ -1854,7 +1911,8 @@ impl Config {
             )
             .build()?;
         Self::refuse_removed_keys(&raw)?;
-        let mut cfg: Config = raw.try_deserialize()?;
+        let mut cfg: Config = raw.clone().try_deserialize()?;
+        cfg.apply_learn_mode(&raw);
         cfg.normalize();
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
@@ -1904,6 +1962,84 @@ impl Config {
              setting that says \"keep none of this\" into a setting that says nothing.",
             found.join("\n")
         )))
+    }
+
+    /// The dial, resolved to the keys it stands for.
+    ///
+    /// Runs after deserialization and before validation, so what the mode
+    /// decides is what the rest of the file is checked against: `off` turns
+    /// synthesis off, and the config that names five sections and one mode is
+    /// then a config that starts, rather than one refused for having no
+    /// `[infer.synthesize]` behind a promotion that can no longer happen.
+    ///
+    /// A key written in the file — or given in the environment, which lands in
+    /// the same merged source — is never touched. That is the whole of the
+    /// promise that nobody loses a knob: the mode fills in what was left
+    /// unsaid, and says so afterwards through `--print-config`.
+    ///
+    /// `full` decides nothing, because `full` is the defaults. That is not a
+    /// special case so much as the definition: the mode exists to describe the
+    /// two bundles that were previously a page of agreeing settings.
+    fn apply_learn_mode(&mut self, raw: &config::Config) {
+        let mut resolved: Vec<(&'static str, String)> = Vec::new();
+        macro_rules! resolve {
+            ($key:literal, $field:expr, $value:expr) => {
+                if raw.get::<config::Value>($key).is_err() {
+                    $field = $value;
+                    resolved.push(($key, format!("{}", $field)));
+                }
+            };
+        }
+        match self.learn.mode {
+            LearnMode::Full => {}
+            LearnMode::Off | LearnMode::Learning => {
+                // Nothing reads the log on the query path in either mode.
+                // Priming and the associative spread are the two things that
+                // reorder or extend a result list from what was learned; the
+                // sitting's lift is the third, and the offers under the search
+                // box are read from the same clusters.
+                resolve!("associate.spread_max", self.associate.spread_max, 0);
+                resolve!("associate.prime_lift", self.associate.prime_lift, 0);
+                resolve!("sitting.prime", self.sitting.prime, false);
+                resolve!("recommend.enabled", self.recommend.enabled, false);
+                // Promotion is the other reader. It is gated on a threshold
+                // rather than a switch, so the way to say "never" in the keys
+                // that exist is a threshold no activation reaches — which is
+                // also what `--print-config` then shows, in the units the
+                // operator would have typed.
+                resolve!(
+                    "promote.activation_above",
+                    self.promote.activation_above,
+                    f64::INFINITY
+                );
+                resolve!(
+                    "promote.resynthesize_after_unconfirmed",
+                    self.promote.resynthesize_after_unconfirmed,
+                    0
+                );
+            }
+        }
+        match self.learn.mode {
+            LearnMode::Off => {
+                resolve!("learn.enabled", self.learn.enabled, false);
+                // Capture-time near-duplicate detection is not this switch: it
+                // costs a hash and stays on. What stops is the background
+                // sweep, which is a stream of model calls about pairs.
+                resolve!("consolidate.enabled", self.consolidate.enabled, false);
+                // With nothing promoted, `earned` is `off` with a synthesizer
+                // requirement attached. Resolving it here is what lets the
+                // five-section config start.
+                if raw.get::<config::Value>("infer.synthesis").is_err() {
+                    self.infer.synthesis = SynthesisMode::Off;
+                    resolved.push(("infer.synthesis", SynthesisMode::Off.as_str().into()));
+                }
+            }
+            LearnMode::Learning => {
+                resolve!("learn.enabled", self.learn.enabled, true);
+            }
+            LearnMode::Full => {}
+        }
+        self.learn.resolved = resolved;
     }
 
     /// Values that would make a feature quietly useless, put back rather than
@@ -2066,6 +2202,17 @@ impl Config {
                  moves, so nothing is ever promoted — this is `off` under another name."
             );
         }
+        if self.infer.synthesis == SynthesisMode::Earned
+            && self.learn.mode == LearnMode::Learning
+            && self.promote.activation_above.is_infinite()
+        {
+            tracing::warn!(
+                "infer.synthesis = \"earned\" at learn.mode = \"learning\": activation is \
+                 recorded but nothing reads it, so no window is ever promoted. That is what \
+                 the mode is for — run the harness here, then move to \"full\" — but the \
+                 synthesizer is idle until you do."
+            );
+        }
     }
 
     /// The output ceiling's name is a guess whenever `reasoning_effort` is set
@@ -2213,7 +2360,20 @@ impl Config {
         if let Some(l) = c.auth.local.as_mut() {
             l.password_hash = R.into();
         }
-        format!("{c:#?}")
+        // The dial first, and in the file's own spelling. The dump below it is
+        // the resolved config, so the values are all in there — but reading a
+        // hundred fields to work out which of them the mode decided is the
+        // question this line answers directly.
+        let mut head = format!("# learn.mode = \"{}\"\n", c.learn.mode.as_str());
+        if c.learn.resolved.is_empty() {
+            head.push_str("# nothing was resolved from it: every key it stands for is set\n");
+        } else {
+            head.push_str("# resolved from it, because the file did not say:\n");
+            for (key, value) in &c.learn.resolved {
+                head.push_str(&format!("#   {key} = {value}\n"));
+            }
+        }
+        format!("{head}\n{c:#?}")
     }
 }
 
@@ -2747,6 +2907,127 @@ mode = "local"
 username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
 "#;
+
+    /// The five sections the issue names, one mode, and nothing else. No
+    /// synthesizer, no tiers, no ask: the base this starts is capture, hybrid
+    /// search and whatever `[infer.embed]` can reach.
+    const FIVE_SECTIONS: &str = r#"
+[server]
+bind = "127.0.0.1:8080"
+
+[vector]
+url = "http://localhost:6334"
+collection = "chunks"
+
+[infer.embed]
+base_url = "http://localhost:8000/v1"
+model = "bge-m3"
+dim = 1024
+max_input_tokens = 8192
+
+[auth]
+mode = "local"
+
+[auth.local]
+username = "dev"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
+
+[learn]
+mode = "off"
+"#;
+
+    #[test]
+    fn five_sections_and_one_mode_start() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, FIVE_SECTIONS);
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.learn.mode, LearnMode::Off);
+        assert!(!cfg.learn.enabled);
+        // `earned` would have refused this file for having no synthesizer, and
+        // the promotion it wanted one for cannot happen at `off` anyway.
+        assert_eq!(cfg.infer.synthesis, SynthesisMode::Off);
+        assert!(cfg.infer.synthesize.is_none());
+        assert!(!cfg.recommend.enabled);
+        assert!(!cfg.consolidate.enabled);
+        assert!(!cfg.sitting.prime);
+        assert_eq!(cfg.associate.spread_max, 0);
+        assert_eq!(cfg.associate.prime_lift, 0);
+        assert!(cfg.promote.activation_above.is_infinite());
+    }
+
+    #[test]
+    fn learning_records_everything_and_reads_none_of_it() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, &format!("{MINIMAL}\n[learn]\nmode = \"learning\"\n"));
+        let cfg = Config::load(Some(&p)).unwrap();
+        // Written: the log, and the activation and links read from it.
+        assert!(cfg.learn.enabled);
+        // Read on the query path: none of it.
+        assert_eq!(cfg.associate.spread_max, 0);
+        assert_eq!(cfg.associate.prime_lift, 0);
+        assert!(!cfg.sitting.prime);
+        assert!(!cfg.recommend.enabled);
+        assert!(cfg.promote.activation_above.is_infinite());
+        // Synthesis is not the mode's business here: `learning` is about what
+        // moves a rank, and an eager base still writes what it always wrote.
+        assert_eq!(cfg.infer.synthesis, SynthesisMode::Earned);
+        assert!(cfg.consolidate.enabled);
+    }
+
+    #[test]
+    fn full_is_todays_defaults_and_resolves_nothing() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let with = write(&dir, &format!("{MINIMAL}\n[learn]\nmode = \"full\"\n"));
+        let cfg = Config::load(Some(&with)).unwrap();
+        assert!(cfg.learn.resolved.is_empty(), "{:?}", cfg.learn.resolved);
+        let plain = Config::load(Some(&write(&tempfile::tempdir().unwrap(), MINIMAL))).unwrap();
+        assert_eq!(cfg.learn.mode, plain.learn.mode);
+        assert_eq!(cfg.learn.enabled, plain.learn.enabled);
+        assert_eq!(cfg.recommend.enabled, plain.recommend.enabled);
+        assert_eq!(cfg.associate.spread_max, plain.associate.spread_max);
+        assert_eq!(cfg.promote.activation_above, plain.promote.activation_above);
+    }
+
+    #[test]
+    fn a_key_in_the_file_beats_the_mode() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        // `off` with three of its keys contradicted: the mode fills in what
+        // was left unsaid and touches nothing else.
+        let p = write(
+            &dir,
+            &format!(
+                "{MINIMAL}\n[learn]\nmode = \"off\"\nenabled = true\n\
+                 [recommend]\nenabled = true\n[associate]\nspread_max = 2\n"
+            ),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert!(cfg.learn.enabled);
+        assert!(cfg.recommend.enabled);
+        assert_eq!(cfg.associate.spread_max, 2);
+        // ...and the rest of the bundle still applies.
+        assert!(!cfg.consolidate.enabled);
+        assert!(cfg.promote.activation_above.is_infinite());
+        let named: Vec<&str> = cfg.learn.resolved.iter().map(|(k, _)| *k).collect();
+        assert!(!named.contains(&"learn.enabled"), "{named:?}");
+        assert!(!named.contains(&"associate.spread_max"), "{named:?}");
+        assert!(named.contains(&"consolidate.enabled"), "{named:?}");
+    }
+
+    #[test]
+    fn print_config_names_what_the_mode_decided() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, FIVE_SECTIONS);
+        let dump = Config::load(Some(&p)).unwrap().redacted();
+        assert!(dump.contains("learn.mode = \"off\""), "{dump}");
+        assert!(dump.contains("consolidate.enabled = false"), "{dump}");
+        assert!(dump.contains("infer.synthesis = off"), "{dump}");
+        assert!(dump.contains("promote.activation_above = inf"), "{dump}");
+    }
 
     #[test]
     fn loads_minimal_config() {

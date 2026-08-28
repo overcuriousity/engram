@@ -258,6 +258,33 @@ Any key can be set by environment variable: prefix `ENGRAM__`, `__` between
 levels, e.g. `ENGRAM__INFER__EMBED__DIM=768`. Put secrets there rather than in
 the file — the loader warns if it finds one.
 
+### One dial over the learning layer
+
+`learn.mode` is the line to set first, and on a base that only wants capture,
+search and ask it is the only one from that half of the file:
+
+```toml
+[learn]
+mode = "full"     # "off" | "learning" | "full"
+```
+
+- `off` — record nothing, learn nothing, prime nothing, promote nothing;
+  consolidation is left with the exact and near duplicates capture finds for a
+  hash. A config naming `[server]`, `[vector]`, `[infer.embed]`, `[auth]` and
+  this one line starts and searches.
+- `learning` — searches and asks are recorded, activation and links are
+  written, and nothing reads any of it on the query path: no priming, no
+  associative spread, no promotion, no offers under the search box. This is the
+  mode to run `cargo test --test eval` in. A default that changes ranking moves
+  only after it has been measured, and it cannot be measured while its own
+  inputs are moving the ranking it is measured against.
+- `full` — the defaults, unchanged.
+
+Every key the mode stands for is still a key, and one written in the file wins
+over what the mode would have said. `--print-config` names the mode first and
+then the keys it decided, so which of the two you are looking at is never a
+guess.
+
 ### Inference endpoints
 
 engram speaks one protocol, the OpenAI-compatible HTTP API, and does not care
