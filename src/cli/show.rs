@@ -102,7 +102,7 @@ pub async fn fetch(e: &Endpoint, id: &str) -> Result<Option<Detail>> {
         .build()
         .map_err(|err| crate::error::Error::Internal(format!("http client: {err}")))?;
     let res = http
-        .get(e.api(&format!("/artifacts/{}", crate::cli::encode(&id))))
+        .get(e.api(&format!("/artifacts/{}", crate::cli::encode(id))))
         .bearer_auth(&e.token)
         .send()
         .await

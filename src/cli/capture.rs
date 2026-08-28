@@ -25,7 +25,8 @@ pub async fn run(
     let mut ids = Vec::new();
     for target in targets {
         let (bytes, content_type) = read_target(target)?;
-        ids.push(post(&http, e, bytes, &content_type, target, title, note, face).await?);
+        let meta = Meta { title, note };
+        ids.push(post(&http, e, bytes, &content_type, target, meta, face).await?);
     }
     Ok(ids)
 }
@@ -49,8 +50,7 @@ pub async fn run_piped(
         text.into_bytes(),
         "text/plain",
         "stdin",
-        title,
-        note,
+        Meta { title, note },
         face,
     )
     .await?;
@@ -64,6 +64,17 @@ fn client() -> Result<reqwest::Client> {
         .map_err(|err| Error::Internal(format!("http client: {err}")))
 }
 
+/// What a door knows about a capture beyond its bytes.
+///
+/// The two travel together everywhere — `run`, `run_piped` and `post` each
+/// take both or neither — and threading them as a separate pair is what pushed
+/// `post` past the argument count that is worth reading at a call site.
+#[derive(Clone, Copy)]
+struct Meta<'a> {
+    title: Option<&'a str>,
+    note: Option<&'a str>,
+}
+
 /// One capture, answering with the corpus id. `label` is what the target is
 /// called when something goes wrong — a path, or `stdin`.
 async fn post(
@@ -72,17 +83,16 @@ async fn post(
     bytes: Vec<u8>,
     content_type: &str,
     label: &str,
-    title: Option<&str>,
-    note: Option<&str>,
+    meta: Meta<'_>,
     face: &crate::cli::face::Face,
 ) -> Result<String> {
     let target = label;
     {
         let mut url = format!("{}?", e.api("/capture"));
-        if let Some(t) = title {
+        if let Some(t) = meta.title {
             url.push_str(&format!("title={}&", encode(t)));
         }
-        if let Some(n) = note {
+        if let Some(n) = meta.note {
             url.push_str(&format!("note={}", encode(n)));
         }
         // The body is handed over in pieces so the track can fill as it goes.
@@ -422,7 +432,7 @@ mod tests {
             CorpusStatus::NeedsReview,
         ] {
             core.store
-                .set_corpus_status(&ids[0], terminal.clone())
+                .set_corpus_status(&ids[0], terminal)
                 .await
                 .expect("set the status");
             tokio::time::timeout(
