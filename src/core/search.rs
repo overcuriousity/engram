@@ -454,22 +454,23 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
 /// after hit #1 on almost every query. A reranker calibrates its scores, so
 /// once one has run they are the right input; without one, the cosine
 /// similarity is — it means the same thing from one query to the next, which
-/// is the property the largest-gap rule needs. A list where any hit has no
-/// similarity — a lexical-only hit, or a store that reports none — has no
-/// scale every hit shares, and gets no cliff rather than a made-up one.
-fn cliff_scores(results: &[SearchResult], reranked: bool) -> Option<Vec<f32>> {
+/// is the property the largest-gap rule needs. A hit with no similarity — one
+/// only the lexical half found, or a store that reports none — cannot be
+/// placed on that scale, so the cliff is read over the longest leading run
+/// of hits that can be. Everything from the cliff on is past it, that hit
+/// included: it placed below the fall in the list, whatever put it there. A
+/// store that reports no similarity at all gives an empty run and no cliff.
+fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<f32> {
     if reranked {
-        return Some(results.iter().map(|r| r.score).collect());
+        return results.iter().map(|r| r.score).collect();
     }
-    results.iter().map(|r| r.similarity).collect()
+    results.iter().map_while(|r| r.similarity).collect()
 }
 
 /// Flag every hit from the cliff on. The list is left in its order and at its
 /// length; nothing about the cliff is silent and nothing about it is a change.
 fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
-    let Some(scores) = cliff_scores(results, reranked) else {
-        return;
-    };
+    let scores = cliff_scores(results, reranked);
     if let Some(above) = cliff(&scores) {
         for r in results.iter_mut().skip(above) {
             r.past_cliff = true;
@@ -4188,8 +4189,18 @@ mod tests {
             vec![false, false, false, true, true]
         );
 
-        // A hit the lexical half alone found has no similarity, so the list
-        // has no one scale to read a cliff on — and gets none.
+        // A hit the lexical half alone found has no similarity: the cliff is
+        // read over the run of hits before it, and it is past the cliff with
+        // the rest of the tail — it placed there.
+        let mut tail = three.clone();
+        tail[4].similarity = None;
+        tail.iter_mut().for_each(|r| r.past_cliff = false);
+        mark_past_cliff(&mut tail, false);
+        assert_eq!(
+            tail.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true, true]
+        );
+        // Placed second, it leaves one measurable hit and nothing to compare.
         let mut mixed = three.clone();
         mixed[1].similarity = None;
         mixed.iter_mut().for_each(|r| r.past_cliff = false);
