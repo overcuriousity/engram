@@ -40,6 +40,32 @@ impl Note {
     }
 }
 
+/// Taken back on every way out, not only the two that were written down.
+///
+/// `clear` was called from the `token` and `error` arms, which leaves the line
+/// on screen for the two exits nobody typed: a transport that dies after a
+/// `retrieved` frame, where the error is printed straight onto it, and a stream
+/// that ends with citations and no token at all. `Stages` and `Fill` have both
+/// had this since they were written; the rule is the type's, not the caller's.
+impl Drop for Note {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+/// One lamp line, held inside the terminal's width.
+///
+/// Clipped here rather than in `Note::show`, because by then the text is
+/// wrapped in escapes and a count of its characters is not a count of its
+/// columns. Four columns go to what is drawn around it: the two of indent
+/// `show` prints and the two of the lamp and its space.
+fn within(face: &crate::cli::face::Face, lamp: crate::cli::face::Lamp, said: &str) -> String {
+    face.lamp_line(
+        lamp,
+        &crate::cli::face::clip(said, face.width.saturating_sub(4)),
+    )
+}
+
 /// What a `retrieved` frame says, in words. `None` where the face is off, so a
 /// redirected answer receives none of it.
 fn retrieved_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Option<String> {
@@ -47,7 +73,8 @@ fn retrieved_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Op
         return None;
     }
     let (got, shown) = (data["retrieved"].as_u64()?, data["shown"].as_u64()?);
-    Some(face.lamp_line(
+    Some(within(
+        face,
         crate::cli::face::Lamp::Done,
         &format!("retrieved {got}, showing {shown}"),
     ))
@@ -67,7 +94,12 @@ fn needs_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Option
     if said.is_empty() {
         return None;
     }
-    Some(face.lamp_line(
+    // The subjects are the model's own words and have no bound; two or three
+    // named ones routinely pass eighty columns, and `show` erases one physical
+    // row, so a wrapped line leaves its head on the screen for the answer to
+    // be written under.
+    Some(within(
+        face,
         crate::cli::face::Lamp::Running,
         &format!("still missing: {}", said.join(", ")),
     ))
@@ -349,6 +381,34 @@ mod tests {
         assert!(line.contains("journal rotation policy"), "{line}");
         // A round that named nothing is not a round that happened.
         assert!(needs_line(&face, &serde_json::json!({"queries": []})).is_none());
+    }
+
+    /// `show` erases one physical row, so a line that wraps leaves its head on
+    /// the screen and the answer is written under a note that was taken back.
+    #[test]
+    fn a_note_longer_than_the_terminal_is_clipped_rather_than_wrapped() {
+        for width in [24usize, 40, 80] {
+            let face = crate::cli::face::Face {
+                on: true,
+                color: false,
+                unicode: true,
+                width,
+            };
+            let line = needs_line(
+                &face,
+                &serde_json::json!({"queries": [
+                    "journal rotation policy",
+                    "retention window for archived corpora",
+                    "who signs off on a deletion"
+                ]}),
+            )
+            .expect("a line");
+            // The lamp is already in `line`; `show` adds the two of indent.
+            assert!(
+                line.chars().count() + 2 <= width,
+                "width {width}: over the width: {line:?}"
+            );
+        }
     }
 
     /// A redirected answer receives none of it.
