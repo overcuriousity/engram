@@ -28,6 +28,14 @@ pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
     }
 }
 
+/// Who is asking, with somewhere to read about it: what a server that refuses
+/// anonymous clients wants to see.
+pub const USER_AGENT: &str = concat!(
+    "engram/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/overcuriousity/engram)"
+);
+
 /// Retrieve a document — a page, a PDF or an image — for the two doors that
 /// take a link: paste-a-link and MCP.
 ///
@@ -49,14 +57,6 @@ pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
 /// Out of scope, deliberately: blocking loopback and private-range addresses.
 /// The endpoint is authenticated and single-operator, so the only caller who
 /// could aim it at the local network is the person who runs the machine.
-/// Who is asking, with somewhere to read about it: what a server that refuses
-/// anonymous clients wants to see.
-pub const USER_AGENT: &str = concat!(
-    "engram/",
-    env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/overcuriousity/engram)"
-);
-
 pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Error::Validation(format!(

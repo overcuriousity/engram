@@ -632,7 +632,12 @@ function label(c) {
   if (c.title_hint) return c.title_hint;
   const first = (c.raw_text || '').split('\n').find((l) => l.trim());
   if (!first) return '';
-  const clipped = first.trim();
+  // The same front trim the server's `stand_in_title` does: a list dash, a
+  // heading's hashes, a quote mark are structure rather than subject, and a
+  // name that opens with them names the markup. Without this the panel showed
+  // `- schneller Schreibzugriff` and `## 3.4.2 FESTE MFT RECORDS` where the
+  // CLI, MCP and web doors all showed the words alone.
+  const clipped = first.trim().replace(/^[-–—*#>·•|\s]+/, '').trim() || first.trim();
   return clipped.length > 60 ? clipped.slice(0, 60) + '…' : clipped;
 }
 

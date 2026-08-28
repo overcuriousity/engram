@@ -794,7 +794,15 @@ impl Store {
         .unwrap_or(0))
     }
 
-    /// Each artifact's stored activation and the stamp it was true at.
+    /// Each artifact's stored activation, the stamp it was true at, and when
+    /// the artifact arrived.
+    ///
+    /// `created_at` is here because the stored number is a sum of two things
+    /// that decay at the same rate: the capture baseline, which every artifact
+    /// carries from the moment it exists, and what use has added since. Telling
+    /// them apart at read time needs the baseline's own age, and `activated_at`
+    /// is not it — a bump moves that stamp forward and the baseline's age does
+    /// not move with it.
     ///
     /// One statement for the whole candidate list: this is on the query path,
     /// and fifty round trips to answer one search is exactly the layer crossing
@@ -804,7 +812,7 @@ impl Store {
     pub async fn activation_of(
         &self,
         ids: &[String],
-    ) -> Result<std::collections::HashMap<String, (f64, i64)>> {
+    ) -> Result<std::collections::HashMap<String, (f64, i64, i64)>> {
         if ids.is_empty() {
             return Ok(Default::default());
         }
@@ -812,7 +820,7 @@ impl Store {
             .collect::<Vec<_>>()
             .join(",");
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT id, activation, activated_at FROM artifacts WHERE id IN ({holes})"
+            "SELECT id, activation, activated_at, created_at FROM artifacts WHERE id IN ({holes})"
         )));
         for id in ids {
             q = q.bind(id);
@@ -826,6 +834,7 @@ impl Store {
                     (
                         r.get::<f64, _>("activation"),
                         r.get::<i64, _>("activated_at"),
+                        r.get::<i64, _>("created_at"),
                     ),
                 )
             })
@@ -1401,12 +1410,15 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let (a, _) = two(&store).await;
         let act = store.activation_of(std::slice::from_ref(&a)).await.unwrap();
-        let (value, stamp) = act
+        let (value, stamp, created_at) = act
             .get(&a)
             .copied()
             .expect("an artifact carries activation");
         assert!((value - 1.0).abs() < 1e-9);
         assert!(stamp > 0, "activated_at was never set at insert");
+        // The baseline's own age, which a bump moves `activated_at` away from
+        // and must not move: at insert the two agree.
+        assert_eq!(created_at, stamp);
     }
 
     #[tokio::test]
@@ -1424,7 +1436,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (value, stamp) = store.activation_of(std::slice::from_ref(&a)).await.unwrap()[&a];
+        let (value, stamp, _) = store.activation_of(std::slice::from_ref(&a)).await.unwrap()[&a];
         assert!((value - 3.0).abs() < 1e-6, "value was {value}");
         assert_eq!(stamp, 14 * 86_400);
     }

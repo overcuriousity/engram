@@ -23,12 +23,26 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
     let activation = core.store.activation_of(ids).await?;
     let mut armed = 0;
     for id in ids {
-        let Some((value, stamp)) = activation.get(id) else {
+        let Some((value, stamp, created_at)) = activation.get(id) else {
             continue;
         };
-        let now_value =
-            crate::store::links::decayed(*value, *stamp, at, core.activation.half_life_days);
-        if now_value < core.promote.activation_above {
+        // Above the capture baseline, decayed to the same instant — never the
+        // raw stored number. Both terms fall at the same rate, so a threshold
+        // read against the raw sum means something different at every age: with
+        // the baseline at `1.0` and a confirmation at `3.0`, a threshold of
+        // `4.0` was reachable only by a confirmation at essentially zero
+        // elapsed time, and one day after capture it already took two. What the
+        // threshold is meant to name is what use added, so that is what it is
+        // compared against.
+        let earned =
+            crate::store::links::decayed(*value, *stamp, at, core.activation.half_life_days)
+                - crate::store::links::decayed(
+                    1.0,
+                    *created_at,
+                    at,
+                    core.activation.half_life_days,
+                );
+        if earned < core.promote.activation_above {
             continue;
         }
         let Ok(c) = core.store.get_artifact(id).await else {
@@ -71,7 +85,7 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
             artifact_id = %id,
             corpus_id,
             window = idx,
-            activation = now_value,
+            activation = earned,
             "promoting a window"
         );
         armed += 1;
@@ -224,7 +238,7 @@ pub async fn supersede_covered(
         let act = core.store.activation_of(&ids).await?;
         let carried = act
             .values()
-            .map(|(v, s)| crate::store::links::decayed(*v, *s, at, half_life))
+            .map(|(v, s, _)| crate::store::links::decayed(*v, *s, at, half_life))
             .fold(f64::MIN, f64::max);
         if carried > f64::MIN {
             let own = core
@@ -232,7 +246,7 @@ pub async fn supersede_covered(
                 .activation_of(std::slice::from_ref(&winner.to_string()))
                 .await?
                 .get(winner)
-                .map(|(v, s)| crate::store::links::decayed(*v, *s, at, half_life))
+                .map(|(v, s, _)| crate::store::links::decayed(*v, *s, at, half_life))
                 .unwrap_or(1.0);
             core.store
                 .set_activation(winner, carried.max(own), at)
@@ -510,6 +524,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn one_confirmation_promotes_however_long_ago_the_passage_was_captured() {
+        // The threshold names what use added, and a confirmation adds the same
+        // amount whenever it lands. Read against the raw stored number it did
+        // not: the capture baseline decays out from under the line, so `4.0`
+        // was reachable only by a confirmation at essentially zero elapsed
+        // time — one day after capture it already took two, and on a passage
+        // this old it would have taken two forever.
+        let (core, corpus, p) = earned_with_one_passage().await;
+        let ids = vec![p.clone()];
+        let now = crate::store::now();
+        let captured = now - 90 * 86_400;
+        sqlx::query(
+            "UPDATE artifacts SET activation = 1.0, activated_at = ?, created_at = ? WHERE id = ?",
+        )
+        .bind(captured)
+        .bind(captured)
+        .bind(&p)
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+
+        core.store
+            .bump_activation(&ids, core.activation.confirmed, 14.0, now)
+            .await
+            .unwrap();
+        // What the old reading saw: a whole confirmation, and still short of 4.
+        let raw = core.store.activation_of(&ids).await.unwrap()[&p].0;
+        assert!(raw < 4.0, "the raw activation was {raw}");
+
+        assert!(maybe_promote(&core, &ids, now).await.unwrap() > 0);
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn age_alone_never_promotes_a_passage_nobody_touched() {
+        // The other direction: subtracting a decayed baseline must not turn a
+        // never-touched artifact into an engaged one at any age.
+        let (core, corpus, p) = earned_with_one_passage().await;
+        let ids = vec![p.clone()];
+        let now = crate::store::now();
+        let captured = now - 900 * 86_400;
+        sqlx::query(
+            "UPDATE artifacts SET activation = 1.0, activated_at = ?, created_at = ? WHERE id = ?",
+        )
+        .bind(captured)
+        .bind(captured)
+        .bind(&p)
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(maybe_promote(&core, &ids, now).await.unwrap(), 0);
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim)
+        );
+    }
+
     use crate::store::artifacts::CorpusSpan;
 
     fn sp(a: i64, b: i64) -> CorpusSpan {
@@ -679,8 +754,8 @@ mod tests {
             .activation_of(&[written[0].id.clone(), passages[1].id.clone()])
             .await
             .unwrap();
-        let (a_val, a_at) = act[&written[0].id];
-        let (p_val, p_at) = act[&passages[1].id];
+        let (a_val, a_at, _) = act[&written[0].id];
+        let (p_val, p_at, _) = act[&passages[1].id];
         let expect = crate::store::links::decayed(p_val, p_at, 1_000, 14.0);
         assert!((a_val - expect).abs() < 1e-6, "got {a_val}, want {expect}");
         assert_eq!(a_at, 1_000);

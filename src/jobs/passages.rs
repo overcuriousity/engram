@@ -43,16 +43,29 @@ pub fn heading_title(line: &str) -> String {
     let mut rest = bare;
     // `[text](target)` → `text`. Anything that is not exactly that shape is
     // left as written: a bracket in prose is not a link.
-    while let Some(open) = rest.find('[') {
-        let Some(close) = rest[open..].find("](") else {
+    while let Some(first) = rest.find('[') {
+        let Some(close_rel) = rest[first..].find("](") else {
             break;
         };
-        let Some(end) = rest[open + close..].find(')') else {
+        let close = first + close_rel;
+        // The link opens at the LAST bracket before `](`, not the first one on
+        // the line. Anchored on the first, a plain bracket standing in prose
+        // ahead of a real link swallowed everything between the two:
+        // `Arrays [0] and [the docs](…)` came out `Arrays 0] and [the docs`.
+        let open = rest[..close].rfind('[').unwrap_or(first);
+        // A markdown image is a link with a `!` in front. The alt text is the
+        // words; the `!` is syntax, and `![diagram](a.png) Overview` has no
+        // business becoming `!diagram Overview`.
+        let text_end = match rest[..open].ends_with('!') {
+            true => open - 1,
+            false => open,
+        };
+        let Some(end) = rest[close..].find(')') else {
             break;
         };
-        out.push_str(&rest[..open]);
-        out.push_str(&rest[open + 1..open + close]);
-        rest = &rest[open + close + end + 1..];
+        out.push_str(&rest[..text_end]);
+        out.push_str(&rest[open + 1..close]);
+        rest = &rest[close + end + 1..];
     }
     out.push_str(rest);
     out.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -372,6 +385,20 @@ mod tests {
             "See the docs"
         );
         assert_eq!(heading_title("## Arrays [0] and [1]"), "Arrays [0] and [1]");
+        // A bracket in prose standing *before* a real link on the same line.
+        // Anchored on the first `[`, the stripper read from it all the way to
+        // the link's `](` and ate the words in between: this came out
+        // `Arrays 0] and [the docs`.
+        assert_eq!(
+            heading_title("## Arrays [0] and [the docs](https://x.test/a)"),
+            "Arrays [0] and the docs"
+        );
+        // An image is a link with a `!` in front. The alt text is words; the
+        // `!` is syntax, and `!diagram Overview` is neither.
+        assert_eq!(
+            heading_title("## ![diagram](a.png) Overview"),
+            "diagram Overview"
+        );
     }
 
     #[tokio::test]

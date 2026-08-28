@@ -457,9 +457,8 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
 /// is the property the largest-gap rule needs. A hit with no similarity — one
 /// only the lexical half found, or a store that reports none — cannot be
 /// placed on that scale, so the cliff is read over the longest leading run
-/// of hits that can be. Everything from the cliff on is past it, that hit
-/// included: it placed below the fall in the list, whatever put it there. A
-/// store that reports no similarity at all gives an empty run and no cliff.
+/// of hits that can be. A store that reports no similarity at all gives an
+/// empty run and no cliff.
 fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<f32> {
     if reranked {
         return results.iter().map(|r| r.score).collect();
@@ -469,14 +468,41 @@ fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<f32> {
 
 /// Flag every hit from the cliff on. The list is left in its order and at its
 /// length; nothing about the cliff is silent and nothing about it is a change.
+///
+/// The gaps are measured over the run **sorted**, and the answer is carried
+/// back to the list as a score: the lowest score still above the fall, and
+/// everything after the last hit that reaches it is past the cliff. The list
+/// itself is not sorted by score, and cannot be — a fused list puts a hit both
+/// branches found above one only the dense branch ranked higher, which is the
+/// point of fusing, and priming moves more. Read position by position, an
+/// out-of-order hit did not merely vanish from the reading: `cliff` clamps a
+/// negative gap to zero, so it manufactured a large positive gap at the
+/// position *before* it and drew the fall there. A leading `0.80, 0.40, 0.78`
+/// cut after the first hit and threw away the 0.78 — in `ask`, out of the
+/// answer entirely, which is the failure this reading was changed to stop.
+///
+/// Carried back as "after the last hit that reaches the cut" rather than as a
+/// per-hit test, so what is marked stays a tail. Every reader downstream is
+/// built on that: `ask` truncates at the first marked hit, and the face draws
+/// one divider where the fall happens. The cost is that a weak hit sitting
+/// high in the list is left above the line — `weak` is the mark for that one,
+/// and cutting the good hits below it was the bug.
 fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
-    let scores = cliff_scores(results, reranked);
-    if let Some(above) = cliff(&scores) {
-        for r in results.iter_mut().skip(above) {
-            r.past_cliff = true;
-            if let Some(e) = r.explanation.as_mut() {
-                e.past_cliff = true;
-            }
+    let run = cliff_scores(results, reranked);
+    let mut sorted = run.clone();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let Some(above) = cliff(&sorted) else {
+        return;
+    };
+    // The lowest score the cliff leaves standing, and the last place in the
+    // list that reaches it. A hit with no score at all is past the run and so
+    // past the cliff with the rest of the tail — it placed there.
+    let cut = sorted[above - 1];
+    let from = run.iter().rposition(|s| *s >= cut).map_or(0, |i| i + 1);
+    for r in results.iter_mut().skip(from) {
+        r.past_cliff = true;
+        if let Some(e) = r.explanation.as_mut() {
+            e.past_cliff = true;
         }
     }
 }
@@ -493,10 +519,29 @@ const ACTIVATION_BASELINE: f64 = 1.0;
 /// reached. With `retrieved` at zero only opened, confirmed and cited raise
 /// activation, so above the baseline it is engagement by construction — and a
 /// hit that has none cannot be primed.
-fn engagement(activation: HashMap<String, f64>) -> HashMap<String, f64> {
-    activation
-        .into_iter()
-        .map(|(id, v)| (id, (v - ACTIVATION_BASELINE).max(0.0)))
+///
+/// The baseline is subtracted *decayed to now*, never as the flat `1.0` it
+/// started at. The stored number is a sum of two terms that fall at the same
+/// rate, and taking a whole baseline off a half-decayed sum is a subtraction of
+/// two different units: an artifact captured three half-lives ago and opened
+/// three times right after came to `4.0`, reads `0.5` today, and came out at
+/// nothing — indistinguishable from one nobody ever touched — while a single
+/// open on that same old artifact came out an eighth the size of the same open
+/// on a fresh one. Both are the baseline's decay leaking into the answer.
+/// `created_at` is the baseline's own age; `stamp` is not, because a bump moves
+/// it and the baseline's age does not move with it.
+fn engagement(
+    rows: HashMap<String, (f64, i64, i64)>,
+    at: i64,
+    half_life_days: f64,
+) -> HashMap<String, f64> {
+    rows.into_iter()
+        .map(|(id, (value, stamp, created_at))| {
+            let now = crate::store::links::decayed(value, stamp, at, half_life_days);
+            let baseline =
+                crate::store::links::decayed(ACTIVATION_BASELINE, created_at, at, half_life_days);
+            (id, (now - baseline).max(0.0))
+        })
         .collect()
 }
 
@@ -860,28 +905,16 @@ impl Core {
         });
     }
 
-    /// Each artifact's activation, already decayed to now.
+    /// Each artifact's engagement — activation decayed to now, less the capture
+    /// baseline decayed to now.
     ///
     /// The one SQLite read the query path takes. It can only add: a failure is
     /// one warning and an empty map, and everything downstream then behaves
     /// exactly as it did before any of this existed.
-    async fn activation_now(&self, ids: &[String]) -> HashMap<String, f64> {
+    async fn engagement_now(&self, ids: &[String]) -> HashMap<String, f64> {
         let at = now_secs();
         match self.store.activation_of(ids).await {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|(id, (value, stamp))| {
-                    (
-                        id,
-                        crate::store::links::decayed(
-                            value,
-                            stamp,
-                            at,
-                            self.activation.half_life_days,
-                        ),
-                    )
-                })
-                .collect(),
+            Ok(rows) => engagement(rows, at, self.activation.half_life_days),
             Err(e) => {
                 tracing::warn!(error = %e, "could not read activation; results are unprimed");
                 HashMap::new()
@@ -1504,7 +1537,7 @@ impl Core {
         {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            let activation = engagement(self.activation_now(&ids).await);
+            let activation = self.engagement_now(&ids).await;
             // Off by default and empty when off: this is the only part of the
             // sitting that moves an order, and the same query ranking
             // differently in two sittings is what is disorienting about it.
@@ -3079,21 +3112,30 @@ mod tests {
         // last has anything priming may read. The report's `primed` badge on
         // a note that had only ever been listed came from reading the first
         // two raw.
+        //
+        // `(value, activated_at, created_at)`, at day 0 and day 28 — two
+        // half-lives — with a 14-day half-life.
+        const DAY: i64 = 86_400;
+        let now = 28 * DAY;
         let acts = HashMap::from([
-            ("fresh".to_string(), 1.0),
-            ("old".to_string(), 0.25),
-            ("opened".to_string(), 1.8),
+            ("fresh".to_string(), (1.0, now, now)),
+            ("old".to_string(), (1.0, 0, 0)),
+            ("opened".to_string(), (1.8, now, now)),
         ]);
-        let e = engagement(acts);
+        let e = engagement(acts, now, 14.0);
         assert_eq!(e["fresh"], 0.0);
         assert_eq!(e["old"], 0.0);
         assert!((e["opened"] - 0.8).abs() < 1e-9);
         let out = prime(
             ranked(&["a", "fresh", "old"]),
-            &engagement(HashMap::from([
-                ("fresh".to_string(), 1.0),
-                ("old".to_string(), 0.25),
-            ])),
+            &engagement(
+                HashMap::from([
+                    ("fresh".to_string(), (1.0, now, now)),
+                    ("old".to_string(), (1.0, 0, 0)),
+                ]),
+                now,
+                14.0,
+            ),
             0.5,
             2,
             &Default::default(),
@@ -3101,6 +3143,41 @@ mod tests {
         assert!(
             out.iter().all(|r| !r.primed),
             "primed without ever being opened"
+        );
+    }
+
+    #[test]
+    fn engagement_is_the_same_size_however_old_the_artifact_is() {
+        // The baseline decays with everything else, so subtracting a whole
+        // `1.0` from a half-decayed sum answered in units of nothing: an
+        // artifact captured six weeks ago and opened three times right after
+        // came to `4.0`, read `0.5` today, and came out with no engagement at
+        // all — while a single open on that same artifact came out an eighth
+        // the size of the same open on a fresh one. One open is one open.
+        const DAY: i64 = 86_400;
+        let now = 42 * DAY;
+        let e = engagement(
+            HashMap::from([
+                // Captured today, opened three times today: 1.0 + 3 × 1.0.
+                ("fresh".to_string(), (4.0, now, now)),
+                // Captured 42 days ago — three half-lives — and opened three
+                // times the same day. Stored `4.0`, stamped then.
+                ("old".to_string(), (4.0, 0, 0)),
+                // Captured 42 days ago, opened once *today*: the decayed
+                // remainder of the baseline, plus a whole open.
+                ("old_open_today".to_string(), (0.125 + 1.0, now, 0)),
+            ]),
+            now,
+            14.0,
+        );
+        assert!((e["fresh"] - 3.0).abs() < 1e-9);
+        // Three opens, three half-lives on: an eighth of three, not zero.
+        assert!((e["old"] - 0.375).abs() < 1e-9, "got {}", e["old"]);
+        // And a fresh open reads as a whole open whatever it landed on.
+        assert!(
+            (e["old_open_today"] - 1.0).abs() < 1e-9,
+            "got {}",
+            e["old_open_today"]
         );
     }
 
@@ -4206,6 +4283,39 @@ mod tests {
         mixed.iter_mut().for_each(|r| r.past_cliff = false);
         mark_past_cliff(&mut mixed, false);
         assert!(mixed.iter().all(|r| !r.past_cliff));
+
+        // A fused list is not sorted by similarity — a hit both branches found
+        // is lifted above one the dense branch alone ranked higher, which is
+        // the point of fusing. Read position by position, the clamp turned that
+        // inversion into a large gap at the position *before* it and cut there,
+        // throwing away the 0.78 hit below. Sorted, the three leading hits are
+        // an even fall and there is no cliff at all.
+        let mut inverted: Vec<SearchResult> = [0.80, 0.40, 0.78]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| dummy(&i.to_string(), 1.0 - i as f32 * 0.1, Some(*s)))
+            .collect();
+        mark_past_cliff(&mut inverted, false);
+        assert!(
+            inverted.iter().all(|r| !r.past_cliff),
+            "an out-of-order hit manufactured a cliff above itself"
+        );
+
+        // And a real fall is still found with an inversion sitting above it.
+        // Sorted that is `0.90 0.85 0.20 0.10`, the fall is after the second,
+        // and the last hit in the *list* reaching 0.85 is the third — so the
+        // tail is the one hit below it. The 0.20 at rank two is left above the
+        // line, which is what `weak` is for.
+        let mut still: Vec<SearchResult> = [0.90, 0.20, 0.85, 0.10]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| dummy(&i.to_string(), 1.0 - i as f32 * 0.1, Some(*s)))
+            .collect();
+        mark_past_cliff(&mut still, false);
+        assert_eq!(
+            still.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, true]
+        );
     }
 
     #[tokio::test]

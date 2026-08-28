@@ -539,13 +539,15 @@ cited = 0.5
 
 # ── Promotion ────────────────────────────────────────────────────────────────
 # At synthesis = "earned", when a passage has earned its window a synthesis
-# call. Read against [activation]: baseline 1.0 at capture, so 4.0 is one
-# confirmation, or three openings. Checked only when a passage is opened,
-# confirmed or cited by an answer — never when it merely appears in results,
+# call. Read against [activation] and above the capture baseline, which decays
+# at the same rate as what use adds and is subtracted decayed before the
+# comparison: so 3.0 is one confirmation, or three openings, at any age.
+# Checked only when a passage is opened, confirmed or cited by an answer —
+# never when it merely appears in results,
 # which with retrieved = 0 also raises nothing — and the window's new
 # artifacts inherit the access the passages earned.
 [promote]
-activation_above = 4.0
+activation_above = 3.0
 # At synthesis = "eager": an artifact shown this many times with no
 # confirmation recorded against it is re-read from its source segment. 0
 # disables it, and it ships disabled — re-synthesising changes what an

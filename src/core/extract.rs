@@ -16,9 +16,10 @@ static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
             // </h2>`, and rendered faithfully that heading became the title
             // `[](#NAME)NAME [top](#top_of_page)` on every card in the
             // product. So: an anchor with no text is nothing; an in-page
-            // anchor is its text; and an in-page anchor inside a heading that
-            // follows the heading's own text is the back-link, and is nothing
-            // too. An ordinary link is the ordinary link.
+            // anchor is its text; and an in-page anchor that ends a heading,
+            // follows the heading's own text and is written the way a
+            // back-link is written is the back-link, and is nothing too. An
+            // ordinary link is the ordinary link.
             let href = el
                 .attrs
                 .iter()
@@ -99,7 +100,14 @@ fn has_ancestor(node: &std::rc::Rc<htmd::Node>, tag: &str) -> bool {
 }
 
 /// Whether an anchor is a heading's back-link: inside an `h1`–`h6`, after the
-/// heading's own text. The `[top]` at the end of every man7 section heading.
+/// heading's own text, with nothing but whitespace after it, and written the
+/// way a back-link is written — bracketed like man7's `[top]` at the end of
+/// every section heading, or a short `top`/`back`/`up`, or a bare arrow.
+///
+/// All three conditions, because position alone is not enough: a heading is
+/// allowed to end in an ordinary in-page link, and on that rule
+/// `<h2>Configuration and the <a href="#flags">flag list</a></h2>` lost the
+/// words "flag list" out of its own title.
 fn is_back_link(node: &std::rc::Rc<htmd::Node>) -> bool {
     use markup5ever_rcdom::NodeData;
     let Some(parent) = parent_of(node) else {
@@ -118,12 +126,41 @@ fn is_back_link(node: &std::rc::Rc<htmd::Node>) -> bool {
             _ => node.children.borrow().iter().any(has_text),
         }
     }
-    parent
-        .children
-        .borrow()
+    fn text_of(node: &std::rc::Rc<htmd::Node>) -> String {
+        match &node.data {
+            NodeData::Text { contents } => contents.borrow().to_string(),
+            _ => node.children.borrow().iter().map(text_of).collect(),
+        }
+    }
+    let children = parent.children.borrow();
+    let after_text = children
+        .iter()
+        .skip_while(|c| !std::rc::Rc::ptr_eq(c, node))
+        .skip(1)
+        .any(has_text);
+    let before_text = children
         .iter()
         .take_while(|c| !std::rc::Rc::ptr_eq(c, node))
-        .any(has_text)
+        .any(has_text);
+    // Text before it and none after it: a back-link is what a heading ends
+    // with, never something it is written around.
+    if !before_text || after_text {
+        return false;
+    }
+    // And it has to *look* like one. Position alone called every heading that
+    // happens to end in an in-page link a back-link, and
+    // `<h2>Configuration and the <a href="#flags">flag list</a></h2>` lost the
+    // words "flag list" out of its own title. What a back-link is written as is
+    // narrow: man7's bracketed `[top]`, or a short word or arrow.
+    let text = text_of(node);
+    let t = text.trim();
+    if t.starts_with('[') && t.ends_with(']') {
+        return true;
+    }
+    let word = t
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    t.chars().count() <= 8 && (word.is_empty() || matches!(word.as_str(), "top" | "back" | "up"))
 }
 
 /// An `alt` as an inline text node rather than as markdown.
@@ -593,6 +630,35 @@ mod tests {
         assert!(md.contains("See the name and"), "{md}");
         assert!(md.contains("[elsewhere](https://x.test/)"), "{md}");
         assert!(!md.contains("[]("), "{md}");
+    }
+
+    #[test]
+    fn a_heading_that_ends_in_an_ordinary_in_page_link_keeps_its_words() {
+        // Position alone made every in-page anchor after a heading's own text
+        // a back-link, and a heading whose last words happen to be linked lost
+        // them: this one arrived as `## Configuration and the`. A back-link
+        // has to look like one as well as sit like one.
+        let page = format!(
+            "<html><body><article>\
+             <h2>Configuration and the <a href=\"#flags\">flag list</a></h2>\
+             <p>{}</p>\
+             <h2>Recovery <a href=\"#top\">top</a></h2>\
+             <p>{}</p>\
+             </article></body></html>",
+            "the configuration is read from one file and every flag in it has a long \
+             form and a short form, which is enough prose for the readability pass to \
+             keep this section rather than drop it as furniture.",
+            "recovery walks the journal from the last checkpoint forward and replays \
+             every record it finds there, which is again long enough to be kept as \
+             content rather than dropped.",
+        );
+        let md = html_to_markdown(&page, None, 10).unwrap();
+        let headings: Vec<&str> = md.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(
+            headings,
+            vec!["## Configuration and the flag list", "## Recovery"],
+            "{md}"
+        );
     }
 
     #[test]

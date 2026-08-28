@@ -2273,7 +2273,8 @@ mod tests {
             .activation_of(std::slice::from_ref(&made[0].id))
             .await
             .unwrap();
-        assert_eq!(act[&made[0].id], (7.25, 99));
+        let (value, stamp, _) = act[&made[0].id];
+        assert_eq!((value, stamp), (7.25, 99));
     }
 
     #[tokio::test]

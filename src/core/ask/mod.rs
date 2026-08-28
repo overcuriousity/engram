@@ -2296,7 +2296,7 @@ mod tests {
         // Every excerpt was retrieved by the same searches, so they share a
         // baseline and the only difference left between them is the citation.
         let act = core.store.activation_of(&ids).await.unwrap();
-        let of = |id: &String| act.get(id).map(|(a, _)| *a).unwrap_or(0.0);
+        let of = |id: &String| act.get(id).map(|(a, _, _)| *a).unwrap_or(0.0);
         let uncited = of(&ids[1]);
         for id in &ids[2..] {
             assert_eq!(of(id), uncited, "the excerpts did not share a baseline");
@@ -2345,7 +2345,7 @@ mod tests {
                 .map(|c| c.artifact_id.clone())
                 .collect();
             let act = core.store.activation_of(&ids).await.unwrap();
-            let of = |id: &String| act.get(id).map(|(a, _)| *a).unwrap_or(0.0);
+            let of = |id: &String| act.get(id).map(|(a, _, _)| *a).unwrap_or(0.0);
             assert_eq!(
                 of(&ids[0]),
                 of(&ids[1]),

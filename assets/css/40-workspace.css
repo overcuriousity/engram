@@ -227,6 +227,13 @@ body { overflow-x: hidden; }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
 .rail-rank { font-size: var(--text-xs); color: var(--color-fg-muted); }
 .rail-title { font-weight: 600; font-size: var(--text-base); }
+/* A passage with no heading of its own is shown under its note's title. The
+   name is borrowed, not earned, so it is said quietly and marked: a `·` in
+   front of it, and the weight of the surrounding text rather than a title's.
+   Without this the borrowed name rendered identical to a real heading and the
+   distinction lived only in the tooltip, where nobody scanning a list looks. */
+.rail-title-corpus { font-weight: 400; color: var(--color-fg-secondary); }
+.rail-title-corpus::before { content: "· "; color: var(--color-fg-muted); }
 /* Two lines at most, and a floor under it: an artifact whose excerpt came back
    empty collapsed to a bare title, so card heights swung between one line and
    four down a list that is read by scanning. */

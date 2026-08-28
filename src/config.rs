@@ -280,13 +280,18 @@ impl Default for AssociateConfig {
 /// When a passage has earned its window a synthesis call, and when an eager
 /// artifact has earned a second one.
 ///
-/// `activation_above` is read against `[activation]`: baseline `1.0`,
-/// `retrieved = 0`, `opened = 1.0`, `confirmed = 3.0`, half-life 14 days — so
-/// `4.0` is one confirmation, or three openings. Checked with `>=` after the
-/// bump, decay folded in, and only at the engagement bumps — opened, confirmed,
-/// cited — never at retrieved. With `retrieved` at zero that is a guarantee
-/// rather than a habit: a passage that merely keeps appearing in result lists
-/// cannot fill the tank for one open to fire, however often it is listed.
+/// `activation_above` is read against `[activation]` and *above the capture
+/// baseline*: `retrieved = 0`, `opened = 1.0`, `confirmed = 3.0`, half-life 14
+/// days — so `3.0` is one confirmation, or three openings. The baseline every
+/// artifact carries decays at the same rate as what use adds, so it is
+/// subtracted decayed before the comparison; a threshold read against the raw
+/// sum meant something different at every age, and the `4.0` this was could
+/// only be reached by a confirmation at essentially zero elapsed time. Checked
+/// with `>=` after the bump, decay folded in, and only at the engagement bumps
+/// — opened, confirmed, cited — never at retrieved. With `retrieved` at zero
+/// that is a guarantee rather than a habit: a passage that merely keeps
+/// appearing in result lists cannot fill the tank for one open to fire,
+/// however often it is listed.
 ///
 /// `resynthesize_after_unconfirmed` is the `eager` counterpart: an artifact
 /// shown this many times with no confirmation recorded against it is
@@ -303,7 +308,7 @@ pub struct PromoteConfig {
 impl Default for PromoteConfig {
     fn default() -> Self {
         Self {
-            activation_above: 4.0,
+            activation_above: 3.0,
             resynthesize_after_unconfirmed: 0,
         }
     }
@@ -3714,7 +3719,7 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
             "
         ))
         .unwrap();
-        assert_eq!(cfg.promote.activation_above, 4.0);
+        assert_eq!(cfg.promote.activation_above, 3.0);
         assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 0);
         // Opt-out now: promotion reads activation, and activation only moves
         // while searches are recorded.

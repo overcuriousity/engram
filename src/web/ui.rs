@@ -6660,6 +6660,15 @@ mod tests {
         .unwrap();
         assert_eq!(body.matches("Sourdough").count(), 2, "{body}");
         assert_eq!(body.matches("rail-title-corpus").count(), 1, "{body}");
+        // And the class has to *do* something. It shipped with no rule behind
+        // it anywhere in the sheet, so a borrowed title rendered identical to
+        // a heading the passage owns and the distinction lived only in the
+        // tooltip — while this assertion passed on the class string alone.
+        let css = include_str!("../../assets/app.css");
+        assert!(
+            css.contains(".rail-title-corpus"),
+            "the borrowed-title class has no rule in app.css"
+        );
     }
 
     #[tokio::test]
