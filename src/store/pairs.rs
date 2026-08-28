@@ -522,18 +522,27 @@ impl Store {
     /// `set_pair_state` because this is the only path that writes
     /// `obsolete_id`, and a plain contradiction must never carry a stale value
     /// left over from a different pair.
+    ///
+    /// `by` is written for the reason `set_pair_state` writes it, and is passed
+    /// rather than defaulted for the reason `DecidedBy` gives: a settled row
+    /// with `decided_by` left `NULL` is indistinguishable from one written
+    /// before the column existed, so the review surface cannot tell a verdict
+    /// from a legacy row.
     pub async fn set_pair_superseded(
         &self,
         id: i64,
         obsolete_id: &str,
         detail: Option<&str>,
+        by: DecidedBy,
     ) -> Result<()> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'superseded', detail = ?, obsolete_id = ?, merged_into = NULL
+                SET state = 'superseded', detail = ?, decided_by = ?,
+                    obsolete_id = ?, merged_into = NULL
               WHERE id = ?",
         )
         .bind(detail)
+        .bind(by.as_str())
         .bind(obsolete_id)
         .bind(id)
         .execute(&self.pool)
@@ -547,18 +556,27 @@ impl Store {
     /// Settle a pair as answered by an applied merge. `merged_into` names the
     /// merged artifact, which is what lets the stranded-merge reap reopen
     /// exactly the pairs a merge that never embedded had closed.
+    ///
+    /// `by` for the reason `set_pair_superseded` takes it: without it the one
+    /// settlement this path writes — a merge the judge applied unattended —
+    /// landed as `decided_by = NULL`, which the column defines as "still open,
+    /// or written before the column existed". The merge is the most attributable
+    /// answer in the queue and was the only one saying nothing about who gave it.
     pub async fn set_pair_merged(
         &self,
         id: i64,
         merged_into: &str,
         detail: Option<&str>,
+        by: DecidedBy,
     ) -> Result<()> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'no_conflict', detail = ?, merged_into = ?, obsolete_id = NULL
+                SET state = 'no_conflict', detail = ?, decided_by = ?,
+                    merged_into = ?, obsolete_id = NULL
               WHERE id = ?",
         )
         .bind(detail)
+        .bind(by.as_str())
         .bind(merged_into)
         .bind(id)
         .execute(&self.pool)
@@ -573,10 +591,16 @@ impl Store {
     /// person. Contradiction rather than Pending on purpose: re-arming the
     /// model would regenerate the same unembeddable draft, at full price,
     /// forever.
+    ///
+    /// `decided_by` is rewritten and not left standing: the row is being moved
+    /// to a state nobody has answered yet by a rule the sweep applied on its
+    /// own, so the name on it is the model's — the same attribution
+    /// `follow_supersession` writes when it settles a row the same way.
     pub async fn reopen_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'contradiction', detail = ?, merged_into = NULL
+                SET state = 'contradiction', detail = ?, decided_by = 'model',
+                    merged_into = NULL
               WHERE merged_into = ?",
         )
         .bind(detail)
@@ -592,13 +616,26 @@ impl Store {
     /// pairs were settled the moment the merge was written. Dismissed, not
     /// Contradiction: an undo is an operator overruling the verdict, and
     /// `record_pair` respecting dismissed rows is what makes that last.
-    pub async fn dismiss_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
+    ///
+    /// `by` is a parameter for the reason `discard_both` takes one, and this is
+    /// the case that made it matter: `undo` settles the pairs it finds through
+    /// `pairs_among` as the operator who pressed it, and reached this — the
+    /// branch that covers an undo outrunning the embed, which before `finish`
+    /// runs is *every* undo — writing no name at all. One button recorded
+    /// itself two different ways depending on timing.
+    pub async fn dismiss_pairs_merged_into(
+        &self,
+        merged_id: &str,
+        detail: &str,
+        by: DecidedBy,
+    ) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'dismissed', detail = ?, merged_into = NULL
+                SET state = 'dismissed', detail = ?, decided_by = ?, merged_into = NULL
               WHERE merged_into = ?",
         )
         .bind(detail)
+        .bind(by.as_str())
         .bind(merged_id)
         .execute(&self.pool)
         .await?;
@@ -972,6 +1009,15 @@ impl Store {
     /// the question back (`reopen_stale_pairs`). Both ways out of results are
     /// reversible; settling these as somebody's decision would make the queue
     /// the one place where they are not.
+    ///
+    /// `decided_by` is overwritten rather than left alone, which is the same
+    /// distinction one level down: the *state* is nobody's answer, but the row
+    /// still has to say who last wrote it. These candidates come from
+    /// `('pending','contradiction','superseded','vacuous')`, and a
+    /// contradiction an operator escalated carries their name — left standing
+    /// beside `'stale'` it reads "an operator decided this went stale", which
+    /// they did not. `'model'`, like every other rule this file applies
+    /// unattended (`follow_supersession` settles `Stale` exactly so).
     pub async fn stale_unreachable_pairs(&self) -> Result<u64> {
         let rows = sqlx::query(
             "SELECT p.id AS pair_id, x.id AS side, x.superseded_by AS winner
@@ -1024,6 +1070,7 @@ impl Store {
             let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE artifact_pairs
                     SET state = 'stale', obsolete_id = NULL, merged_into = NULL,
+                        decided_by = 'model',
                         detail = 'one of these artifacts is no longer in results'
                   WHERE id IN ({holes})"
             )));
@@ -1877,7 +1924,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        s.set_pair_superseded(p.id, &a, Some("a is stale"))
+        s.set_pair_superseded(p.id, &a, Some("a is stale"), DecidedBy::Model)
             .await
             .unwrap();
         assert_eq!(
@@ -2062,7 +2109,7 @@ mod tests {
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
 
-        s.set_pair_merged(id, "merge-1", Some("same claim"))
+        s.set_pair_merged(id, "merge-1", Some("same claim"), DecidedBy::Model)
             .await
             .unwrap();
 
@@ -2077,13 +2124,71 @@ mod tests {
         assert_eq!(s.get_pair(id).await.unwrap().merged_into, None);
     }
 
+    /// The settlement this whole column exists for. A merge the judge applied
+    /// unattended is the most attributable answer the queue has, and it was the
+    /// one row landing with `decided_by` unset — which the column defines as
+    /// "still open, or written before this existed". The review surface could
+    /// not tell an applied merge from a legacy row.
+    #[tokio::test]
+    async fn an_applied_merge_says_who_applied_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+
+        s.set_pair_merged(id, "merge-1", None, DecidedBy::Model)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_pair(id).await.unwrap().decided_by,
+            Some(DecidedBy::Model)
+        );
+
+        s.set_pair_superseded(id, &a, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_pair(id).await.unwrap().decided_by,
+            Some(DecidedBy::Operator),
+            "the proposed direction was recorded as nobody's"
+        );
+    }
+
+    /// One button, one attribution. `merge::undo` settles the pairs it finds
+    /// through `pairs_among` as the operator who pressed it and reaches this
+    /// for the rest — which before `finish` runs is *every* pair the merge
+    /// settled. Recording those two halves differently made how an undo is
+    /// remembered depend on whether the embed had landed yet.
+    #[tokio::test]
+    async fn dismissing_a_merge_s_pairs_carries_the_name_the_undo_gives_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_merged(id, "merge-1", None, DecidedBy::Model)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.dismiss_pairs_merged_into("merge-1", "merge undone", DecidedBy::Operator)
+                .await
+                .unwrap(),
+            1
+        );
+        let p = s.get_pair(id).await.unwrap();
+        assert_eq!(p.state, PairState::Dismissed);
+        assert_eq!(p.decided_by, Some(DecidedBy::Operator));
+    }
+
     #[tokio::test]
     async fn reopening_a_stranded_merge_s_pairs_touches_only_its_own() {
         let s = Store::memory().await.unwrap();
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_merged(id, "merge-1", None).await.unwrap();
+        s.set_pair_merged(id, "merge-1", None, DecidedBy::Model)
+            .await
+            .unwrap();
 
         assert_eq!(
             s.reopen_pairs_merged_into("merge-other", "unrelated")
@@ -2101,6 +2206,11 @@ mod tests {
         let p = s.get_pair(id).await.unwrap();
         assert_eq!(p.state, PairState::Contradiction);
         assert_eq!(p.merged_into, None);
+        assert_eq!(
+            p.decided_by,
+            Some(DecidedBy::Model),
+            "the reap is a rule the sweep applied on its own; the row has to say so"
+        );
     }
 
     /// The whole point of re-pointing: C was a duplicate of B, B is now inside
@@ -2573,6 +2683,29 @@ mod tests {
         assert_eq!(s.stale_unreachable_pairs().await.unwrap(), 1);
     }
 
+    /// `Stale` is not the operator's answer even when the row it lands on was
+    /// theirs. A contradiction a person escalated carries their name; leaving
+    /// it standing beside `'stale'` reads "an operator decided this went
+    /// stale", which is a lifecycle event nobody decided.
+    #[tokio::test]
+    async fn going_stale_does_not_leave_an_operator_s_name_on_the_row() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
+        s.set_pair_state(id, PairState::Contradiction, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        s.set_artifact_status(&b, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        assert_eq!(s.stale_unreachable_pairs().await.unwrap(), 1);
+        let p = s.get_pair(id).await.unwrap();
+        assert_eq!(p.state, PairState::Stale);
+        assert_eq!(p.decided_by, Some(DecidedBy::Model));
+    }
+
     /// The stale pass ran unbounded straight after a repair pass that takes 200
     /// supersessions a sweep, so it reached everything the repair had not got to
     /// yet and settled it `Stale` first. That is a one-way door:
@@ -2698,7 +2831,7 @@ mod tests {
         let (loser, other, winner) = (&ids[0], &ids[1], &ids[2]);
         s.record_pair(loser, other, 0.91).await.unwrap();
         let id = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        s.set_pair_superseded(id, loser, Some("the older reading"))
+        s.set_pair_superseded(id, loser, Some("the older reading"), DecidedBy::Model)
             .await
             .unwrap();
 

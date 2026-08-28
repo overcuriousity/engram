@@ -22,9 +22,11 @@ pub struct CliArgs {
     /// Ask one question across the base.
     #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search"])]
     pub ask: Vec<String>,
-    #[arg(long, value_name = "TITLE")]
+    /// What to call this capture. Refused with every verb but `-c`, for the
+    /// reason `--tag` is refused with `-a`: a search has no title to set.
+    #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show"])]
     pub title: Option<String>,
-    #[arg(long, value_name = "NOTE")]
+    #[arg(long, value_name = "NOTE", conflicts_with_all = ["search", "ask", "show"])]
     pub note: Option<String>,
     /// Narrow a search to artifacts carrying this tag. Repeatable.
     ///
@@ -32,12 +34,20 @@ pub struct CliArgs {
     /// accepts all three over its JSON API, but no interactive door offers a
     /// filtered ask, and a flag that is accepted and then dropped is worse
     /// than one that is refused. See `cli::ask::run`.
-    #[arg(long = "tag", value_name = "TAG", conflicts_with = "ask")]
+    ///
+    /// Refused with `--show` for the plainer version of the same reason: one
+    /// artifact named by id is not a list there is anything to narrow.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show"])]
     pub tags: Vec<String>,
-    #[arg(long, value_name = "CATEGORY", conflicts_with = "ask")]
+    #[arg(long, value_name = "CATEGORY", conflicts_with_all = ["ask", "show"])]
     pub category: Option<String>,
     /// Print the results as JSON instead of for a person.
-    #[arg(long, conflicts_with = "ask")]
+    ///
+    /// `--show` refuses it rather than ignoring it: the reading door renders a
+    /// body for a person to read and has no JSON form, and being handed the
+    /// human rendering after asking for JSON is the failure this whole rule is
+    /// about.
+    #[arg(long, conflicts_with_all = ["ask", "show"])]
     pub json: bool,
     /// Never colour, never animate, never leave ASCII.
     #[arg(long)]
@@ -46,12 +56,18 @@ pub struct CliArgs {
     #[arg(long, value_name = "WHEN", default_value = "auto")]
     pub fancy: Fancy,
     /// After capturing, follow the background stages until they finish.
-    #[arg(long)]
+    ///
+    /// There is nothing to follow behind the other three verbs: they finish
+    /// when their response arrives.
+    #[arg(long, conflicts_with_all = ["search", "ask", "show"])]
     pub watch: bool,
     /// Read one artifact in full: a rank from the last search, a leading piece
     /// of an id, or a whole id.
     #[arg(long, value_name = "RANK|ID", conflicts_with_all = ["capture", "search", "ask"])]
     pub show: Option<String>,
+    // Every flag `--show` does not honour refuses it from the other side —
+    // `--json`, `--tag`, `--category`, `--title`, `--note`, `--watch` — so the
+    // conflict is declared once, on the flag whose own doc comment explains it.
 }
 
 /// When the drawn rendering is used. `Auto` is the only honest default: a pipe

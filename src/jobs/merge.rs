@@ -219,7 +219,12 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
     // the pairs were settled the moment the merge was written, and leaving
     // them would keep the duplicates invisible to every later sweep.
     core.store
-        .dismiss_pairs_merged_into(&m.id, "merge undone")
+        .dismiss_pairs_merged_into(
+            &m.id,
+            "merge undone",
+            // The same press, recorded the same way as the branch above it.
+            crate::store::pairs::DecidedBy::Operator,
+        )
         .await?;
     tracing::info!(merged = %m.id, restored = restored.len(), "undid a merge");
     Ok(())
@@ -1109,7 +1114,12 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .set_pair_merged(pair, &m.id, Some("duplicate"))
+            .set_pair_merged(
+                pair,
+                &m.id,
+                Some("duplicate"),
+                crate::store::pairs::DecidedBy::Model,
+            )
             .await
             .unwrap();
         // No embed ran: nothing is superseded by m yet.
@@ -1123,6 +1133,14 @@ mod tests {
             "the pair stayed settled behind a deprecated merge: {p:?}"
         );
         assert_eq!(p.merged_into, None);
+        // The same press that dismissed the pairs `pairs_among` finds. Reached
+        // through the lineage branch here, because no embed ran — which before
+        // `finish` is every undo — and that branch recorded nobody.
+        assert_eq!(
+            p.decided_by,
+            Some(crate::store::pairs::DecidedBy::Operator),
+            "an undo a person pressed was recorded as nobody's: {p:?}"
+        );
     }
 
     #[tokio::test]

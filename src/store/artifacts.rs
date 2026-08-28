@@ -610,20 +610,30 @@ impl Store {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        let holes = std::iter::repeat_n("?", ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT * FROM artifacts WHERE id IN ({holes})"
-        )));
-        for id in ids {
-            q = q.bind(id);
+        // Deduplicated and chunked, because the callers hand this whatever
+        // their own walk produced. `dedupe::run` passes every root of both
+        // members flattened together, which repeats an id whenever two members
+        // share a source and is bounded by nothing: the pre-merge check it
+        // feeds has no count-based cap by design. One `?` per id past
+        // SQLITE_MAX_VARIABLE_NUMBER — 999 on the builds predating 3.32 — is a
+        // prepare error, not a slow query, so the same 500 the pair repair
+        // chunks at is used here (`store::pairs::stale_unreachable_pairs`).
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        let unique: Vec<&String> = ids.iter().filter(|id| seen.insert(*id)).collect();
+        let mut out = Vec::with_capacity(unique.len());
+        for chunk in unique.chunks(500) {
+            let holes = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM artifacts WHERE id IN ({holes})"
+            )));
+            for id in chunk {
+                q = q.bind(*id);
+            }
+            out.extend(q.fetch_all(&self.pool).await?.iter().map(row_to_artifact));
         }
-        Ok(q.fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(row_to_artifact)
-            .collect())
+        Ok(out)
     }
 
     /// The caveats of many artifacts in one query, keyed by id.
@@ -1954,6 +1964,30 @@ mod tests {
         let mut texts: Vec<&str> = got.iter().map(|c| c.text.as_str()).collect();
         texts.sort_unstable();
         assert_eq!(texts, vec!["a", "c"]);
+    }
+
+    /// One `?` per id, and the callers hand this whatever their own walk
+    /// produced: `dedupe::run` flattens every root of both members together,
+    /// which repeats a shared source and is capped by nothing. Past
+    /// SQLITE_MAX_VARIABLE_NUMBER that is a prepare error, not a slow query.
+    #[tokio::test]
+    async fn a_long_repetitive_list_of_ids_is_still_one_answer() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "a"), nc(1, "b")])
+            .await
+            .unwrap();
+        // Well past 999, and mostly repeats.
+        let mut ids: Vec<String> = (0..2_000).map(|i| format!("gone-{i}")).collect();
+        for _ in 0..40 {
+            ids.push(made[0].id.clone());
+            ids.push(made[1].id.clone());
+        }
+        let got = s.artifacts_by_ids(&ids).await.unwrap();
+        let mut texts: Vec<&str> = got.iter().map(|c| c.text.as_str()).collect();
+        texts.sort_unstable();
+        assert_eq!(texts, vec!["a", "b"], "a repeated id came back twice");
     }
 
     #[tokio::test]

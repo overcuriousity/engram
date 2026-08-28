@@ -92,10 +92,19 @@ async fn post(
         //
         // Where the face is off the whole vector goes at once, exactly as it
         // did before: a pipe gets no chunked encoding it did not ask for.
+        //
+        // And where it is on, `content-length` is set by hand so the pieces are
+        // sent length-framed too. The length is known — it is `bytes.len()`,
+        // the whole reason the track can show a percentage — and without the
+        // header a streamed body goes out chunked, which made what the server
+        // and every proxy in front of it saw depend on nothing but whether the
+        // operator's stdout happened to be a terminal.
+        let len = bytes.len();
         let res = http
             .post(url.trim_end_matches(['?', '&']))
             .bearer_auth(&e.token)
             .header("content-type", content_type)
+            .header(reqwest::header::CONTENT_LENGTH, len)
             .body(tracked_body(bytes, face))
             .send()
             .await
@@ -125,19 +134,24 @@ async fn post(
     }
 }
 
+/// How much of the body goes out at a time. Small enough that the track moves
+/// on a slow link, large enough that a book is not a hundred thousand yields.
+const PIECE: usize = 64 * 1024;
+
 /// The request body, filling a track as the transport reads it.
 ///
 /// One vector where the face is off, so nothing about a scripted capture
-/// changes: no chunked transfer encoding, no lost `content-length`, no track.
+/// changes: no track, and the length comes from the body itself.
+///
+/// The streamed form carries no length of its own, so the caller sets
+/// `content-length` from the vector before handing it over; both forms then go
+/// out identically framed.
 fn tracked_body(bytes: Vec<u8>, face: &crate::cli::face::Face) -> reqwest::Body {
     if !face.on {
         return reqwest::Body::from(bytes);
     }
     let total = bytes.len();
     let mut fill = face.fill();
-    // Small enough that the track moves on a slow link, large enough that a
-    // book is not a hundred thousand yields.
-    const PIECE: usize = 64 * 1024;
     let stream = async_stream::stream! {
         let mut at = 0usize;
         while at < total {
@@ -147,7 +161,9 @@ fn tracked_body(bytes: Vec<u8>, face: &crate::cli::face::Face) -> reqwest::Body 
             fill.show(at, total);
             yield Ok::<Vec<u8>, std::io::Error>(piece);
         }
-        // Before the response is read, and so before anything is printed.
+        // Before the response is read, and so before anything is printed. The
+        // request that never gets here — a reset, a refusal mid-upload — is
+        // covered by `Fill`'s own `Drop`, which this only makes earlier.
         fill.clear();
     };
     reqwest::Body::wrap_stream(stream)
@@ -287,6 +303,43 @@ mod tests {
         assert_eq!(ids.len(), 1);
         let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
         assert!(stored.raw_text.contains("a procedure worth keeping"));
+    }
+
+    /// The one case `off()` cannot reach: with the face on the body goes out in
+    /// pieces, and the length is set by hand so it is framed the same way the
+    /// single vector is. Bigger than `PIECE`, so several chunks actually go.
+    ///
+    /// What this guards is that the two forms are the same request. Before the
+    /// header was set, a streamed body went out chunked with no
+    /// `content-length` — so what the server and any proxy in front of it saw
+    /// depended on nothing but whether the operator's stdout was a terminal.
+    #[tokio::test]
+    async fn a_body_sent_in_pieces_arrives_whole() {
+        let (e, core) = endpoint().await;
+        let face = crate::cli::face::Face::decide(
+            &crate::cli::args::CliArgs {
+                fancy: crate::cli::args::Fancy::Always,
+                ..Default::default()
+            },
+            true,
+            false,
+            None,
+        );
+        let body = "eine Zeile, die sich wiederholt\n".repeat(8_000);
+        assert!(body.len() > PIECE, "the test body fits in one piece");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lang.txt");
+        std::fs::write(&file, &body).unwrap();
+
+        let ids = run(&e, &[file.display().to_string()], None, None, &face)
+            .await
+            .unwrap();
+        let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
+        assert_eq!(
+            stored.raw_text.len(),
+            body.len(),
+            "the streamed body arrived a different length than it left"
+        );
     }
 
     #[tokio::test]

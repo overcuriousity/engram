@@ -113,6 +113,13 @@ pub fn render_citations(hits: &[serde_json::Value], unicode: bool) -> String {
 
 /// The ids of those sources, in the order they were numbered, so `--show 9`
 /// after an answer reaches what `[9]` meant.
+///
+/// A citation carrying no `artifact_id` keeps its place as an empty string
+/// rather than being dropped: `render_citations` numbers every hit it is given,
+/// so skipping one here would shift every rank below it and `--show 9` would
+/// open the tenth source. `last::resolve` is what turns the empty place back
+/// into a sentence — before that it was sent to the server as an id, which
+/// asked for `/api/v1/artifacts/` and answered with a bare 404.
 pub fn citation_ids(hits: &[serde_json::Value]) -> Vec<String> {
     hits.iter()
         .map(|c| c["artifact_id"].as_str().unwrap_or_default().to_string())
@@ -182,7 +189,14 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
                 // Said, not swallowed: an answer that stopped and an answer
                 // that failed look identical on a terminal otherwise.
                 "error" => {
+                    use std::io::Write;
                     print!("{}", readout.finish());
+                    // Flushed before a word goes to stderr. The erase is a
+                    // bare escape with no newline, so stdout's line buffer
+                    // holds it: without this the failure prints over a readout
+                    // still on screen, and the erase lands at process exit,
+                    // eating part of whatever line the cursor is on by then.
+                    std::io::stdout().flush().ok();
                     eprintln!(
                         "\n{}",
                         data["error"].as_str().unwrap_or("the answer failed")

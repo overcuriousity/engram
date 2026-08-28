@@ -2193,7 +2193,12 @@ pub(crate) mod tests {
             .unwrap()[0]
             .id;
         core.store
-            .set_pair_merged(pid, &m.id, Some("same claim"))
+            .set_pair_merged(
+                pid,
+                &m.id,
+                Some("same claim"),
+                crate::store::pairs::DecidedBy::Model,
+            )
             .await
             .unwrap();
         // The embed job has exhausted its retries and cannot succeed.

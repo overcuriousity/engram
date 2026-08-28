@@ -529,7 +529,7 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             // lands, the sweep's reap has to find exactly this pair and reopen
             // it (`reap_stranded`).
             core.store
-                .set_pair_merged(s.pair.id, &m.id, s.detail.as_deref())
+                .set_pair_merged(s.pair.id, &m.id, s.detail.as_deref(), DecidedBy::Model)
                 .await
         }
     }

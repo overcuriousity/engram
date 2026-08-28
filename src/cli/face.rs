@@ -172,6 +172,18 @@ impl Fill {
     }
 }
 
+/// Taken back on drop, the way `Pulse` stops on drop.
+///
+/// The one caller draws from inside a request body, and a request that fails
+/// partway — a reset connection, a 413 mid-upload — drops that stream without
+/// ever reaching its own `clear`. The track was then left half-filled on stderr
+/// underneath the error message, describing an upload that did not happen.
+impl Drop for Fill {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 /// The three lamps, drawn in place while a capture is watched.
 ///
 /// Holds no timer and starts no thread: it is redrawn from each poll the watch
@@ -305,22 +317,32 @@ impl Readout {
 
     /// One cell per bucket of the window, oldest on the left, each cell as tall
     /// as that bucket was busy.
+    ///
+    /// Bucketed by each mark's age rather than by an absolute span per cell:
+    /// the same arithmetic done from the end, and it cannot go wrong at either
+    /// edge. Spans computed forwards left the newest cell covering
+    /// `[now - BUCKET, now)`, so the token that triggered this very redraw —
+    /// the one at `now` — fell outside every cell and the readout never showed
+    /// the character being printed beside it. Those spans also collapsed onto a
+    /// `saturating_sub` floor of zero for the first second of a stream, drawing
+    /// one bucket several times over.
     fn strand(&self, now_ms: u64) -> String {
         let blocks = if self.unicode { BLOCKS } else { ASCII_BLOCKS };
-        (0..READOUT_CELLS)
-            .map(|i| {
-                let age = (READOUT_CELLS - i) as u64 * READOUT_BUCKET_MS;
-                let from = now_ms.saturating_sub(age);
-                let to = from + READOUT_BUCKET_MS;
-                let n = self
-                    .marks
-                    .iter()
-                    .filter(|m| **m >= from && **m < to)
-                    .count();
-                match n {
-                    0 => ' ',
-                    n => blocks[(n - 1).min(blocks.len() - 1)],
-                }
+        let mut counts = [0usize; READOUT_CELLS];
+        for m in &self.marks {
+            // Age zero is the newest cell, so a mark landing exactly now is
+            // drawn now. A mark from ahead of `now` saturates to the same
+            // place, which is where a clock that stepped back belongs.
+            let back = (now_ms.saturating_sub(*m) / READOUT_BUCKET_MS) as usize;
+            if back < READOUT_CELLS {
+                counts[READOUT_CELLS - 1 - back] += 1;
+            }
+        }
+        counts
+            .iter()
+            .map(|n| match n {
+                0 => ' ',
+                n => blocks[(n - 1).min(blocks.len() - 1)],
             })
             .collect()
     }
@@ -541,6 +563,65 @@ mod tests {
     use super::*;
     use crate::cli::args::{CliArgs, Fancy};
     use crate::cli::search::fixture::hit;
+
+    fn readout() -> Readout {
+        Readout {
+            on: true,
+            unicode: true,
+            width: 200,
+            marks: Vec::new(),
+            col: 0,
+            tail: 0,
+        }
+    }
+
+    /// The readout is drawn beside the character that triggered it, so the
+    /// newest cell has to hold that character. Cells computed as forward spans
+    /// left the newest one covering everything up to but not including `now`,
+    /// and the mark just pushed fell off the end of the strand it caused.
+    #[test]
+    fn the_token_that_triggered_the_redraw_is_in_the_strand() {
+        let mut r = readout();
+        r.marks.push(1_000);
+        let strand = r.strand(1_000);
+        assert_eq!(strand.chars().count(), READOUT_CELLS);
+        assert_ne!(
+            strand.chars().next_back(),
+            Some(' '),
+            "the newest cell is empty on the very tick a token arrived: {strand:?}"
+        );
+        assert!(
+            strand.chars().take(READOUT_CELLS - 1).all(|c| c == ' '),
+            "one mark lit more than its own cell: {strand:?}"
+        );
+    }
+
+    /// Inside the first second every cell's start saturated to zero, so several
+    /// of them counted the same marks and the strand drew one bucket over and
+    /// over. One mark can only ever light one cell.
+    #[test]
+    fn the_first_second_of_a_stream_draws_no_duplicate_cells() {
+        let mut r = readout();
+        r.marks.push(10);
+        for now in [10, 50, 99, 150, 300, 999] {
+            let strand = r.strand(now);
+            assert_eq!(
+                strand.chars().filter(|c| *c != ' ').count(),
+                1,
+                "one mark lit several cells at {now}ms: {strand:?}"
+            );
+        }
+    }
+
+    /// A mark older than the window is off the strand entirely, which is what
+    /// makes the readout fall away when a model stops to think.
+    #[test]
+    fn a_mark_older_than_the_window_is_not_drawn() {
+        let mut r = readout();
+        r.marks.push(0);
+        let window = READOUT_CELLS as u64 * READOUT_BUCKET_MS;
+        assert!(r.strand(window).chars().all(|c| c == ' '));
+    }
 
     fn always() -> CliArgs {
         CliArgs {

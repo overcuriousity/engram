@@ -1139,12 +1139,13 @@ async fn get_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<Ar
     // A reading is not refused because the document behind it is gone: the
     // artifact is the thing that was asked for and it is still here.
     let source = match &chunk.corpus_id {
+        // `corpus_origin` and not `get_corpus`: the four columns below are the
+        // whole of what this answers with, and the row carries `raw_text`.
         Some(id) => tenant
             .core
             .store
-            .get_corpus(id)
-            .await
-            .ok()
+            .corpus_origin(id)
+            .await?
             .map(|c| SourceRef {
                 id: c.id,
                 title: c.title_hint,

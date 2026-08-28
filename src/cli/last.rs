@@ -110,6 +110,13 @@ pub fn resolve(needle: &str, last: Option<&LastSearch>) -> Result<String> {
             )));
         };
         return match n.checked_sub(1).and_then(|i| last.ids.get(i)) {
+            // A source the answer cited and named no artifact for. It holds a
+            // rank so the numbering matches what was printed
+            // (`ask::citation_ids`), and there is nothing behind it to open.
+            Some(id) if id.is_empty() => Err(Error::Validation(format!(
+                "the source listed as [{n}] carried no artifact id, so there \
+                 is nothing to read"
+            ))),
             Some(id) => Ok(id.clone()),
             None => Err(Error::Validation(format!(
                 "the last search — {} — had {} hit(s), so there is no {n}",
@@ -126,7 +133,7 @@ pub fn resolve(needle: &str, last: Option<&LastSearch>) -> Result<String> {
         let matched: Vec<&String> = last
             .ids
             .iter()
-            .filter(|id| id.starts_with(needle))
+            .filter(|id| !id.is_empty() && id.starts_with(needle))
             .collect();
         match matched.as_slice() {
             [one] => return Ok((*one).clone()),
@@ -239,6 +246,31 @@ mod tests {
     fn a_rank_with_nothing_remembered_says_so_rather_than_asking_the_server() {
         let said = resolve("3", None).unwrap_err().to_string();
         assert!(said.contains("no search"), "{said}");
+    }
+
+    /// An answer can cite a source the API named no artifact for. The rank
+    /// still has to line up with the printed list, so the place is kept empty
+    /// (`ask::citation_ids`) — and an empty place sent on as an id asked the
+    /// server for `/artifacts/`, which answers with a bare 404 that says
+    /// nothing about the rank the operator typed.
+    #[test]
+    fn a_rank_naming_a_source_with_no_id_says_so_rather_than_asking_the_server() {
+        let held = last(&["id-a", "", "id-c"]);
+        let said = resolve("2", Some(&held)).unwrap_err().to_string();
+        assert!(said.contains("no artifact id"), "{said}");
+        assert_eq!(
+            resolve("3", Some(&held)).unwrap(),
+            "id-c",
+            "the empty place shifted the ranks under it"
+        );
+    }
+
+    /// And it is not a prefix of anything either: every needle starts with the
+    /// empty string, so the empty place matched the first thing typed.
+    #[test]
+    fn a_source_with_no_id_is_not_a_prefix_of_what_was_typed() {
+        let held = last(&["", "id-c"]);
+        assert_eq!(resolve("id-c", Some(&held)).unwrap(), "id-c");
     }
 
     #[test]
