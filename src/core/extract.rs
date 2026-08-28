@@ -36,6 +36,21 @@ static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
             }
             Some(content)
         })
+        .add_handler(
+            vec!["b", "strong", "i", "em"],
+            |handlers: &dyn Handlers, el: Element| {
+                // Inside `<pre>` the output is a code block, and a code block is
+                // literal: the `**` htmd would write around a `<b>` is shown as
+                // two asterisks, not read as bold. man7 sets every option name
+                // bold inside one `<pre>`, and the rail showed `**-c**,
+                // **--set-capacity**` on every snippet from it. Plain text there;
+                // the ordinary markers everywhere else.
+                match has_ancestor(el.node, "pre") {
+                    true => Some(handlers.walk_children(el.node)),
+                    false => handlers.fallback(el),
+                }
+            },
+        )
         .add_handler(vec!["img"], |_: &dyn Handlers, el: Element| {
             // A capture is text, so the image itself is not stored — but its
             // `alt` is not always decoration. Wikipedia renders every equation
@@ -56,17 +71,44 @@ static CONVERTER: LazyLock<HtmlToMarkdown> = LazyLock::new(|| {
         .build()
 });
 
+/// The parent of a DOM node. `parent` is a `Cell` of a weak handle, so it is
+/// taken and put back rather than borrowed.
+fn parent_of(node: &std::rc::Rc<htmd::Node>) -> Option<std::rc::Rc<htmd::Node>> {
+    let parent = node.parent.take();
+    node.parent.set(parent.clone());
+    parent.and_then(|w| w.upgrade())
+}
+
+fn tag_of(node: &std::rc::Rc<htmd::Node>) -> Option<String> {
+    match &node.data {
+        markup5ever_rcdom::NodeData::Element { name, .. } => Some(name.local.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether any element above this node is `tag`.
+fn has_ancestor(node: &std::rc::Rc<htmd::Node>, tag: &str) -> bool {
+    let mut cur = parent_of(node);
+    while let Some(n) = cur {
+        if tag_of(&n).as_deref() == Some(tag) {
+            return true;
+        }
+        cur = parent_of(&n);
+    }
+    false
+}
+
 /// Whether an anchor is a heading's back-link: inside an `h1`–`h6`, after the
 /// heading's own text. The `[top]` at the end of every man7 section heading.
 fn is_back_link(node: &std::rc::Rc<htmd::Node>) -> bool {
     use markup5ever_rcdom::NodeData;
-    let parent = node.parent.take();
-    node.parent.set(parent.clone());
-    let Some(parent) = parent.and_then(|w| w.upgrade()) else {
+    let Some(parent) = parent_of(node) else {
         return false;
     };
-    let heading = matches!(&parent.data, NodeData::Element { name, .. }
-        if matches!(name.local.as_ref(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6"));
+    let heading = matches!(
+        tag_of(&parent).as_deref(),
+        Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+    );
     if !heading {
         return false;
     }
@@ -260,8 +302,16 @@ fn closes(line: &str, marker: &str) -> bool {
 /// `html_to_markdown` off the async runtime's threads: the two parsers are a
 /// synchronous walk over whatever a page contained, seconds during which
 /// search, health and the queue poll on that thread would all wait.
-pub async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Result<String> {
-    tokio::task::spawn_blocking(move || html_to_markdown(&html, url.as_ref(), min_chars))
+/// What a page reduces to: its markdown, and the name readability found for
+/// it — the `<title>`, with the site's suffix taken off where readability can
+/// tell it from the article's heading. `None` when the page had none.
+pub struct Extracted {
+    pub title: Option<String>,
+    pub markdown: String,
+}
+
+pub async fn extract(html: String, url: Option<url::Url>, min_chars: usize) -> Result<Extracted> {
+    tokio::task::spawn_blocking(move || html_to_document(&html, url.as_ref(), min_chars))
         .await
         // A `JoinError` is a panic in `dom_smoothie` or `htmd` — two parsers
         // fed whatever a remote page contained — or a cancelled runtime.
@@ -276,14 +326,37 @@ pub fn html_to_markdown(
     base_url: Option<&url::Url>,
     min_chars: usize,
 ) -> Result<String> {
-    let content = {
+    html_to_document(html, base_url, min_chars).map(|d| d.markdown)
+}
+
+/// `html_to_markdown`, with the page's title beside the text.
+///
+/// The title matters because readability drops the page's `<h1>` from the
+/// content it keeps, so a captured article's first heading is its first
+/// *section* — and with no title supplied, that section heading became the
+/// corpus's name: a capture of the Wikipedia article on loop devices was
+/// listed as "Uses of loop mounting" on the home screen.
+pub fn html_to_document(
+    html: &str,
+    base_url: Option<&url::Url>,
+    min_chars: usize,
+) -> Result<Extracted> {
+    let (title, content) = {
         let mut readability =
             dom_smoothie::Readability::new(html, base_url.map(url::Url::as_str), None)
                 .map_err(|e| Error::Validation(format!("could not read the page: {e}")))?;
         let article = readability
             .parse()
             .map_err(|e| Error::Validation(format!("could not read the page: {e}")))?;
-        article.content.to_string()
+        let title = article
+            .title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        (
+            (!title.is_empty()).then_some(title),
+            article.content.to_string(),
+        )
     };
 
     let converted = CONVERTER
@@ -313,7 +386,7 @@ pub fn html_to_markdown(
              the page was probably a login wall or an empty shell"
         )));
     }
-    Ok(markdown)
+    Ok(Extracted { title, markdown })
 }
 
 #[cfg(test)]
@@ -462,6 +535,35 @@ mod tests {
         assert!(
             md.contains('1'),
             "the citation marker itself was lost:\n{md}"
+        );
+    }
+
+    #[test]
+    fn bold_inside_a_pre_block_is_plain_text_not_asterisks() {
+        // man7 sets every option name in `<b>` inside one `<pre>`. A code
+        // block is literal, so the `**` written around them was shown.
+        let page = format!(
+            "<html><head><title>losetup(8) - Linux manual page</title></head><body><article>\
+             <h2>OPTIONS</h2><pre>       <b>-a</b>, <b>--all</b>\n           Show the status of all loop \
+             devices. <i>loopdev</i> names one.\n{}</pre>\
+             <p>Outside the block <b>bold</b> is still bold, and {}</p>\
+             </article></body></html>",
+            "           more lines of the manual page so that readability keeps it as content\n"
+                .repeat(6),
+            "this paragraph is long enough to be kept as content by the readability pass too."
+        );
+        let doc = html_to_document(&page, None, 10).unwrap();
+        assert!(!doc.markdown.contains("**-a**"), "{}", doc.markdown);
+        assert!(doc.markdown.contains("-a, --all"), "{}", doc.markdown);
+        assert!(!doc.markdown.contains("*loopdev*"), "{}", doc.markdown);
+        assert!(doc.markdown.contains("**bold**"), "{}", doc.markdown);
+        // And the page's own title comes out beside the text.
+        assert!(
+            doc.title
+                .as_deref()
+                .is_some_and(|t| t.starts_with("losetup(8)")),
+            "{:?}",
+            doc.title
         );
     }
 
