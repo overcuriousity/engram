@@ -660,7 +660,11 @@ async function refreshRecent() {
       link.href = deployment + '/ui/corpora/' + c.id;
       link.target = '_blank';
       link.rel = 'noreferrer noopener';
-      link.textContent = label(c);
+      // Same floor the hit rows carry: `label` bottoms out at '' for a
+      // corpus with no `title_hint` and no usable first line — an image
+      // capture, a PDF whose `raw_text` this payload does not carry — and an
+      // empty anchor is an invisible, unclickable row.
+      link.textContent = label(c) || c.id;
 
       const state = document.createElement('span');
       state.className = 'state ' + c.status;

@@ -102,7 +102,8 @@ fn has_ancestor(node: &std::rc::Rc<htmd::Node>, tag: &str) -> bool {
 /// Whether an anchor is a heading's back-link: inside an `h1`–`h6`, after the
 /// heading's own text, with nothing but whitespace after it, and written the
 /// way a back-link is written — bracketed like man7's `[top]` at the end of
-/// every section heading, or a short `top`/`back`/`up`, or a bare arrow.
+/// every section heading, or a short `top`/`back`/`up`, or a bare arrow. Short
+/// either way, and never numbered: a bracketed number is a citation.
 ///
 /// All three conditions, because position alone is not enough: a heading is
 /// allowed to end in an ordinary in-page link, and on that rule
@@ -154,13 +155,25 @@ fn is_back_link(node: &std::rc::Rc<htmd::Node>) -> bool {
     // narrow: man7's bracketed `[top]`, or a short word or arrow.
     let text = text_of(node);
     let t = text.trim();
-    if t.starts_with('[') && t.ends_with(']') {
-        return true;
+    // Both branches are bounded. Brackets alone are not the signal: a heading
+    // that cites something in brackets — `<h2>Requirement levels <a
+    // href="#refs">[RFC 2119]</a></h2>` — is written around that link, and an
+    // unbounded bracket rule dropped its words the same way position alone
+    // used to.
+    if t.chars().count() > 8 {
+        return false;
+    }
+    if let Some(inner) = t.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        // A digit inside the brackets makes it a reference, never navigation:
+        // `[1]`, `[12]`, `[§4.2]` are what a heading cites, and no back-link
+        // anywhere is numbered. Only digits, because an arrow — `[↑]` — is
+        // punctuation-only and *is* one.
+        return !inner.chars().any(|c| c.is_numeric());
     }
     let word = t
         .trim_matches(|c: char| !c.is_alphanumeric())
         .to_lowercase();
-    t.chars().count() <= 8 && (word.is_empty() || matches!(word.as_str(), "top" | "back" | "up"))
+    word.is_empty() || matches!(word.as_str(), "top" | "back" | "up")
 }
 
 /// An `alt` as an inline text node rather than as markdown.
@@ -657,6 +670,50 @@ mod tests {
         assert_eq!(
             headings,
             vec!["## Configuration and the flag list", "## Recovery"],
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn a_heading_that_ends_in_a_bracketed_citation_keeps_its_words() {
+        // The bracket branch of `is_back_link` was unbounded, so every heading
+        // whose last element is a link written in brackets — a citation, a
+        // pointer to a table — was read as man7's `[top]` and dropped. This one
+        // arrived as `## Requirement levels`. A numbered reference is refused
+        // whatever its length, and a bracketed arrow is still a back-link.
+        let body = |what: &str| {
+            format!(
+                "each {what} is stated once and referred to from everywhere else in \
+                 the document, which is enough prose for the readability pass to keep \
+                 this section rather than drop it as furniture."
+            )
+        };
+        let page = format!(
+            "<html><body><article>\
+             <h2>Requirement levels <a href=\"#refs\">[RFC 2119]</a></h2>\
+             <p>{}</p>\
+             <h2>Retry budgets <a href=\"#n1\">[1]</a></h2>\
+             <p>{}</p>\
+             <h2>Error codes <a href=\"#top\">[top]</a></h2>\
+             <p>{}</p>\
+             <h2>Wire format <a href=\"#top\">[↑]</a></h2>\
+             <p>{}</p>\
+             </article></body></html>",
+            body("requirement"),
+            body("budget"),
+            body("code"),
+            body("frame"),
+        );
+        let md = html_to_markdown(&page, None, 10).unwrap();
+        let headings: Vec<&str> = md.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(
+            headings,
+            vec![
+                "## Requirement levels \\[RFC 2119\\]",
+                "## Retry budgets \\[1\\]",
+                "## Error codes",
+                "## Wire format",
+            ],
             "{md}"
         );
     }

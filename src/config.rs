@@ -1638,15 +1638,19 @@ pub enum RerankStyle {
 }
 
 impl RerankStyle {
-    /// Where the startup probe checks this server is up. `base_url` for a
-    /// rerank role is the bare host — the request path itself carries any
-    /// `v1` prefix, per style, so the probe has to do the same rather than
-    /// assume `models` off the bare host. TEI has no model-list endpoint;
-    /// `info` is the one it actually serves.
+    /// Where the startup probe checks this server is up. The probe has to
+    /// carry the same prefix its style's *request* path does, because that is
+    /// what the configured `base_url` is written against: vLLM posts to
+    /// `v1/rerank` off a bare host, so the probe asks `v1/models`; Cohere
+    /// posts to a bare `rerank`, so its `base_url` already ends in `/v1` and
+    /// the probe must ask `models` — `v1/models` would request `/v1/v1/models`
+    /// and warn "rerank unreachable" at every startup. TEI has no model-list
+    /// endpoint; `info` is the one it actually serves.
     pub fn probe_path(self) -> &'static str {
         match self {
             RerankStyle::Tei => "info",
-            RerankStyle::Cohere | RerankStyle::Vllm => "v1/models",
+            RerankStyle::Cohere => "models",
+            RerankStyle::Vllm => "v1/models",
         }
     }
 }
@@ -3791,5 +3795,17 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
         .unwrap();
         assert_eq!(cfg.pursuit.idle_secs, 60);
         assert!(!cfg.learn.enabled);
+    }
+
+    #[test]
+    fn the_rerank_probe_shares_the_prefix_of_its_style_request_path() {
+        // The probe is written against the same `base_url` the request is, so
+        // a style whose request path carries no `v1` must not have the probe
+        // add one: Cohere's `base_url` already ends in `/v1`, and `v1/models`
+        // asked for `/v1/v1/models` and warned "rerank unreachable" at every
+        // startup.
+        assert_eq!(RerankStyle::Cohere.probe_path(), "models");
+        assert_eq!(RerankStyle::Vllm.probe_path(), "v1/models");
+        assert_eq!(RerankStyle::Tei.probe_path(), "info");
     }
 }

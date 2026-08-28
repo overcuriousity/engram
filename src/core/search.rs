@@ -1652,7 +1652,14 @@ impl Core {
             let recalled = self.associated(&results, &filter).await;
             if !recalled.is_empty() {
                 self.mark_seen(&recalled, &HashMap::new(), false);
+                let from = results.len();
                 results.extend(recalled);
+                // The earlier pass ran before these existed. Without this an
+                // associated passage with no heading of its own renders
+                // untitled beside ranked siblings from the same note that show
+                // its name — `retrieve_round` already re-runs it after
+                // `reach_sideways` for the same reason.
+                self.fill_titles(&mut results[from..]).await;
             }
         }
         tracing::info!(

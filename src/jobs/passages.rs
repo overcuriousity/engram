@@ -60,12 +60,29 @@ pub fn heading_title(line: &str) -> String {
             true => open - 1,
             false => open,
         };
-        let Some(end) = rest[close..].find(')') else {
+        // Parens nest. A bare `find(')')` stopped at the inner one of
+        // `[Loop device](https://en.wikipedia.org/wiki/Loop_device_(computing))`
+        // and left the outer `)` standing in the title as `See Loop device)`,
+        // and Wikipedia headings are exactly what this path is handed.
+        let mut depth = 0usize;
+        let target = rest[close + 2..].char_indices().find_map(|(i, c)| match c {
+            '(' => {
+                depth += 1;
+                None
+            }
+            ')' if depth == 0 => Some(close + 2 + i),
+            ')' => {
+                depth -= 1;
+                None
+            }
+            _ => None,
+        });
+        let Some(target) = target else {
             break;
         };
         out.push_str(&rest[..text_end]);
         out.push_str(&rest[open + 1..close]);
-        rest = &rest[close + end + 1..];
+        rest = &rest[target + 1..];
     }
     out.push_str(rest);
     out.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -398,6 +415,15 @@ mod tests {
         assert_eq!(
             heading_title("## ![diagram](a.png) Overview"),
             "diagram Overview"
+        );
+        // A parenthesised URL — the Wikipedia disambiguation shape, which is
+        // most of what this path is handed. Stopping at the first `)` left the
+        // outer one behind as `See Loop device)`.
+        assert_eq!(
+            heading_title(
+                "## See [Loop device](https://en.wikipedia.org/wiki/Loop_device_(computing))"
+            ),
+            "See Loop device"
         );
     }
 

@@ -265,14 +265,23 @@ async fn card_for(tenant: &Tenant, event: PendingEvent) -> Result<Card> {
         .filter_map(|(_, corpus)| corpus.clone())
         .collect();
     if !untitled.is_empty() {
-        let titles = tenant.core.store.corpus_titles(&untitled).await?;
-        for (c, corpus) in choices
-            .iter_mut()
-            .zip(&corpora)
-            .filter(|(c, _)| c.title.is_empty())
-        {
-            if let Some(t) = corpus.as_ref().and_then(|id| titles.get(id)) {
-                c.title = t.clone();
+        // Best-effort, exactly as in `Core::fill_titles`: a failed read costs
+        // the borrowed names, never the card. Propagating it turned a
+        // renderable card into a 500 over optional decoration.
+        match tenant.core.store.corpus_titles(&untitled).await {
+            Ok(titles) => {
+                for (c, corpus) in choices
+                    .iter_mut()
+                    .zip(&corpora)
+                    .filter(|(c, _)| c.title.is_empty())
+                {
+                    if let Some(t) = corpus.as_ref().and_then(|id| titles.get(id)) {
+                        c.title = t.clone();
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read corpus titles for the judge card")
             }
         }
     }
