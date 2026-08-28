@@ -1,19 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
-     role="img" aria-label="Engram">
-  <title>Engram</title>
+     role="img" aria-label="engram">
+  <title>engram</title>
   <!--
-    The home-screen icon: the same mark as logo.svg, on an opaque ground.
+    The home-screen icon: the mark of logo.svg on an opaque ground.
 
-    Two differences from the logo, both forced by where this is shown. The
-    colours are literal rather than `currentColor` and CSS variables, because an
-    icon is rasterized outside any document and would otherwise come out black.
-    And the mark is scaled to 62% of the square, so it survives a maskable crop:
-    a launcher may cut this to a circle and keeps only the central 80%, which
-    means anything nearer the edge than that is not guaranteed to be seen.
+    Two differences from the logo, both forced by where this is shown. The ink
+    is literal rather than `currentColor`, because a launcher rasterizes this
+    outside any document and outside any scheme — one fixed pair, dark ground,
+    light mark. And the mark is scaled to 62% of the square so it survives a
+    maskable crop: a launcher may cut this to a circle, keeping the central
+    80%, so anything nearer the edge is not guaranteed to be seen.
 
     The PNGs beside this file are committed rather than generated, because a
-    build must not need a rasterizer installed. Regenerate them after editing
-    this file:
+    build must not need a rasterizer installed. Regenerate them after editing:
 
       rsvg-convert -w 192 -h 192 assets/icon.svg -o assets/icon-192.png
       rsvg-convert -w 512 -h 512 assets/icon.svg -o assets/icon-512.png
@@ -22,29 +21,21 @@
   <rect width="512" height="512" fill="#0e1015"/>
 
   <g transform="translate(97.28 97.28) scale(4.96)">
-    <!-- Retrieved: bound to the query. -->
-    <g fill="none" stroke="#5aa8b0" stroke-width="2.25" stroke-linecap="round" opacity="0.9">
+    <g fill="none" stroke="#e8eaf0" stroke-width="2" stroke-linecap="round">
       <line x1="32" y1="32" x2="18" y2="24"/>
       <line x1="32" y1="32" x2="46" y2="26"/>
       <line x1="32" y1="32" x2="28" y2="48"/>
     </g>
-
-    <!-- Beyond the neighbourhood: present in the space, not in the answer. -->
-    <g fill="#ffffff" opacity="0.28">
-      <circle cx="55" cy="52" r="2.5"/>
-      <circle cx="40" cy="7"  r="2.5"/>
-      <circle cx="7"  cy="45" r="2.5"/>
+    <g fill="#e8eaf0">
+      <circle cx="18" cy="24" r="3.5"/>
+      <circle cx="46" cy="26" r="3.5"/>
+      <circle cx="28" cy="48" r="3.5"/>
+      <circle cx="32" cy="32" r="6"/>
     </g>
-
-    <!-- The neighbourhood. -->
-    <g fill="#5aa8b0">
-      <circle cx="18" cy="24" r="4"/>
-      <circle cx="46" cy="26" r="4"/>
-      <circle cx="28" cy="48" r="4"/>
+    <g fill="#e8eaf0" opacity="0.3">
+      <circle cx="55" cy="52" r="2"/>
+      <circle cx="40" cy="7"  r="2"/>
+      <circle cx="7"  cy="45" r="2"/>
     </g>
-
-    <!-- The query. -->
-    <circle cx="32" cy="32" r="7.5" fill="#5aa8b0"/>
-    <circle cx="32" cy="32" r="3.25" fill="#0e1015"/>
   </g>
 </svg>

@@ -1,29 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- Favicons get no CSS variables, so the palette is inlined. Dark-mode
-       variant keeps the mark legible on a dark browser chrome. -->
+  <!-- The mark at tab size. One colour, chosen from the browser chrome's
+       scheme because a favicon inherits nothing. -->
   <style>
-    .q { fill: #3b6e91 }
-    .e { stroke: #3b6e91 }
-    .h { fill: #ffffff }
-    .f { fill: #2d2d2d }
-    @media (prefers-color-scheme: dark) {
-      .q { fill: #5aa8b0 }
-      .e { stroke: #5aa8b0 }
-      .h { fill: #0e1015 }
-      .f { fill: #e2e4ec }
-    }
+    :root { color: #1c1e24 }
+    @media (prefers-color-scheme: dark) { :root { color: #e8eaf0 } }
   </style>
-  <g class="e" fill="none" stroke-width="2.25" stroke-linecap="round" opacity="0.9">
+
+  <g fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
     <line x1="32" y1="32" x2="18" y2="24"/>
     <line x1="32" y1="32" x2="46" y2="26"/>
     <line x1="32" y1="32" x2="28" y2="48"/>
   </g>
-  <g class="f" opacity="0.28">
-    <circle cx="55" cy="52" r="2.5"/><circle cx="40" cy="7" r="2.5"/><circle cx="7" cy="45" r="2.5"/>
+  <g fill="currentColor">
+    <circle cx="18" cy="24" r="4"/>
+    <circle cx="46" cy="26" r="4"/>
+    <circle cx="28" cy="48" r="4"/>
+    <circle cx="32" cy="32" r="6.5"/>
   </g>
-  <g class="q">
-    <circle cx="18" cy="24" r="4"/><circle cx="46" cy="26" r="4"/><circle cx="28" cy="48" r="4"/>
-    <circle cx="32" cy="32" r="7.5"/>
+  <g fill="currentColor" opacity="0.3">
+    <circle cx="55" cy="52" r="2.5"/>
+    <circle cx="40" cy="7"  r="2.5"/>
+    <circle cx="7"  cy="45" r="2.5"/>
   </g>
-  <circle class="h" cx="32" cy="32" r="3.25"/>
 </svg>

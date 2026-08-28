@@ -1,12 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 236 64" width="236" height="64"
-     role="img" aria-label="engram">
-  <title>engram</title>
-  <!-- The mark of logo.svg, set beside the name. Same one colour throughout. -->
-  <style>
-    :root { color: #1c1e24 }
-    @media (prefers-color-scheme: dark) { :root { color: #e8eaf0 } }
-  </style>
-
+{# The engram mark, inlined rather than <img src="/assets/logo.svg"> so it
+   inherits the page's colour: an <img> is its own document and sees neither
+   `currentColor` nor the theme toggle, so as an image it could only ever show
+   one fixed ink. Same geometry as assets/logo.svg — edit both. Decorative;
+   the link around it carries the label. Sized by CSS on the parent. #}
+<svg class="mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
   <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
     <line x1="32" y1="32" x2="18" y2="24"/>
     <line x1="32" y1="32" x2="46" y2="26"/>
@@ -23,9 +20,4 @@
     <circle cx="40" cy="7"  r="2"/>
     <circle cx="7"  cy="45" r="2"/>
   </g>
-
-  <text x="74" y="42"
-        font-family="Inter, ui-sans-serif, system-ui, sans-serif"
-        font-size="30" font-weight="500" letter-spacing="-0.4"
-        fill="currentColor">engram</text>
 </svg>

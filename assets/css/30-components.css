@@ -145,15 +145,19 @@ table.grid tr:hover td { background: var(--color-bg-hover); }
 .htmx-request .spinner, .htmx-request.spinner { visibility: visible; }
 
 /* ── Brand ───────────────────────────────────────────────────────────────── */
-/* The logo inherits the theme: its accent comes from --color-accent and its
-   faint nodes from currentColor, so it recolours with the rest of the UI. */
+/* The mark is one colour and takes it from the text beside it, so it follows
+   the theme -- including a `data-theme` override, which an <img> could not
+   see. Sizing is here rather than on the element because it is included as a
+   partial and every caller wants a different size. */
 nav.top a.brand {
-  display: inline-flex; align-items: center; gap: 0.4rem;
+  display: inline-flex; align-items: center; gap: 0.45rem;
   font-weight: 600; color: var(--color-fg-primary);
   padding-left: 0; margin-right: 0.5rem;
 }
 nav.top a.brand:hover { background: transparent; }
-nav.top a.brand img { display: block; }
+.mark { display: block; flex: none; color: inherit; }
+nav.top a.brand .mark { width: 22px; height: 22px; }
+.brand-lockup .mark { width: 40px; height: 40px; }
 
 .brand-lockup { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.25rem; }
 .brand-name { font-size: var(--text-xl); font-weight: 600; letter-spacing: -0.02em; }
