@@ -1384,9 +1384,8 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
             gaps_open: tenant
                 .core
                 .store
-                .open_gap_refs(tenant.core.embedder.model(), tenant.core.weak_below)
-                .await?
-                .len() as i64,
+                .count_open_gaps(tenant.core.embedder.model(), tenant.core.weak_below)
+                .await?,
         }),
     };
 
@@ -1445,8 +1444,8 @@ async fn ask_stream(
                 // Terminal by construction: the producer is a `try_stream!` and
                 // ends at its first error, so the panel sees one `error` frame
                 // and nothing after it.
-                Ok(e) => api_sse_event(e).unwrap_or_else(|e| error_frame(&e)),
-                Err(e) => error_frame(&e),
+                Ok(e) => api_sse_event(e).unwrap_or_else(|e| error_frame("ask", &e)),
+                Err(e) => error_frame("ask", &e),
             });
         }
     };
@@ -1504,8 +1503,8 @@ async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<
             // Terminal by construction: the producer ends at its first error,
             // so a client sees one `error` frame and nothing after it.
             yield Ok::<_, Error>(match ev {
-                Ok(e) => search_sse_event(e).unwrap_or_else(|e| error_frame(&e)),
-                Err(e) => error_frame(&e),
+                Ok(e) => search_sse_event(e).unwrap_or_else(|e| error_frame("search", &e)),
+                Err(e) => error_frame("search", &e),
             });
         }
     };
@@ -1514,11 +1513,14 @@ async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<
         .into_response())
 }
 
-fn error_frame(e: &Error) -> SseEvent {
+/// `stream` is the route the failure came out of. Two routes yield these now,
+/// and a search that failed logged as `ask stream failed` sends whoever is
+/// reading the log to the wrong half of the application.
+fn error_frame(stream: &'static str, e: &Error) -> SseEvent {
     if e.status().is_server_error() {
-        tracing::error!(error = %e, "ask stream failed");
+        tracing::error!(error = %e, stream, "stream failed");
     } else {
-        tracing::debug!(error = %e, "ask stream rejected");
+        tracing::debug!(error = %e, stream, "stream rejected");
     }
     SseEvent::default()
         .event("error")

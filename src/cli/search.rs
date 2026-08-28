@@ -88,11 +88,18 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
 /// this one existed, so one code path reports failure and it is the older one.
 ///
 /// A failure after it ran is an error, and this is the whole of the difference.
-/// The server yields `results` only once `search_inner` has returned, so that
-/// frame is the line between "nothing happened" and "the search completed and
-/// the learning layer wrote the event down". Falling back across that line ran
-/// the same query a second time and recorded it a second time, which is a
-/// duplicate in the data nobody typed and nobody can tell from a real repeat.
+/// Falling back across that line runs the same query a second time and records
+/// it a second time, which is a duplicate in the data nobody typed and nobody
+/// can tell from a real repeat — `record_search` coalesces the two typing
+/// doors and not this one, so a shell's duplicate never folds.
+///
+/// The line is drawn at the first `stage` frame rather than at `results`,
+/// which is later than it needs to be and is the point. `record_search` is
+/// spawned onto the server's background inside `search_inner`, before the
+/// `results` frame is yielded and out of reach of the client hanging up, so a
+/// transport that dies in that window has recorded a search this client never
+/// saw. A stage frame proves the search is running over there; from then on
+/// the honest answer to a dead stream is to say so, not to run it again.
 async fn streaming(
     e: &Endpoint,
     limit: Option<usize>,
@@ -123,8 +130,8 @@ async fn streaming(
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = String::new();
     let mut hits: Option<Vec<SearchResult>> = None;
-    // Whether a `results` frame has been seen at all — not whether it could be
-    // read. Once the server has sent one the search is behind us either way.
+    // Whether this search may already have been written down over there. Set
+    // from the first stage frame, for the reason above, and never unset.
     let mut ran = false;
     while let Some(chunk) = body.next().await {
         let chunk = match chunk {
@@ -143,6 +150,7 @@ async fn streaming(
                     stages.start(&named);
                 }
                 "stage" => {
+                    ran = true;
                     if let Ok(now) = serde_json::from_value(data["stage"].clone()) {
                         stages.show(now);
                     }
@@ -152,7 +160,8 @@ async fn streaming(
                     hits = serde_json::from_value(data["results"].clone()).ok();
                 }
                 // Said by the plain door, which is about to run this search
-                // again and refuse it in the words it has always used.
+                // again and refuse it in the words it has always used. A
+                // refusal recorded nothing, whatever stages preceded it.
                 "error" => return Ok(None),
                 _ => {}
             }
@@ -162,12 +171,14 @@ async fn streaming(
     stages.clear();
     match (hits, ran) {
         (Some(h), _) => Ok(Some((h, began.elapsed().as_millis()))),
-        // A results frame arrived and could not be read. The search is already
-        // recorded, so the plain door must not be asked to run it again.
+        // The search started and its results never arrived here: a frame in a
+        // shape this client could not read, or a stream that stopped between
+        // the stages and the list. Either way it may already be recorded, so
+        // the plain door must not be asked to run it again.
         (None, true) => Err(Error::Validation(
-            "the search answered in a shape this client could not read".into(),
+            "the search ran and its results did not arrive".into(),
         )),
-        // The stream ended before the search finished. Nothing was recorded and
+        // The stream ended before the search started. Nothing was recorded and
         // the older door can be asked cleanly.
         (None, false) => Ok(None),
     }
@@ -472,6 +483,54 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A stream that reported a stage and then died is not run again.
+    ///
+    /// The server spawns `record_search` onto its own background before the
+    /// `results` frame is yielded, and that spawn outlives the client hanging
+    /// up. Falling back here asked the plain door for the same query, which
+    /// records a second time — and `record_search` coalesces the two typing
+    /// doors and not the shell, so the duplicate is permanent.
+    #[tokio::test]
+    async fn a_stream_that_dies_after_a_stage_is_not_run_a_second_time() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let addr = listener.local_addr().expect("the port it got");
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let (mut sock, _) = listener.accept().await.expect("a client");
+            // Enough of a chunked response to carry two frames, and then the
+            // socket goes away without its terminating chunk: a proxy timing
+            // out mid-search, seen from here.
+            let body = "event: stages\ndata: {\"stages\":[\"embed\",\"retrieve\"]}\n\n\
+                        event: stage\ndata: {\"stage\":\"embed\"}\n\n";
+            sock.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                     Transfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .ok();
+            sock.flush().await.ok();
+        });
+        let e = Endpoint {
+            url: format!("http://{addr}"),
+            token: "engram_x".into(),
+        };
+        let cli = CliArgs {
+            plain: true,
+            ..Default::default()
+        };
+        let face = crate::cli::face::Face::decide(&cli, false, false, None);
+        assert!(
+            streaming(&e, None, "journal", &cli, &face).await.is_err(),
+            "a search that started over there is reported, not repeated"
         );
     }
 

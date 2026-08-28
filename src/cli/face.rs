@@ -43,14 +43,21 @@ const BAR_CELLS: usize = 7;
 /// A `room` of one or zero is a real answer rather than a reason to give up: a
 /// narrow terminal is the case clipping exists for, and returning the whole
 /// string there put the one line nobody can widen over the edge.
-pub(crate) fn clip(s: &str, room: usize) -> String {
+///
+/// The marker comes off the locale like every other glyph in this file. It was
+/// a hardcoded `…`, which is one character of mojibake at the end of a row on
+/// the terminal that asked for the ASCII shapes — and this is now on the two
+/// paths that clip most, a hit's title and an ask's lamp line.
+pub(crate) fn clip(s: &str, room: usize, unicode: bool) -> String {
     if s.chars().count() <= room {
         return s.to_string();
     }
-    match room {
-        0 => String::new(),
-        1 => "…".to_string(),
-        _ => s.chars().take(room - 1).chain(['…']).collect(),
+    let more = if unicode { "…" } else { "..." };
+    match room.checked_sub(more.chars().count()) {
+        // Narrower than the marker itself: as much of it as fits, which still
+        // says there is more and still stops at the edge.
+        None => more.chars().take(room).collect(),
+        Some(keep) => s.chars().take(keep).chain(more.chars()).collect(),
     }
 }
 
@@ -307,24 +314,24 @@ impl Track {
     }
 }
 
-/// How long a search may take before anything at all is drawn.
-///
-/// Most searches on a warm box come back inside this, and a display that
-/// appears and disappears inside a tenth of a second is worse than no display:
-/// it reads as a flicker, not as progress. Nothing here delays a result — the
-/// floor decides what is drawn, never when the answer is printed.
-const QUIET_FLOOR_MS: u128 = 120;
-
 /// The stages of one search, redrawn in place as the server names them.
 ///
 /// Holds no timer and invents no frames: it is redrawn from events that
 /// arrived, so it cannot run ahead of the work. The stages themselves are the
 /// server's to name — whether a rerank happens is decided there — so a lamp is
 /// never drawn for work that is not going to run.
+///
+/// It held a quiet floor as well — a tenth of a second before anything was
+/// drawn, so a fast search did not flicker. Because a frame is the only thing
+/// that draws, and the floor was read at the frame's own instant, a search
+/// whose *first* stage was the slow one was suppressed at the only moment it
+/// would ever have been drawn: a cold embedder showed a blank terminal for as
+/// long as it took, which is the case the display exists for. A floor would
+/// have to be paired with a clock of its own to be safe, and the flicker it
+/// spared is worth less than the wait it hid.
 pub struct Stages {
     face: Face,
     names: Vec<crate::core::search::SearchStage>,
-    began: std::time::Instant,
     drawn: bool,
 }
 
@@ -334,45 +341,68 @@ impl Stages {
         self.names = names.to_vec();
     }
 
-    /// What this frame would draw, or `None` — the face is off, or the search
-    /// is still inside the quiet floor.
+    /// What this frame would draw, or `None` where the face is off.
     ///
-    /// `elapsed_ms` is passed rather than read so the floor is testable without
-    /// a clock, in the way `Face::decide` takes its facts as arguments.
-    pub fn at_after(
-        &self,
-        now: crate::core::search::SearchStage,
-        elapsed_ms: u128,
-    ) -> Option<String> {
+    /// Separate from `show` for the reason `Track::line` is: the rule worth
+    /// asserting is what a person sees, and stderr is a poor place to assert
+    /// it from.
+    pub fn at(&self, now: crate::core::search::SearchStage) -> Option<String> {
         use crate::core::search::SearchStage;
-        if !self.face.on || self.names.is_empty() || elapsed_ms < QUIET_FLOOR_MS {
+        if !self.face.on || self.names.is_empty() {
             return None;
         }
         let mut reached = false;
-        Some(
-            self.names
+        let lamps: Vec<(Lamp, &str)> = self
+            .names
+            .iter()
+            .map(|s| {
+                // Everything before the running stage is finished, and
+                // everything after it is not: a client that started watching
+                // late has missed the transitions and must still draw the
+                // truth, exactly as `Lamps::of` does.
+                let lamp = match (*s == now, reached) {
+                    (true, _) => {
+                        reached = true;
+                        Lamp::Running
+                    }
+                    (false, false) => Lamp::Done,
+                    (false, true) => Lamp::Waiting,
+                };
+                let name = match s {
+                    SearchStage::Embed => "embed",
+                    SearchStage::Retrieve => "retrieve",
+                    SearchStage::Rerank => "rerank",
+                };
+                (lamp, name)
+            })
+            .collect();
+        // The room `show`'s two columns of indent leave. Counted before the ink
+        // goes on, because by then a count of characters is not a count of
+        // columns — the same reason `ask::within` clips where it does.
+        let room = self.face.width.saturating_sub(2);
+        // Two columns for each lamp and its space, three between neighbours.
+        let wide: usize = lamps
+            .iter()
+            .map(|(_, n)| n.chars().count() + 2)
+            .sum::<usize>()
+            + 3 * lamps.len().saturating_sub(1);
+        // A terminal too narrow for the row gets the running stage alone, the
+        // way `divider` gives it the sentence without its rules. `show` erases
+        // one physical row, so a line that wrapped would leave its head above
+        // the results for good.
+        if wide > room {
+            let (lamp, name) = lamps
                 .iter()
-                .map(|s| {
-                    // Everything before the running stage is finished, and
-                    // everything after it is not: a client that started
-                    // watching late has missed the transitions and must still
-                    // draw the truth, exactly as `Lamps::of` does.
-                    let lamp = match (*s == now, reached) {
-                        (true, _) => {
-                            reached = true;
-                            Lamp::Running
-                        }
-                        (false, false) => Lamp::Done,
-                        (false, true) => Lamp::Waiting,
-                    };
-                    let name = match s {
-                        SearchStage::Embed => "embed",
-                        SearchStage::Retrieve => "retrieve",
-                        SearchStage::Rerank => "rerank",
-                    };
-                    // Drawn *and* said, like every other lamp in this file.
-                    self.face.lamp_line(lamp, name)
-                })
+                .find(|(l, _)| *l == Lamp::Running)
+                .or_else(|| lamps.last())?;
+            let said = clip(name, room.saturating_sub(2), self.face.unicode);
+            return Some(self.face.lamp_line(*lamp, &said));
+        }
+        Some(
+            lamps
+                .iter()
+                // Drawn *and* said, like every other lamp in this file.
+                .map(|(lamp, name)| self.face.lamp_line(*lamp, name))
                 .collect::<Vec<_>>()
                 .join("   "),
         )
@@ -383,7 +413,7 @@ impl Stages {
     /// On stderr and by rewriting the current line, for the reason `Track` is:
     /// the results this precedes have to stay in scrollback and stay pipeable.
     pub fn show(&mut self, now: crate::core::search::SearchStage) {
-        let Some(line) = self.at_after(now, self.began.elapsed().as_millis()) else {
+        let Some(line) = self.at(now) else {
             return;
         };
         use std::io::Write;
@@ -701,6 +731,7 @@ impl Face {
             let title = clip(
                 h.title.as_deref().unwrap_or("(untitled)"),
                 self.width.saturating_sub(26),
+                self.unicode,
             );
             let (bar, title) = match h.past_cliff {
                 true => (self.ink(DIM, &bar), self.ink(DIM, &title)),
@@ -778,7 +809,6 @@ impl Face {
         Stages {
             face: *self,
             names: Vec::new(),
-            began: std::time::Instant::now(),
             drawn: false,
         }
     }
@@ -922,9 +952,13 @@ mod tests {
     fn a_locale_that_does_not_say_utf8_gets_the_ascii_shapes() {
         let f = Face::decide(&always(), true, false, Some("C"));
         assert!(!f.unicode);
-        let drawn = f.render(&[hit("a", 0.9, false, false)], None);
+        // A title long enough to be clipped. The fixture was three characters
+        // wide and never reached the clip, which is how a hardcoded `…` sat on
+        // the one path in this renderer that draws a glyph nobody chose.
+        let long = "Betriebssysteme fuer Server und die Dienste die auf ihnen laufen";
+        let drawn = f.render(&[hit(long, 0.9, false, false)], None);
         assert!(
-            !drawn.contains('█') && !drawn.contains('┃'),
+            drawn.is_ascii(),
             "a drawing glyph reached a non-UTF-8 terminal: {drawn}"
         );
     }
@@ -1170,13 +1204,26 @@ mod tests {
     /// The narrow end of `clip`, which used to hand back the whole string.
     #[test]
     fn clipping_into_no_room_at_all_still_clips() {
-        assert_eq!(clip("Dienste", 7), "Dienste");
-        assert_eq!(clip("Dienste", 8), "Dienste");
-        assert_eq!(clip("Dienste", 6), "Diens…");
-        assert_eq!(clip("Dienste", 2), "D…");
-        assert_eq!(clip("Dienste", 1), "…");
-        assert_eq!(clip("Dienste", 0), "");
-        assert_eq!(clip("", 0), "");
+        assert_eq!(clip("Dienste", 7, true), "Dienste");
+        assert_eq!(clip("Dienste", 8, true), "Dienste");
+        assert_eq!(clip("Dienste", 6, true), "Diens…");
+        assert_eq!(clip("Dienste", 2, true), "D…");
+        assert_eq!(clip("Dienste", 1, true), "…");
+        assert_eq!(clip("Dienste", 0, true), "");
+        assert_eq!(clip("", 0, true), "");
+    }
+
+    /// The marker is a glyph like any other here, and the row it ends is
+    /// counted in columns either way.
+    #[test]
+    fn a_clip_on_an_ascii_terminal_ends_in_ascii() {
+        for room in 0..8 {
+            let out = clip("Dienste", room, false);
+            assert!(out.is_ascii(), "room {room}: {out:?}");
+            assert!(out.chars().count() <= room, "room {room}: {out:?}");
+        }
+        assert_eq!(clip("Dienste", 6, false), "Die...");
+        assert_eq!(clip("Dienste", 2, false), "..");
     }
 
     /// The two lines a list spends are two lines that carry text.
@@ -1292,7 +1339,7 @@ mod tests {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
         let mut s = f.stages();
         s.start(&[Embed, Retrieve, Rerank]);
-        let line = s.at_after(Retrieve, 500).expect("a line");
+        let line = s.at(Retrieve).expect("a line");
         assert!(line.contains("embed") && line.contains("retrieve") && line.contains("rerank"));
         assert!(
             line.contains('●'),
@@ -1310,20 +1357,46 @@ mod tests {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
         let mut s = f.stages();
         s.start(&[Embed, Retrieve]);
-        let line = s.at_after(Retrieve, 500).expect("a line");
+        let line = s.at(Retrieve).expect("a line");
         assert!(!line.contains("rerank"), "{line}");
     }
 
-    /// Most searches come back inside the floor, and a display that flickers
-    /// on and off is worse than none.
+    /// The first stage is drawn the moment it is reported. A floor on the
+    /// elapsed time, read at the instant of a frame, took the whole display
+    /// away from the search that most needed it: a cold embedder drew nothing
+    /// at all until `retrieve` started.
     #[test]
-    fn a_search_answered_inside_the_quiet_floor_draws_nothing() {
+    fn the_first_stage_is_drawn_as_soon_as_it_is_reported() {
         use crate::core::search::SearchStage::*;
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
         let mut s = f.stages();
         s.start(&[Embed, Retrieve]);
-        assert!(s.at_after(Embed, 40).is_none());
-        assert!(s.at_after(Retrieve, 300).is_some());
+        assert!(s.at(Embed).is_some());
+    }
+
+    /// `show` erases one physical row, so a stage line wider than the terminal
+    /// left its head above the results for good — the failure a note is
+    /// clipped to prevent, one type over.
+    #[test]
+    fn a_stage_line_wider_than_the_terminal_is_cut_down_rather_than_wrapped() {
+        use crate::core::search::SearchStage::*;
+        for width in 4..40 {
+            let f = Face {
+                width,
+                ..Face::decide(&always(), true, false, Some("en_US.UTF-8"))
+            };
+            let mut s = f.stages();
+            s.start(&[Embed, Retrieve, Rerank]);
+            let line = s.at(Retrieve).expect("a line");
+            assert!(
+                strip_sgr(&line).chars().count() + 2 <= width,
+                "width {width}: {line:?}"
+            );
+            assert!(
+                width < 10 || strip_sgr(&line).contains("retr"),
+                "width {width}: the running stage is the one it keeps: {line:?}"
+            );
+        }
     }
 
     #[test]
@@ -1332,7 +1405,7 @@ mod tests {
         let off = Face::decide(&Default::default(), false, false, None);
         let mut s = off.stages();
         s.start(&[Embed, Retrieve]);
-        assert!(s.at_after(Embed, 5_000).is_none());
+        assert!(s.at(Embed).is_none());
     }
 
     /// `NO_COLOR` is about ink. It used to take the lamps, the upload track and

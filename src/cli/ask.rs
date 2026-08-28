@@ -62,7 +62,7 @@ impl Drop for Note {
 fn within(face: &crate::cli::face::Face, lamp: crate::cli::face::Lamp, said: &str) -> String {
     face.lamp_line(
         lamp,
-        &crate::cli::face::clip(said, face.width.saturating_sub(4)),
+        &crate::cli::face::clip(said, face.width.saturating_sub(4), face.unicode),
     )
 }
 
@@ -316,6 +316,13 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
     }
     // Taken back before anything else is printed, so no part of it survives
     // into the scrollback the answer is read from tomorrow.
+    //
+    // Here rather than left to the drop: `note` outlives this block, and a
+    // stream that carried citations and no token at all reaches here with the
+    // line still on screen — `finish` is empty, the `println!` steps past it,
+    // the citations print underneath, and the drop's erase then takes an
+    // unrelated blank row while the note itself stays.
+    note.clear();
     print!("{}", readout.finish());
     println!();
     if !citations.is_empty() {
