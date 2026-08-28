@@ -778,13 +778,36 @@ mod tests {
         shown: &[&str],
         at: i64,
     ) -> String {
+        event_from(
+            core,
+            crate::store::feedback::Door::Ui,
+            Some("me"),
+            q,
+            vec,
+            shown,
+            at,
+        )
+        .await
+    }
+
+    /// A recorded search, as a named door with a named scope makes it. The two
+    /// tests below turn on the scope alone.
+    async fn event_from(
+        core: &crate::core::Core,
+        door: crate::store::feedback::Door,
+        scope: Option<&str>,
+        q: &str,
+        vec: Vec<f32>,
+        shown: &[&str],
+        at: i64,
+    ) -> String {
         let id = core
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
                     query: q.into(),
-                    door: crate::store::feedback::Door::Ui,
-                    scope: Some("me".into()),
+                    door,
+                    scope: scope.map(str::to_string),
                     filters: "{}".into(),
                     query_vec: vec,
                     embed_model: "fake".into(),
@@ -812,6 +835,84 @@ mod tests {
             .await
             .unwrap();
         id
+    }
+
+    /// The join the terminal door had never been able to make.
+    ///
+    /// A search typed at a shell records with a scope now, and the `--show`
+    /// that follows it records the open with the same one, so the sweep can see
+    /// that the two are one run. What it does with that run is the ordinary
+    /// decision; what matters here is that it has the run at all.
+    #[tokio::test]
+    async fn an_open_at_a_shell_attaches_to_the_search_that_led_to_it() {
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        // Exactly the origin `GET /search?door=cli` now builds.
+        event_from(
+            &core,
+            crate::store::feedback::Door::Cli,
+            Some("me"),
+            "how do I read the journal",
+            vec![1.0, 0.0],
+            &[&ids[0], &ids[1]],
+            now - 100,
+        )
+        .await;
+        // Exactly what `GET /artifacts/{id}` records for `engram --show`.
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), now - 97)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "opened", None, Some("me"), now - 96)
+            .await
+            .unwrap();
+
+        assert_eq!(run(&core).await.unwrap(), 1);
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(
+            p.sources.len(),
+            2,
+            "the opens did not reach the pursuit: {p:?}"
+        );
+        assert_ne!(
+            p.reason.as_deref(),
+            Some("nothing engaged"),
+            "a shell that read two artifacts engaged two artifacts: {p:?}"
+        );
+    }
+
+    /// The bug, kept as a witness. Unscoped — which is what every CLI search
+    /// recorded before this — the same run reads as a search nobody followed.
+    #[tokio::test]
+    async fn an_unscoped_search_cannot_be_joined_to_the_opens_after_it() {
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        event_from(
+            &core,
+            crate::store::feedback::Door::Cli,
+            None,
+            "how do I read the journal",
+            vec![1.0, 0.0],
+            &[&ids[0], &ids[1]],
+            now - 100,
+        )
+        .await;
+        core.store
+            .record_interaction(&ids[0], "opened", None, Some("me"), now - 97)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "opened", None, Some("me"), now - 96)
+            .await
+            .unwrap();
+
+        assert_eq!(run(&core).await.unwrap(), 1);
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert_eq!(p.reason.as_deref(), Some("nothing engaged"), "{p:?}");
     }
 
     #[tokio::test]

@@ -1044,14 +1044,24 @@ fn search_request(
         rerank: q.rerank.unwrap_or(!typing),
         explain,
     };
+    // Typing and scoped were one decision here, and they are two.
+    //
     // Coalescing folds a keystroke into the query it was an early spelling of,
     // and it folds only within one scope — so a box that types has to say who
-    // is typing, or two operators' panels fold into each other's queries. A
-    // deliberate API call is one event and has nothing to fold with.
-    let origin: crate::store::feedback::Origin = if typing {
-        door.by(tenant.user.subject.clone())
-    } else {
-        door.into()
+    // is typing, or two operators' panels fold into each other's queries. But a
+    // shell is not a typing door and still has a subject: `--show` records the
+    // open it leads to with a scope, and `jobs/pursuit.rs` attaches an
+    // interaction to a search only when the scopes match. Unscoped, a
+    // shell-only session opened pursuits that collected no engagement at all
+    // and closed unsatisfied every time — it could widen a hole in the base and
+    // never fill one.
+    //
+    // `Api` and `Mcp` stay unscoped on purpose: a bearer token is not a person,
+    // and two agents sharing one would fold into each other's queries. The same
+    // reason `sitting.rs` keeps no sitting for them.
+    let origin: crate::store::feedback::Origin = match door {
+        Door::Extension | Door::Cli => door.by(tenant.user.subject.clone()),
+        _ => door.into(),
     };
     (query, origin, explain)
 }
@@ -1779,6 +1789,50 @@ pub(crate) mod tests {
                 .to_vec(),
         )
         .unwrap()
+    }
+
+    /// A shell has a subject, and the open it leads to is recorded with one.
+    /// Unscoped, the two could never be joined.
+    #[tokio::test]
+    async fn a_cli_search_is_recorded_against_whoever_ran_it() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+        app.clone()
+            .oneshot(get("/api/v1/search?q=journal&door=cli", Some(&token)))
+            .await
+            .unwrap();
+        // The recording is off the request path, as everything the learning
+        // layer writes is.
+        core.background.wait_idle().await;
+        let events = core
+            .store
+            .events_between(0, crate::store::now() + 1)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].scope.is_some(), "an unscoped shell search: {events:?}");
+    }
+
+    /// The other half of the rule, and the one that must not move: a token is
+    /// not a person, and two agents sharing one must not fold together.
+    #[tokio::test]
+    async fn a_bearer_token_is_still_not_a_person() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+        app.clone()
+            .oneshot(get("/api/v1/search?q=journal", Some(&token)))
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+        let events = core
+            .store
+            .events_between(0, crate::store::now() + 1)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].scope, None, "Door::Api must stay unscoped");
     }
 
     #[tokio::test]
