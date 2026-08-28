@@ -625,8 +625,10 @@ impl Face {
                 out.push_str(&format!("  {}\n\n", self.ink(CYAN, &self.divider())));
             }
             // Zero to seven rungs becomes one to seven lit cells: every hit in
-            // this list was returned by the search, so no row is drawn empty.
-            let lit = (scale.rung(h.score) + 1).min(BAR_CELLS);
+            // this list was returned by the search, so no row is drawn empty —
+            // and only the bottom rung is lifted, because adding a cell to all
+            // of them pushed the top two together and lost the step between.
+            let lit = scale.rung(h.score).max(1);
             let bar: String = (0..BAR_CELLS)
                 .map(|c| if c < lit { full } else { empty })
                 .collect();
