@@ -7297,6 +7297,31 @@ mod tests {
         );
     }
 
+    /// The spinner names which of the two passes is running.
+    ///
+    /// A seam with a compiler on neither side: the id lives in the template,
+    /// the words live in `app.js`, and the discrimination is `wasRefine` —
+    /// which the fast branch also reads. Renaming any one of the three
+    /// silently leaves the box saying the wrong thing about what it is doing,
+    /// with nothing failing anywhere.
+    #[test]
+    fn the_spinner_says_which_pass_is_in_flight() {
+        let js = include_str!("../../assets/app.js");
+        assert!(
+            js.contains("'reranking…' : 'retrieving…'"),
+            "the two passes are no longer named apart in app.js"
+        );
+        assert!(
+            js.contains("getElementById('search-spinner')"),
+            "app.js no longer reaches the element the template renders"
+        );
+        let tpl = include_str!("templates/workspace.html");
+        assert!(
+            tpl.contains(r#"id="search-spinner""#),
+            "the element the words are written into is gone from the template"
+        );
+    }
+
     #[tokio::test]
     async fn search_results_are_a_fragment_not_a_page() {
         let (app, cookie) = app_with_session().await;

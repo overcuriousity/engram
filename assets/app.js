@@ -1925,7 +1925,23 @@
     // replay guard checks.
     document.body.addEventListener('htmx:beforeRequest', function (e) {
       if (!e.detail) return;
-      if (e.detail.elt === form) cancel();
+      if (e.detail.elt === form) {
+        cancel();
+        // Which of the two passes is in flight, said rather than left as one
+        // word for both. `searching…` was true of everything and therefore
+        // told you nothing: the fast pass is vector order at embedding speed
+        // and the second one is the reranker's opinion, and how long each is
+        // worth waiting for is not the same answer.
+        //
+        // The limit of the claim, stated because it is easy to mistake for
+        // more: this names the request that is open, not the stage the server
+        // is inside. `Core::search_events` reports that, and the box does not
+        // read it — adopting the channel here means rebuilding what htmx does
+        // around this form by hand, which is not worth two words. See
+        // `docs/superpowers/specs/2026-08-28-cli-face-design.md` §1.
+        var spinner = document.getElementById('search-spinner');
+        if (spinner) spinner.textContent = wasRefine(e) ? 'reranking…' : 'retrieving…';
+      }
       var cfg = e.detail.requestConfig;
       if (cfg && cfg.verb && String(cfg.verb).toLowerCase() !== 'get') refined = null;
     });

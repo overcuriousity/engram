@@ -162,12 +162,35 @@ back when the answer starts:
 exactly what the model wrote. Nothing here is drawn on a timer, and when a fast
 ask arrives with nothing before its first token, nothing is drawn at all.
 
-### The web door reads the same frames
+### The web door, and why it does not read the frames yet
 
-The search box consumes `/search/stream` and renders the same three stages. This
-is the reason the channel lives in `Core` rather than in the CLI: one definition
-of what a search is doing, rendered twice, rather than two implementations that
-will disagree within a month.
+**Revised during implementation.** The design said the search box would consume
+`/search/stream` and render the same three stages. Reading `refinePass` properly
+made the cost clear, and it is not the cost this section assumed.
+
+The box is not a form that issues a request. It is driven *by* htmx's lifecycle:
+`htmx:beforeRequest` cancels the pending refine and clears the replay cache on
+any non-GET; `htmx:afterSwap` decides refine-from-typing by reading
+`requestConfig.unfilteredParameters`, then marks the open row, writes the replay
+cache and runs the glide, or re-arms the quiet timer; the fragment carries an
+out-of-band `#rail-head` that htmx swaps and the JS reads back afterwards; and
+`hx-sync="this:replace"` is what aborts a refine when a keystroke lands.
+
+An `EventSource` sits outside all of it. Adopting the channel here means
+hand-rolling htmx's out-of-band swap, the abort, the discrimination and the cache
+writes — in the most delicate JavaScript in the application, with no automated
+coverage of any of it (`tests/browser/` holds one file, for the ask stream). That
+is a large, unverifiable change bought with two words of spinner text.
+
+So the box keeps htmx, and says which of its **two real passes** is in flight:
+`retrieving…` for the fast vector pass, `reranking…` for the refine. Both passes
+exist and the label reports which request is open — it is true, and it is a
+smaller claim than the CLI's, which reports the stage the server is inside.
+
+The channel is still shared in the sense that matters: it lives in `Core`, one
+definition of what a search is doing, and `/ui/search/stream` is a contained
+piece of work whenever the box is next opened up. What was avoided was rebuilding
+htmx by hand to get there today.
 
 ## 2. The list
 
