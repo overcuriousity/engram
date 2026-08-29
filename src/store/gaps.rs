@@ -1233,7 +1233,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.judge(&id, Verdict::Gap).await.unwrap();
+        store
+            .judge(&id, Verdict::Gap, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         id
     }
 
@@ -1308,7 +1311,10 @@ mod tests {
         // The same row, said twice, in two different words.
         let store = Store::memory().await.unwrap();
         let id = search_with(&store, "mount an E01", &[0.10]).await;
-        store.judge(&id, Verdict::Gap).await.unwrap();
+        store
+            .judge(&id, Verdict::Gap, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
 
         let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
         let mine: Vec<GapKind> = gaps
@@ -1330,9 +1336,23 @@ mod tests {
         // was there.
         let store = Store::memory().await.unwrap();
         let typo = search_with(&store, "mont an E01", &[0.10]).await;
-        store.judge(&typo, Verdict::Discard).await.unwrap();
+        store
+            .judge(
+                &typo,
+                Verdict::Discard,
+                crate::store::feedback::Labeller::Deck,
+            )
+            .await
+            .unwrap();
         let weak_hit = search_with(&store, "grep a pcap", &[0.12]).await;
-        store.judge(&weak_hit, Verdict::Hit).await.unwrap();
+        store
+            .judge(
+                &weak_hit,
+                Verdict::Hit,
+                crate::store::feedback::Labeller::Deck,
+            )
+            .await
+            .unwrap();
 
         let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
 
@@ -1451,7 +1471,10 @@ mod tests {
             .unwrap();
         assert!(store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
 
-        store.judge(&id, Verdict::Gap).await.unwrap();
+        store
+            .judge(&id, Verdict::Gap, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
 
         assert!(
             store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty(),

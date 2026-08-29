@@ -880,7 +880,10 @@ mod tests {
         on(&mut core).await;
         let ids = seed(&core, 3).await;
         let ev = record(&core, "q", &[&ids[0], &ids[1], &ids[2]], &[]).await;
-        core.store.judge_hit(&ev, &ids[0]).await.unwrap();
+        core.store
+            .judge_hit(&ev, &ids[0], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         settle(&core).await;
 
         run(&core).await.unwrap();
@@ -924,7 +927,10 @@ mod tests {
         let ids = seed(&core, 3).await;
         // ids[2] is never offered as a candidate at all.
         let ev = record(&core, "q", &[&ids[0], &ids[1]], &[]).await;
-        core.store.judge_hit(&ev, &ids[2]).await.unwrap();
+        core.store
+            .judge_hit(&ev, &ids[2], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         settle(&core).await;
 
         run(&core).await.unwrap();
@@ -967,7 +973,10 @@ mod tests {
         on(&mut core).await;
         let ids = seed(&core, 2).await;
         let g = record(&core, "nothing about this", &[&ids[0], &ids[1]], &[]).await;
-        core.store.judge(&g, Verdict::Gap).await.unwrap();
+        core.store
+            .judge(&g, Verdict::Gap, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         settle(&core).await;
 
         run(&core).await.unwrap();
@@ -1617,7 +1626,10 @@ mod tests {
         let ids = seed(&core, 3).await;
 
         let first = record(&core, "one", &[&ids[0], &ids[1]], &[]).await;
-        core.store.judge_hit(&first, &ids[0]).await.unwrap();
+        core.store
+            .judge_hit(&first, &ids[0], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         sqlx::query("UPDATE search_events SET judged_at = 1000 WHERE id = ?")
             .bind(&first)
             .execute(&core.store.pool)
@@ -1629,7 +1641,10 @@ mod tests {
 
         // A second verdict written moments later, still inside second 1000.
         let second = record(&core, "two", &[&ids[0], &ids[2]], &[]).await;
-        core.store.judge_hit(&second, &ids[2]).await.unwrap();
+        core.store
+            .judge_hit(&second, &ids[2], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         sqlx::query("UPDATE search_events SET judged_at = 1000 WHERE id = ?")
             .bind(&second)
             .execute(&core.store.pool)

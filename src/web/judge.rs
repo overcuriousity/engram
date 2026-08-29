@@ -10,7 +10,7 @@
 //! failure leaves a record instead of passing as a shrug.
 
 use crate::error::Result;
-use crate::store::feedback::{PendingEvent, Stats, Verdict};
+use crate::store::feedback::{Labeller, PendingEvent, Stats, Verdict};
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
@@ -589,20 +589,28 @@ async fn hit(
     tenant
         .core
         .store
-        .judge_hit(&event_id, &f.artifact_id)
+        .judge_hit(&event_id, &f.artifact_id, Labeller::Deck)
         .await?;
     card_after(&tenant, before, rank, Verdict::Hit, &event_id).await
 }
 
 async fn gap(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
     let before = tenant.core.store.feedback_stats().await?;
-    tenant.core.store.judge(&event_id, Verdict::Gap).await?;
+    tenant
+        .core
+        .store
+        .judge(&event_id, Verdict::Gap, Labeller::Deck)
+        .await?;
     card_after(&tenant, before, None, Verdict::Gap, &event_id).await
 }
 
 async fn discard(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
     let before = tenant.core.store.feedback_stats().await?;
-    tenant.core.store.judge(&event_id, Verdict::Discard).await?;
+    tenant
+        .core
+        .store
+        .judge(&event_id, Verdict::Discard, Labeller::Deck)
+        .await?;
     card_after(&tenant, before, None, Verdict::Discard, &event_id).await
 }
 
@@ -2301,7 +2309,10 @@ mod tests {
             )
             .await
             .unwrap();
-        core.store.judge_hit(&id, &ids[0]).await.unwrap();
+        core.store
+            .judge_hit(&id, &ids[0], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
 
         let body = get(&app, "/ui/judge", &cookie).await;
         assert!(body.contains("--to:10%"), "{body}");

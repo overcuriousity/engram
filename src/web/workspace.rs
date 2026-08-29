@@ -49,6 +49,12 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/ask", get(ask_door).post(ask_submit))
         .route("/ui/ask/{id}/stream", get(ask_stream))
         .route("/ui/ask/{id}/verdict", post(ask_verdict))
+        // Judging at the moment of search: the bar under an opened result and
+        // the gap button on the rail. Open to whoever searched, like the ask
+        // bar — it is their own search — and unlike the deck, whose grant also
+        // covers writing `config.toml`.
+        .route("/ui/search/{id}/verdict", post(search_verdict))
+        .route("/ui/search/gap", post(search_gap))
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/ask/{id}/keep", post(ask_keep))
 }
@@ -688,6 +694,91 @@ async fn ask_verdict(
         }
     }
     Ok(axum::response::Html(ask_verdict_bar(&tenant, &id, false).await?).into_response())
+}
+
+#[derive(Template)]
+#[template(path = "_search_verdict.html")]
+struct SearchVerdictTemplate {
+    event_id: String,
+    artifact_id: String,
+    /// `hit` / `no` / `discard` for display; empty shows the buttons.
+    state: &'static str,
+}
+
+#[derive(serde::Deserialize)]
+struct SearchVerdictForm {
+    verdict: String,
+    artifact_id: String,
+}
+
+/// The bar under an opened result. `none` is the undo; `no` is "not this
+/// one", which leaves the search a question for the deck.
+async fn search_verdict(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<SearchVerdictForm>,
+) -> Result<Response> {
+    if !tenant.core.learn.enabled {
+        return Err(Error::NotFound);
+    }
+    use crate::store::feedback::{Labeller, Verdict};
+    let store = &tenant.core.store;
+    let state = match f.verdict.as_str() {
+        "hit" => {
+            store
+                .judge_hit(&id, &f.artifact_id, Labeller::Confirm)
+                .await?;
+            "hit"
+        }
+        "no" => {
+            store.decline(&id).await?;
+            "no"
+        }
+        "discard" => {
+            store
+                .judge(&id, Verdict::Discard, Labeller::Confirm)
+                .await?;
+            "discard"
+        }
+        "none" => {
+            store.unjudge(&id).await?;
+            ""
+        }
+        v => return Err(Error::Validation(format!("unknown verdict {v}"))),
+    };
+    Ok(HtmlTemplate(SearchVerdictTemplate {
+        event_id: id,
+        artifact_id: f.artifact_id,
+        state,
+    })
+    .into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct SearchGapForm {
+    q: String,
+}
+
+/// The rail's "nothing here has it": a gap against the search just made.
+/// Answers with the line that replaces the button.
+async fn search_gap(tenant: Tenant, Form(f): Form<SearchGapForm>) -> Result<Response> {
+    if !tenant.core.learn.enabled {
+        return Err(Error::NotFound);
+    }
+    let line = match tenant
+        .core
+        .store
+        .gap_for_query(
+            f.q.trim(),
+            Some(&tenant.user.subject),
+            crate::web::ui::OPEN_WITHIN_SECS,
+        )
+        .await?
+    {
+        Some(_) => "recorded as a gap: your base doesn't know this yet.",
+        None => "nothing to record — that search was already judged.",
+    };
+    Ok(axum::response::Html(format!(r#"<span class="muted">{line}</span>"#)).into_response())
 }
 
 async fn ask_carried(

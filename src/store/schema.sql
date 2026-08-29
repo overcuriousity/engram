@@ -287,6 +287,16 @@ CREATE TABLE IF NOT EXISTS search_events (
   judged_at   INTEGER,
   verdict     TEXT,
   expect_id   TEXT,
+  -- Who gave the verdict: `confirm` from the bar under an opened result,
+  -- `dwell` from reading one long enough, NULL from the judge deck. A read is
+  -- the weakest of the three and never overwrites the other two — and a
+  -- `confirm` with no verdict is a person having said "not this one", which
+  -- keeps the search pending and keeps the read from labelling it.
+  judged_by   TEXT,
+  -- When a result from this search was opened. Freezes the pool: a rewording
+  -- after an open starts its own event rather than folding into the list the
+  -- person actually read.
+  opened_at   INTEGER,
   skips       INTEGER NOT NULL DEFAULT 0,
   -- Set when the operator says a `gap` search has since been covered.
   dismissed_at INTEGER,

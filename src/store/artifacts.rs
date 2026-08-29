@@ -2299,7 +2299,9 @@ mod tests {
             )
             .await
             .unwrap();
-        s.judge_hit(&ev, &made[0].id).await.unwrap();
+        s.judge_hit(&ev, &made[0].id, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         assert!(s.artifact_confirmed(&made[0].id).await.unwrap());
     }
 

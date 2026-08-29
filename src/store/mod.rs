@@ -154,7 +154,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 2] = [
+        const ADDITIVE: [(&str, &str, &str); 4] = [
             (
                 "artifacts",
                 "updated_at",
@@ -169,6 +169,19 @@ impl Store {
                 "artifact_pairs",
                 "decided_by",
                 "ALTER TABLE artifact_pairs ADD COLUMN decided_by TEXT",
+            ),
+            // Both nullable for the same reason: every verdict before these
+            // columns came from the deck, and no search before them was opened
+            // in a way anything recorded.
+            (
+                "search_events",
+                "judged_by",
+                "ALTER TABLE search_events ADD COLUMN judged_by TEXT",
+            ),
+            (
+                "search_events",
+                "opened_at",
+                "ALTER TABLE search_events ADD COLUMN opened_at INTEGER",
             ),
         ];
         for (table, column, ddl) in ADDITIVE {
@@ -345,6 +358,33 @@ mod tests {
         assert_eq!(stamp, 0, "a stamp nobody has set is not a claim about when");
         // And again, because migrate runs on every connect.
         store.migrate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_base_judged_only_from_the_deck_gains_the_two_search_columns() {
+        // `judged_by` and `opened_at` are nullable and mean, on an old row,
+        // exactly what NULL says: the deck gave the verdict, and nobody recorded
+        // an open. A base full of deck verdicts must keep them.
+        let store = Store::memory().await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO search_events (id, query, door, query_vec, vec_dim, embed_model,
+                                        created_at, judged_at, verdict)
+                  VALUES ('e', 'fat32', 'ui', x'00', 0, 'fake', 1, 2, 'gap');
+             ALTER TABLE search_events DROP COLUMN judged_by;
+             ALTER TABLE search_events DROP COLUMN opened_at;",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        store.migrate().await.unwrap();
+        let (verdict, by, opened): (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT verdict, judged_by, opened_at FROM search_events WHERE id = 'e'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!((verdict.as_str(), by, opened), ("gap", None, None));
     }
 
     #[tokio::test]

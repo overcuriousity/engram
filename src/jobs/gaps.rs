@@ -399,7 +399,11 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .judge(&id, crate::store::feedback::Verdict::Gap)
+            .judge(
+                &id,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
             .await
             .unwrap();
         id

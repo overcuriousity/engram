@@ -187,7 +187,10 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let artifact_id = seed_one_artifact(&store).await;
         let event = record_one_search(&store, "how do I read a deleted entry", &artifact_id).await;
-        store.judge_hit(&event, &artifact_id).await.unwrap();
+        store
+            .judge_hit(&event, &artifact_id, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
 
         let (artifacts, pairs, _) = export(&store, dir.path()).await.unwrap();
         assert_eq!((artifacts, pairs), (1, 1));
@@ -242,7 +245,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::memory().await.unwrap();
         let event = record_one_search(&store, "gone", "no-such-artifact").await;
-        store.judge_hit(&event, "no-such-artifact").await.unwrap();
+        store
+            .judge_hit(
+                &event,
+                "no-such-artifact",
+                crate::store::feedback::Labeller::Deck,
+            )
+            .await
+            .unwrap();
 
         let (_, pairs, _) = export(&store, dir.path()).await.unwrap();
         assert_eq!(pairs, 0);
@@ -254,9 +264,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::memory().await.unwrap();
         let g = record_one_search(&store, "nothing about this", "x").await;
-        store.judge(&g, Verdict::Gap).await.unwrap();
+        store
+            .judge(&g, Verdict::Gap, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         let d = record_one_search(&store, "asdf", "x").await;
-        store.judge(&d, Verdict::Discard).await.unwrap();
+        store
+            .judge(&d, Verdict::Discard, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
 
         let (_, pairs, _) = export(&store, dir.path()).await.unwrap();
         assert_eq!(pairs, 0);

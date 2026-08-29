@@ -413,7 +413,10 @@ mod tests {
             )
             .await
             .unwrap();
-        core.store.judge_hit(&id, expect).await.unwrap();
+        core.store
+            .judge_hit(&id, expect, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -605,7 +608,10 @@ mod tests {
             )
             .await
             .unwrap();
-        core.store.judge(&id, Verdict::Gap).await.unwrap();
+        core.store
+            .judge(&id, Verdict::Gap, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
 
         run_sweep(&core).await.unwrap();
         assert!(core.store.latest_eval_run().await.unwrap().is_none());

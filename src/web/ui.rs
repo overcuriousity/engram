@@ -191,6 +191,10 @@ pub struct ArtifactDetail {
     /// it is showing is the artifact's own text reflected back rather than the
     /// document it was drawn from.
     pub corpus_restored: bool,
+    /// The search this was opened from, when it was opened from the rail and
+    /// searches are being recorded. What the bar under the artifact and the
+    /// dwell timer both report against. See `Store::open_event_for`.
+    pub search_event: Option<String>,
     /// Link to the source, scrolled to and highlighting the exact lines this
     /// artifact was drawn from. Falls back to the plain source page for an
     /// artifact with no recorded span — a restored one, for instance.
@@ -499,6 +503,9 @@ struct ResultsTemplate {
     /// The tick beside the count is what makes the reordering legible as a
     /// refinement rather than a glitch.
     reranked: bool,
+    /// The query as typed, for the "nothing here has it" button — and only
+    /// while searches are being recorded, since a gap is a verdict on one.
+    gap_q: Option<String>,
 }
 
 /// The rail before anything is asked: the base introducing itself.
@@ -1136,6 +1143,9 @@ pub(crate) async fn search_results(
     // Function words are dropped: a query phrased as a situation is mostly
     // stopwords, and highlighting every "to" marks the whole card.
     let terms = highlightable_terms(p.q.trim());
+    // Trimmed, because that is the wording the capture stores and the gap
+    // button has to name the same event.
+    let gap_q = tenant.core.learn.enabled.then(|| p.q.trim().to_string());
     // What this sitting is working on. A typing burst folds into one entry
     // here as it does in the log, so what is carried is the query that was
     // meant rather than every prefix of it.
@@ -1237,6 +1247,7 @@ pub(crate) async fn search_results(
         // that failed or was skipped answered in vector order, and the tick
         // would assert a confirmation that never took place.
         reranked: outcome.timing.reranked,
+        gap_q,
     })
     .into_response();
     // Measured as before, reported where a browser already knows to show it.
@@ -1664,7 +1675,15 @@ async fn reread_uncovered_ui(
 struct DwellForm {
     #[serde(default)]
     secs: i64,
+    /// The search the artifact was opened from, where the pane knew one.
+    #[serde(default)]
+    event: Option<String>,
 }
+
+/// A read this long is taken as the search having found what it was for.
+/// Provisional — see `Store::implicit_hit` — but enough to give recall@10 a
+/// value from ordinary use, with nothing clicked.
+const DWELL_HIT_SECS: i64 = 20;
 
 /// The page saying how long an artifact was open, sent as the reader leaves
 /// it. `sendBeacon` lands here; nothing is rendered back.
@@ -1676,6 +1695,11 @@ async fn artifact_dwell(
     tenant
         .core
         .record_dwell(&aid, f.secs, Some(&tenant.user.subject));
+    if let Some(event) = f.event.filter(|_| f.secs >= DWELL_HIT_SECS)
+        && tenant.core.learn.enabled
+    {
+        tenant.core.store.implicit_hit(&event, &aid).await?;
+    }
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
@@ -2868,8 +2892,14 @@ pub(crate) async fn build_artifact_detail(
         slice_label: slice.label,
         slice_lines: slice.lines,
         terms: terms.to_string(),
+        search_event: None,
     })
 }
+
+/// How long after a search an open from its rail still counts as an open of
+/// it. Generous: the rail stays on screen for as long as the tab does, and
+/// the lookup also asks that the pool hold the artifact.
+pub(crate) const OPEN_WITHIN_SECS: i64 = 3600;
 
 #[derive(serde::Deserialize)]
 struct ArtifactViewParams {
@@ -2890,6 +2920,10 @@ struct ArtifactViewParams {
     /// every click lands in one bucket on Ops.
     #[serde(default)]
     rung: Option<String>,
+    /// `results` when the link was a row on the search rail. Only then is
+    /// there a search this open can be the answer to.
+    #[serde(default)]
+    from: Option<String>,
 }
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
@@ -2901,7 +2935,18 @@ async fn artifact_detail(
     Path(cid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
 ) -> Result<Response> {
-    let d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
+    let mut d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
+    // Opened from the rail: the search it answers is asked of the store, since
+    // the capture was written off the request path and nothing on the page
+    // carries its id. On the request path, because the bar under the artifact
+    // needs the id before it can render.
+    if tenant.core.learn.enabled && p.from.as_deref() == Some("results") {
+        d.search_event = tenant
+            .core
+            .store
+            .open_event_for(&cid, Some(&tenant.user.subject), OPEN_WITHIN_SECS)
+            .await?;
+    }
     // Opening a chunk is the deliberate act that counts as remembering it.
     tenant.core.mark_artifact_seen(&cid);
     // And the act the pursuit sweep reads: opened, or pivoted through — unless
@@ -6331,6 +6376,7 @@ mod tests {
             results: vec![loose],
             associated: vec![],
             all_weak: true,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         })
@@ -6434,6 +6480,7 @@ mod tests {
             results: vec![named, offered],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         })
@@ -6457,6 +6504,7 @@ mod tests {
             results: vec![row("a", "#1")],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         })
@@ -6563,6 +6611,7 @@ mod tests {
             results: vec![r],
             associated: vec![render_hit(0, hit(None, Some("a")), &titles, false)],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         })
@@ -6612,6 +6661,7 @@ mod tests {
             results: vec![above.clone(), above.clone(), past, also_past],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         }
@@ -6634,6 +6684,7 @@ mod tests {
             results: vec![above.clone(), above.clone(), above],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         }
@@ -6653,6 +6704,7 @@ mod tests {
             results: vec![own, borrowed],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         }
@@ -6684,6 +6736,7 @@ mod tests {
             results: vec![],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         };
@@ -6700,6 +6753,7 @@ mod tests {
                 Some("the tool and its errors"),
             )],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         };
@@ -6718,6 +6772,7 @@ mod tests {
             results: vec![rendered(Some("Mounting E01 images"), None)],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: true,
         }
@@ -6729,6 +6784,7 @@ mod tests {
             results: vec![rendered(Some("Mounting E01 images"), None)],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         }
@@ -6805,6 +6861,7 @@ mod tests {
             results: vec![ranked(true)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: true,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         };
@@ -6818,6 +6875,7 @@ mod tests {
             results: vec![ranked(false)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         };
@@ -7056,6 +7114,7 @@ mod tests {
             results: vec![r],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         }
@@ -7103,6 +7162,7 @@ mod tests {
             results: vec![ranked(false)],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         }
@@ -7122,6 +7182,7 @@ mod tests {
             results: vec![r],
             associated: vec![],
             all_weak: false,
+            gap_q: None,
             terms: String::new(),
             reranked: false,
         }
@@ -9234,7 +9295,11 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .judge(&gap, crate::store::feedback::Verdict::Gap)
+            .judge(
+                &gap,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
             .await
             .unwrap();
         core.store
@@ -9419,7 +9484,11 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .judge(&judged, crate::store::feedback::Verdict::Gap)
+            .judge(
+                &judged,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
             .await
             .unwrap();
         // Nothing came close.
@@ -11183,5 +11252,247 @@ mod tests {
         // The detail root names the artifact, which is what the page's timer reads.
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
         assert!(page.contains(&format!("data-artifact=\"{a}\"")), "{page}");
+    }
+
+    // ── Judging at the moment of search ──────────────────────────────────────
+
+    /// A recording session, one artifact, and one captured search of this
+    /// user's whose pool holds it.
+    async fn searched_app() -> (axum::Router, String, crate::core::Core, String, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let a = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "mounting the image".into(),
+                    corpus_span: None,
+                    title: Some("mount".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let event = handle
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "image will not mount".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some(crate::store::TEST_SUBJECT.into()),
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![crate::store::feedback::NewCandidate {
+                        artifact_id: a.clone(),
+                        score: 1.0,
+                        similarity: Some(0.5),
+                        shown: true,
+                    }],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        (app, cookie, handle, a, event)
+    }
+
+    #[tokio::test]
+    async fn a_result_opened_from_the_rail_asks_whether_it_was_the_one() {
+        // The judge deck asks hours later, out of context, and the honest
+        // answer then is "I don't know, I was looking". Under the result just
+        // opened the answer is cheap, so that is where it is asked.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?from=results")).await;
+        assert!(
+            page.contains("Was this what you were looking for?"),
+            "{page}"
+        );
+        assert!(
+            page.contains(&format!("/ui/search/{event}/verdict")),
+            "the bar does not name the search: {page}"
+        );
+        // Named on the root beside the artifact, so the dwell timer can report
+        // which search the read belongs to.
+        assert!(page.contains(&format!("data-event=\"{event}\"")), "{page}");
+        // The rail's own links say they are the rail's.
+        let rail = include_str!("templates/_results.html");
+        assert!(rail.contains("&from=results\""), "{rail}");
+
+        // Reached any other way — a corpus page, a pasted link — there is no
+        // search to be the answer to.
+        let plain = get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
+        assert!(
+            !plain.contains("Was this what you were looking for?"),
+            "{plain}"
+        );
+        // And a bar was not the whole of the open: the rewording after it starts
+        // its own event because this one is now the list that was read.
+        handle
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "image mount".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some(crate::store::TEST_SUBJECT.into()),
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                60,
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.store.feedback_stats().await.unwrap().captured, 2);
+    }
+
+    #[tokio::test]
+    async fn with_learning_off_a_result_is_just_a_result() {
+        let core = crate::core::test_support::test_core().await;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let a = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "a".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?from=results")).await;
+        assert!(
+            !page.contains("Was this what you were looking for?"),
+            "{page}"
+        );
+        let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
+        assert!(!rail.contains("Nothing here has it"), "{rail}");
+    }
+
+    #[tokio::test]
+    async fn reading_a_result_long_enough_confirms_it_without_a_click() {
+        let (app, cookie, handle, a, event) = searched_app().await;
+        // A glance is not a read.
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{a}/dwell"),
+                &cookie,
+                &format!("secs=5&event={event}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(handle.store.feedback_stats().await.unwrap().hits, 0);
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{a}/dwell"),
+                &cookie,
+                &format!("secs=42&event={event}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let s = handle.store.feedback_stats().await.unwrap();
+        assert_eq!((s.hits, s.pending), (1, 0), "{s:?}");
+        assert_eq!(s.recall_at_10, 1.0);
+    }
+
+    #[tokio::test]
+    async fn the_bar_takes_yes_no_and_not_sure_and_each_can_be_taken_back() {
+        let (app, cookie, handle, a, event) = searched_app().await;
+        let verdict = |v: &str| {
+            form(
+                &format!("/ui/search/{event}/verdict"),
+                &cookie,
+                &format!("verdict={v}&artifact_id={a}"),
+            )
+        };
+        let res = app.clone().oneshot(verdict("hit")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bar = body_of(res).await;
+        assert!(bar.contains("undo"), "{bar}");
+        let s = handle.store.feedback_stats().await.unwrap();
+        assert_eq!((s.hits, s.pending), (1, 0), "{s:?}");
+
+        // Undo: a question again.
+        app.clone().oneshot(verdict("none")).await.unwrap();
+        assert_eq!(handle.store.feedback_stats().await.unwrap().pending, 1);
+
+        // No: still a question, for the deck — and one no read may answer.
+        app.clone().oneshot(verdict("no")).await.unwrap();
+        assert_eq!(handle.store.feedback_stats().await.unwrap().pending, 1);
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{a}/dwell"),
+                &cookie,
+                &format!("secs=42&event={event}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(handle.store.feedback_stats().await.unwrap().hits, 0);
+
+        // Not sure: not a pair, and not a card either.
+        app.clone().oneshot(verdict("discard")).await.unwrap();
+        let s = handle.store.feedback_stats().await.unwrap();
+        assert_eq!((s.discards, s.pending), (1, 0), "{s:?}");
+    }
+
+    #[tokio::test]
+    async fn the_rail_offers_a_gap_where_nothing_matches() {
+        // The deck's `N` key, moved to where the person is when they know.
+        let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
+        assert!(rail.contains("No matches."), "{rail}");
+        assert!(rail.contains("Nothing here has it"), "{rail}");
+        assert!(rail.contains(r#"hx-post="/ui/search/gap""#), "{rail}");
+        handle.background.wait_idle().await;
+
+        let res = app
+            .clone()
+            .oneshot(form("/ui/search/gap", &cookie, "q=nothing+here"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let s = handle.store.feedback_stats().await.unwrap();
+        assert_eq!((s.gaps, s.pending), (1, 0), "{s:?}");
+        assert!(
+            body_of(res).await.contains("recorded as a gap"),
+            "the button did not say what it did"
+        );
     }
 }

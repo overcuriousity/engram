@@ -1,4 +1,6 @@
-<div data-terms="{{ d.terms }}" data-artifact="{{ d.id }}">
+{# `data-event` names the search this was opened from, where there is one, so
+   the dwell timer can report the read against it. #}
+<div data-terms="{{ d.terms }}" data-artifact="{{ d.id }}"{% if let Some(ev) = d.search_event %} data-event="{{ ev }}"{% endif %}>
   {# The way back to the list, for a narrow window where opening a result hides
      it. An installed app has no back button to fall back on. Hidden above
      60rem, where the rail is still on screen beside this — the same width that
@@ -174,6 +176,13 @@
                            f.querySelector('textarea').focus()">edit</button>
         </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
+        {# Under the text, once it has been read: was it the one? Only where
+           this was opened from the rail and the search was recorded. #}
+        {% if let Some(event_id) = d.search_event %}
+        {% let artifact_id = d.id %}
+        {% let state = "" %}
+        {% include "_search_verdict.html" %}
+        {% endif %}
         {# The passage stopped mid-sentence, so the window it was cut from did.
            The source column beside this already shows the rest of the line;
            this is the way to the artifact that carries it. #}

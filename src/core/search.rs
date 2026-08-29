@@ -4369,6 +4369,9 @@ mod tests {
     async fn a_synthesized_artifact_leading_the_list_marks_the_search_answered() {
         let mut core = test_core().await;
         core.learn.enabled = true;
+        // Two deliberate searches, not one being reworded: with the window on
+        // the second would fold into the first and there would be one event.
+        core.feedback.coalesce_secs = 0;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let captured = core
             .store
