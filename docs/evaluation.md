@@ -65,10 +65,13 @@ twenty seconds is recorded, provisionally, as the one the search was for; the
 bar under it — *Was this what you were looking for? Yes · No · Not sure* — makes
 that a person's verdict, and *Nothing here has it* on a rail that matched
 nothing records a gap. Only what none of these labelled reaches `/ui/judge`,
-where a recorded search comes back with its candidates shuffled and unlabelled
-and you say which one you needed. The shuffling is not decoration — a label
-assigned while reading the answer contaminates the question, which is the same
-reason the query is recorded in the moment and the verdict is not.
+where a recorded search comes back with the top five of its pool in the order
+the search gave them, the rest behind a fold, and you say which one you needed.
+Showing the order is a known cost: a person is likelier to confirm what came
+first, so the recall@10 and MRR read off deck verdicts lean slightly towards
+the ranker. Five in order is a question a person answers; twenty shuffled was
+one nobody answered twice. Scores are still withheld, and the query is still
+recorded in the moment and the verdict is not.
 
 ```bash
 engram --export-eval ~/engram-eval

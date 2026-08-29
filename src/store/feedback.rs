@@ -422,7 +422,20 @@ pub struct PendingEvent {
     pub query: String,
     pub door: String,
     pub created_at: i64,
+    /// Whether a result was ever opened from it. The card asks a different
+    /// question of a search nobody opened anything from.
+    pub opened: bool,
     pub candidates: Vec<Candidate>,
+}
+
+/// What the deck deals: see `Store::next_pending`. One bind, `weak_below`.
+/// `COALESCE` so an empty pool reads as the weakest search there is.
+macro_rules! dealable {
+    () => {
+        "judged_at IS NULL AND length(query) >= 3
+         AND COALESCE((SELECT max(similarity) FROM search_candidates
+                        WHERE event_id = search_events.id), 0) >= ?"
+    };
 }
 
 #[derive(Debug, Clone, Default)]
@@ -460,15 +473,22 @@ impl Store {
     /// Newest first because a judgement is worth something only while the
     /// situation is still in mind, and that memory is the most perishable part
     /// of the whole dataset.
-    pub async fn next_pending(&self) -> Result<Option<PendingEvent>> {
-        let row = sqlx::query(
+    ///
+    /// Not every unjudged search is dealt. A query under three characters and a
+    /// search whose best match fell under `weak_below` are the cards nobody can
+    /// answer — a typo, or a hole the distance already says is one and
+    /// `GapKind::Unmatched` already counts. They stay pending, for that sweep;
+    /// they are just never asked about.
+    pub async fn next_pending(&self, weak_below: f32) -> Result<Option<PendingEvent>> {
+        let row = sqlx::query(concat!(
             // `id DESC` breaks the tie: two searches within one second are
             // ordinary, and `created_at` alone would leave SQLite to pick.
             // Ids are uuid v7, so they sort by time down to the millisecond.
-            "SELECT id, query, door, created_at FROM search_events
-             WHERE judged_at IS NULL
-             ORDER BY skips ASC, created_at DESC, id DESC LIMIT 1",
-        )
+            "SELECT id, query, door, created_at, opened_at FROM search_events WHERE ",
+            dealable!(),
+            " ORDER BY skips ASC, created_at DESC, id DESC LIMIT 1"
+        ))
+        .bind(weak_below)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else { return Ok(None) };
@@ -481,10 +501,12 @@ impl Store {
     /// the judging order now puts first, and the operator expects to land back
     /// on the card they were looking at rather than somewhere else.
     pub async fn pending_by_id(&self, event_id: &str) -> Result<Option<PendingEvent>> {
-        let row = sqlx::query("SELECT id, query, door, created_at FROM search_events WHERE id = ?")
-            .bind(event_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            "SELECT id, query, door, created_at, opened_at FROM search_events WHERE id = ?",
+        )
+        .bind(event_id)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some(row) = row else { return Ok(None) };
         self.hydrate(row).await.map(Some)
     }
@@ -512,6 +534,7 @@ impl Store {
             query: row.get("query"),
             door: row.get("door"),
             created_at: row.get("created_at"),
+            opened: row.get::<Option<i64>, _>("opened_at").is_some(),
             candidates,
         })
     }
@@ -726,12 +749,14 @@ impl Store {
     /// Split out of `feedback_stats`, which runs half a dozen queries and two
     /// joins: this one is read on every page render to draw the nav, and the
     /// nav must not cost what the ops page costs.
-    pub async fn pending_count(&self) -> Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT count(*) FROM search_events WHERE judged_at IS NULL")
-                .fetch_one(&self.pool)
-                .await?,
-        )
+    pub async fn pending_count(&self, weak_below: f32) -> Result<i64> {
+        Ok(sqlx::query_scalar(concat!(
+            "SELECT count(*) FROM search_events WHERE ",
+            dealable!()
+        ))
+        .bind(weak_below)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// The field value: recall@10 and MRR read from the ranks the searches
@@ -1382,7 +1407,7 @@ mod tests {
         assert_eq!(s.recall_at_10, 1.0);
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("dwell"));
         assert!(
-            store.next_pending().await.unwrap().is_none(),
+            store.next_pending(0.0).await.unwrap().is_none(),
             "a search already labelled by reading is not dealt to the deck"
         );
     }
@@ -1411,7 +1436,7 @@ mod tests {
         let s = store.feedback_stats().await.unwrap();
         assert_eq!(s.hits, 0, "the provisional hit was withdrawn");
         assert_eq!(
-            store.next_pending().await.unwrap().map(|e| e.id),
+            store.next_pending(0.0).await.unwrap().map(|e| e.id),
             Some(id),
             "and the search goes to the deck, still a question"
         );
@@ -1438,6 +1463,34 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(expect.as_deref(), Some("a2"));
+    }
+
+    #[tokio::test]
+    async fn a_search_too_short_or_too_loose_to_judge_is_never_dealt() {
+        // A two-letter query and a search whose best match was under the
+        // weak line are the cards nobody can answer: a typo, or a hole the
+        // distance already says is one (`GapKind::Unmatched`). They stay
+        // recorded and stay pending — the gap sweep reads them — but the deck
+        // does not deal them and the badge does not count them.
+        let store = Store::memory().await.unwrap();
+        seed(&store, "ab", &["a1"]).await;
+        let mut loose = ev("fat32", Door::Ui);
+        loose.candidates[0].similarity = Some(0.2);
+        store.record_search(loose, 0).await.unwrap();
+        assert!(store.next_pending(0.3).await.unwrap().is_none());
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 0);
+
+        let id = seed(&store, "ntfs", &["a1"]).await;
+        assert_eq!(
+            store.next_pending(0.3).await.unwrap().map(|e| e.id),
+            Some(id.clone())
+        );
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
+
+        // And the card knows whether anything was opened from it.
+        assert!(!store.next_pending(0.3).await.unwrap().unwrap().opened);
+        store.open_event_for("a1", None, 600).await.unwrap();
+        assert!(store.next_pending(0.3).await.unwrap().unwrap().opened);
     }
 
     #[tokio::test]
@@ -1629,7 +1682,10 @@ mod tests {
         let store = Store::memory().await.unwrap();
         seed(&store, "older", &["a"]).await;
         seed(&store, "newer", &["b"]).await;
-        assert_eq!(store.next_pending().await.unwrap().unwrap().query, "newer");
+        assert_eq!(
+            store.next_pending(0.0).await.unwrap().unwrap().query,
+            "newer"
+        );
     }
 
     #[tokio::test]
@@ -1638,7 +1694,10 @@ mod tests {
         seed(&store, "older", &["a"]).await;
         let newer = seed(&store, "newer", &["b"]).await;
         store.skip_event(&newer).await.unwrap();
-        assert_eq!(store.next_pending().await.unwrap().unwrap().query, "older");
+        assert_eq!(
+            store.next_pending(0.0).await.unwrap().unwrap().query,
+            "older"
+        );
     }
 
     #[tokio::test]
@@ -1646,7 +1705,7 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let id = seed(&store, "only one", &["a"]).await;
         store.judge_hit(&id, "a", Labeller::Deck).await.unwrap();
-        assert!(store.next_pending().await.unwrap().is_none());
+        assert!(store.next_pending(0.0).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1845,7 +1904,10 @@ mod tests {
         let older = seed(&store, "older", &["a"]).await;
         seed(&store, "newer", &["b"]).await;
 
-        assert_eq!(store.next_pending().await.unwrap().unwrap().query, "newer");
+        assert_eq!(
+            store.next_pending(0.0).await.unwrap().unwrap().query,
+            "newer"
+        );
         assert_eq!(
             store.event_query(&older).await.unwrap().as_deref(),
             Some("older")
@@ -1926,7 +1988,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
-        assert!(store.next_pending().await.unwrap().is_none());
+        assert!(store.next_pending(0.0).await.unwrap().is_none());
     }
 
     #[tokio::test]

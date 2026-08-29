@@ -1,9 +1,17 @@
 //! Turning captured searches into labelled pairs.
 //!
-//! The card shows the query as it was typed and the stored pool shuffled, with
-//! no ranks and no scores. Both omissions are deliberate: the ranker's opinion
-//! is the one thing that must not be visible while its work is being judged, or
-//! what gets measured is agreement rather than relevance.
+//! Most pairs are made at the moment of search now — a result read, a bar
+//! answered, a gap pressed on the rail — and the deck deals only what none of
+//! that labelled. See `web::ui::artifact_detail` and `Store::open_event_for`.
+//!
+//! The card shows the query as it was typed and the top five of the stored pool
+//! in the order the search gave them, titled, with the rest behind a fold. It
+//! used to shuffle the whole pool, so that the ranker's opinion could not be
+//! seen while its work was judged; that made a card of twenty unordered
+//! paragraphs, and the honest answer to it was "I don't know, I was looking".
+//! Five, in order, is a question a person can answer. The position bias that
+//! costs is small, and `docs/evaluation.md` says so beside the number. Scores
+//! are still withheld.
 //!
 //! The pool offered is wider than the answer the searcher saw, so an artifact
 //! the ranking buried can still be confirmed. That is the only way a ranking
@@ -40,18 +48,36 @@ pub struct Choice {
     /// `card_for` for why it is shown at all.
     pub usable: bool,
     /// The digit that presses this option, or `None` where no key reaches it:
-    /// past the ninth, or on something unusable. Assigned after the shuffle,
-    /// over the choosable options only, so the digits an operator can see are
-    /// the digits that work and they run without a gap.
+    /// behind the fold, or on something unusable. Over the choosable options
+    /// among the five dealt, so the digits an operator can see are the digits
+    /// that work and they run without a gap.
     pub key: Option<usize>,
 }
+
+/// How many of the pool the card deals openly. The rest are one click away.
+pub const DEALT: usize = 5;
 
 pub struct Card {
     pub id: String,
     pub query: String,
     pub door: String,
     pub when: String,
+    /// Whether anything was opened from this search. See `PendingEvent::opened`.
+    pub opened: bool,
+    /// In the order the search gave them.
     pub choices: Vec<Choice>,
+}
+
+impl Card {
+    /// Where the fold starts, for the template.
+    pub fn dealt(&self) -> usize {
+        DEALT
+    }
+
+    /// How many are behind it.
+    pub fn folded(&self) -> usize {
+        self.choices.len().saturating_sub(DEALT)
+    }
 }
 
 /// The header's live half: what is true right now, and what just moved.
@@ -61,18 +87,11 @@ pub struct Card {
 /// copies of the same dozen fields would drift.
 pub struct Pulse {
     pub judged: i64,
-    /// The judgement count the last sweep ran at, and so where this stretch of
-    /// the bar starts. Zero before the first one.
+    /// The judgement count the last sweep ran at. Zero before the first one,
+    /// which is when the page still explains what a sweep is.
     pub floor: i64,
     /// The judgement count the next sweep runs at.
     pub target: i64,
-    /// How far along the stretch between the two, not how far along the count.
-    pub pct: i64,
-    /// Where the bar stood before this verdict. A swapped element is a new
-    /// element with no previous width to transition away from, so the previous
-    /// width is sent and the fill is animated between the two. Equal to `pct`
-    /// wherever nothing moved, which is what makes the animation a no-op there.
-    pub pct_prev: i64,
     /// What that target buys, in the words for a first sweep or a later one.
     pub label: &'static str,
     pub recall: String,
@@ -210,21 +229,6 @@ fn snippet_of(text: &str) -> String {
     crate::web::markdown::snippet(text, 140)
 }
 
-/// Shuffle without pulling in a random-number crate: the event id is already a
-/// uuid v7, so hashing it together with each artifact id gives an order that is
-/// stable for one card, different for the next, and unrelated to rank.
-fn shuffled(event_id: &str, mut choices: Vec<Choice>) -> Vec<Choice> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    choices.sort_by_key(|c| {
-        let mut h = DefaultHasher::new();
-        event_id.hash(&mut h);
-        c.artifact_id.hash(&mut h);
-        h.finish()
-    });
-    choices
-}
-
 /// Hydrate a pending event into something renderable, dropping candidates whose
 /// artifact has since been deleted and marking those the benchmark cannot hold.
 ///
@@ -294,11 +298,9 @@ async fn card_for(tenant: &Tenant, event: PendingEvent) -> Result<Card> {
             }
         }
     }
-    let mut choices = shuffled(&event.id, choices);
-    // After the shuffle, because the digits number the card as it is read. The
-    // range is the cap: the shortcut is one digit, so the tenth choosable
-    // option and everything after it keeps its column and loses the number.
-    for (key, c) in (1..=9).zip(choices.iter_mut().filter(|c| c.usable)) {
+    // Over the five dealt only: an option behind the fold answering to a key
+    // would be a key that presses something the operator cannot see.
+    for (key, c) in (1..=DEALT).zip(choices.iter_mut().take(DEALT).filter(|c| c.usable)) {
         c.key = Some(key);
     }
     Ok(Card {
@@ -307,11 +309,17 @@ async fn card_for(tenant: &Tenant, event: PendingEvent) -> Result<Card> {
         query: event.query,
         door: event.door,
         when: ago(event.created_at),
+        opened: event.opened,
     })
 }
 
 async fn next_pending_card(tenant: &Tenant) -> Result<Option<Card>> {
-    match tenant.core.store.next_pending().await? {
+    match tenant
+        .core
+        .store
+        .next_pending(tenant.core.weak_below)
+        .await?
+    {
         Some(event) => Ok(Some(card_for(tenant, event).await?)),
         None => Ok(None),
     }
@@ -323,7 +331,7 @@ async fn next_pending_card(tenant: &Tenant) -> Result<Option<Card>> {
 /// judgement buys is a measurement, and after the first one the distance is to
 /// the next re-sweep. Read from the last run rather than counted, so the two
 /// always agree about when it is due.
-async fn pulse_of(tenant: &Tenant, stats: &Stats, delta: String, prev: i64) -> Result<Pulse> {
+async fn pulse_of(tenant: &Tenant, stats: &Stats, delta: String) -> Result<Pulse> {
     let tune = &tenant.core.feedback.tune;
     let (floor, label) = match tenant.core.store.latest_eval_run().await? {
         None => (0, "until the first sweep"),
@@ -333,20 +341,11 @@ async fn pulse_of(tenant: &Tenant, stats: &Stats, delta: String, prev: i64) -> R
         0 => tune.min_judgements,
         n => n + tune.resweep_after,
     };
-    // A target already passed would draw a bar over 100% and a hint counting
-    // backwards; it happens whenever a sweep is queued but has not run yet.
+    // A target already passed would read as a count going backwards; it
+    // happens whenever a sweep is queued but has not run yet.
     let target = target.max(stats.judged).max(1);
-    // Against the last sweep rather than against zero. Measured from zero the
-    // bar reads the share of all judgements ever given that have been swept —
-    // which after the first sweep is always nearly all of them, so it stood at
-    // 95% and then 96%, and the one visual the header is built around stopped
-    // saying anything.
-    let span = (target - floor).max(1);
-    let along = |n: i64| ((n - floor).max(0) * 100 / span).min(100);
     Ok(Pulse {
         judged: stats.judged,
-        pct: along(stats.judged),
-        pct_prev: along(prev),
         floor,
         target,
         label,
@@ -377,7 +376,7 @@ async fn page(CanJudge(tenant): CanJudge) -> Result<Response> {
     Ok(HtmlTemplate(JudgeTemplate {
         // Read off the stats already in hand rather than counted again.
         judge_pending: tenant.core.learn.enabled.then_some(stats.pending),
-        pulse: Some(pulse_of(&tenant, &stats, String::new(), stats.judged).await?),
+        pulse: Some(pulse_of(&tenant, &stats, String::new()).await?),
         tune: Some(tune_view(&tenant, "").await?),
         tune_oob: false,
         misses,
@@ -399,7 +398,7 @@ async fn next_card(CanJudge(tenant): CanJudge) -> Result<Response> {
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(&tenant).await?,
         flash: None,
-        pulse: Some(pulse_of(&tenant, &stats, String::new(), stats.judged).await?),
+        pulse: Some(pulse_of(&tenant, &stats, String::new()).await?),
         tune: None,
         tune_oob: true,
     })
@@ -447,7 +446,7 @@ async fn card_after(
             delta: format!("MRR {:.2} → {after:.2}", before.mrr),
             undo: Some(judged.to_string()),
         }),
-        pulse: Some(pulse_of(tenant, &stats, delta, before.judged).await?),
+        pulse: Some(pulse_of(tenant, &stats, delta).await?),
         tune: Some(tune_view(tenant, "").await?),
         tune_oob: true,
     })
@@ -479,7 +478,7 @@ async fn card_again(tenant: &Tenant, event_id: &str, line: &str) -> Result<Respo
         }),
         // Nothing was recorded, so the figures are rendered where they stand and
         // `delta` is empty, which is what every animation on them keys on.
-        pulse: Some(pulse_of(tenant, &stats, String::new(), stats.judged).await?),
+        pulse: Some(pulse_of(tenant, &stats, String::new()).await?),
         tune: None,
         tune_oob: true,
     })
@@ -534,7 +533,7 @@ async fn undo(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Resul
         // at them while it happens. No delta, though: the tick and the bar's
         // travel are how the page acknowledges work, and taking a judgement
         // back is not some of it.
-        pulse: Some(pulse_of(&tenant, &stats, String::new(), stats.judged).await?),
+        pulse: Some(pulse_of(&tenant, &stats, String::new()).await?),
         tune: None,
         tune_oob: true,
     })
@@ -1417,23 +1416,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_the_options_a_key_can_reach_are_numbered() {
-        // The shortcut is a single digit and the pool is twenty deep by
-        // default, so past the ninth the badge advertised a key that does
-        // nothing — half the card looking operable and answering to nothing.
-        let (app, cookie, _core, _) = judge_app(13, &[]).await;
+    async fn the_card_deals_the_top_five_in_order_and_folds_the_rest() {
+        // Twenty unordered paragraphs forced a linear read of all twenty. The
+        // top five in the order the search gave them is a question a person
+        // can answer; the rest of the pool is still there — a buried hit can
+        // still be confirmed — behind one click, and carries no key.
+        let (app, cookie, _core, ids) = judge_app(13, &[]).await;
         let body = get(&app, "/ui/judge/next", &cookie).await;
-
-        assert!(body.contains(r#"<span class="judge-key">9</span>"#));
+        let fold = body.find("judge-more").expect("no fold for the rest");
+        let mut last = 0;
+        for id in &ids[..5] {
+            let at = body.find(id.as_str()).unwrap();
+            assert!(at < fold, "{id} is not among the five dealt: {body}");
+            assert!(at > last, "the five are not in the search's order: {body}");
+            last = at;
+        }
+        for id in &ids[5..] {
+            assert!(body.find(id.as_str()).unwrap() > fold, "{id} dealt openly");
+        }
+        assert!(body.contains("8 more"), "{body}");
+        assert!(body.contains(r#"<span class="judge-key">5</span>"#));
         assert!(
-            !body.contains(r#"<span class="judge-key">10</span>"#),
-            "the tenth option offers a key that cannot be pressed"
+            !body.contains(r#"<span class="judge-key">6</span>"#),
+            "a key points at an option behind the fold"
         );
-        assert_eq!(
-            body.matches(r#"<span class="judge-key"></span>"#).count(),
-            4,
-            "the options past the ninth must keep their column and lose the number"
-        );
+    }
+
+    #[tokio::test]
+    async fn the_card_says_whether_anything_was_opened() {
+        // A search nobody opened anything from is a different question — was
+        // there something you wanted at all? — from one where something was
+        // read and not confirmed.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        let body = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(body.contains("opened nothing"), "{body}");
+        assert!(body.contains("No, I was just looking"), "{body}");
+        core.store
+            .open_event_for(&ids[0], None, 600)
+            .await
+            .unwrap()
+            .expect("the seeded search holds this artifact");
+        let body = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(!body.contains("opened nothing"), "{body}");
+        assert!(body.contains("which of these was it"), "{body}");
     }
 
     #[tokio::test]
@@ -1476,43 +1501,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_bar_carries_where_it_moved_from_as_well_as_where_it_is() {
-        // A swapped element is a new element: it has no previous width to
-        // transition away from, so a bar rendered by the server can only be
-        // animated between two values it was told. Without the first one it
-        // jumps, which is the thing it exists not to do.
+    async fn a_verdict_moves_the_count_and_there_is_no_bar() {
+        // The XP bar, the trail and the sheen made the page prettier and the
+        // question no easier. The count is what a verdict buys: the distance
+        // to the next sweep, said as a number.
         let (app, cookie, core, ids) = judge_app(2, &[]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
-        let card = {
-            let res = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("/ui/judge/{}/hit", event.id))
-                        .method("POST")
-                        .header("cookie", &cookie)
-                        .header("content-type", "application/x-www-form-urlencoded")
-                        .body(Body::from(format!("artifact_id={}", ids[0])))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            body_of(res).await
-        };
-        assert!(card.contains("--from:"), "no starting position: {card}");
-        assert!(card.contains("--to:"), "no finishing position: {card}");
-        assert!(
-            card.contains("judge-xp-moved"),
-            "a verdict left the bar still: {card}"
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
+        assert_eq!(
+            post(
+                &app,
+                &format!("/ui/judge/{}/hit", event.id),
+                &cookie,
+                &format!("artifact_id={}", ids[0])
+            )
+            .await,
+            StatusCode::OK
         );
-
-        // And a plain fetch does not: an animation there is the page
-        // acknowledging its own load.
-        let plain = get(&app, "/ui/judge/next", &cookie).await;
-        assert!(
-            !plain.contains("judge-xp-moved"),
-            "the bar animates on a fetch that judged nothing: {plain}"
-        );
+        let card = get(&app, "/ui/judge/next", &cookie).await;
+        assert!(!card.contains("progressbar"), "the bar is back: {card}");
+        assert!(card.contains("<b>1</b> /"), "{card}");
+        assert!(card.contains("until the first sweep"), "{card}");
     }
 
     #[tokio::test]
@@ -1545,7 +1553,7 @@ mod tests {
     #[tokio::test]
     async fn confirming_a_candidate_records_the_hit_and_moves_on() {
         let (app, cookie, core, ids) = judge_app(2, &[]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         let status = post(
             &app,
             &format!("/ui/judge/{}/hit", event.id),
@@ -1557,7 +1565,7 @@ mod tests {
 
         let s = core.store.feedback_stats().await.unwrap();
         assert_eq!(s.hits, 1);
-        assert!(core.store.next_pending().await.unwrap().is_none());
+        assert!(core.store.next_pending(0.0).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1571,7 +1579,7 @@ mod tests {
             .set_artifact_status(&ids[1], ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
 
         let status = post(
             &app,
@@ -1584,7 +1592,7 @@ mod tests {
 
         assert_eq!(core.store.feedback_stats().await.unwrap().hits, 0);
         assert_eq!(
-            core.store.next_pending().await.unwrap().map(|e| e.id),
+            core.store.next_pending(0.0).await.unwrap().map(|e| e.id),
             Some(event.id),
             "the event must still be waiting for a verdict it can keep"
         );
@@ -1644,7 +1652,7 @@ mod tests {
             "the reading view is not the artifact: {full}"
         );
         // Reading must stay a read: the event is still waiting for a verdict.
-        assert!(core.store.next_pending().await.unwrap().is_some());
+        assert!(core.store.next_pending(0.0).await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -1667,7 +1675,7 @@ mod tests {
         // that is exactly what makes it misfire. A pair labelled by a slipped
         // key is scored as truth.
         let (app, cookie, core, ids) = judge_app(2, &[]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         let flash = {
             let res = app
                 .clone()
@@ -1710,7 +1718,7 @@ mod tests {
 
         let s = core.store.feedback_stats().await.unwrap();
         assert_eq!((s.hits, s.judged), (0, 0), "the verdict outlived its undo");
-        let pending = core.store.next_pending().await.unwrap().unwrap();
+        let pending = core.store.next_pending(0.0).await.unwrap().unwrap();
         assert_eq!(pending.id, event.id, "a different event came back");
         assert!(
             back.contains(&event.id),
@@ -1738,10 +1746,10 @@ mod tests {
     #[tokio::test]
     async fn skipping_leaves_it_pending() {
         let (app, cookie, core, _) = judge_app(1, &[]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         post(&app, &format!("/ui/judge/{}/skip", event.id), &cookie, "").await;
 
-        assert!(core.store.next_pending().await.unwrap().is_some());
+        assert!(core.store.next_pending(0.0).await.unwrap().is_some());
         assert_eq!(core.store.feedback_stats().await.unwrap().judged, 0);
     }
 
@@ -1761,7 +1769,7 @@ mod tests {
         // search would never have shown you this" — a find, and a permanent
         // dent in recall@10 for a ranking failure that never happened.
         let (app, cookie, core, _) = judge_app(1, &["gone-for-good"]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         let status = post(
             &app,
             &format!("/ui/judge/{}/hit", event.id),
@@ -1775,7 +1783,7 @@ mod tests {
         assert_eq!(s.finds, 0, "a phantom was counted as a find");
         assert_eq!(s.judged, 0);
         assert!(
-            core.store.next_pending().await.unwrap().is_some(),
+            core.store.next_pending(0.0).await.unwrap().is_some(),
             "the event was consumed by a verdict that was refused"
         );
     }
@@ -1785,7 +1793,7 @@ mod tests {
         // Retention or an Ops purge under an open judging screen. The flash
         // would otherwise show an MRR delta and an Undo for a row that is gone.
         let (app, cookie, core, ids) = judge_app(1, &[]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         core.store.purge_feedback().await.unwrap();
 
         for (uri, body) in [
@@ -1884,7 +1892,7 @@ mod tests {
         for id in &ids {
             crate::jobs::embed::run(&core, id).await.unwrap();
         }
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         let body = get(
             &app,
             &format!("/ui/judge/{}/assign/results?q=mounting", event.id),
@@ -1908,7 +1916,7 @@ mod tests {
     #[tokio::test]
     async fn confirming_from_outside_the_pool_is_reported_as_a_find() {
         let (app, cookie, core, ids) = judge_app(1, &[]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         // An artifact that exists but was never in this event's pool.
         let src = core
             .store
@@ -1957,7 +1965,7 @@ mod tests {
         // The loop the whole feature is: a verdict is what buys the next
         // measurement, so the check rides on the verdict rather than a timer.
         let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(1)).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         post(
             &app,
             &format!("/ui/judge/{}/hit", event.id),
@@ -1977,7 +1985,7 @@ mod tests {
         // Below it a sweep would recommend the quirks of a handful of queries
         // as confidently as a real improvement.
         let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(50)).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         post(
             &app,
             &format!("/ui/judge/{}/hit", event.id),
@@ -1997,7 +2005,7 @@ mod tests {
         // searches per verdict.
         let (app, cookie, core, ids) = judge_app_tuned(3, &[], Some(1)).await;
         for id in ids.iter().take(2) {
-            let event = core.store.next_pending().await.unwrap();
+            let event = core.store.next_pending(0.0).await.unwrap();
             let Some(event) = event else { break };
             post(
                 &app,
@@ -2185,7 +2193,7 @@ mod tests {
         // stood at whatever it read on arrival while the queue was worked
         // down — the one figure the work is measured by, frozen.
         let (app, cookie, core, ids) = judge_app(2, &[]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         let res = app
             .clone()
             .oneshot(
@@ -2264,13 +2272,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_bar_counts_from_the_last_sweep_rather_than_from_zero() {
-        // Measured from zero it reads the share of every judgement ever given
-        // that has been swept — which after the first sweep is nearly all of
-        // them. It stood at 95%, then 96%, then 98%, and the one visual the
-        // header is built around stopped conveying anything.
+    async fn the_count_targets_the_next_sweep_rather_than_a_fixed_milestone() {
+        // What a judgement buys is a measurement, and after the first sweep
+        // the distance is to the next re-sweep, read from the last run rather
+        // than counted so the two always agree about when it is due.
         let (app, cookie, core, ids) = judge_app(2, &[]).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         post(
             &app,
             &format!("/ui/judge/{}/hit", event.id),
@@ -2282,40 +2289,14 @@ mod tests {
         record_run_at(&core, swept_at).await;
 
         let body = get(&app, "/ui/judge", &cookie).await;
+        let target = swept_at + core.feedback.tune.resweep_after;
         assert!(
-            body.contains("--to:0%"),
-            "the stretch to the next sweep has not started: {body}"
+            body.contains(&format!(
+                "<b>{swept_at}</b> / {target} until the next sweep"
+            )),
+            "the count does not run to the next sweep: {body}"
         );
-        assert!(
-            body.contains(&format!(r#"aria-valuemin="{swept_at}""#)),
-            "the bar starts where the last sweep did: {body}"
-        );
-
-        // One further verdict is one tenth of the ten the next sweep waits for.
-        let id = core
-            .store
-            .record_search(
-                NewEvent {
-                    query: "a second question entirely".into(),
-                    door: Door::Ui,
-                    scope: None,
-                    filters: "{}".into(),
-                    query_vec: vec![0.1, 0.2],
-                    embed_model: "fake".into(),
-                    candidates: vec![],
-                    answered: false,
-                },
-                0,
-            )
-            .await
-            .unwrap();
-        core.store
-            .judge_hit(&id, &ids[0], crate::store::feedback::Labeller::Deck)
-            .await
-            .unwrap();
-
-        let body = get(&app, "/ui/judge", &cookie).await;
-        assert!(body.contains("--to:10%"), "{body}");
+        assert!(!body.contains("progressbar"), "the bar is back: {body}");
     }
 
     /// A sweep in the store, recorded as having run at `judged`.
@@ -2403,7 +2384,7 @@ mod tests {
         // It runs off the request path, so the page that paid for it has
         // already been sent. The next verdict is the first chance to say so.
         let (app, cookie, core, ids) = judge_app_tuned(2, &[], Some(1)).await;
-        let event = core.store.next_pending().await.unwrap().unwrap();
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
         let res = app
             .clone()
             .oneshot(

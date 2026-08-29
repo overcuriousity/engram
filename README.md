@@ -41,8 +41,10 @@ positions those searches really gave. Not a proxy score.
   supports gets badged. That badge is the best part.
 - **From a shell** — capture, search, ask, read. Drawn on a terminal, plain text
   in a pipe. See [The client](#the-client).
-- **Judge** — recorded searches come back shuffled and unlabelled, one keystroke
-  each. It all stays on your machine, and one button forgets it.
+- **Judge** — a result you read, or answer *Was this what you were looking
+  for?* under, is a labelled pair; what that leaves comes back as a card, top
+  five in order, one keystroke each. It all stays on your machine, and one
+  button forgets it.
 - **Duplicates** — near-duplicates parked at capture, close pairs queued for a
   person. Nothing deleted. No merge drops a number, a command or a path. Undo on
   everything.

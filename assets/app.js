@@ -2272,7 +2272,12 @@
       // Disabled options are skipped, matching the badges: a deprecated or
       // superseded candidate is shown at its place in the pool but carries no
       // digit, and the numbering runs over the choosable ones without a gap.
-      var pick = card.querySelectorAll('.judge-option:not([disabled])')[Number(e.key) - 1];
+      // Options behind the fold are skipped too — they carry no digit, and a
+      // key that pressed what cannot be seen would be a verdict on nothing.
+      var pick = Array.prototype.filter.call(
+        card.querySelectorAll('.judge-option:not([disabled])'),
+        function (o) { return !o.closest('.judge-more'); }
+      )[Number(e.key) - 1];
       if (pick) { e.preventDefault(); pick.click(); }
       return;
     }
