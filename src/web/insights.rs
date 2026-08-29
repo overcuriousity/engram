@@ -528,7 +528,11 @@ async fn page(tenant: Tenant) -> Result<Response> {
         // the honest answer is that there is nothing to say — not 0.00.
         retrieval: match tenant.core.learn.enabled {
             true => {
-                let f = tenant.core.store.feedback_stats().await?;
+                let f = tenant
+                    .core
+                    .store
+                    .feedback_stats(tenant.core.weak_below)
+                    .await?;
                 Some(Retrieval {
                     recall_at_10: format!("{:.2}", f.recall_at_10),
                     mrr: format!("{:.2}", f.mrr),

@@ -2,7 +2,7 @@
 //!
 //! Most pairs are made at the moment of search now — a result read, a bar
 //! answered, a gap pressed on the rail — and the deck deals only what none of
-//! that labelled. See `web::ui::artifact_detail` and `Store::open_event_for`.
+//! that labelled. See `web::ui::artifact_detail` and `Store::open_event`.
 //!
 //! The card shows the query as it was typed and the top five of the stored pool
 //! in the order the search gave them, titled, with the rest behind a fold. It
@@ -367,7 +367,11 @@ async fn pulse_of(tenant: &Tenant, stats: &Stats, delta: String) -> Result<Pulse
 
 async fn page(CanJudge(tenant): CanJudge) -> Result<Response> {
     use axum::response::IntoResponse;
-    let stats = tenant.core.store.feedback_stats().await?;
+    let stats = tenant
+        .core
+        .store
+        .feedback_stats(tenant.core.weak_below)
+        .await?;
     let misses = if stats.judged >= MISS_LIST_AT {
         tenant.core.store.misses(20).await?
     } else {
@@ -394,7 +398,11 @@ async fn page(CanJudge(tenant): CanJudge) -> Result<Response> {
 /// movement: `delta` is empty, and every animation on this fragment keys on it.
 async fn next_card(CanJudge(tenant): CanJudge) -> Result<Response> {
     use axum::response::IntoResponse;
-    let stats = tenant.core.store.feedback_stats().await?;
+    let stats = tenant
+        .core
+        .store
+        .feedback_stats(tenant.core.weak_below)
+        .await?;
     Ok(HtmlTemplate(CardTemplate {
         card: next_pending_card(&tenant).await?,
         flash: None,
@@ -417,7 +425,11 @@ async fn card_after(
     judged: &str,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    let stats = tenant.core.store.feedback_stats().await?;
+    let stats = tenant
+        .core
+        .store
+        .feedback_stats(tenant.core.weak_below)
+        .await?;
     let after = stats.mrr;
     // A verdict is what buys the next measurement. Off the request path: the
     // operator must not wait on a grid of searches, and a sweep that fails
@@ -465,7 +477,11 @@ async fn card_again(tenant: &Tenant, event_id: &str, line: &str) -> Result<Respo
         Some(event) => Some(card_for(tenant, event).await?),
         None => next_pending_card(tenant).await?,
     };
-    let stats = tenant.core.store.feedback_stats().await?;
+    let stats = tenant
+        .core
+        .store
+        .feedback_stats(tenant.core.weak_below)
+        .await?;
     Ok(HtmlTemplate(CardTemplate {
         card,
         flash: Some(Flash {
@@ -525,7 +541,11 @@ async fn undo(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Resul
         // is a better answer than an error page.
         None => next_pending_card(&tenant).await?,
     };
-    let stats = tenant.core.store.feedback_stats().await?;
+    let stats = tenant
+        .core
+        .store
+        .feedback_stats(tenant.core.weak_below)
+        .await?;
     Ok(HtmlTemplate(CardTemplate {
         card,
         flash: None,
@@ -584,7 +604,11 @@ async fn hit(
         .store
         .rank_in_event(&event_id, &f.artifact_id)
         .await?;
-    let before = tenant.core.store.feedback_stats().await?;
+    let before = tenant
+        .core
+        .store
+        .feedback_stats(tenant.core.weak_below)
+        .await?;
     tenant
         .core
         .store
@@ -594,7 +618,11 @@ async fn hit(
 }
 
 async fn gap(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
-    let before = tenant.core.store.feedback_stats().await?;
+    let before = tenant
+        .core
+        .store
+        .feedback_stats(tenant.core.weak_below)
+        .await?;
     tenant
         .core
         .store
@@ -604,7 +632,11 @@ async fn gap(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result
 }
 
 async fn discard(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Result<Response> {
-    let before = tenant.core.store.feedback_stats().await?;
+    let before = tenant
+        .core
+        .store
+        .feedback_stats(tenant.core.weak_below)
+        .await?;
     tenant
         .core
         .store
@@ -1447,15 +1479,12 @@ mod tests {
         // A search nobody opened anything from is a different question — was
         // there something you wanted at all? — from one where something was
         // read and not confirmed.
-        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        let (app, cookie, core, _) = judge_app(2, &[]).await;
         let body = get(&app, "/ui/judge/next", &cookie).await;
         assert!(body.contains("opened nothing"), "{body}");
         assert!(body.contains("No, I was just looking"), "{body}");
-        core.store
-            .open_event_for(&ids[0], None, 600)
-            .await
-            .unwrap()
-            .expect("the seeded search holds this artifact");
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
+        assert!(core.store.open_event(&event.id).await.unwrap());
         let body = get(&app, "/ui/judge/next", &cookie).await;
         assert!(!body.contains("opened nothing"), "{body}");
         assert!(body.contains("which of these was it"), "{body}");
@@ -1563,7 +1592,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let s = core.store.feedback_stats().await.unwrap();
+        let s = core.store.feedback_stats(0.0).await.unwrap();
         assert_eq!(s.hits, 1);
         assert!(core.store.next_pending(0.0).await.unwrap().is_none());
     }
@@ -1590,7 +1619,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "the operator gets the card back");
 
-        assert_eq!(core.store.feedback_stats().await.unwrap().hits, 0);
+        assert_eq!(core.store.feedback_stats(0.0).await.unwrap().hits, 0);
         assert_eq!(
             core.store.next_pending(0.0).await.unwrap().map(|e| e.id),
             Some(event.id),
@@ -1696,7 +1725,7 @@ mod tests {
             flash.contains(&format!("/ui/judge/{}/undo", event.id)),
             "the verdict was recorded with no way back: {flash}"
         );
-        assert_eq!(core.store.feedback_stats().await.unwrap().hits, 1);
+        assert_eq!(core.store.feedback_stats(0.0).await.unwrap().hits, 1);
 
         let back = {
             let res = app
@@ -1716,7 +1745,7 @@ mod tests {
             body_of(res).await
         };
 
-        let s = core.store.feedback_stats().await.unwrap();
+        let s = core.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.hits, s.judged), (0, 0), "the verdict outlived its undo");
         let pending = core.store.next_pending(0.0).await.unwrap().unwrap();
         assert_eq!(pending.id, event.id, "a different event came back");
@@ -1750,7 +1779,7 @@ mod tests {
         post(&app, &format!("/ui/judge/{}/skip", event.id), &cookie, "").await;
 
         assert!(core.store.next_pending(0.0).await.unwrap().is_some());
-        assert_eq!(core.store.feedback_stats().await.unwrap().judged, 0);
+        assert_eq!(core.store.feedback_stats(0.0).await.unwrap().judged, 0);
     }
 
     #[tokio::test]
@@ -1779,7 +1808,7 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let s = core.store.feedback_stats().await.unwrap();
+        let s = core.store.feedback_stats(0.0).await.unwrap();
         assert_eq!(s.finds, 0, "a phantom was counted as a find");
         assert_eq!(s.judged, 0);
         assert!(
@@ -1860,7 +1889,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let before = core.store.feedback_stats().await.unwrap().captured;
+        let before = core.store.feedback_stats(0.0).await.unwrap().captured;
 
         get(
             &app,
@@ -1871,7 +1900,7 @@ mod tests {
         core.background.wait_idle().await;
 
         assert_eq!(
-            core.store.feedback_stats().await.unwrap().captured,
+            core.store.feedback_stats(0.0).await.unwrap().captured,
             before,
             "looking something up in order to label it must not become data"
         );
@@ -1957,7 +1986,7 @@ mod tests {
             .unwrap();
         let body = body_of(res).await;
         assert!(body.contains("a find"), "the flash did not name it a find");
-        assert_eq!(core.store.feedback_stats().await.unwrap().finds, 1);
+        assert_eq!(core.store.feedback_stats(0.0).await.unwrap().finds, 1);
     }
 
     #[tokio::test]
@@ -2285,7 +2314,7 @@ mod tests {
             &format!("artifact_id={}", ids[0]),
         )
         .await;
-        let swept_at = core.store.feedback_stats().await.unwrap().judged;
+        let swept_at = core.store.feedback_stats(0.0).await.unwrap().judged;
         record_run_at(&core, swept_at).await;
 
         let body = get(&app, "/ui/judge", &cookie).await;

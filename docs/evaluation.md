@@ -64,7 +64,9 @@ Pairs are made mostly by searching. A result opened from the rail and read for
 twenty seconds is recorded, provisionally, as the one the search was for; the
 bar under it — *Was this what you were looking for? Yes · No · Not sure* — makes
 that a person's verdict, and *Nothing here has it* on a rail that matched
-nothing records a gap. Only what none of these labelled reaches `/ui/judge`,
+nothing records a gap. *Not sure* is not a verdict: it leaves the search for the
+deck, which is where a question nobody could answer in the moment belongs. Only
+what none of these labelled reaches `/ui/judge`,
 where a recorded search comes back with the top five of its pool in the order
 the search gave them, the rest behind a fold, and you say which one you needed.
 Showing the order is a known cost: a person is likelier to confirm what came

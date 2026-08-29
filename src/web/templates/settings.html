@@ -77,7 +77,12 @@ reading, and search from a panel beside it.</p>
    beside the search box would be in view during every keystroke; this is the
    page for things that are true about the installation. #}
 <p class="muted">
-  Searches are being recorded — {{ f.captured }} captured, {{ f.pending }} unjudged.
+  {# "waiting" rather than "unjudged": the number is what the deck will deal,
+     which is not every search without a verdict — a typo and a search nothing
+     came close to are recorded and stay pending, and neither is a card anyone
+     can answer. A count the link cannot deliver on is a queue that never
+     empties. #}
+  Searches are being recorded — {{ f.captured }} captured, {{ f.pending }} waiting.
   {% if f.pending > 0 %}<a href="/ui/judge">Review them</a>{% endif %}
 </p>
 {# Counted here beside the searches because one purge takes both. The judged

@@ -193,7 +193,7 @@ pub struct ArtifactDetail {
     pub corpus_restored: bool,
     /// The search this was opened from, when it was opened from the rail and
     /// searches are being recorded. What the bar under the artifact and the
-    /// dwell timer both report against. See `Store::open_event_for`.
+    /// dwell timer both report against. See `Store::open_event`.
     pub search_event: Option<String>,
     /// Link to the source, scrolled to and highlighting the exact lines this
     /// artifact was drawn from. Falls back to the plain source page for an
@@ -220,6 +220,16 @@ pub struct ArtifactDetail {
     /// is what this resembles, the other is what it has been reached for
     /// together with, and they answer different questions.
     pub seen_together: Vec<SeenTogether>,
+}
+
+impl ArtifactDetail {
+    /// `Chunk::in_results`, read off what the pane already holds rather than
+    /// fetched again. One spelling of the predicate, in one place, as that
+    /// method's own doc insists.
+    fn in_results(&self) -> bool {
+        self.status == crate::store::artifacts::ArtifactStatus::Active
+            && self.superseded_by.is_none()
+    }
 }
 
 /// A neighbour, as one line in the pane.
@@ -503,9 +513,12 @@ struct ResultsTemplate {
     /// The tick beside the count is what makes the reordering legible as a
     /// refinement rather than a glitch.
     reranked: bool,
-    /// The query as typed, for the "nothing here has it" button — and only
-    /// while searches are being recorded, since a gap is a verdict on one.
-    gap_q: Option<String>,
+    /// The search that filled this rail, where it was recorded. Every row
+    /// carries it onward, so an open, a verdict and the "nothing here has it"
+    /// button all name the one search they are answers about. `None` while
+    /// searches are not being recorded, and the button and the links go
+    /// without.
+    event_id: Option<String>,
 }
 
 /// The rail before anything is asked: the base introducing itself.
@@ -1143,9 +1156,6 @@ pub(crate) async fn search_results(
     // Function words are dropped: a query phrased as a situation is mostly
     // stopwords, and highlighting every "to" marks the whole card.
     let terms = highlightable_terms(p.q.trim());
-    // Trimmed, because that is the wording the capture stores and the gap
-    // button has to name the same event.
-    let gap_q = tenant.core.learn.enabled.then(|| p.q.trim().to_string());
     // What this sitting is working on. A typing burst folds into one entry
     // here as it does in the log, so what is carried is the query that was
     // meant rather than every prefix of it.
@@ -1247,7 +1257,7 @@ pub(crate) async fn search_results(
         // that failed or was skipped answered in vector order, and the tick
         // would assert a confirmation that never took place.
         reranked: outcome.timing.reranked,
-        gap_q,
+        event_id: outcome.event,
     })
     .into_response();
     // Measured as before, reported where a browser already knows to show it.
@@ -1695,8 +1705,14 @@ async fn artifact_dwell(
     tenant
         .core
         .record_dwell(&aid, f.secs, Some(&tenant.user.subject));
+    // Not for an artifact search will no longer return: `eval::export` drops
+    // the pair, so the hit would move the recall on the judging page and
+    // nothing in `pairs.json`. `judge::hit` and the verdict bar both refuse one
+    // for that reason, and a beacon is not the way around them. The pane omits
+    // `data-event` in that case, so this is the write agreeing with the page.
     if let Some(event) = f.event.filter(|_| f.secs >= DWELL_HIT_SECS)
         && tenant.core.learn.enabled
+        && tenant.core.store.get_artifact(&aid).await?.in_results()
     {
         tenant.core.store.implicit_hit(&event, &aid).await?;
     }
@@ -2339,7 +2355,13 @@ async fn settings(tenant: Tenant) -> Result<Response> {
         judge_pending: crate::web::state::judge_pending(&tenant).await,
         tokens: token_rows(&tenant).await?,
         feedback: match tenant.core.learn.enabled {
-            true => Some(tenant.core.store.feedback_stats().await?),
+            true => Some(
+                tenant
+                    .core
+                    .store
+                    .feedback_stats(tenant.core.weak_below)
+                    .await?,
+            ),
             false => None,
         },
         asks: match tenant.core.learn.enabled {
@@ -2896,11 +2918,6 @@ pub(crate) async fn build_artifact_detail(
     })
 }
 
-/// How long after a search an open from its rail still counts as an open of
-/// it. Generous: the rail stays on screen for as long as the tab does, and
-/// the lookup also asks that the pool hold the artifact.
-pub(crate) const OPEN_WITHIN_SECS: i64 = 3600;
-
 #[derive(serde::Deserialize)]
 struct ArtifactViewParams {
     #[serde(default)]
@@ -2920,10 +2937,12 @@ struct ArtifactViewParams {
     /// every click lands in one bucket on Ops.
     #[serde(default)]
     rung: Option<String>,
-    /// `results` when the link was a row on the search rail. Only then is
-    /// there a search this open can be the answer to.
+    /// The search this row was listed by, carried on the link the rail drew.
+    /// Present only on a rail row, so it says both which search this open
+    /// answers and that it came from a list of answers at all.
+    /// See `SearchOutcome::event`.
     #[serde(default)]
-    from: Option<String>,
+    event: Option<String>,
 }
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
@@ -2936,16 +2955,23 @@ async fn artifact_detail(
     Query(p): Query<ArtifactViewParams>,
 ) -> Result<Response> {
     let mut d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
-    // Opened from the rail: the search it answers is asked of the store, since
-    // the capture was written off the request path and nothing on the page
-    // carries its id. On the request path, because the bar under the artifact
-    // needs the id before it can render.
-    if tenant.core.learn.enabled && p.from.as_deref() == Some("results") {
-        d.search_event = tenant
-            .core
-            .store
-            .open_event_for(&cid, Some(&tenant.user.subject), OPEN_WITHIN_SECS)
-            .await?;
+    // Opened from the rail, which named the search that listed it. Stamped
+    // here rather than looked up: the id is on the link, so this open is
+    // attributed to the search it came from and to no other.
+    //
+    // Not for an artifact search will no longer return. `eval::export` freezes
+    // only active, un-superseded artifacts and drops any pair naming something
+    // else, so a hit recorded here — by the bar, or by the dwell timer that
+    // reads the same id off the pane — would raise the recall and MRR on the
+    // judging page while contributing nothing to `pairs.json`. `judge::hit`
+    // refuses one for that reason; so does this. No bar and no `data-event`
+    // means neither path can fire.
+    if tenant.core.learn.enabled
+        && d.in_results()
+        && let Some(event) = p.event.as_deref()
+        && tenant.core.store.open_event(event).await?
+    {
+        d.search_event = Some(event.to_string());
     }
     // Opening a chunk is the deliberate act that counts as remembering it.
     tenant.core.mark_artifact_seen(&cid);
@@ -6376,7 +6402,7 @@ mod tests {
             results: vec![loose],
             associated: vec![],
             all_weak: true,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         })
@@ -6480,7 +6506,7 @@ mod tests {
             results: vec![named, offered],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         })
@@ -6504,7 +6530,7 @@ mod tests {
             results: vec![row("a", "#1")],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         })
@@ -6611,7 +6637,7 @@ mod tests {
             results: vec![r],
             associated: vec![render_hit(0, hit(None, Some("a")), &titles, false)],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         })
@@ -6661,7 +6687,7 @@ mod tests {
             results: vec![above.clone(), above.clone(), past, also_past],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         }
@@ -6684,7 +6710,7 @@ mod tests {
             results: vec![above.clone(), above.clone(), above],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         }
@@ -6704,7 +6730,7 @@ mod tests {
             results: vec![own, borrowed],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         }
@@ -6736,7 +6762,7 @@ mod tests {
             results: vec![],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         };
@@ -6753,7 +6779,7 @@ mod tests {
                 Some("the tool and its errors"),
             )],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         };
@@ -6772,7 +6798,7 @@ mod tests {
             results: vec![rendered(Some("Mounting E01 images"), None)],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: true,
         }
@@ -6784,7 +6810,7 @@ mod tests {
             results: vec![rendered(Some("Mounting E01 images"), None)],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         }
@@ -6861,7 +6887,7 @@ mod tests {
             results: vec![ranked(true)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: true,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         };
@@ -6875,7 +6901,7 @@ mod tests {
             results: vec![ranked(false)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         };
@@ -7114,7 +7140,7 @@ mod tests {
             results: vec![r],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         }
@@ -7162,7 +7188,7 @@ mod tests {
             results: vec![ranked(false)],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         }
@@ -7182,7 +7208,7 @@ mod tests {
             results: vec![r],
             associated: vec![],
             all_weak: false,
-            gap_q: None,
+            event_id: None,
             terms: String::new(),
             reranked: false,
         }
@@ -11318,7 +11344,7 @@ mod tests {
         // answer then is "I don't know, I was looking". Under the result just
         // opened the answer is cheap, so that is where it is asked.
         let (app, cookie, handle, a, event) = searched_app().await;
-        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?from=results")).await;
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event={event}")).await;
         assert!(
             page.contains("Was this what you were looking for?"),
             "{page}"
@@ -11330,9 +11356,9 @@ mod tests {
         // Named on the root beside the artifact, so the dwell timer can report
         // which search the read belongs to.
         assert!(page.contains(&format!("data-event=\"{event}\"")), "{page}");
-        // The rail's own links say they are the rail's.
+        // The rail's own links carry the search that listed them.
         let rail = include_str!("templates/_results.html");
-        assert!(rail.contains("&from=results\""), "{rail}");
+        assert!(rail.contains("&event={{ ev }}"), "{rail}");
 
         // Reached any other way — a corpus page, a pasted link — there is no
         // search to be the answer to.
@@ -11360,7 +11386,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(handle.store.feedback_stats().await.unwrap().captured, 2);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().captured, 2);
     }
 
     #[tokio::test]
@@ -11392,7 +11418,9 @@ mod tests {
             .unwrap()[0]
             .id
             .clone();
-        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?from=results")).await;
+        // With learning off nothing is captured, so the rail draws no event on
+        // its links and there is nothing for the bar to be a verdict on.
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event=whatever")).await;
         assert!(
             !page.contains("Was this what you were looking for?"),
             "{page}"
@@ -11415,7 +11443,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        assert_eq!(handle.store.feedback_stats().await.unwrap().hits, 0);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
 
         let res = app
             .clone()
@@ -11427,7 +11455,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        let s = handle.store.feedback_stats().await.unwrap();
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.hits, s.pending), (1, 0), "{s:?}");
         assert_eq!(s.recall_at_10, 1.0);
     }
@@ -11446,16 +11474,16 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let bar = body_of(res).await;
         assert!(bar.contains("undo"), "{bar}");
-        let s = handle.store.feedback_stats().await.unwrap();
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.hits, s.pending), (1, 0), "{s:?}");
 
         // Undo: a question again.
         app.clone().oneshot(verdict("none")).await.unwrap();
-        assert_eq!(handle.store.feedback_stats().await.unwrap().pending, 1);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().pending, 1);
 
         // No: still a question, for the deck — and one no read may answer.
         app.clone().oneshot(verdict("no")).await.unwrap();
-        assert_eq!(handle.store.feedback_stats().await.unwrap().pending, 1);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().pending, 1);
         app.clone()
             .oneshot(form(
                 &format!("/ui/artifacts/{a}/dwell"),
@@ -11464,12 +11492,21 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(handle.store.feedback_stats().await.unwrap().hits, 0);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
 
-        // Not sure: not a pair, and not a card either.
-        app.clone().oneshot(verdict("discard")).await.unwrap();
-        let s = handle.store.feedback_stats().await.unwrap();
-        assert_eq!((s.discards, s.pending), (1, 0), "{s:?}");
+        // Not sure: no verdict at all. The search stays a question for the deck
+        // — it is not a discard, which says the search was never real and would
+        // drop it from the pairs, from the deck and out of the purge's
+        // exemption on the strength of somebody not remembering.
+        let res = app.clone().oneshot(verdict("skip")).await.unwrap();
+        let bar = body_of(res).await;
+        assert!(bar.contains("left for the deck"), "{bar}");
+        assert!(
+            !bar.contains("undo"),
+            "a skip is not a verdict to take back"
+        );
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.discards, s.judged, s.pending), (0, 0, 1), "{s:?}");
     }
 
     #[tokio::test]
@@ -11479,20 +11516,105 @@ mod tests {
         let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
         assert!(rail.contains("No matches."), "{rail}");
         assert!(rail.contains("Nothing here has it"), "{rail}");
-        assert!(rail.contains(r#"hx-post="/ui/search/gap""#), "{rail}");
-        handle.background.wait_idle().await;
+        // The button names the search it is a verdict on. The query never
+        // reaches the client as data, so no wording can break the request: a
+        // `"` in `hx-vals` JSON used to make htmx throw and the button do
+        // nothing at all, silently.
+        let event = handle
+            .store
+            .next_pending(0.0)
+            .await
+            .unwrap()
+            .expect("the search the rail was filled by")
+            .id;
+        assert!(
+            rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap""#)),
+            "{rail}"
+        );
+        assert!(!rail.contains("hx-vals='{\"q\""), "{rail}");
 
         let res = app
             .clone()
-            .oneshot(form("/ui/search/gap", &cookie, "q=nothing+here"))
+            .oneshot(form(&format!("/ui/search/{event}/gap"), &cookie, ""))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let s = handle.store.feedback_stats().await.unwrap();
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.gaps, s.pending), (1, 0), "{s:?}");
         assert!(
             body_of(res).await.contains("recorded as a gap"),
             "the button did not say what it did"
         );
+    }
+
+    #[tokio::test]
+    async fn a_quotation_mark_in_the_query_does_not_break_the_gap_button() {
+        // The capture is on the request path at this door, so the rail comes
+        // back naming its own search whatever was typed — and the button
+        // carries an id rather than the words.
+        let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        let rail = get_body(
+            &app,
+            &cookie,
+            "/ui/search/results?q=say%20%22hi%22%20%5Cnow",
+        )
+        .await;
+        let event = handle.store.next_pending(0.0).await.unwrap().unwrap().id;
+        assert!(
+            rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap""#)),
+            "{rail}"
+        );
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/search/{event}/gap"), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().gaps, 1);
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_result_is_never_asked_about() {
+        // `eval::export` drops any pair naming an artifact search will not
+        // return, so a hit recorded against one raises the recall on the
+        // judging page and contributes nothing to `pairs.json`. `judge::hit`
+        // refuses one; the bar under a result must not be a way around it, and
+        // neither must the dwell timer that reads the same id off the pane.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        handle
+            .store
+            .set_artifact_status(&a, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event={event}")).await;
+        assert!(
+            !page.contains("Was this what you were looking for?"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("data-event="),
+            "the dwell timer would report a hit the benchmark cannot hold: {page}"
+        );
+        // And the writes refuse it too, not only the render: a beacon or a
+        // replayed form naming the pair is not the way around the guard.
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{a}/dwell"),
+                &cookie,
+                &format!("secs=42&event={event}"),
+            ))
+            .await
+            .unwrap();
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/search/{event}/verdict"),
+                &cookie,
+                &format!("verdict=hit&artifact_id={a}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
     }
 }

@@ -429,11 +429,21 @@ pub struct PendingEvent {
 }
 
 /// What the deck deals: see `Store::next_pending`. One bind, `weak_below`.
-/// `COALESCE` so an empty pool reads as the weakest search there is.
+///
+/// Two `COALESCE`s, for two different absences. The outer one: an empty pool
+/// reads as the weakest search there is, because a search that returned nothing
+/// is a hole rather than a card. The inner one: a candidate the vector half
+/// never scored reads as the *strongest*, because a similarity nobody measured
+/// is not evidence of a weak match. A hit found by the lexical half alone
+/// carries none — `search_inner` stores what the vector search returned, and
+/// with the embedder down or the query answered on keywords it returns nothing
+/// — and reading those as zero withheld every such search from the deck
+/// silently, when a keyword search that found something is exactly the card a
+/// person can answer.
 macro_rules! dealable {
     () => {
         "judged_at IS NULL AND length(query) >= 3
-         AND COALESCE((SELECT max(similarity) FROM search_candidates
+         AND COALESCE((SELECT max(COALESCE(similarity, 1.0)) FROM search_candidates
                         WHERE event_id = search_events.id), 0) >= ?"
     };
 }
@@ -441,6 +451,11 @@ macro_rules! dealable {
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
     pub captured: i64,
+    /// Searches still waiting for a verdict *and* answerable — the same
+    /// `dealable!` set the deck deals and `pending_count` draws the nav from.
+    /// Every screen showing this says "waiting", and a number counting cards
+    /// nobody will ever be dealt is a queue that never empties: the pulse read
+    /// "12 waiting" over an empty deck while the nav beside it read nothing.
     pub pending: i64,
     pub judged: i64,
     pub hits: i64,
@@ -610,43 +625,32 @@ impl Store {
         )
     }
 
-    /// The search a result was opened from: the newest of this person's still
-    /// unjudged events, within `within_secs`, whose pool holds the artifact.
-    /// Stamped `opened_at`, which is what stops the next rewording folding
-    /// into it — see `record_search`.
+    /// The search a result was opened from, named by the page that listed it.
+    /// Stamped `opened_at`, which is what stops the next rewording folding into
+    /// it — see `record_search`.
     ///
-    /// The capture is written off the request path and its id is thrown away,
-    /// so the page cannot carry one. Asking the store at open time is the one
-    /// lookup that also survives the fold: whatever wording the burst ended on,
-    /// the pool the person is looking at is the one stored.
-    pub async fn open_event_for(
-        &self,
-        artifact_id: &str,
-        scope: Option<&str>,
-        within_secs: i64,
-    ) -> Result<Option<String>> {
-        let at = now();
-        let id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM search_events
-              WHERE scope IS ? AND (judged_at IS NULL OR judged_by = 'dwell')
-                AND created_at > ?
-                AND EXISTS (SELECT 1 FROM search_candidates
-                             WHERE event_id = search_events.id AND artifact_id = ?)
-              ORDER BY created_at DESC, id DESC LIMIT 1",
+    /// Named rather than guessed: the UI door waits for its own capture (see
+    /// `Core::search_inner`) so every rail row carries the id of the search
+    /// that produced it. What this replaced looked for the newest recent event
+    /// whose pool happened to hold the artifact, which had two ways to be
+    /// wrong — a click arriving before the background write found nothing, and
+    /// one arriving an hour later could be answered by a different search
+    /// entirely, then labelled by a read that had nothing to do with it.
+    ///
+    /// `false` where the event is gone — retention expires them, Ops purges
+    /// them — or where a person has already spoken for it. That is what
+    /// decides whether the bar under the artifact is drawn at all.
+    pub async fn open_event(&self, event_id: &str) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE search_events SET opened_at = ?
+              WHERE id = ? AND (judged_at IS NULL OR judged_by = 'dwell')",
         )
-        .bind(scope)
-        .bind(at - within_secs)
-        .bind(artifact_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        if let Some(id) = &id {
-            sqlx::query("UPDATE search_events SET opened_at = ? WHERE id = ?")
-                .bind(at)
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
-        }
-        Ok(id)
+        .bind(now())
+        .bind(event_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
     }
 
     /// A read long enough to count, as a hit — only where no person has said
@@ -688,29 +692,27 @@ impl Store {
         )
     }
 
-    /// The rail's "nothing here has it": a gap against this person's newest
-    /// unjudged search for these words, within `within_secs`. The id it
-    /// labelled, or `None` where there was nothing left to label.
-    pub async fn gap_for_query(
-        &self,
-        query: &str,
-        scope: Option<&str>,
-        within_secs: i64,
-    ) -> Result<Option<String>> {
-        let id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM search_events
-              WHERE scope IS ? AND query = ? AND judged_at IS NULL AND created_at > ?
-              ORDER BY created_at DESC, id DESC LIMIT 1",
+    /// The rail's "nothing here has it": a gap against the search the rail was
+    /// filled by, named by the page as an open is. `false` where there was
+    /// nothing left to label — the event was purged, or already judged.
+    ///
+    /// Not `judge`, which would report a second click as an error and a purged
+    /// event as the same error: the button has two outcomes and both of them
+    /// are ordinary.
+    pub async fn gap_event(&self, event_id: &str) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE search_events
+             SET judged_at = ?, verdict = ?, expect_id = NULL, judged_by = ?
+             WHERE id = ? AND judged_at IS NULL",
         )
-        .bind(scope)
-        .bind(query)
-        .bind(now() - within_secs)
-        .fetch_optional(&self.pool)
-        .await?;
-        if let Some(id) = &id {
-            self.judge(id, Verdict::Gap, Labeller::Confirm).await?;
-        }
-        Ok(id)
+        .bind(now())
+        .bind(Verdict::Gap.as_str())
+        .bind(Labeller::Confirm.as_sql())
+        .bind(event_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
     }
 
     /// Take a verdict back, returning the event to the pending queue.
@@ -763,16 +765,12 @@ impl Store {
     /// actually gave. No vector store and no embedding are involved, so the
     /// number can move on every single judgement — which is what makes it worth
     /// showing while judging rather than afterwards.
-    pub async fn feedback_stats(&self) -> Result<Stats> {
+    pub async fn feedback_stats(&self, weak_below: f32) -> Result<Stats> {
         let mut s = Stats {
             captured: sqlx::query_scalar("SELECT count(*) FROM search_events")
                 .fetch_one(&self.pool)
                 .await?,
-            pending: sqlx::query_scalar(
-                "SELECT count(*) FROM search_events WHERE judged_at IS NULL",
-            )
-            .fetch_one(&self.pool)
-            .await?,
+            pending: self.pending_count(weak_below).await?,
             ..Default::default()
         };
 
@@ -1344,35 +1342,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_a_result_names_the_search_it_came_from() {
-        // The capture is written off the request path and its id thrown away,
-        // so nothing on the page knows which event an open belongs to. The
-        // store answers instead: the newest unjudged event of this person's
-        // whose pool holds the artifact.
+    async fn opening_a_result_stamps_the_search_the_page_named() {
+        // The UI door waits for its own capture, so the page carries the id and
+        // this is a stamp rather than a guess.
         let store = Store::memory().await.unwrap();
         let id = store
             .record_search(scoped("fat32", Door::Ui, Some("me")), 15)
             .await
             .unwrap();
-        assert_eq!(
-            store.open_event_for("a1", Some("me"), 600).await.unwrap(),
-            Some(id.clone())
+        assert!(store.open_event(&id).await.unwrap());
+        assert!(
+            !store.open_event("no-such-event").await.unwrap(),
+            "an event retention or a purge took away is nothing to open"
         );
-        assert_eq!(
-            store.open_event_for("a9", Some("me"), 600).await.unwrap(),
-            None,
-            "an artifact the search never offered is not an open of it"
-        );
-        assert_eq!(
-            store.open_event_for("a1", Some("you"), 600).await.unwrap(),
-            None,
-            "someone else's search is not mine to open"
-        );
-        assert_eq!(
-            store.open_event_for("a1", Some("me"), 0).await.unwrap(),
-            None,
-            "outside the window there is nothing to attach to"
-        );
+
+        // A person having answered closes it: the bar is not drawn again over
+        // a search that has been spoken for.
+        store.judge_hit(&id, "a1", Labeller::Confirm).await.unwrap();
+        assert!(!store.open_event(&id).await.unwrap());
     }
 
     #[tokio::test]
@@ -1381,12 +1368,8 @@ mod tests {
         // and the hit about to be recorded against it needs the rank it held.
         // A search after the open starts its own event.
         let store = Store::memory().await.unwrap();
-        store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
-        store
-            .open_event_for("a1", None, 600)
-            .await
-            .unwrap()
-            .unwrap();
+        let id = store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
+        assert!(store.open_event(&id).await.unwrap());
         store
             .record_search(ev("fat32", Door::Ui), 15)
             .await
@@ -1402,7 +1385,7 @@ mod tests {
             .await
             .unwrap();
         assert!(store.implicit_hit(&id, "a1").await.unwrap());
-        let s = store.feedback_stats().await.unwrap();
+        let s = store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.judged, s.hits), (1, 1));
         assert_eq!(s.recall_at_10, 1.0);
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("dwell"));
@@ -1424,7 +1407,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!store.implicit_hit(&id, "a1").await.unwrap());
-        assert_eq!(store.feedback_stats().await.unwrap().gaps, 1);
+        assert_eq!(store.feedback_stats(0.0).await.unwrap().gaps, 1);
 
         // "No" clears nothing into a verdict, but it is still a person having
         // spoken: the dwell that flushes when the pane is left must not put the
@@ -1433,7 +1416,7 @@ mod tests {
         store.implicit_hit(&id, "a1").await.unwrap();
         store.decline(&id).await.unwrap();
         assert!(!store.implicit_hit(&id, "a1").await.unwrap());
-        let s = store.feedback_stats().await.unwrap();
+        let s = store.feedback_stats(0.0).await.unwrap();
         assert_eq!(s.hits, 0, "the provisional hit was withdrawn");
         assert_eq!(
             store.next_pending(0.0).await.unwrap().map(|e| e.id),
@@ -1450,9 +1433,8 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let id = seed(&store, "fat32", &["a1", "a2"]).await;
         assert!(store.implicit_hit(&id, "a1").await.unwrap());
-        assert_eq!(
-            store.open_event_for("a2", None, 600).await.unwrap(),
-            Some(id.clone()),
+        assert!(
+            store.open_event(&id).await.unwrap(),
             "a search labelled only by reading is still open to the next open"
         );
         assert!(store.implicit_hit(&id, "a2").await.unwrap());
@@ -1487,10 +1469,46 @@ mod tests {
         );
         assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
 
+        // Every screen that says "waiting" counts the same set. The pulse used
+        // to read its number off a plain `judged_at IS NULL` and say "12
+        // waiting" over a deck that had nothing left to deal.
+        assert_eq!(
+            store.feedback_stats(0.3).await.unwrap().pending,
+            store.pending_count(0.3).await.unwrap()
+        );
+
         // And the card knows whether anything was opened from it.
         assert!(!store.next_pending(0.3).await.unwrap().unwrap().opened);
-        store.open_event_for("a1", None, 600).await.unwrap();
+        store.open_event(&id).await.unwrap();
         assert!(store.next_pending(0.3).await.unwrap().unwrap().opened);
+    }
+
+    #[tokio::test]
+    async fn a_search_the_vector_half_never_scored_is_still_dealt() {
+        // A hit found by the lexical half alone carries no similarity — the
+        // embedder is down, or the query was answered on keywords. Reading that
+        // absence as a zero withheld every such search from the deck and from
+        // the count, silently, when a keyword search that found something is
+        // exactly the card a person can answer. Only a measured similarity
+        // under the line, or a pool with nothing in it, is undealable.
+        let store = Store::memory().await.unwrap();
+        let mut lexical = ev("fat32", Door::Ui);
+        lexical.candidates[0].similarity = None;
+        let id = store.record_search(lexical, 0).await.unwrap();
+        assert_eq!(
+            store.next_pending(0.35).await.unwrap().map(|e| e.id),
+            Some(id)
+        );
+        assert_eq!(store.pending_count(0.35).await.unwrap(), 1);
+
+        let mut empty = ev("ntfs", Door::Ui);
+        empty.candidates.clear();
+        store.record_search(empty, 0).await.unwrap();
+        assert_eq!(
+            store.pending_count(0.35).await.unwrap(),
+            1,
+            "a search that returned nothing is a hole, not a card"
+        );
     }
 
     #[tokio::test]
@@ -1516,21 +1534,16 @@ mod tests {
             .record_search(scoped("xyz", Door::Ui, Some("me")), 15)
             .await
             .unwrap();
-        assert_eq!(
-            store.gap_for_query("xyz", Some("me"), 600).await.unwrap(),
-            Some(id.clone())
-        );
-        assert_eq!(store.feedback_stats().await.unwrap().gaps, 1);
+        assert!(store.gap_event(&id).await.unwrap());
+        assert_eq!(store.feedback_stats(0.0).await.unwrap().gaps, 1);
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("confirm"));
-        assert_eq!(
-            store.gap_for_query("xyz", Some("me"), 600).await.unwrap(),
-            None,
+        assert!(
+            !store.gap_event(&id).await.unwrap(),
             "a second press finds nothing left to label"
         );
-        assert_eq!(
-            store.gap_for_query("abc", Some("me"), 600).await.unwrap(),
-            None,
-            "a query nobody searched for is not a gap"
+        assert!(
+            !store.gap_event("no-such-event").await.unwrap(),
+            "and an event that is no longer there is not a gap either"
         );
     }
 
@@ -1817,7 +1830,7 @@ mod tests {
         let third = seed(&store, "third hit", &["x", "y", "z"]).await;
         store.judge_hit(&third, "z", Labeller::Deck).await.unwrap();
 
-        let s = store.feedback_stats().await.unwrap();
+        let s = store.feedback_stats(0.0).await.unwrap();
         assert_eq!(s.judged, 2);
         assert_eq!(s.hits, 2);
         assert!((s.recall_at_10 - 1.0).abs() < 1e-9);
@@ -1871,7 +1884,7 @@ mod tests {
             .await
             .unwrap();
 
-        let s = store.feedback_stats().await.unwrap();
+        let s = store.feedback_stats(0.0).await.unwrap();
         assert_eq!(s.finds, 1);
         assert_eq!(s.recall_at_10, 0.0);
         assert_eq!(s.mrr, 0.0);
@@ -1889,7 +1902,7 @@ mod tests {
             .await
             .unwrap();
 
-        let s = store.feedback_stats().await.unwrap();
+        let s = store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.gaps, s.discards, s.hits), (1, 1, 0));
         // Neither can score: one has no answer, the other was not a question.
         assert_eq!(s.mrr, 0.0);

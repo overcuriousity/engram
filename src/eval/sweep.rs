@@ -183,7 +183,7 @@ pub async fn run_sweep(core: &Core) -> Result<()> {
     if pairs.is_empty() {
         return Ok(());
     }
-    let judged = core.store.feedback_stats().await?.judged;
+    let judged = core.store.feedback_stats(core.weak_below).await?.judged;
     let current = *core.ranking.read().expect("ranking lock");
 
     let grid = grid(current);
@@ -314,7 +314,7 @@ impl Drop for Sweeping {
 
 async fn sweep_if_due(core: &Core) -> Result<()> {
     let tune = &core.feedback.tune;
-    let judged = core.store.feedback_stats().await?.judged;
+    let judged = core.store.feedback_stats(core.weak_below).await?.judged;
     if judged < tune.min_judgements {
         return Ok(());
     }
@@ -625,13 +625,13 @@ mod tests {
         core.learn.enabled = true;
         judge(&core, &order[3]).await;
         judge(&core, &order[4]).await;
-        let before = core.store.feedback_stats().await.unwrap().captured;
+        let before = core.store.feedback_stats(0.0).await.unwrap().captured;
 
         run_sweep(&core).await.unwrap();
         core.background.wait_idle().await;
 
         assert_eq!(
-            core.store.feedback_stats().await.unwrap().captured,
+            core.store.feedback_stats(0.0).await.unwrap().captured,
             before,
             "the sweep's own searches became data"
         );

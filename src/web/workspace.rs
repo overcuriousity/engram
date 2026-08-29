@@ -54,7 +54,7 @@ pub fn routes() -> Router<AppState> {
         // bar — it is their own search — and unlike the deck, whose grant also
         // covers writing `config.toml`.
         .route("/ui/search/{id}/verdict", post(search_verdict))
-        .route("/ui/search/gap", post(search_gap))
+        .route("/ui/search/{id}/gap", post(search_gap))
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/ask/{id}/keep", post(ask_keep))
 }
@@ -701,7 +701,7 @@ async fn ask_verdict(
 struct SearchVerdictTemplate {
     event_id: String,
     artifact_id: String,
-    /// `hit` / `no` / `discard` for display; empty shows the buttons.
+    /// `hit` / `no` / `skip` for display; empty shows the buttons.
     state: &'static str,
 }
 
@@ -721,10 +721,21 @@ async fn search_verdict(
     if !tenant.core.learn.enabled {
         return Err(Error::NotFound);
     }
-    use crate::store::feedback::{Labeller, Verdict};
+    use crate::store::feedback::Labeller;
     let store = &tenant.core.store;
     let state = match f.verdict.as_str() {
         "hit" => {
+            // The same guard `judge::hit` states in full: `eval::export` drops
+            // any pair naming an artifact search will not return, so recording
+            // one here would raise the recall on the judging page while
+            // contributing nothing to `pairs.json`. The bar is not drawn over
+            // such an artifact at all — see `ui::artifact_detail` — so this is
+            // the write refusing what the page already refuses to offer.
+            if !store.get_artifact(&f.artifact_id).await?.in_results() {
+                return Err(Error::Validation(
+                    "that one is deprecated or superseded, so the benchmark can't hold it".into(),
+                ));
+            }
             store
                 .judge_hit(&id, &f.artifact_id, Labeller::Confirm)
                 .await?;
@@ -734,11 +745,16 @@ async fn search_verdict(
             store.decline(&id).await?;
             "no"
         }
-        "discard" => {
-            store
-                .judge(&id, Verdict::Discard, Labeller::Confirm)
-                .await?;
-            "discard"
+        // Not `Verdict::Discard`, which the deck's own key means and which says
+        // something else entirely: that the search was never real. A discard is
+        // dropped from the eval pairs, gone from the deck for good, and — alone
+        // among the verdicts — not exempt from the retention purge. Somebody
+        // unsure whether the result in front of them was the one has not said
+        // any of that. The deck's skip is what the label promises: the search
+        // stays a question and only sinks in the judging order.
+        "skip" => {
+            store.skip_event(&id).await?;
+            "skip"
         }
         "none" => {
             store.unjudge(&id).await?;
@@ -754,29 +770,16 @@ async fn search_verdict(
     .into_response())
 }
 
-#[derive(serde::Deserialize)]
-struct SearchGapForm {
-    q: String,
-}
-
-/// The rail's "nothing here has it": a gap against the search just made.
-/// Answers with the line that replaces the button.
-async fn search_gap(tenant: Tenant, Form(f): Form<SearchGapForm>) -> Result<Response> {
+/// The rail's "nothing here has it": a gap against the search that filled the
+/// rail, named by the page the way an open is. Answers with the line that
+/// replaces the button.
+async fn search_gap(tenant: Tenant, Path(id): Path<String>) -> Result<Response> {
     if !tenant.core.learn.enabled {
         return Err(Error::NotFound);
     }
-    let line = match tenant
-        .core
-        .store
-        .gap_for_query(
-            f.q.trim(),
-            Some(&tenant.user.subject),
-            crate::web::ui::OPEN_WITHIN_SECS,
-        )
-        .await?
-    {
-        Some(_) => "recorded as a gap: your base doesn't know this yet.",
-        None => "nothing to record — that search was already judged.",
+    let line = match tenant.core.store.gap_event(&id).await? {
+        true => "recorded as a gap: your base doesn't know this yet.",
+        false => "nothing to record — that search was already judged.",
     };
     Ok(axum::response::Html(format!(r#"<span class="muted">{line}</span>"#)).into_response())
 }
