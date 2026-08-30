@@ -698,11 +698,25 @@ impl Store {
         )
     }
 
+    /// The deck's gap and discard, and the same `AND judged_at IS NULL` the
+    /// other three writes carry — for the same race, read from the other side.
+    /// A card sits on screen while the searcher who made that search opens a
+    /// result from it and presses Yes in the workspace; unguarded, G on the
+    /// stale card turned their confirmed hit into a gap, dropped the pair from
+    /// `pairs.json`, and left `expect_id` naming an artifact on a `gap` row —
+    /// a state no other path can produce. `expect_id = NULL` beside it, as
+    /// `gap_event` writes it: with the guard an unjudged row never holds one,
+    /// and the two writes that mean the same thing should not differ.
+    ///
+    /// `NotFound` is what a refusal reads as here, which is what the deck
+    /// already does with `judge_hit`: the deck deals only unjudged events, so
+    /// for it the answer means what it always meant — that row is gone.
     pub async fn judge(&self, event_id: &str, verdict: Verdict, by: Labeller) -> Result<()> {
         Self::judged_one(
             sqlx::query(
-                "UPDATE search_events SET judged_at = ?, verdict = ?, judged_by = ?
-                 WHERE id = ?",
+                "UPDATE search_events
+                 SET judged_at = ?, verdict = ?, expect_id = NULL, judged_by = ?
+                 WHERE id = ? AND judged_at IS NULL",
             )
             .bind(now())
             .bind(verdict.as_str())
@@ -2110,6 +2124,25 @@ mod tests {
                 .is_empty(),
             "the profiles built from them survived"
         );
+    }
+
+    #[tokio::test]
+    async fn the_deck_does_not_write_over_what_the_searcher_confirmed() {
+        // The race the other three writes are guarded for, read from the deck's
+        // side: a card is dealt, and before the operator answers it the person
+        // who made that search opens a result and presses Yes. G on the stale
+        // card used to turn their hit into a gap — the pair gone from
+        // `pairs.json`, and `expect_id` left naming an artifact on a `gap` row.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "already answered", &["a"]).await;
+        store.judge_hit(&id, "a", Labeller::Confirm).await.unwrap();
+
+        assert!(matches!(
+            store.judge(&id, Verdict::Gap, Labeller::Deck).await,
+            Err(crate::error::Error::NotFound)
+        ));
+        let s = store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.hits, s.gaps), (1, 0), "{s:?}");
     }
 
     #[tokio::test]

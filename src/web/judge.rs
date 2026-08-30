@@ -1449,6 +1449,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_fold_over_the_rest_of_the_pool_is_styled() {
+        // Same oversight, one class along: the fold shipped with no rule and
+        // rendered as a native disclosure triangle and a line of body text
+        // between two lists that are neither, inside a pool that styles
+        // everything else on the card.
+        let (app, cookie, _core, _ids) = judge_app(13, &[]).await;
+        let body = get(&app, "/ui/judge", &cookie).await;
+        assert!(body.contains(r#"class="judge-more"#), "{body}");
+        let css = include_str!("../../assets/app.css");
+        assert!(css.contains(".judge-more"), "the fold has no rule");
+    }
+
+    #[tokio::test]
     async fn the_card_offers_the_whole_pool_not_only_what_was_shown() {
         // Offering only the ten that were displayed would make a buried hit
         // unconfirmable, and the ranking failure invisible.

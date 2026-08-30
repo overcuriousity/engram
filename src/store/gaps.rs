@@ -261,14 +261,20 @@ macro_rules! search_gaps_sql {
 /// whose candidates all scored weakly is a search someone answered; the
 /// scores say the ranking was poor, not that the knowledge is missing.
 ///
-/// The guard this needs already exists. A typing burst folds into one event by
-/// `feedback.coalesce_secs`, so what is measured is the finished query and not
-/// its first two letters.
+/// Two guards keep the half-typed out of this. A typing burst folds into one
+/// event by `feedback.coalesce_secs`, so what is measured is the finished query
+/// and not its first two letters; and `length(e.query) >= 3`, which is
+/// `dealable!`'s own lower bound, for the burst that was never finished. That
+/// bound makes the two predicates exact complements, which is what the escape
+/// hatch above depends on: `discard` is only reachable through the deck, so a
+/// hole the deck will never deal is a hole nobody can ever discard. Without it
+/// a `qq` typed and walked away from sat on the capture page as a gap in the
+/// base until somebody dismissed it by hand.
 macro_rules! unmatched_gaps_from {
     () => {
         " FROM search_events e
           WHERE e.dismissed_at IS NULL AND e.embed_model = ? AND e.vec_dim > 0
-            AND e.verdict IS NULL
+            AND e.verdict IS NULL AND length(e.query) >= 3
             AND NOT EXISTS (SELECT 1 FROM gap_coverage
                              WHERE kind = 'unmatched' AND gap_id = e.id)
             AND (NOT EXISTS (SELECT 1 FROM search_candidates c WHERE c.event_id = e.id)
@@ -1324,6 +1330,31 @@ mod tests {
             .map(|g| g.gap.id.clone())
             .collect();
         assert_eq!(unmatched, vec![empty]);
+    }
+
+    #[tokio::test]
+    async fn a_query_too_short_for_the_deck_is_not_a_gap_either() {
+        // `dealable!` holds back anything under three characters, and `discard`
+        // — the operator saying this was never a search — is only reachable
+        // from the deck. So a hole the deck will never deal is a hole nobody
+        // can ever discard: the box searches as you type, somebody taps `qq`
+        // and walks away, and that sat on the capture page as a gap in the base
+        // for good. Both branches of the predicate, because the pool being
+        // empty is not what makes it not a search.
+        let store = Store::memory().await.unwrap();
+        search_with(&store, "qq", &[]).await;
+        search_with(&store, "qq", &[0.01]).await;
+
+        let unmatched: Vec<String> = store
+            .open_gaps("fake", 0.35)
+            .await
+            .unwrap()
+            .gaps
+            .iter()
+            .filter(|g| g.gap.kind == GapKind::Unmatched)
+            .map(|g| g.gap.id.clone())
+            .collect();
+        assert!(unmatched.is_empty(), "{unmatched:?}");
     }
 
     #[tokio::test]

@@ -785,8 +785,18 @@ async fn search_verdict(
         // any of that. The deck's skip is what the label promises: the search
         // stays a question and only sinks in the judging order.
         "skip" => {
-            store.skip_event(&id).await?;
-            "skip"
+            // Not a verdict, so nothing can have got here first, and a search
+            // already gone was refused by the ownership check above. What is
+            // left is the window between that check and this write, which
+            // retention and an Ops purge can both fall into. `judged_one` calls
+            // it `NotFound`, and a 404 is the one answer htmx will not swap —
+            // the button would do nothing at all, silently, where the other
+            // three say so in words.
+            match store.skip_event(&id).await {
+                Ok(()) => "skip",
+                Err(Error::NotFound) => return Ok(already_judged()),
+                Err(e) => return Err(e),
+            }
         }
         "none" => {
             // Only back over what this bar wrote — `Labeller::Confirm`. The

@@ -11819,4 +11819,29 @@ mod tests {
         let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.gaps, s.hits, s.judged), (1, 0, 1), "{s:?}");
     }
+
+    #[tokio::test]
+    async fn a_purged_search_is_not_the_bar_owner_s_any_more() {
+        // Where the bar's writing guards do *not* come into it: the ownership
+        // check runs first and a row that is gone belongs to nobody, so all
+        // four answers stop there. Worth pinning, because the store guards
+        // below it read as the thing standing between a stale tab and a purged
+        // event, and they are not — this is.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        handle.store.purge_feedback().await.unwrap();
+
+        for body in [
+            format!("verdict=hit&artifact_id={a}"),
+            format!("verdict=no&artifact_id={a}"),
+            format!("verdict=skip&artifact_id={a}"),
+            format!("verdict=none&artifact_id={a}"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(form(&format!("/ui/search/{event}/verdict"), &cookie, &body))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{body}");
+        }
+    }
 }

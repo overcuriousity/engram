@@ -132,6 +132,36 @@
 }
 .judge-options > li:has(.judge-option:hover),
 .judge-options > li:has(.judge-option:focus-visible) { border-color: var(--color-accent-muted); }
+
+/* The fold under the first five. A row of the pool rather than a browser
+   default: unstyled it arrived as a native triangle and a line of body text
+   sitting between two lists that are neither. The chevron is `.judge-peek`'s,
+   turned to point down, because it is the same gesture at a different scale —
+   there, one option's full text; here, the rest of the list.
+
+   No border or ground of its own: the fold is a line between two halves of one
+   list, and boxing it would make the second half read as a different kind of
+   thing from the first — which is the one thing the ordering says it is not. */
+.judge-more > summary {
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.35rem 0.7rem 0.5rem; cursor: pointer; list-style: none;
+  font-size: var(--text-sm); color: var(--color-fg-muted);
+}
+.judge-more > summary::-webkit-details-marker { display: none; }
+.judge-more > summary::before {
+  content: ""; width: 0.38rem; height: 0.38rem; flex: none;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: translateY(-0.1rem) rotate(45deg); transition: transform 160ms ease;
+}
+.judge-more > summary:hover { color: var(--color-fg-primary); }
+.judge-more > summary:focus-visible {
+  outline: 2px solid var(--color-accent); outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+.judge-more[open] > summary::before { transform: translateY(0.05rem) rotate(-135deg); }
+/* The first five already end in the list's own padding, so the fold's own top
+   padding would double it into a gap the ordering has to be read across. */
+.judge-more > .judge-options { padding-top: 0; }
 .judge-option {
   display: grid; grid-template-columns: 1.6rem minmax(0, 1fr); gap: 0.15rem 0.55rem;
   width: 100%; text-align: left; padding: 0.6rem 0.3rem 0.6rem 0.7rem;
