@@ -5,12 +5,20 @@
    capture, or by hand. The band replaces itself in place, so what the column
    shows on its way back is what is due now and not what was due a minute ago.
 
+   And it polls itself, but only while something is coming: the trigger is on
+   the fragment rather than on the page, so the swap that reports the last
+   pending thing landing is also the swap that stops the polling. What the
+   delay is worked out from is in `due::refresh_in`. Same contract as
+   `_queue.html`, and the reason an idle page in a background tab costs
+   nothing.
+
    `just` is the row the viewer acted on, shown struck through with its undo
    for this render only.
    `hx-vals` on the container is inherited by every button in it, so each
    action carries the viewer's zone. #}
 <div id="due" class="due{% if !rows.is_empty() || just.is_some() %} due-filled{% endif %}"
-     hx-post="/ui/due" hx-swap="outerHTML" hx-trigger="refresh"
+     hx-post="/ui/due" hx-swap="outerHTML"
+     hx-trigger="refresh{% if let Some(s) = refresh_in %}, every {{ s }}s{% endif %}"
      hx-vals='{"tz": "{{ tz }}"}'>
 {% if let Some(j) = just %}
   <p class="due-row due-done muted"><span class="due-title">Done</span>

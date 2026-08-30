@@ -61,6 +61,35 @@ pub(crate) struct DueTemplate {
     pub events: Vec<EventView>,
     pub tz: String,
     pub just: Option<String>,
+    /// Seconds until this fragment should ask again, or `None` for "never".
+    ///
+    /// The fragment carries its own trigger, so the swap that reports the last
+    /// pending thing landing is also the swap that stops the polling — the
+    /// contract `_queue.html` already keeps, and the reason an idle page open
+    /// in a background tab costs nothing at all.
+    pub refresh_in: Option<i64>,
+}
+
+/// The cap. Further out than this and there is nothing to watch for yet: the
+/// band re-reads on the five and whatever is coming is still minutes away.
+const POLL_CAP: i64 = 300;
+/// While a capture is still being read, its reminder does not exist yet. Two
+/// seconds is the gap between "you pressed Capture" and "the band holds it".
+const POLL_QUEUE: i64 = 2;
+
+/// `queue_active` — anything of this tenant's still waiting to be read.
+/// `next_at` — the next second at which the band's contents change, if any.
+pub(crate) fn refresh_in(queue_active: bool, next_at: Option<i64>, now: i64) -> Option<i64> {
+    if queue_active {
+        return Some(POLL_QUEUE);
+    }
+    let ahead = next_at?.saturating_sub(now);
+    // Already past and still open: the row is on screen and nothing further is
+    // coming, so there is nothing to poll for.
+    if ahead <= 0 {
+        return None;
+    }
+    Some(ahead.min(POLL_CAP))
 }
 
 /// *today 14:00* / *tomorrow 09:00* / *Fri 4 Sep 09:00* / *overdue since Thu 27 Aug 12:00*.
@@ -114,7 +143,24 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<String>) -> Result<
             span: r.moment.span.unwrap_or_default(),
         })
         .collect();
-    Ok(HtmlTemplate(DueTemplate { rows, events, tz: tz_name.to_string(), just }).into_response())
+    // What the band is waiting for: a capture still being read, or the next
+    // change to what is due — whichever is sooner.
+    let queue_active = tenant.core.store.oldest_pending_age().await.unwrap_or(None).is_some();
+    let next_at = tenant
+        .core
+        .store
+        .next_due_change(now, tenant.core.time.horizon_hours as i64 * 3_600)
+        .await
+        .unwrap_or(None);
+    let refresh_in = refresh_in(queue_active, next_at, now);
+    Ok(HtmlTemplate(DueTemplate {
+        rows,
+        events,
+        tz: tz_name.to_string(),
+        just,
+        refresh_in,
+    })
+    .into_response())
 }
 
 async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
@@ -415,6 +461,43 @@ mod tests {
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(open[0].moment.at.unwrap(), 0).unwrap();
         assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-10-01 09:00");
         assert_eq!(open[0].moment.rule.as_deref(), Some("FREQ=MONTHLY;BYMONTHDAY=1"));
+    }
+
+    #[test]
+    fn the_cadence_is_the_soonest_thing_worth_asking_about() {
+        assert_eq!(refresh_in(true, None, 1_000), Some(2), "a capture is still being read");
+        assert_eq!(refresh_in(false, None, 1_000), None, "nothing pending, nothing asked");
+        assert_eq!(refresh_in(false, Some(1_090), 1_000), Some(90), "polled at the second it lands");
+        assert_eq!(refresh_in(false, Some(20_000), 1_000), Some(300), "and no later than the cap");
+        assert_eq!(refresh_in(false, Some(900), 1_000), None, "already past and on screen");
+    }
+
+    #[tokio::test]
+    async fn an_idle_band_with_nothing_pending_polls_not_at_all() {
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert!(!html.contains("every "), "an idle page in a background tab makes no requests: {html}");
+    }
+
+    #[tokio::test]
+    async fn a_reminder_landing_soon_is_polled_for_at_its_second() {
+        let core = test_core().await;
+        // Inside the horizon already, so what the band is waiting for is the
+        // turn from coming to overdue.
+        artifact_with_due(&core, Some(crate::store::now() + 90)).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert!(html.contains("every 90s"), "polled when it lands, not on a fixed tick: {html}");
+    }
+
+    #[tokio::test]
+    async fn a_reminder_further_out_is_polled_for_at_the_cap() {
+        let core = test_core().await;
+        artifact_with_due(&core, Some(crate::store::now() + 30 * 86_400)).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert!(html.contains("every 300s"), "five-minute cap: {html}");
     }
 
     #[test]

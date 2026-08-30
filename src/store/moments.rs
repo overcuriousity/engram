@@ -332,6 +332,36 @@ impl Store {
     }
 
     /// The Remind unit's next wake: the earliest owed moment, at any time.
+    /// The next second at which the band's contents change, or `None` for
+    /// "nothing is coming".
+    ///
+    /// Three boundaries, because three things move a row: `at - horizon` is
+    /// when a moment enters the window `open_due` reads; `at` is when it turns
+    /// from coming to overdue; `snoozed_until` is when a row put aside comes
+    /// back. The earliest of those still in the future is what the band is
+    /// waiting for, and polling before it is asking a question whose answer
+    /// cannot have changed.
+    pub async fn next_due_change(&self, now: i64, horizon: i64) -> Result<Option<i64>> {
+        let r: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT MIN(t) FROM (
+               SELECT m.at - ? AS t FROM moments m JOIN artifacts a ON a.id = m.artifact_id
+                 WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active' AND m.at IS NOT NULL
+               UNION ALL
+               SELECT m.at FROM moments m JOIN artifacts a ON a.id = m.artifact_id
+                 WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active' AND m.at IS NOT NULL
+               UNION ALL
+               SELECT m.snoozed_until FROM moments m JOIN artifacts a ON a.id = m.artifact_id
+                 WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'
+                   AND m.snoozed_until IS NOT NULL
+             ) WHERE t > ?",
+        )
+        .bind(horizon)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(r.flatten())
+    }
+
     pub async fn next_notify_at(&self) -> Result<Option<i64>> {
         let r = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT MIN(COALESCE(m.snoozed_until, m.at)) AS at FROM moments m WHERE {OWED}")))
             .fetch_one(&self.pool)

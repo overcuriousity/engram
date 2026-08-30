@@ -4583,7 +4583,7 @@ mod tests {
         );
         let due = include_str!("templates/_due.html");
         assert!(
-            due.contains(r#"hx-trigger="refresh""#),
+            due.contains(r#"hx-trigger="refresh"#),
             "and the band has nothing to answer that event with"
         );
         let ws = include_str!("templates/workspace.html");
