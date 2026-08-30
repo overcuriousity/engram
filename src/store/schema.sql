@@ -627,6 +627,38 @@ CREATE TABLE IF NOT EXISTS pursuits (
 );
 CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
 
+-- ── Moments ──────────────────────────────────────────────────────────────────
+-- A time attached to an artifact. `due` is a reminder; `event` is a date the
+-- note refers to. The note is the reminder text — there is none apart from it.
+-- Only `done_at`, `snoozed_until` and `notified_at` ever change on a row; a
+-- wrong date is a new row with source 'set', and the misreading stays.
+CREATE TABLE IF NOT EXISTS moments (
+  id            TEXT PRIMARY KEY,
+  artifact_id   TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- 'due' | 'event'
+  kind          TEXT NOT NULL,
+  -- Unix seconds. NULL for a reminder the base heard and could not date:
+  -- kept, and shown asking for its date, rather than dropped.
+  at            INTEGER,
+  until         INTEGER,
+  -- IANA zone the moment was read in. Recurrence and the day page need the
+  -- wall-clock, and a Unix integer alone cannot give it back across DST.
+  tz            TEXT NOT NULL,
+  -- RRULE subset (FREQ, INTERVAL, BYDAY, BYMONTHDAY, UNTIL, COUNT), or NULL.
+  rule          TEXT,
+  -- 'set' | 'cue' | 'classified' | 'extracted'.
+  source        TEXT NOT NULL,
+  -- The text the date was read from, verbatim, so a misread is visible.
+  span          TEXT,
+  done_at       INTEGER,
+  snoozed_until INTEGER,
+  -- Set once the push went out, so a restart never sends it twice.
+  notified_at   INTEGER,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_moments_open     ON moments(kind, done_at, at);
+CREATE INDEX IF NOT EXISTS idx_moments_artifact ON moments(artifact_id);
+
 -- Cursors that have no row to live on. Three keys so far:
 -- `associate.events_after`, `associate.judged_after`, `pursuit.events_after`.
 CREATE TABLE IF NOT EXISTS meta (
