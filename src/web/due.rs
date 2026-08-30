@@ -34,6 +34,12 @@ struct TzForm {
     until: String,
     #[serde(default)]
     when: String,
+    /// When the band last rendered, as the band itself reported it. A row
+    /// created after this is one the viewer has not seen, and is marked so it
+    /// can announce itself. `0` on the first render of a page, which makes
+    /// every row fresh — and that is right: they have all just appeared.
+    #[serde(default)]
+    since: i64,
 }
 
 pub(crate) struct DueView {
@@ -45,6 +51,9 @@ pub(crate) struct DueView {
     pub undated: bool,
     pub recurring: bool,
     pub source: &'static str,
+    /// Created since the band last rendered. Drives one short animation and
+    /// means nothing afterwards.
+    pub fresh: bool,
 }
 
 pub(crate) struct EventView {
@@ -61,6 +70,11 @@ pub(crate) struct DueTemplate {
     pub events: Vec<EventView>,
     pub tz: String,
     pub just: Option<String>,
+    /// The stamp this render happened at, sent back with the next request so
+    /// the band can tell a row the viewer has already seen from one that
+    /// arrived while they were looking elsewhere. The band is stateless; this
+    /// is the whole of the state, and it lives on the fragment.
+    pub since: i64,
     /// Seconds until this fragment should ask again, or `None` for "never".
     ///
     /// The fragment carries its own trigger, so the swap that reports the last
@@ -108,7 +122,12 @@ pub(crate) fn when_words(at: i64, now: i64, tz: Tz) -> String {
     }
 }
 
-async fn render(tenant: &Tenant, tz_name: &str, just: Option<String>) -> Result<Response> {
+async fn render(
+    tenant: &Tenant,
+    tz_name: &str,
+    just: Option<String>,
+    since: i64,
+) -> Result<Response> {
     let tz = zone(Some(tz_name));
     let now = tenant.core.clock.now();
     let horizon = now + tenant.core.time.horizon_hours as i64 * 3_600;
@@ -127,6 +146,7 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<String>) -> Result<
             undated: r.moment.at.is_none(),
             recurring: r.moment.rule.is_some(),
             source: r.moment.source.as_str(),
+            fresh: r.moment.created_at > since,
         })
         .collect::<Vec<_>>();
     let coming = now + tenant.core.time.coming_up_days as i64 * 86_400;
@@ -158,18 +178,19 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<String>) -> Result<
         events,
         tz: tz_name.to_string(),
         just,
+        since: now,
         refresh_in,
     })
     .into_response())
 }
 
 async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
-    render(&tenant, &f.tz, None).await
+    render(&tenant, &f.tz, None, f.since).await
 }
 
 async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.complete_moment(&id).await?;
-    render(&tenant, &f.tz, Some(id)).await
+    render(&tenant, &f.tz, Some(id), f.since).await
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -180,7 +201,7 @@ async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -
         tenant.core.store.unretire_corpus(&cid).await?;
     }
     tenant.core.store.rearm_remind().await?;
-    render(&tenant, &f.tz, None).await
+    render(&tenant, &f.tz, None, f.since).await
 }
 
 /// `hour` = now + 1h; `tomorrow` = 09:00 tomorrow; `monday` = 09:00 next
@@ -204,13 +225,13 @@ async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -
         tenant.core.store.snooze(&id, until).await?;
         tenant.core.store.rearm_remind().await?;
     }
-    render(&tenant, &f.tz, Some(id)).await
+    render(&tenant, &f.tz, Some(id), f.since).await
 }
 
 async fn unsnooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.store.unsnooze(&id).await?;
     tenant.core.store.rearm_remind().await?;
-    render(&tenant, &f.tz, None).await
+    render(&tenant, &f.tz, None, f.since).await
 }
 
 async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -236,7 +257,7 @@ async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
             .await?;
         tenant.core.store.rearm_remind().await?;
     }
-    render(&tenant, &f.tz, None).await
+    render(&tenant, &f.tz, None, f.since).await
 }
 
 #[cfg(test)]
@@ -461,6 +482,49 @@ mod tests {
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(open[0].moment.at.unwrap(), 0).unwrap();
         assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-10-01 09:00");
         assert_eq!(open[0].moment.rule.as_deref(), Some("FREQ=MONTHLY;BYMONTHDAY=1"));
+    }
+
+    #[tokio::test]
+    async fn a_row_shows_one_verb_and_keeps_the_rest_behind_a_disclosure() {
+        let core = test_core().await;
+        artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert!(html.contains("due-later"), "snooze and move are behind a disclosure: {html}");
+        assert!(html.contains("<summary>later</summary>"));
+        assert!(html.contains(">done<"), "and done is the one visible verb");
+    }
+
+    #[tokio::test]
+    async fn an_undated_row_opens_its_date_field_rather_than_hiding_it() {
+        let core = test_core().await;
+        artifact_with_due(&core, None).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert!(!html.contains("due-later"), "asking for the date is the whole point of the row");
+        assert!(html.contains("set date"));
+    }
+
+    #[tokio::test]
+    async fn a_row_the_viewer_has_already_seen_does_not_announce_itself_again() {
+        let core = test_core().await;
+        artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        // First render: nothing has been seen, so the row is new by definition.
+        let first = body_of(
+            app.clone().oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&since=0")).await.unwrap(),
+        )
+        .await;
+        assert!(first.contains("due-new"), "a row nobody has seen announces itself: {first}");
+        // Second render, carrying a stamp from after the moment was written.
+        let later = crate::store::now() + 60;
+        let again = body_of(
+            app.oneshot(form("/ui/due", &cookie, &format!("tz=Europe/Berlin&since={later}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!again.contains("due-new"), "and does not go on announcing it: {again}");
     }
 
     #[test]
