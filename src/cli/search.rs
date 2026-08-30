@@ -315,6 +315,7 @@ pub(crate) fn excerpt(text: &str, budget: usize, width: usize) -> Vec<String> {
 /// different things about the same hit.
 pub(crate) fn badges(h: &SearchResult) -> Option<String> {
     let mut said: Vec<&str> = Vec::new();
+    let due_word = h.due_in.as_ref().map(|d| format!("due {d}"));
     if h.past_cliff {
         said.push("past the cliff");
     }
@@ -323,6 +324,9 @@ pub(crate) fn badges(h: &SearchResult) -> Option<String> {
     }
     if h.model_written {
         said.push("model-written");
+    }
+    if let Some(d) = &due_word {
+        said.push(d);
     }
     if h.primed {
         said.push("primed");
@@ -354,6 +358,8 @@ pub(crate) mod fixture {
             origin_count: 0,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff,
             similarity: None,
             titled_by_corpus: false,

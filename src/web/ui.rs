@@ -51,6 +51,8 @@ pub struct RenderedResult {
     /// folded into it: "you were just reading this" and "this is reached
     /// often" are two different reasons to be higher up a list.
     pub in_sitting: bool,
+    /// "in 2 h" when a reminder on this artifact is due inside the horizon.
+    pub due_in: Option<String>,
     /// Past the point where this list's relevance falls off. Greyed, under a
     /// rule; the rank stays, because it did place — the claim withdrawn is
     /// "this is an answer", not "this is fifth". See `search::cliff`.
@@ -1368,6 +1370,7 @@ pub(crate) fn render_hit(
         weak: h.weak,
         primed: h.primed,
         in_sitting: h.in_sitting,
+        due_in: h.due_in.clone(),
         past_cliff: h.past_cliff,
         via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
         reason: h.reason.clone(),
@@ -6490,6 +6493,8 @@ mod tests {
             last_verified_at: None,
             weak,
             primed: false,
+            due_at: None,
+            due_in: None,
             in_sitting: false,
             past_cliff: false,
             similarity: None,
@@ -6595,6 +6600,7 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_in: None,
             past_cliff: false,
             via_title: None,
             model_written: false,
@@ -6730,6 +6736,8 @@ mod tests {
             last_verified_at: None,
             weak: false,
             primed: false,
+            due_at: None,
+            due_in: None,
             in_sitting: false,
             past_cliff: false,
             similarity: None,
@@ -6777,6 +6785,7 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_in: None,
             past_cliff: false,
             via_title: via.map(str::to_string),
             reason: reason.map(str::to_string),
@@ -6989,6 +6998,7 @@ mod tests {
             weak,
             primed: false,
             in_sitting: false,
+            due_in: None,
             past_cliff: false,
             via_title: None,
             reason: None,

@@ -190,6 +190,15 @@ pub struct SearchResult {
     /// pass one off as the other.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_sitting: bool,
+    /// An open reminder on this artifact falls due inside `time.horizon_hours`.
+    /// A fact about the row whatever `time.lift` says; the lift is what may
+    /// move it, and then `primed` says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<i64>,
+    /// `due_at` in words — "in 2 h", "in 3 days", "1 h ago" — so every door
+    /// prints the same thing without each owning a clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_in: Option<String>,
     /// This hit sits past the cliff: the one step in this list's scores that
     /// accounts for more of the fall than the rest of the list together. See
     /// `cliff`. It still competed and still placed — nothing is reordered or
@@ -249,6 +258,8 @@ impl From<SearchHit> for SearchResult {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
             similarity: h.similarity,
             titled_by_corpus: false,
@@ -588,6 +599,7 @@ fn prime(
     margin: f64,
     lift: usize,
     sitting: &std::collections::HashSet<String>,
+    due: &std::collections::HashSet<String>,
 ) -> Vec<SearchResult> {
     // Marked before anything can return. `in_sitting` is a fact about the row —
     // this sitting has been in it — and not a consequence of the reordering. A
@@ -601,7 +613,7 @@ fn prime(
         return results;
     }
     let max = activation.values().copied().fold(0.0f64, f64::max);
-    if max <= 0.0 && sitting.is_empty() {
+    if max <= 0.0 && sitting.is_empty() && due.is_empty() {
         return results;
     }
     let n = results.len();
@@ -619,9 +631,11 @@ fn prime(
                 true => activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max,
                 false => 0.0,
             };
-            match sitting.contains(&r.artifact_id) {
-                // The top of the same normalised scale: what this sitting has
-                // been in is as accessible as anything in the base gets.
+            // The top of the same normalised scale: what this sitting has
+            // been in is as accessible as anything in the base gets, and a
+            // reminder the operator set for this week is a fact about what
+            // they want now — the one budget, the one walk, for both.
+            match sitting.contains(&r.artifact_id) || due.contains(&r.artifact_id) {
                 true => act.max(1.0),
                 false => act,
             }
@@ -1049,6 +1063,8 @@ impl Core {
                 weak: false,
                 primed: false,
                 in_sitting: false,
+                due_at: None,
+                due_in: None,
                 past_cliff: false,
                 similarity: None,
                 titled_by_corpus: false,
@@ -1546,6 +1562,24 @@ impl Core {
         // and the excerpt lost is then the one that answered best — a silent
         // change to the answer, on a path where nobody can see what was cut.
         // `Judge` needs the pool it labels to be the pool the ranking produced.
+        // What is due on these rows, said on every door. Read regardless of
+        // `time.lift`: the badge is a fact, the lift is a choice.
+        let due_map = {
+            let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+            let now = now_secs();
+            self.store
+                .due_for(&ids, now, now + self.time.horizon_hours as i64 * 3_600)
+                .await
+                .unwrap_or_default()
+        };
+        for r in &mut results {
+            r.due_at = due_map.get(&r.artifact_id).copied();
+            r.due_in = r.due_at.map(|at| crate::web::judge::ago_or_ahead(at));
+        }
+        let due: std::collections::HashSet<String> = match self.time.lift {
+            true => due_map.keys().cloned().collect(),
+            false => Default::default(),
+        };
         if self.associating()
             && self.associate.prime_lift > 0
             && !matches!(door, Door::Ask | Door::Judge)
@@ -1579,6 +1613,7 @@ impl Core {
                 self.associate.prime_margin,
                 self.associate.prime_lift,
                 &sitting,
+                &due,
             );
             note_reorder(&mut results, &before, |e| &mut e.prime);
         }
@@ -1869,6 +1904,48 @@ mod tests {
             "the fixture stopped configuring a reranker: {named:?}"
         );
         assert_eq!(named, started, "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_hit_says_it_is_due_inside_the_horizon_and_not_outside() {
+        let mut core = test_core().await;
+        seed(&core, &[("send the invoice to the client", "admin", &[])]).await;
+        let first = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        let aid = first[0].artifact_id.clone();
+        assert!(first[0].due_at.is_none());
+        let now = now_secs();
+        let far = core
+            .store
+            .insert_moment(&crate::store::moments::NewMoment {
+                artifact_id: aid.clone(),
+                kind: crate::store::moments::Kind::Due,
+                at: Some(now + 10 * 86_400),
+                tz: "UTC".into(),
+                rule: None,
+                source: crate::store::moments::Source::Set,
+                span: None,
+            })
+            .await
+            .unwrap();
+        let out = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        assert!(out[0].due_at.is_none(), "ten days out is beyond the horizon");
+        core.store.mark_done(&far, now).await.unwrap();
+        core.store
+            .insert_moment(&crate::store::moments::NewMoment {
+                artifact_id: aid.clone(),
+                kind: crate::store::moments::Kind::Due,
+                at: Some(now + 2 * 3_600),
+                tz: "UTC".into(),
+                rule: None,
+                source: crate::store::moments::Source::Set,
+                span: None,
+            })
+            .await
+            .unwrap();
+        core.time.lift = false;
+        let out = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        assert_eq!(out[0].due_at, Some(now + 2 * 3_600));
+        assert_eq!(out[0].due_in.as_deref(), Some("in 2 h"), "the badge is a fact whatever the lift says");
     }
 
     /// The stream is the same search, so it has to answer with the same hits.
@@ -3032,6 +3109,8 @@ mod tests {
                 weak: false,
                 primed: false,
                 in_sitting: false,
+                due_at: None,
+                due_in: None,
                 past_cliff: false,
                 similarity: None,
                 titled_by_corpus: false,
@@ -3061,6 +3140,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
         assert!(out[1].primed, "the hit that moved must say so");
@@ -3070,7 +3150,7 @@ mod tests {
     #[test]
     fn the_most_active_hit_cannot_displace_an_exact_match() {
         let act = HashMap::from([("b".to_string(), 9.0)]);
-        let out = prime(ranked(&["a", "b", "c"]), &act, 0.5, 2, &Default::default());
+        let out = prime(ranked(&["a", "b", "c"]), &act, 0.5, 2, &Default::default(), &Default::default());
         assert_eq!(order(&out), vec!["a", "b", "c"]);
         assert!(out.iter().all(|r| !r.primed));
     }
@@ -3084,10 +3164,27 @@ mod tests {
             0.5,
             2,
             &sitting,
+            &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
         assert!(out[1].primed);
         assert!(out[1].in_sitting, "the page cannot say why it moved");
+    }
+
+    #[test]
+    fn a_due_hit_is_lifted_like_a_sitting_hit_and_says_so() {
+        let due = std::collections::HashSet::from(["d".to_string()]);
+        let out = prime(ranked(&["a", "b", "c", "d"]), &HashMap::new(), 0.5, 2, &Default::default(), &due);
+        assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
+        assert!(out[1].primed);
+        assert!(!out[1].in_sitting, "due is not the sitting");
+    }
+
+    #[test]
+    fn a_due_hit_never_displaces_an_exact_match() {
+        let due = std::collections::HashSet::from(["b".to_string()]);
+        let out = prime(ranked(&["a", "b", "c"]), &HashMap::new(), 0.5, 2, &Default::default(), &due);
+        assert_eq!(order(&out), vec!["a", "b", "c"], "rank 0 never moves and b is already at 1");
     }
 
     #[test]
@@ -3096,7 +3193,7 @@ mod tests {
         // list of two is a list nothing can be lifted in — but a badge that
         // vanishes on short lists reads as the page forgetting, not as a rule.
         let sitting = std::collections::HashSet::from(["b".to_string()]);
-        let out = prime(ranked(&["a", "b"]), &HashMap::new(), 0.5, 2, &sitting);
+        let out = prime(ranked(&["a", "b"]), &HashMap::new(), 0.5, 2, &sitting, &Default::default());
         assert_eq!(order(&out), vec!["a", "b"], "nothing can move on two rows");
         assert!(out[1].in_sitting);
         assert!(!out[0].in_sitting);
@@ -3110,7 +3207,7 @@ mod tests {
         // second lift would be the one nobody bounded. One walk, one `lift`.
         let act = HashMap::from([("e".to_string(), 9.0)]);
         let sitting = std::collections::HashSet::from(["e".to_string()]);
-        let out = prime(ranked(&["a", "b", "c", "d", "e"]), &act, 0.5, 2, &sitting);
+        let out = prime(ranked(&["a", "b", "c", "d", "e"]), &act, 0.5, 2, &sitting, &Default::default());
         assert_eq!(
             order(&out),
             vec!["a", "b", "e", "c", "d"],
@@ -3122,7 +3219,7 @@ mod tests {
     fn the_sitting_cannot_displace_the_first_hit_either() {
         // Rank 0 never moves, whatever the reason for moving would have been.
         let sitting = std::collections::HashSet::from(["b".to_string(), "c".to_string()]);
-        let out = prime(ranked(&["a", "b", "c"]), &HashMap::new(), 0.5, 2, &sitting);
+        let out = prime(ranked(&["a", "b", "c"]), &HashMap::new(), 0.5, 2, &sitting, &Default::default());
         assert_eq!(order(&out)[0], "a");
     }
 
@@ -3134,6 +3231,7 @@ mod tests {
             &act,
             0.5,
             0,
+            &Default::default(),
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "c", "d"]);
@@ -3149,6 +3247,7 @@ mod tests {
             &act,
             0.5,
             2,
+            &Default::default(),
             &Default::default(),
         );
         assert_eq!(
@@ -3190,6 +3289,7 @@ mod tests {
             ),
             0.5,
             2,
+            &Default::default(),
             &Default::default(),
         );
         assert!(
@@ -3246,6 +3346,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "e", "c", "d"]);
         let moved = order(&out).iter().position(|id| *id == "e").unwrap();
@@ -3263,6 +3364,7 @@ mod tests {
             &act,
             0.5,
             2,
+            &Default::default(),
             &Default::default(),
         );
         let moved = order(&out).iter().position(|id| *id == "g").unwrap();
@@ -4109,6 +4211,8 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
             similarity: None,
             titled_by_corpus: false,
@@ -4221,6 +4325,8 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
             similarity: None,
             titled_by_corpus: false,
@@ -4279,6 +4385,8 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
             similarity,
             titled_by_corpus: false,

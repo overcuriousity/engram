@@ -127,6 +127,8 @@ mod tests {
             last_verified_at: None,
             weak,
             primed: false,
+            due_at: None,
+            due_in: None,
             in_sitting: false,
             past_cliff: false,
             similarity: None,

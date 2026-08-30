@@ -124,6 +124,9 @@ pub fn format_search_results(
                     "lifted: opened, confirmed or cited more than what it passed".to_string(),
                 );
             }
+            if let Some(d) = &r.due_in {
+                facts.push(format!("due {d}"));
+            }
             if r.in_sitting {
                 facts.push("lifted: open in this sitting".to_string());
             }
@@ -814,6 +817,8 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
             similarity: None,
             titled_by_corpus: false,
@@ -951,6 +956,8 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
             similarity: None,
             titled_by_corpus: false,
@@ -1136,6 +1143,13 @@ mod tests {
         let mut s = hit("open", None);
         s.in_sitting = true;
         assert!(format_search_results(&[s], None).contains("lifted: open in this sitting"));
+    }
+
+    #[test]
+    fn a_result_with_a_reminder_due_says_when() {
+        let mut d = hit("rent", None);
+        d.due_in = Some("in 2 h".into());
+        assert!(format_search_results(&[d], None).contains("due in 2 h"));
     }
 
     /// Search is a dead end without this: it hands back one passage and the

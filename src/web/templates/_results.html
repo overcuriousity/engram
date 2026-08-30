@@ -91,6 +91,9 @@
         <span class="badge" title="Moved up: opened, confirmed or cited more than the hits it passed">primed</span>
         {% endif %}
         {% endif %}
+        {% if let Some(d) = r.due_in %}
+        <span class="badge badge-due" title="A reminder you set on this is due">due {{ d }}</span>
+        {% endif %}
         {% if r.model_written %}
         {# Never silently indistinguishable from captured text. The count comes
            off the vector payload, so a hit that was reached rather than ranked

@@ -888,6 +888,8 @@ impl Core {
                 // assumed — in either direction.
                 weak: false,
                 primed: false,
+                due_at: None,
+                due_in: None,
                 in_sitting: false,
                 // The cliff was computed over scores this one was never in.
                 past_cliff: false,
@@ -2864,6 +2866,8 @@ mod tests {
                 last_verified_at: None,
                 weak: false,
                 primed: false,
+                due_at: None,
+                due_in: None,
                 in_sitting: false,
                 past_cliff: false,
                 similarity: None,

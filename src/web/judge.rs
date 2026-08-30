@@ -218,6 +218,22 @@ pub(crate) fn ago(then: i64) -> String {
     }
 }
 
+/// A due time relative to now, either way: "in 2 h", "in 3 days", "1 h ago".
+/// Hours under a day, days from there; a reminder's precision.
+pub(crate) fn ago_or_ahead(at: i64) -> String {
+    let delta = at - crate::store::now();
+    let (ahead, span) = (delta >= 0, delta.abs());
+    let words = match span {
+        s if s < 3_600 => "under an hour".to_string(),
+        s if s < 86_400 => format!("{} h", s / 3_600),
+        s => format!("{} day{}", s / 86_400, if s / 86_400 == 1 { "" } else { "s" }),
+    };
+    match ahead {
+        true => format!("in {words}"),
+        false => format!("{words} ago"),
+    }
+}
+
 /// The card's preview: plain text, markup gone.
 ///
 /// Flattening whitespace was the whole of this, so a card showed
