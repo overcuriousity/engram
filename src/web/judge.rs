@@ -1434,6 +1434,13 @@ mod tests {
         let body = get(&app, "/ui/judge", &cookie).await;
         assert!(body.contains("1 of 2 questions judged"), "{body}");
         assert!(body.contains("1 right"), "{body}");
+        // And the count the card is built around is sized. It was renamed out
+        // from under its rule when the XP bar came out, and rendered at body
+        // size with no margin while every assertion about it still passed on
+        // the text alone.
+        assert!(body.contains(r#"class="judge-count"#), "{body}");
+        let css = include_str!("../../assets/app.css");
+        assert!(css.contains(".judge-count"), "the count has no rule");
     }
 
     #[tokio::test]
@@ -1484,7 +1491,8 @@ mod tests {
         assert!(body.contains("opened nothing"), "{body}");
         assert!(body.contains("No, I was just looking"), "{body}");
         let event = core.store.next_pending(0.0).await.unwrap().unwrap();
-        assert!(core.store.open_event(&event.id).await.unwrap());
+        let opened = event.candidates[0].artifact_id.clone();
+        assert!(core.store.open_event(&event.id, &opened).await.unwrap());
         let body = get(&app, "/ui/judge/next", &cookie).await;
         assert!(!body.contains("opened nothing"), "{body}");
         assert!(body.contains("which of these was it"), "{body}");

@@ -205,12 +205,18 @@ impl Store {
     /// agent narrowing one search into a longer one made two decisions worth
     /// judging separately.
     pub async fn record_search(&self, ev: NewEvent, coalesce_secs: i64) -> Result<String> {
-        // One capture at a time. Two of these overlapping would read the same
-        // previous event and both try to upgrade to a write, which fails
-        // outright rather than waiting — and a lost capture is a search nobody
-        // can judge.
-        let _serialised = self.capture.lock().await;
-        let mut tx = self.pool.begin().await?;
+        // A write transaction from the first statement. This reads the previous
+        // event and then writes over it, and a deferred transaction would take
+        // the read snapshot first and only upgrade at the `UPDATE` — which two
+        // overlapping captures answer with `SQLITE_BUSY_SNAPSHOT`, a failure no
+        // `busy_timeout` waits out, and a lost capture is a search nobody can
+        // judge. Taking the write lock up front makes the read and the write
+        // one atomic thing and leaves the queueing to SQLite's busy timeout,
+        // where a second writer waits instead of failing. It also means the UI
+        // door, which now awaits this on every keystroke, queues only behind
+        // another write to the same file rather than behind a lock held across
+        // every door at once.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let at = now();
 
         // `scope IS ?` rather than `=`, so a UI event recorded without a
@@ -218,7 +224,7 @@ impl Store {
         let prev = match ev.door {
             Door::Ui | Door::Extension => {
                 sqlx::query(
-                    "SELECT id, query, created_at,
+                    "SELECT id, created_at,
                             (SELECT COUNT(*) FROM search_candidates
                               WHERE event_id = search_events.id) AS pool
                        FROM search_events
@@ -435,14 +441,20 @@ pub struct PendingEvent {
 
 /// What the deck deals: see `Store::next_pending`. One bind, `weak_below`.
 ///
-/// Two `COALESCE`s, for two different absences. The outer one: an empty pool
-/// reads as the weakest search there is, because a search that returned nothing
-/// is a hole rather than a card — there is no list to point at, so the only
-/// answers left are gap and discard, and neither is worth spending a person's
-/// turn on. It is not thereby lost: `unmatched_gaps_from!` in `store::gaps`
-/// names the empty pool explicitly and the sweep raises it as a hole in the
-/// base, which is what it is. (It did not, once, and the search fell through
-/// the crack between the two.) The inner one: a candidate the vector half
+/// An `EXISTS` and two `COALESCE`s, for three different absences. The `EXISTS`:
+/// an empty pool is not a card, because a search that returned nothing is a
+/// hole — there is no list to point at, so the only answers left are gap and
+/// discard, and neither is worth spending a person's turn on. It is not thereby
+/// lost: `unmatched_gaps_from!` in `store::gaps` names the empty pool
+/// explicitly and the sweep raises it as a hole in the base, which is what it
+/// is. (It did not, once, and the search fell through the crack between the
+/// two.) Said as an `EXISTS` and not left to the outer `COALESCE` below, which
+/// reads an empty pool as the weakest search there is: that holds the empty
+/// pool out at every threshold but the lowest one, and `weak_below = 0.0` is a
+/// supported setting — it turns the labelling off — where `0 >= 0` let exactly
+/// the unanswerable card through and raised the same search as a gap beside
+/// it. The outer one still stands, because it is what the threshold means. The
+/// inner one: a candidate the vector half
 /// never scored reads as the *strongest*, because a similarity nobody measured
 /// is not evidence of a weak match. A hit found by the lexical half alone
 /// carries none — `search_inner` stores what the vector search returned, and
@@ -453,6 +465,7 @@ pub struct PendingEvent {
 macro_rules! dealable {
     () => {
         "judged_at IS NULL AND length(query) >= 3
+         AND EXISTS (SELECT 1 FROM search_candidates WHERE event_id = search_events.id)
          AND COALESCE((SELECT max(COALESCE(similarity, 1.0)) FROM search_candidates
                         WHERE event_id = search_events.id), 0) >= ?"
     };
@@ -671,36 +684,58 @@ impl Store {
     /// one arriving an hour later could be answered by a different search
     /// entirely, then labelled by a read that had nothing to do with it.
     ///
+    /// The artifact is named as well as the event, and the pool is checked for
+    /// it: a search still in flight when the click lands takes this very row as
+    /// its predecessor — `opened_at` is still NULL at the moment it reads —
+    /// and folds forward over the query, the filters and the whole candidate
+    /// set before this statement runs. Stamping that row regardless drew the
+    /// bar against a search the artifact was never in, so a Yes recorded a hit
+    /// on a pool that never held it. The window is one type-ahead debounce
+    /// wide, and it is the same misattribution the named event exists to stop.
+    ///
     /// `false` where the event is gone — retention expires them, Ops purges
-    /// them — or where a person has already spoken for it. That is what
-    /// decides whether the bar under the artifact is drawn at all.
-    pub async fn open_event(&self, event_id: &str) -> Result<bool> {
-        Ok(
-            sqlx::query(
-                "UPDATE search_events SET opened_at = ? WHERE id = ? AND judged_at IS NULL",
-            )
-            .bind(now())
-            .bind(event_id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected()
-                == 1,
+    /// them — or where a person has already spoken for it, or where the fold
+    /// above happened. That is what decides whether the bar under the artifact
+    /// is drawn at all.
+    pub async fn open_event(&self, event_id: &str, artifact_id: &str) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE search_events SET opened_at = ?
+              WHERE id = ? AND judged_at IS NULL
+                AND EXISTS (SELECT 1 FROM search_candidates
+                             WHERE event_id = ? AND artifact_id = ?)",
         )
+        .bind(now())
+        .bind(event_id)
+        .bind(event_id)
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
     }
 
     /// "Not this one": the search stays a question for the deck, and the column
     /// records that the answer came from a person rather than the deck.
-    pub async fn decline(&self, event_id: &str) -> Result<()> {
-        Self::judged_one(
-            sqlx::query(
-                "UPDATE search_events
-                 SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = 'confirm'
-                 WHERE id = ?",
-            )
-            .bind(event_id)
-            .execute(&self.pool)
-            .await?,
+    ///
+    /// `AND judged_at IS NULL`, as `open_event` and `gap_event` both carry, and
+    /// for a sharper reason than either: this clears the verdict columns, so
+    /// without the guard it is the one answer on the bar that *destroys* a
+    /// label. The bar is drawn against an unjudged event, but the deck can
+    /// answer the same search in the time a tab is left open, and pressing No
+    /// in that tab used to silently delete a confirmed pair out of
+    /// `pairs.json`. `false` where that has happened — the same two ordinary
+    /// outcomes `gap_event` reports.
+    pub async fn decline(&self, event_id: &str) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE search_events
+             SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = 'confirm'
+             WHERE id = ? AND judged_at IS NULL",
         )
+        .bind(event_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
     }
 
     /// The rail's "nothing here has it": a gap against the search the rail was
@@ -1367,16 +1402,68 @@ mod tests {
             .record_search(scoped("fat32", Door::Ui, Some("me")), 15)
             .await
             .unwrap();
-        assert!(store.open_event(&id).await.unwrap());
+        assert!(store.open_event(&id, "a1").await.unwrap());
         assert!(
-            !store.open_event("no-such-event").await.unwrap(),
+            !store.open_event("no-such-event", "a1").await.unwrap(),
             "an event retention or a purge took away is nothing to open"
         );
 
         // A person having answered closes it: the bar is not drawn again over
         // a search that has been spoken for.
         store.judge_hit(&id, "a1", Labeller::Confirm).await.unwrap();
-        assert!(!store.open_event(&id).await.unwrap());
+        assert!(!store.open_event(&id, "a1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_fold_that_took_the_artifact_out_of_the_pool_refuses_the_open() {
+        // The click and the next keystroke race: a search still in flight when
+        // the link is followed reads this very row as its predecessor —
+        // nothing has stamped `opened_at` yet — and folds forward over the
+        // query and the whole pool. Stamping it anyway drew the verdict bar
+        // against a search the artifact was never in.
+        let store = Store::memory().await.unwrap();
+        let id = store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
+        let mut later = ev("fat32", Door::Ui);
+        later.candidates[0].artifact_id = "a2".into();
+        assert_eq!(store.record_search(later, 15).await.unwrap(), id, "folded");
+        assert!(
+            !store.open_event(&id, "a1").await.unwrap(),
+            "the pool the rail was showing is gone, so there is nothing to open against"
+        );
+        // The row the fold left behind is still openable on its own terms.
+        assert!(store.open_event(&id, "a2").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn no_cannot_erase_a_verdict_somebody_else_gave() {
+        // The bar is drawn against an unjudged search, and the deck can answer
+        // the same search while the tab holding it is open. "No" clears the
+        // verdict columns, so without a guard it is the one answer on the bar
+        // that deletes a confirmed pair out of the eval set.
+        let store = Store::memory().await.unwrap();
+        let id = store.record_search(ev("ntfs", Door::Ui), 0).await.unwrap();
+        store.judge_hit(&id, "a1", Labeller::Deck).await.unwrap();
+        assert!(!store.decline(&id).await.unwrap());
+        assert_eq!(
+            store.feedback_stats(0.0).await.unwrap().hits,
+            1,
+            "the pair survived"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_that_returned_nothing_is_not_dealt_with_labelling_off() {
+        // `weak_below = 0.0` turns the labelling off, and at that setting the
+        // outer `COALESCE` in `dealable!` reads an empty pool as `0 >= 0` and
+        // lets it through — a card with no options, which is unanswerable
+        // except by skip, gap or discard, and which the sweep is raising as a
+        // hole in the base at the same time.
+        let store = Store::memory().await.unwrap();
+        let mut empty = ev("nothing here", Door::Ui);
+        empty.candidates.clear();
+        store.record_search(empty, 0).await.unwrap();
+        assert!(store.next_pending(0.0).await.unwrap().is_none());
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1386,7 +1473,7 @@ mod tests {
         // A search after the open starts its own event.
         let store = Store::memory().await.unwrap();
         let id = store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
-        assert!(store.open_event(&id).await.unwrap());
+        assert!(store.open_event(&id, "a1").await.unwrap());
         store
             .record_search(ev("fat32", Door::Ui), 15)
             .await
@@ -1402,7 +1489,7 @@ mod tests {
         // having been spoken for by a person rather than by the deck.
         let store = Store::memory().await.unwrap();
         let id = store.record_search(ev("ntfs", Door::Ui), 0).await.unwrap();
-        store.decline(&id).await.unwrap();
+        assert!(store.decline(&id).await.unwrap());
         let s = store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.judged, s.hits), (0, 0));
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("confirm"));
@@ -1445,7 +1532,7 @@ mod tests {
 
         // And the card knows whether anything was opened from it.
         assert!(!store.next_pending(0.3).await.unwrap().unwrap().opened);
-        store.open_event(&id).await.unwrap();
+        store.open_event(&id, "a1").await.unwrap();
         assert!(store.next_pending(0.3).await.unwrap().unwrap().opened);
     }
 

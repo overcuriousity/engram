@@ -57,12 +57,18 @@
      rule empties the animation either way. #}
   <div class="rail-row">
     <a class="rail-item{% if r.past_cliff %} rail-past{% endif %}" role="option" aria-selected="false"
-       href="/ui/artifacts/{{ r.artifact_id }}"
        {# The search that listed this row travels with the link. It is what the
           bar under the artifact reports against, and naming it here is what
           keeps an open attributed to the search it came from rather than to
           whichever recent search happened to hold the same artifact. Absent
-          while searches are not being recorded. #}
+          while searches are not being recorded.
+
+          On the `href` as well as the `hx-get`, and identical to it: a
+          middle-click, a ⌘-click and a load that reached the page without htmx
+          are all the same open, and a link that carried the search down one
+          path and not the other produced a label from one and silence from the
+          other for the same act. #}
+       href="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}{% if let Some(ev) = event_id %}&event={{ ev }}{% endif %}"
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}{% if let Some(ev) = event_id %}&event={{ ev }}{% endif %}"
        hx-target="#pane-content" hx-swap="innerHTML transition:true" hx-push-url="true">
       <div class="rail-head">

@@ -60,70 +60,18 @@
 .judge-ask { margin: 0.8rem 0 0; }
 .judge-ask .mono { font-size: var(--text-xs); color: var(--color-fg-muted); }
 
-/* ── The bar ─────────────────────────────────────────────────────────────────
-   An object with a height, under the query, where the work is.
+/* ── The count ───────────────────────────────────────────────────────────────
+   A number, under the query, where the work is.
 
-   Three things move on it, and all three are borrowed from the bars games put
-   experience and health in — for the reason those bars are built that way: a
-   quantity that only ever changes its endpoint is hard to notice changing at
-   all.
-
-   · The pale trail goes straight to the new value while the solid fill follows
-     late, so the ground just won reads as area rather than as a number that is
-     now different.
-   · The fill overshoots slightly and settles, so it arrives rather than stops.
-   · A sheen crosses once.
-
-   None of it responds to *what* was judged — only to the fact that something
-   was, which is `Pulse::delta` being non-empty. A bar that celebrated
-   confirmations would be teaching agreement with the ranker it exists to
-   measure, and the flash line above the card already says the informative
-   thing, quietly, in the opposite direction. */
+   There was a bar here, with a trail, a sheen and notches, borrowed from the
+   ones games put experience in. It made the page prettier and the question no
+   easier, and most of the distance is covered by searching now rather than by
+   this page — so what is left is the figure itself, sized to be read at a
+   glance and not animated at all. Nothing here reacts to *which* verdict was
+   given; the flash line above the card is where a judgement is spoken about. */
 .judge-live { margin: 0; }
-.judge-xp {
-  position: relative; height: 14px; border-radius: 7px;
-  background: var(--color-bg-active); border: 1px solid var(--color-border-subtle);
-  overflow: hidden;
-}
-.judge-xp > span { position: absolute; inset: 0; border-radius: 7px; }
-.judge-xp-trail { width: var(--to); background: var(--color-accent-muted); }
-.judge-xp-fill {
-  width: var(--to);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--color-accent) 82%, white) 0%,
-    var(--color-accent) 55%,
-    color-mix(in srgb, var(--color-accent) 84%, black) 100%);
-}
-/* Notches, so the bar is a distance rather than a percentage: ten of them,
-   because the two counts it spans are always round numbers of judgements. */
-.judge-xp-notches {
-  pointer-events: none; opacity: 0.45;
-  background-image: repeating-linear-gradient(
-    90deg, transparent 0 calc(10% - 1px), var(--color-bg-base) calc(10% - 1px) 10%);
-}
-.judge-xp-sheen { pointer-events: none; transform: translateX(-110%); }
-
-@keyframes judge-xp-fill { from { width: var(--from); } to { width: var(--to); } }
-@keyframes judge-xp-sheen { to { transform: translateX(110%); } }
-@keyframes judge-xp-pulse {
-  0% { box-shadow: 0 0 0 0 var(--color-accent-muted); }
-  35% { box-shadow: 0 0 0 5px transparent; }
-  100% { box-shadow: 0 0 0 0 transparent; }
-}
-/* `backwards`, so the fill holds where it started for the length of its delay
-   instead of standing at the new value until the animation begins — which is
-   the delay the trail is visible in, and so the whole effect. */
-.judge-xp-moved .judge-xp-fill {
-  animation: judge-xp-fill 620ms 180ms cubic-bezier(0.34, 1.4, 0.64, 1) backwards;
-}
-.judge-xp-moved .judge-xp-sheen { animation: judge-xp-sheen 850ms 200ms ease-out 1; }
-/* Once, and then still. A bar that pulsed continuously would be asking for
-   attention on a page whose actual work is reading. */
-.judge-xp-moved { animation: judge-xp-pulse 700ms ease-out 1; }
-
-.judge-xp-read { margin: 0.45rem 0 0; font-size: var(--text-base); }
-.judge-xp-read b { font-weight: 500; font-size: var(--text-lg); }
+.judge-count { margin: 0.45rem 0 0; font-size: var(--text-base); }
+.judge-count b { font-weight: 500; font-size: var(--text-lg); }
 .judge-live .hint { margin: 0.25rem 0 0; }
 /* Four counts, two figures and a delta do not fit across a phone. They wrap
    rather than run off the side — the row is a readout, and a readout that has
@@ -319,13 +267,11 @@
 .judge-assign .input { max-width: 32rem; }
 
 /* Every rule above is one-shot and cheap, and all of it is skipped for anyone
-   who asked not to be moved. The bar still shows where it stands; it simply
+   who asked not to be moved. Each thing still shows where it stands; it simply
    arrives there. */
 @media (prefers-reduced-motion: reduce) {
   .judge-ghost, .judge-card, .judge-peek > summary::after { transition: none; }
-  .judge-card-enter, .judge-tick, .judge-delta,
-  .judge-xp-moved, .judge-xp-moved .judge-xp-fill,
-  .judge-xp-moved .judge-xp-sheen { animation: none; }
+  .judge-card-enter, .judge-tick, .judge-delta { animation: none; }
   .judge-delta { opacity: 1; }
   #card.htmx-swapping .judge-card { transform: none; opacity: 1; }
 }

@@ -224,11 +224,10 @@ pub struct ArtifactDetail {
 
 impl ArtifactDetail {
     /// `Chunk::in_results`, read off what the pane already holds rather than
-    /// fetched again. One spelling of the predicate, in one place, as that
-    /// method's own doc insists.
+    /// fetched again — and through that method's own predicate rather than a
+    /// second copy of it, so a third lifecycle state still changes one place.
     fn in_results(&self) -> bool {
-        self.status == crate::store::artifacts::ArtifactStatus::Active
-            && self.superseded_by.is_none()
+        crate::store::artifacts::in_results(self.status, self.superseded_by.as_deref())
     }
 }
 
@@ -2965,7 +2964,7 @@ async fn artifact_detail(
             .store
             .event_is_mine(event, &tenant.user.subject)
             .await?
-        && tenant.core.store.open_event(event).await?
+        && tenant.core.store.open_event(event, &cid).await?
     {
         d.search_event = Some(event.to_string());
     }
@@ -5671,7 +5670,17 @@ mod tests {
                         filters: "{}".into(),
                         query_vec: vec![0.1, 0.2],
                         embed_model: "fake".into(),
-                        candidates: vec![],
+                        // A pool, because a search that returned nothing is a
+                        // hole rather than a card and the deck does not deal
+                        // one — see `dealable!`. These stand for searches
+                        // waiting to be judged, so they have something to
+                        // judge.
+                        candidates: vec![crate::store::feedback::NewCandidate {
+                            artifact_id: format!("a{i}"),
+                            score: 0.9,
+                            similarity: Some(0.8),
+                            shown: true,
+                        }],
                         answered: false,
                     },
                     // No folding: these stand for separate searches, not one
@@ -11349,9 +11358,19 @@ mod tests {
             page.contains(&format!("/ui/search/{event}/verdict")),
             "the bar does not name the search: {page}"
         );
-        // The rail's own links carry the search that listed them.
+        // The rail's own links carry the search that listed them — on the
+        // `href` as well as on the `hx-get`. A middle-click, a ⌘-click and a
+        // load that reached the page without htmx are all the same open, and
+        // the plain `href` used to drop the event: the same act produced a
+        // label down one path and silence down the other.
         let rail = include_str!("templates/_results.html");
-        assert!(rail.contains("&event={{ ev }}"), "{rail}");
+        let carries = |attr: &str| {
+            rail.contains(&format!(
+                r#"{attr}="/ui/artifacts/{{{{ r.artifact_id }}}}?terms={{{{ terms|urlencode }}}}{{% if let Some(ev) = event_id %}}&event={{{{ ev }}}}{{% endif %}}""#
+            ))
+        };
+        assert!(carries("href"), "{rail}");
+        assert!(carries("hx-get"), "{rail}");
 
         // Reached any other way — a corpus page, a pasted link — there is no
         // search to be the answer to.
@@ -11500,6 +11519,16 @@ mod tests {
         assert_eq!((s.discards, s.judged, s.pending), (0, 0, 1), "{s:?}");
     }
 
+    /// The search just recorded, read off the table rather than off the deck.
+    /// A search that returned nothing is not a card the deck deals — see
+    /// `dealable!` — and the rail asks about one of those.
+    async fn newest_event(handle: &crate::core::Core) -> String {
+        sqlx::query_scalar("SELECT id FROM search_events ORDER BY created_at DESC, id DESC LIMIT 1")
+            .fetch_one(&handle.store.pool)
+            .await
+            .expect("the search the rail was filled by")
+    }
+
     #[tokio::test]
     async fn the_rail_offers_a_gap_where_nothing_matches() {
         // The deck's `N` key, moved to where the person is when they know.
@@ -11511,13 +11540,7 @@ mod tests {
         // reaches the client as data, so no wording can break the request: a
         // `"` in `hx-vals` JSON used to make htmx throw and the button do
         // nothing at all, silently.
-        let event = handle
-            .store
-            .next_pending(0.0)
-            .await
-            .unwrap()
-            .expect("the search the rail was filled by")
-            .id;
+        let event = newest_event(&handle).await;
         assert!(
             rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap""#)),
             "{rail}"
@@ -11550,7 +11573,7 @@ mod tests {
             "/ui/search/results?q=say%20%22hi%22%20%5Cnow",
         )
         .await;
-        let event = handle.store.next_pending(0.0).await.unwrap().unwrap().id;
+        let event = newest_event(&handle).await;
         assert!(
             rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap""#)),
             "{rail}"

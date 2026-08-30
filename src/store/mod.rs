@@ -38,13 +38,6 @@ pub struct Store {
     /// appears anywhere below the web layer. The knowledge tables never see
     /// it: they are already alone in a file of their own.
     pub subject: String,
-    /// Held for the length of a capture write. `record_search` reads the
-    /// previous event and then writes over it, and the UI fires one of these per
-    /// keystroke: two overlapping transactions upgrade from read to write on the
-    /// same snapshot, which SQLite answers with `SQLITE_BUSY_SNAPSHOT` and no
-    /// `busy_timeout` can wait out. Shared by every clone, which is what makes
-    /// it a queue rather than eight of them.
-    capture: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Store {
@@ -72,7 +65,6 @@ impl Store {
             pool,
             control,
             subject: subject.to_string(),
-            capture: Default::default(),
         };
         store.migrate().await?;
         Ok(store)
@@ -239,7 +231,6 @@ impl Store {
             pool,
             control,
             subject: TEST_SUBJECT.to_string(),
-            capture: Default::default(),
         };
         store.migrate().await?;
         Ok(store)
@@ -330,7 +321,6 @@ mod tests {
             pool,
             control: control::Control::memory().await.unwrap(),
             subject: TEST_SUBJECT.to_string(),
-            capture: Default::default(),
         };
         // A base as it was before the column existed: the real schema, with
         // the column taken back off. Hand-writing a cut-down `artifacts` would
@@ -447,7 +437,6 @@ mod tests {
             pool,
             control: control::Control::memory().await.unwrap(),
             subject: TEST_SUBJECT.to_string(),
-            capture: Default::default(),
         };
 
         let err = store.migrate().await.unwrap_err().to_string();
@@ -572,7 +561,6 @@ mod tests {
             pool,
             control: control::Control::memory().await.unwrap(),
             subject: TEST_SUBJECT.to_string(),
-            capture: Default::default(),
         };
 
         let err = store.migrate().await.unwrap_err().to_string();

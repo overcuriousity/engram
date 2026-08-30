@@ -747,7 +747,17 @@ async fn search_verdict(
             "hit"
         }
         "no" => {
-            store.decline(&id).await?;
+            // The one answer that clears columns rather than filling them, so
+            // the one that can undo somebody else's work: the deck can judge
+            // this search while the tab holding the bar is open. Refused
+            // rather than applied, and said in the same words the rail's gap
+            // button uses for the same situation.
+            if !store.decline(&id).await? {
+                return Ok(axum::response::Html(
+                    r#"<span class="muted">nothing to record — that search was already judged.</span>"#,
+                )
+                .into_response());
+            }
             "no"
         }
         // Not `Verdict::Discard`, which the deck's own key means and which says
