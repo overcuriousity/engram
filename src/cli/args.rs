@@ -14,14 +14,21 @@ use crate::error::{Error, Result};
 pub struct CliArgs {
     /// Capture a file, a link, or `-` for standard input. Repeatable:
     /// `engram -c *.pdf` is one invocation and several corpora.
-    #[arg(short = 'c', value_name = "PATH|URL|-", num_args = 1.., conflicts_with_all = ["search", "ask"])]
+    #[arg(short = 'c', value_name = "PATH|URL|-", num_args = 1.., conflicts_with_all = ["search", "ask", "remind", "journal"])]
     pub capture: Vec<String>,
     /// Search. A leading bare integer is how many hits are wanted.
-    #[arg(short = 's', value_name = "[N] QUERY", num_args = 1.., conflicts_with_all = ["capture", "ask"])]
+    #[arg(short = 's', value_name = "[N] QUERY", num_args = 1.., conflicts_with_all = ["capture", "ask", "remind", "journal"])]
     pub search: Vec<String>,
     /// Ask one question across the base.
-    #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search"])]
+    #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search", "remind", "journal"])]
     pub ask: Vec<String>,
+    /// Capture as a reminder: the classifier is skipped and the note is dated.
+    /// `-` reads stdin, as `-a` does.
+    #[arg(short = 'r', value_name = "TEXT", num_args = 1.., conflicts_with_all = ["capture", "search", "ask", "journal", "show", "status"])]
+    pub remind: Vec<String>,
+    /// Capture as today's journal entry.
+    #[arg(short = 'j', value_name = "TEXT", num_args = 1.., conflicts_with_all = ["capture", "search", "ask", "remind", "show", "status"])]
+    pub journal: Vec<String>,
     /// What to call this capture. Refused with every verb but `-c`, for the
     /// reason `--tag` is refused with `-a`: a search has no title to set.
     #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show", "status"])]
@@ -109,6 +116,10 @@ pub enum Verb {
         query: String,
     },
     Ask(String),
+    /// `-r`: a reminder, dated at capture.
+    Remind(String),
+    /// `-j`: today's entry.
+    Journal(String),
     /// What the base holds and what it has been learning.
     Status,
     /// One artifact, read in full. Carries what the operator typed rather than
@@ -137,6 +148,8 @@ pub fn verb(
         !args.capture.is_empty(),
         !args.search.is_empty(),
         !args.ask.is_empty(),
+        !args.remind.is_empty(),
+        !args.journal.is_empty(),
         args.show.is_some(),
         args.status,
     ]
@@ -154,7 +167,7 @@ pub fn verb(
         // prompt below would then be handed EOF.
         if named > 0 {
             return Err(Error::Validation(
-                "`-c`, `-s`, `-a`, `--show` and `--status` are the client half \
+                "`-c`, `-s`, `-a`, `-r`, `-j`, `--show` and `--status` are the client half \
                  of this binary; run them on their own, without the server's \
                  own flags"
                     .into(),
@@ -168,7 +181,7 @@ pub fn verb(
         // this is here for the caller that built `CliArgs` itself — which is
         // every test, and one day some other entry point.
         return Err(Error::Validation(
-            "one verb at a time: `-c`, `-s`, `-a`, `--show` or `--status`".into(),
+            "one verb at a time: `-c`, `-s`, `-a`, `-r`, `-j`, `--show` or `--status`".into(),
         ));
     }
 
@@ -191,6 +204,12 @@ pub fn verb(
     }
     if !args.ask.is_empty() {
         return Ok(Some(Verb::Ask(read(&args.ask, stdin)?)));
+    }
+    if !args.remind.is_empty() {
+        return Ok(Some(Verb::Remind(read(&args.remind, stdin)?)));
+    }
+    if !args.journal.is_empty() {
+        return Ok(Some(Verb::Journal(read(&args.journal, stdin)?)));
     }
     if !args.search.is_empty() {
         // A leading integer is a count only when something is left to be the
@@ -472,5 +491,15 @@ mod tests {
             ..Default::default()
         };
         assert!(verb(&a, true, false, piped("")).is_err());
+    }
+
+    #[test]
+    fn a_reminder_and_an_entry_are_verbs_of_their_own() {
+        let r = CliArgs { remind: vec!["call".into(), "the".into(), "bank".into()], ..Default::default() };
+        assert!(matches!(verb(&r, false, false, || Ok(String::new())), Ok(Some(Verb::Remind(t))) if t == "call the bank"));
+        let j = CliArgs { journal: vec!["long".into(), "day".into()], ..Default::default() };
+        assert!(matches!(verb(&j, false, false, || Ok(String::new())), Ok(Some(Verb::Journal(t))) if t == "long day"));
+        let both = CliArgs { remind: vec!["x".into()], capture: vec!["y".into()], ..Default::default() };
+        assert!(verb(&both, false, false, || Ok(String::new())).is_err(), "one verb at a time");
     }
 }

@@ -25,7 +25,8 @@ pub async fn run(
     let mut ids = Vec::new();
     for target in targets {
         let (bytes, content_type) = read_target(target)?;
-        let meta = Meta { title, note };
+        let tz = local_zone();
+        let meta = Meta { title, note, tz: tz.as_deref(), origin: None, intent: None };
         ids.push(post(&http, e, bytes, &content_type, target, meta, face).await?);
     }
     Ok(ids)
@@ -44,13 +45,14 @@ pub async fn run_piped(
     face: &crate::cli::face::Face,
 ) -> Result<Vec<String>> {
     let http = client()?;
+    let tz = local_zone();
     let id = post(
         &http,
         e,
         text.into_bytes(),
         "text/plain",
         "stdin",
-        Meta { title, note },
+        Meta { title, note, tz: tz.as_deref(), origin: None, intent: None },
         face,
     )
     .await?;
@@ -73,6 +75,42 @@ fn client() -> Result<reqwest::Client> {
 struct Meta<'a> {
     title: Option<&'a str>,
     note: Option<&'a str>,
+    /// The process's IANA zone, so a date in the text is read where it was
+    /// typed rather than where the server runs.
+    tz: Option<&'a str>,
+    /// `journal` for `-j`; the server accepts nothing else.
+    origin: Option<&'a str>,
+    /// `remind` for `-r`.
+    intent: Option<&'a str>,
+}
+
+/// The zone this process is in, or none where the platform cannot say.
+pub(crate) fn local_zone() -> Option<String> {
+    iana_time_zone::get_timezone().ok()
+}
+
+/// One piece of text, sent as the reminder or the entry a verb said it is.
+pub async fn run_text(
+    e: &Endpoint,
+    text: String,
+    title: Option<&str>,
+    note: Option<&str>,
+    origin: Option<&str>,
+    intent: Option<&str>,
+    face: &crate::cli::face::Face,
+) -> Result<String> {
+    let http = client()?;
+    let tz = local_zone();
+    post(
+        &http,
+        e,
+        text.into_bytes(),
+        "text/plain",
+        "text",
+        Meta { title, note, tz: tz.as_deref(), origin, intent },
+        face,
+    )
+    .await
 }
 
 /// One capture, answering with the corpus id. `label` is what the target is
@@ -93,7 +131,12 @@ async fn post(
             url.push_str(&format!("title={}&", encode(t)));
         }
         if let Some(n) = meta.note {
-            url.push_str(&format!("note={}", encode(n)));
+            url.push_str(&format!("note={}&", encode(n)));
+        }
+        for (key, value) in [("tz", meta.tz), ("origin", meta.origin), ("intent", meta.intent)] {
+            if let Some(v) = value {
+                url.push_str(&format!("{key}={}&", encode(v)));
+            }
         }
         // The body is handed over in pieces so the track can fill as it goes.
         // A book is tens of megabytes and the upload is the part of a capture

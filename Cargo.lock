@@ -1657,6 +1657,7 @@ dependencies = [
  "encoding_rs",
  "hex",
  "htmd",
+ "iana-time-zone",
  "image",
  "kamadak-exif",
  "markup5ever_rcdom",

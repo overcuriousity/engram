@@ -39,7 +39,34 @@ pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
     let said: serde_json::Value =
         serde_json::from_str(&body).map_err(|err| Error::Internal(format!("status: {err}")))?;
     print!("{}", render(face, e, &said));
+    // What is due, from a second read that an older server answers 404 to —
+    // in which case nothing is said, rather than the status failing.
+    if let Ok(res) = http.get(e.api("/moments?kind=due")).bearer_auth(&e.token).send().await
+        && res.status().is_success()
+        && let Ok(due) = res.json::<serde_json::Value>().await
+    {
+        print!("{}", render_due(face, &due));
+    }
     Ok(0)
+}
+
+/// The Due block: one line per open reminder, overdue marked, undated last.
+/// Empty when nothing is due, so a quiet base prints nothing extra.
+pub(crate) fn render_due(face: &Face, rows: &serde_json::Value) -> String {
+    let Some(rows) = rows.as_array().filter(|r| !r.is_empty()) else { return String::new() };
+    let now = crate::store::now();
+    let mut out = String::from("\n  due\n");
+    for r in rows {
+        let title = r["title"].as_str().unwrap_or("");
+        let line = match r["moment"]["at"].as_i64() {
+            None => format!("    (undated)  {title}"),
+            Some(at) if at < now => format!("    {}  {title}", face.ink_dim("overdue")),
+            Some(at) => format!("    {}  {title}", crate::web::judge::ago_or_ahead(at)),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
 }
 
 /// The screen, as a string. Split from `run` for the reason every renderer in
@@ -251,5 +278,26 @@ mod tests {
         assert_eq!(ago(600), "10 min");
         assert_eq!(ago(14_400), "4 h");
         assert_eq!(ago(200_000), "2 d");
+    }
+
+    #[test]
+    fn what_is_due_is_listed_after_the_status_overdue_marked_undated_last() {
+        let now = crate::store::now();
+        let rows = serde_json::json!([
+            { "title": "Send the invoice", "moment": { "at": now - 3_600 } },
+            { "title": "Call the bank", "moment": { "at": now + 7_200 } },
+            { "title": "Something, sometime", "moment": { "at": null } },
+        ]);
+        let out = render_due(&face(), &rows);
+        let (a, b, c) = (
+            out.find("Send the invoice").unwrap(),
+            out.find("Call the bank").unwrap(),
+            out.find("Something, sometime").unwrap(),
+        );
+        assert!(a < b && b < c, "{out}");
+        assert!(out.contains("overdue"), "{out}");
+        assert!(out.contains("in 2 h"), "{out}");
+        assert!(out.contains("(undated)"), "{out}");
+        assert_eq!(render_due(&face(), &serde_json::json!([])), "", "a quiet base says nothing");
     }
 }
