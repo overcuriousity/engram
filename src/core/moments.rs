@@ -565,6 +565,33 @@ pub struct Protos {
 }
 
 impl crate::core::Core {
+    /// Done, and — for a recurring moment — the next occurrence as a new row
+    /// carrying the same rule and source. The done row stays: the history of
+    /// a recurring reminder is its rows.
+    pub async fn complete_moment(&self, id: &str) -> crate::error::Result<()> {
+        let now = self.clock.now();
+        if let Some(m) = self.store.moment(id).await? {
+            self.store.mark_done(id, now).await?;
+            if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
+                && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
+            {
+                self.store
+                    .insert_moment(&crate::store::moments::NewMoment {
+                        artifact_id: m.artifact_id,
+                        kind: crate::store::moments::Kind::Due,
+                        at: Some(next),
+                        tz: m.tz,
+                        rule: m.rule.clone(),
+                        source: m.source,
+                        span: m.span,
+                    })
+                    .await?;
+            }
+            self.store.rearm_remind().await?;
+        }
+        Ok(())
+    }
+
     /// Embeds the prototypes once per embed model and measures the line from
     /// the base's own vectors. Cached in `meta` so a restart pays nothing, and
     /// held in `protos` so a process reads `meta` once. Keyed by model, so a

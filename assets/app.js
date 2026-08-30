@@ -855,6 +855,10 @@
   function dropOffer() {
     var area = document.getElementById('context-offer');
     if (area) area.remove();
+    // What is due goes with it: once there is an intent, the box is the
+    // application and the band under it is furniture.
+    var due = document.getElementById('due');
+    if (due) due.remove();
   }
 
   // The other half of the impression. The server computes an offer without
@@ -2055,6 +2059,7 @@
         if (offerDismissed) dropOffer();
         else confirmOffer(e.target);
       }
+      if (e.target.id === 'due' && offerDismissed) dropOffer();
       enhance(e.target);
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.

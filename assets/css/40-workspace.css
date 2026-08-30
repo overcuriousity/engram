@@ -787,6 +787,21 @@ body { overflow-x: hidden; }
   white-space: pre-wrap; word-break: break-all;
   margin: 0.375rem 0 0; font-size: var(--text-xs);
 }
+/* ── What is due, under the recommendation ──────────────────────────────── */
+.due { margin: 0 0 0.75rem; }
+.due-filled { border-left: 3px solid var(--color-due); padding: 0.375rem 0.75rem; }
+.due-row { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline; padding: 0.25rem 0; }
+.due-title { font-weight: 500; }
+.due-when { color: var(--color-due); }
+.due-overdue .due-when { font-weight: 600; }
+.due-undated .due-when { font-style: italic; }
+.due-done .due-title { text-decoration: line-through; }
+.due-acts { display: inline-flex; gap: 0.25rem; align-items: center; margin-left: auto; flex-wrap: wrap; }
+.due-snooze { display: inline-flex; gap: 0.25rem; align-items: center; font-size: var(--text-xs); }
+.due-date { display: inline-flex; gap: 0.25rem; }
+.due-coming { margin: 0.25rem 0 0; }
+.badge-due { color: var(--color-due); border-color: var(--color-due); }
+
 /* ── A file, waiting to be sent ──────────────────────────────────────────── */
 
 /* The box holds only a file that exists: thumbnail, name, note, Remove. The

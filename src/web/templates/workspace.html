@@ -260,6 +260,13 @@
 <div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
      hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
 {% endif %}
+{# What is due, below the offer: a reminder has a hard reason where a rung has
+   a guess, so it is a second area and not a rung. Fetched because the zone
+   comes from the browser; removed on the first keystroke like the offer. #}
+{% if q.is_empty() %}
+<div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
+     hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
+{% endif %}
 
 {% include "_keyhint.html" %}
 </div>
