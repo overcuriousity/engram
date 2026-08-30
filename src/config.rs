@@ -38,6 +38,8 @@ pub struct Config {
     #[serde(default)]
     pub time: TimeConfig,
     #[serde(default)]
+    pub reap: ReapConfig,
+    #[serde(default)]
     pub recommend: RecommendConfig,
     #[serde(default)]
     pub ui: UiConfig,
@@ -492,6 +494,35 @@ pub struct TimeConfig {
 impl Default for TimeConfig {
     fn default() -> Self {
         Self { horizon_hours: 48, coming_up_days: 7, intent_at: 0.80, lift: true, default_tz: String::new() }
+    }
+}
+
+/// The reap sweep: revisit long-retired artifacts, bury what the live base
+/// already states, rewrite what it does not. Runs only where a judge model is
+/// configured — the rules alone nominate, they never tombstone.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ReapConfig {
+    pub enabled: bool,
+    pub interval_mins: u64,
+    /// How long an artifact must have been retired before it is judged at all.
+    pub min_age_days: u64,
+    /// Model calls per run — the sweep's whole inference budget.
+    pub max_judged_per_run: u64,
+    /// Rescue rewrites per run, so one bad judging batch cannot flood the
+    /// live base with model-written text.
+    pub max_rescues_per_run: u64,
+}
+
+impl Default for ReapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_mins: 1440,
+            min_age_days: 90,
+            max_judged_per_run: 20,
+            max_rescues_per_run: 3,
+        }
     }
 }
 
@@ -2540,6 +2571,7 @@ impl Config {
             schedule: ScheduleConfig::default(),
             sitting: SittingConfig::default(),
             time: TimeConfig::default(),
+            reap: ReapConfig::default(),
             recommend: RecommendConfig::default(),
             ui: UiConfig::default(),
         }

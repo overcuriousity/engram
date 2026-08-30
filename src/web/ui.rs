@@ -380,6 +380,7 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
         "context" => "Learning situations",
         "moments" => "Reading time",
         "remind" => "Pushing what is due",
+        "reap" => "Reaping the retired",
         other => other,
     }
 }

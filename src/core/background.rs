@@ -135,6 +135,12 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     if core.recommends() {
         out.push((Stage::Context, CONSOLIDATE_TARGET));
     }
+    // Revisiting the retired. Behind its own switch and the judge's
+    // existence: the rules alone may nominate but never tombstone, so a base
+    // with no judge model gets no sweep rather than a rules-only one.
+    if core.reap.enabled && core.judge.is_some() {
+        out.push((Stage::Reap, CONSOLIDATE_TARGET));
+    }
     if core.associating() {
         out.push((Stage::Associate, ASSOCIATE_TARGET));
         // Its own period as a floor. The association sweep arming it is what
@@ -172,6 +178,7 @@ pub fn periodic_period(
         Stage::Retention => core.feedback.sweep_hours.max(1).saturating_mul(3600),
         Stage::Context => crate::jobs::context::INTERVAL_HOURS.saturating_mul(3600),
         Stage::Associate => core.associate.interval_mins.max(1).saturating_mul(60),
+        Stage::Reap => core.reap.interval_mins.max(1).saturating_mul(60),
         // Shorter than the idle window, so a run of searches is grouped soon
         // after it goes quiet.
         Stage::Pursuit => (core.pursuit.idle_secs / 2).max(60),
@@ -619,6 +626,38 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn the_reap_sweep_is_armed_only_when_enabled_and_a_judge_exists() {
+        use crate::store::jobs::Stage;
+        let core = crate::core::test_support::test_core().await;
+        assert!(
+            periodic_units(&core)
+                .iter()
+                .any(|(s, _)| *s == Stage::Reap),
+            "on by default when a judge is configured"
+        );
+        assert_eq!(
+            periodic_period(&core, Stage::Reap),
+            Some(Duration::from_secs(1440 * 60))
+        );
+
+        let mut off = crate::core::test_support::test_core().await;
+        off.reap.enabled = false;
+        assert!(
+            !periodic_units(&off).iter().any(|(s, _)| *s == Stage::Reap),
+            "the switch arms nothing"
+        );
+
+        let mut judgeless = crate::core::test_support::test_core().await;
+        judgeless.judge = None;
+        assert!(
+            !periodic_units(&judgeless)
+                .iter()
+                .any(|(s, _)| *s == Stage::Reap),
+            "no judge, no sweep — the rules alone may never tombstone"
+        );
+    }
 
     #[tokio::test]
     async fn the_context_sweep_is_armed_only_when_the_offer_is_on() {

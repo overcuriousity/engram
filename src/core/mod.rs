@@ -223,6 +223,7 @@ pub struct Core {
     /// Whether the sitting may move a result. Carrying needs no setting.
     pub sitting: crate::config::SittingConfig,
     pub time: crate::config::TimeConfig,
+    pub reap: crate::config::ReapConfig,
     /// Whether and how the area under the search box is filled. Read by the
     /// sweep and on the page-view path, so it lives here rather than being
     /// threaded down.
@@ -357,6 +358,7 @@ impl Core {
             schedule: cfg.schedule.clone(),
             sitting: cfg.sitting.clone(),
             time: cfg.time.clone(),
+            reap: cfg.reap.clone(),
             recommend: cfg.recommend.clone(),
             ui: cfg.ui.clone(),
             sittings: working.sittings,
@@ -611,6 +613,7 @@ pub mod test_support {
             // unrelated strings clear 0.80 by chance and the classifier fires on
             // noise. Tests of the classifier hand it vectors directly.
             time: crate::config::TimeConfig { intent_at: 0.99, ..Default::default() },
+            reap: crate::config::ReapConfig::default(),
             // Off, unlike the shipped default: `recommends()` is two flags and
             // a test that leaves both alone must offer nothing. The
             // recommendation tests switch both on.

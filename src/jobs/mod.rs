@@ -2,6 +2,7 @@ pub mod associate;
 pub mod consolidate;
 pub mod context;
 pub mod dedupe;
+pub mod reap;
 pub mod describe;
 pub mod embed;
 pub mod extract;
@@ -175,7 +176,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::Pursuit
             | Stage::Retention
             | Stage::ArmDedupe
-            | Stage::Context,
+            | Stage::Context
+            | Stage::Reap,
             _,
         ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
         (Stage::Moments, _) => moments::run(core, &job.target_id).await,
@@ -296,6 +298,7 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
         Stage::Consolidate => consolidate::run(core).await.and_then(detail),
         Stage::Associate => associate::run(core).await.and_then(detail),
         Stage::Retention => retention::run(core).await.and_then(detail),
+        Stage::Reap => reap::run(core).await.and_then(detail),
         Stage::Context => context::run(core).await.and_then(detail),
         Stage::Pursuit => pursuit::run(core)
             .await
@@ -306,7 +309,7 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
             }
             detail(serde_json::json!({ "armed": n }))
         }),
-        // `run_claimed` sends only the five above here, and a sixth arriving
+        // `run_claimed` sends only the sweeps above here, and a sixth arriving
         // silently unaccounted for is worse than a row saying so.
         _ => detail(serde_json::json!({})),
     };

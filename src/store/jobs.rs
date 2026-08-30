@@ -77,13 +77,18 @@ pub enum Stage {
     /// Push what is due. Armed at the next due moment by every write that can
     /// move it, never on a period.
     Remind,
+    /// The periodic reap sweep: judge long-retired artifacts, bury the
+    /// worthless in the graveyard, rewrite the valuable. Collection-targeted
+    /// like `Consolidate`, so at most one sits in the queue; model calls are
+    /// bounded by `reap.max_judged_per_run`.
+    Reap,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 19] = [
+    pub const ALL: [Stage; 20] = [
         Stage::Synthesize,
         Stage::Enrich,
         Stage::SegmentWindow,
@@ -103,6 +108,7 @@ impl Stage {
         Stage::Context,
         Stage::Moments,
         Stage::Remind,
+        Stage::Reap,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -126,6 +132,7 @@ impl Stage {
             Stage::Context => "context",
             Stage::Moments => "moments",
             Stage::Remind => "remind",
+            Stage::Reap => "reap",
         }
     }
     /// Is someone waiting on this? `0` foreground, `1` background.
@@ -161,7 +168,8 @@ impl Stage {
             | Stage::ArmDedupe
             | Stage::Context
             | Stage::Moments
-            | Stage::Remind => 1,
+            | Stage::Remind
+            | Stage::Reap => 1,
         }
     }
 
@@ -186,6 +194,7 @@ impl Stage {
             "context" => Some(Stage::Context),
             "moments" => Some(Stage::Moments),
             "remind" => Some(Stage::Remind),
+            "reap" => Some(Stage::Reap),
             _ => None,
         }
     }
