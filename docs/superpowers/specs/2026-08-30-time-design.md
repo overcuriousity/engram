@@ -1,7 +1,20 @@
 # A sense of time — moments, reminders, the day — Design
 
 Date: 2026-08-30
-Status: draft
+Status: implemented (2026-08-30)
+
+> **Implementation notes.** The classifier runs in the `Moments` stage after
+> `Embed`, so the capture receipt's *kept as today's entry — undo* covers the
+> cue case (checked synchronously in `ingest_capture`) and the day page's
+> *not an entry* covers the classified case. `regex` (date rules) and
+> `iana-time-zone` (the CLI's own zone) entered the tree. The prototype cache
+> is keyed by embed model, so `--reindex` under the same model has nothing to
+> clear. A forced intent (`-r`, `?intent=remind`) is recorded as `source =
+> 'cue'`, not `'set'`: it is the stage's own row and a re-read replaces it. The
+> search row carries `due_at` and a ready-made `due_in` ("in 2 h") so every
+> door prints the same words. Under the fake embedder the test core sets
+> `time.intent_at = 0.99`, since eight-dimensional hash vectors clear 0.80 by
+> chance.
 Adds `src/core/moments.rs`, `src/jobs/moments.rs`, `src/jobs/remind.rs`,
 `src/web/day.rs`, `templates/day.html`, `templates/_due.html`; touches
 `src/store/schema.sql` (one table), `src/store/control_schema.sql` (one

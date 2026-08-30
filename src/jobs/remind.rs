@@ -74,7 +74,7 @@ pub async fn run(core: &Core) -> Result<()> {
         for t in &targets {
             push(&http, t, &row.title, &message).await?;
         }
-        core.store.mark_notified(&[row.moment.id.clone()], now).await?;
+        core.store.mark_notified(std::slice::from_ref(&row.moment.id), now).await?;
     }
     core.store.rearm_remind().await
 }

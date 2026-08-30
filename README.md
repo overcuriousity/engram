@@ -52,6 +52,11 @@ positions those searches really gave. Not a proxy score.
   so what you use stays reachable. It never rewrites what is stored.
 - **Gaps** — questions the base could not answer are grouped, named and listed
   until you cover them.
+- **Time** — *remind me Friday to send the invoice* is a reminder, dated at
+  capture and shown under the box when it comes due, with done, snooze and
+  push to Gotify or UnifiedPush. Dates a note refers to are read out of it
+  with no model. Every *today* is a link to the day: what you wrote, what
+  you looked for, what was due.
 
 Everything after the paste runs on its own, and sweeps repair whatever was
 interrupted. You do not babysit it.
@@ -397,6 +402,8 @@ needing root.
 engram -c notes.pdf                 # capture; `pbpaste | engram` captures a pipe
 engram -s 40 "loop device"          # search, as wide as you ask
 engram -a "how did I mount it?"     # stream an answer
+engram -r "call the bank tomorrow"  # a reminder, dated at capture
+engram -j "long day, but it built"  # today's journal entry
 engram --show 3                     # read the third hit of the last search in full
 ```
 

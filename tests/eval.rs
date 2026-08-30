@@ -507,6 +507,9 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         link_judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         gap_namer: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
+        reminder: None,
+        protos: Arc::new(tokio::sync::OnceCell::new()),
+        time: engram::config::TimeConfig::default(),
         generator: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         // The harness measures the shipped default, which is one round.
         planner: None,

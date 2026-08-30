@@ -860,4 +860,25 @@ mod tests {
         assert_eq!(local(next_after("FREQ=DAILY;INTERVAL=3", at, berlin()).unwrap()), "2026-09-03 09:00");
         assert_eq!(local(next_after("FREQ=YEARLY", at, berlin()).unwrap()), "2027-08-31 09:00");
     }
+
+    #[tokio::test]
+    async fn the_prototypes_are_embedded_once_and_cached_under_the_model() {
+        let (mut core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
+        core.protos = std::sync::Arc::new(tokio::sync::OnceCell::new());
+        let before = embedder.calls();
+        let first = core.prototypes().await.unwrap();
+        assert_eq!(first.vectors.len(), PROTOTYPES.len());
+        assert_eq!(first.line, core.time.intent_at, "too small a base to measure a line");
+        assert_eq!(embedder.calls(), before + 1, "one batch");
+        core.prototypes().await.unwrap();
+        assert_eq!(embedder.calls(), before + 1, "held on the core after that");
+        let key = format!("moments.prototypes.{}", core.embedder.model());
+        let cached = core.store.meta_get(&key).await.unwrap().expect("cached in meta");
+        let parsed: Vec<(Intent, Vec<f32>)> = serde_json::from_str(&cached).unwrap();
+        assert_eq!(parsed.len(), PROTOTYPES.len());
+        // A fresh process with the same model reads the cache and embeds nothing.
+        core.protos = std::sync::Arc::new(tokio::sync::OnceCell::new());
+        core.prototypes().await.unwrap();
+        assert_eq!(embedder.calls(), before + 1);
+    }
 }

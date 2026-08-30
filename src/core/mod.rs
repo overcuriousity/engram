@@ -552,7 +552,14 @@ pub mod test_support {
             reminder: Some(Arc::new(FakeCompleter {
                 reply: Some(r#"{"when":null,"rule":null,"what":"fake"}"#.into()),
             })),
-            protos: Arc::new(tokio::sync::OnceCell::new()),
+            // Pre-filled and empty: no test pays an embed call for the
+            // prototypes, and the hash-vector embedder cannot fire the
+            // classifier on noise. `prototypes()` has its own test, over a
+            // core that clears this.
+            protos: Arc::new(tokio::sync::OnceCell::new_with(Some(crate::core::moments::Protos {
+                vectors: vec![],
+                line: 1.0,
+            }))),
             generator: Some(Arc::new(FakeCompleter::default())),
             // Off, unlike the shipped default: a test that wants a fan-out puts
             // a completer here, and every other test gets one round and no

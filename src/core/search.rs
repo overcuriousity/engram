@@ -1574,7 +1574,7 @@ impl Core {
         };
         for r in &mut results {
             r.due_at = due_map.get(&r.artifact_id).copied();
-            r.due_in = r.due_at.map(|at| crate::web::judge::ago_or_ahead(at));
+            r.due_in = r.due_at.map(crate::web::judge::ago_or_ahead);
         }
         let due: std::collections::HashSet<String> = match self.time.lift {
             true => due_map.keys().cloned().collect(),

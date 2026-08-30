@@ -1846,8 +1846,8 @@ mod tests {
         // rather than a slow one.
         //
         // The exact total is what pins it, and it is now two things rather than
-        // one: three batch claims, plus one `relate` unit per artifact that
-        // reached the index. Either number drifting shows up here — an extra
+        // one: three batch claims, plus one `relate` unit and one `moments`
+        // unit per artifact that reached the index. Either number drifting shows up here — an extra
         // batch claim means the re-arm ran long, and a missing relate unit means
         // an artifact was indexed without ever being checked for duplicates,
         // which is the silent half.
@@ -1855,7 +1855,9 @@ mod tests {
         while crate::jobs::run_one(&core).await.unwrap() {
             claims += 1;
             assert!(
-                claims <= 3 + chunks,
+                // One `Moments` unit per chunk rides on the embed; the bound
+                // is about batch claims, so those are allowed for.
+                claims <= 3 + 2 * chunks,
                 "the re-arm never terminated: {claims} claims"
             );
         }
@@ -1870,8 +1872,8 @@ mod tests {
         );
         assert_eq!(
             claims,
-            3 + chunks,
-            "expected one claim per batch, plus one relate unit per artifact"
+            3 + 2 * chunks,
+            "expected one claim per batch, plus one relate and one moments unit per artifact"
         );
     }
 

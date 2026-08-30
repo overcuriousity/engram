@@ -69,10 +69,8 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     };
 
     match intent {
-        Some(Intent::Journal) => {
-            if JOURNALABLE.contains(&src.origin.as_str()) {
-                core.set_entry(cid, true).await?;
-            }
+        Some(Intent::Journal) if JOURNALABLE.contains(&src.origin.as_str()) => {
+            core.set_entry(cid, true).await?;
         }
         Some(Intent::Remind) => {
             let (at, rule) = date_reminder(core, &art.text, src.created_at, tz, &tz_name, &found).await;
@@ -89,13 +87,13 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
                 .await?;
             core.store.rearm_remind().await?;
         }
-        None => {}
+        Some(Intent::Journal) | None => {}
     }
     Ok(())
 }
 
-/// 4. The model if there is one, else the relative table, else what step 3
-/// found; the nearest future date wins. `(None, None)` is an undated reminder.
+/// Step 4: the model if there is one, else the relative table, else what step
+/// 3 found; the nearest future date wins. `(None, None)` is an undated reminder.
 async fn date_reminder(
     core: &Core,
     text: &str,

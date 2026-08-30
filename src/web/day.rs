@@ -308,7 +308,7 @@ mod tests {
                 .unwrap();
         }
         core.store
-            .insert_pursuit(day + 14 * 3_600, &["qdrant payload filter".into()], &[aid.clone()], None)
+            .insert_pursuit(day + 14 * 3_600, &["qdrant payload filter".into()], std::slice::from_ref(&aid), None)
             .await
             .unwrap();
         // The capture itself landed at the real now, not on the fixed day;

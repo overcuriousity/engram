@@ -385,7 +385,7 @@ mod tests {
         let b = s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
         s.insert_moment(&due(&aid, None)).await.unwrap();
         assert_eq!(s.next_notify_at().await.unwrap(), Some(1_000));
-        s.mark_notified(&[b.clone()], 1_001).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&b), 1_001).await.unwrap();
         assert_eq!(s.next_notify_at().await.unwrap(), Some(3_000));
         let owed = s.due_unnotified(3_500).await.unwrap();
         assert_eq!(owed.len(), 1);
@@ -401,7 +401,7 @@ mod tests {
         s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
         let hit = s.due_for(&[aid.clone(), "other".into()], 500, 2_000).await.unwrap();
         assert_eq!(hit.get(&aid), Some(&1_000));
-        assert!(s.due_for(&[aid.clone()], 1_500, 2_000).await.unwrap().is_empty(), "already past");
+        assert!(s.due_for(std::slice::from_ref(&aid), 1_500, 2_000).await.unwrap().is_empty(), "already past");
     }
 
     #[tokio::test]
