@@ -119,6 +119,20 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
         ));
     }
 
+    // What the last reap sweep did, and how many retired rows still hold
+    // their text. Absent from an older server, absent while the sweep is off
+    // — either way the key is missing and the line with it.
+    if let Some(r) = s["reap"].as_object() {
+        let n = |k: &str| r.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
+        out.push_str(&format!(
+            "\n  reap       {} judged · {} reaped · {} rescued · {} retired waiting\n",
+            n("judged"),
+            n("reaped"),
+            n("rescued"),
+            n("retired_waiting"),
+        ));
+    }
+
     // The rows, not only the count: a failed job nobody can name is a failed
     // job nobody can retry.
     if let Some(failed) = s["failed"].as_array().filter(|f| !f.is_empty()) {
@@ -210,6 +224,24 @@ mod tests {
         assert!(!out.contains("learning"), "{out}");
         assert!(out.contains("1842 artifacts"), "{out}");
         assert!(out.contains("engram.mikoshi.de"), "{out}");
+    }
+
+    /// The reap line: what the last sweep did, and how many retired rows
+    /// still wait with their text. Absent from an older server's JSON, so
+    /// absent from the render too.
+    #[test]
+    fn the_reap_line_says_what_was_done_and_what_waits() {
+        let mut b = body(serde_json::Value::Null);
+        b["reap"] = serde_json::json!({
+            "judged": 3, "reaped": 2, "rescued": 1, "retired_waiting": 41
+        });
+        let out = render(&face(), &endpoint(), &b);
+        assert!(
+            out.contains("3 judged · 2 reaped · 1 rescued · 41 retired waiting"),
+            "{out}"
+        );
+        let without = render(&face(), &endpoint(), &body(serde_json::Value::Null));
+        assert!(!without.contains("reap"), "{without}");
     }
 
     /// The half that was invisible from a shell: a pursuit closed unsatisfied

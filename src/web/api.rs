@@ -173,6 +173,19 @@ pub struct StatusResponse {
     /// Absent rather than zeroed: four zeroes read like a faculty failing, and
     /// a faculty that was never switched on is not failing.
     pub learning: Option<Learning>,
+    /// What the last reap sweep did, or `None` while the sweep is off —
+    /// absent for the same honesty as `learning`.
+    pub reap: Option<ReapStatus>,
+}
+
+/// The reap line: the last run's counts, and how many retired rows still
+/// hold their text.
+#[derive(serde::Serialize)]
+pub struct ReapStatus {
+    pub judged: i64,
+    pub reaped: i64,
+    pub rescued: i64,
+    pub retired_waiting: i64,
 }
 
 /// The half of `status` that is not about machinery.
@@ -1444,8 +1457,26 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
         }),
     };
 
+    let reap = if tenant.core.reap.enabled && tenant.core.judge.is_some() {
+        let last = tenant.core.store.last_sweep_run("reap").await?;
+        let n = |d: &serde_json::Value, k: &str| d.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        let detail: serde_json::Value = last
+            .as_ref()
+            .and_then(|r| serde_json::from_str(&r.detail).ok())
+            .unwrap_or(serde_json::Value::Null);
+        Some(ReapStatus {
+            judged: n(&detail, "judged"),
+            reaped: n(&detail, "reaped"),
+            rescued: n(&detail, "rescued"),
+            retired_waiting: tenant.core.store.retired_unreaped_count().await?,
+        })
+    } else {
+        None
+    };
+
     Ok(Json(StatusResponse {
         learning,
+        reap,
         sources: corpus_rows
             .iter()
             .map(|r| (r.get("status"), r.get("n")))
