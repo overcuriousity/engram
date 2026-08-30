@@ -70,6 +70,23 @@ reading, and search from a panel beside it.</p>
   </tbody>
 </table>
 {% endif %}
+<h3>Notifications</h3>
+<p class="muted">A due reminder is pushed here. Leave a field empty to switch that channel off.</p>
+<div id="notify-result"></div>
+<form method="post" action="/ui/settings/notify" class="col" style="max-width:32rem;gap:0.5rem;margin-bottom:1rem">
+  <label>Gotify message URL
+    <input class="input" name="gotify_url" value="{{ gotify_url }}" placeholder="https://gotify.example/message"></label>
+  <label>Gotify app token
+    <input class="input" name="gotify_token" type="password" autocomplete="off"
+           placeholder="{% if gotify_token_set %}•••••••• (kept unless you type a new one){% else %}token{% endif %}"></label>
+  <label>UnifiedPush endpoint
+    <input class="input" name="up_endpoint" value="{{ up_endpoint }}" placeholder="https://nextcloud.example/index.php/apps/uppush/push/…"></label>
+  <div class="row">
+    <button class="btn btn-accent" type="submit">Save</button>
+    <button class="btn btn-ghost" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"gotify"}' hx-target="#notify-result">Test Gotify</button>
+    <button class="btn btn-ghost" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"unifiedpush"}' hx-target="#notify-result">Test UnifiedPush</button>
+  </div>
+</form>
 {% match feedback %}
 {% when Some with (f) %}
 <h3>Feedback</h3>

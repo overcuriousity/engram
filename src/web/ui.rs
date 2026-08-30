@@ -767,6 +767,11 @@ pub(crate) fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i
 struct SettingsTemplate {
     /// Waiting judgements for the nav. See `state::judge_pending`.
     judge_pending: Option<i64>,
+    /// Where due reminders are pushed. The token is never rendered; only
+    /// whether one is stored.
+    gotify_url: String,
+    gotify_token_set: bool,
+    up_endpoint: String,
     tokens: Vec<TokenRow>,
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
@@ -2367,8 +2372,12 @@ async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
 /// Housekeeping is: neither belongs in a top row that is three destinations
 /// wide on purpose.
 async fn settings(tenant: Tenant) -> Result<Response> {
+    let notify = tenant.core.store.control.notify(&tenant.user.subject).await?;
     Ok(HtmlTemplate(SettingsTemplate {
         judge_pending: crate::web::state::judge_pending(&tenant).await,
+        gotify_url: notify["gotify"]["url"].as_str().unwrap_or_default().to_string(),
+        gotify_token_set: notify["gotify"]["token"].as_str().is_some_and(|t| !t.is_empty()),
+        up_endpoint: notify["unifiedpush"]["endpoint"].as_str().unwrap_or_default().to_string(),
         tokens: token_rows(&tenant).await?,
         feedback: match tenant.core.learn.enabled {
             true => Some(
@@ -2430,6 +2439,71 @@ async fn purge_feedback_ui(tenant: Tenant) -> Result<Response> {
 #[derive(serde::Deserialize)]
 struct MintForm {
     name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct NotifyForm {
+    #[serde(default)]
+    gotify_url: String,
+    #[serde(default)]
+    gotify_token: String,
+    #[serde(default)]
+    up_endpoint: String,
+}
+
+/// Save the channels. A blank token keeps the stored one while the url stays;
+/// a blank url or endpoint switches that channel off. Saving re-arms the
+/// Remind unit, because a channel just configured is what makes it worth arming.
+async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> Result<Response> {
+    let control = &tenant.core.store.control;
+    let stored = control.notify(&tenant.user.subject).await?;
+    let mut notify = serde_json::json!({});
+    let url = f.gotify_url.trim();
+    if !url.is_empty() {
+        let token = match f.gotify_token.trim() {
+            "" => stored["gotify"]["token"].as_str().unwrap_or_default().to_string(),
+            t => t.to_string(),
+        };
+        notify["gotify"] = serde_json::json!({ "url": url, "token": token });
+    }
+    let endpoint = f.up_endpoint.trim();
+    if !endpoint.is_empty() {
+        notify["unifiedpush"] = serde_json::json!({ "endpoint": endpoint });
+    }
+    control.set_notify(&tenant.user.subject, &notify).await?;
+    tenant.core.store.rearm_remind().await?;
+    Ok(Redirect::to("/ui/settings").into_response())
+}
+
+#[derive(serde::Deserialize)]
+struct NotifyTestForm {
+    channel: String,
+}
+
+/// One test message down the named channel, answered as a fragment.
+async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> Result<Response> {
+    let notify = tenant.core.store.control.notify(&tenant.user.subject).await?;
+    let target = crate::jobs::remind::notify_targets(&notify).into_iter().find(|t| match t {
+        crate::jobs::remind::Target::Gotify { .. } => f.channel == "gotify",
+        crate::jobs::remind::Target::UnifiedPush { .. } => f.channel == "unifiedpush",
+    });
+    let Some(target) = target else {
+        return Ok(axum::response::Html("<p class=\"muted\">That channel is not configured — save it first.</p>").into_response());
+    };
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    Ok(match crate::jobs::remind::push(&http, &target, "engram", "A test from Settings.").await {
+        Ok(()) => axum::response::Html("<p class=\"muted\">Sent.</p>".to_string()),
+        // The error names the endpoint the operator typed; escaped, since it
+        // is rendered as a fragment.
+        Err(e) => axum::response::Html(format!(
+            "<p class=\"muted\">Could not send: {}</p>",
+            e.to_string().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        )),
+    }
+    .into_response())
 }
 
 async fn mint_token(
@@ -3180,6 +3254,8 @@ pub fn ui_router() -> Router<AppState> {
             get(|_: Tenant| async { Redirect::to("/ui/insights") }),
         )
         .route("/ui/settings", get(settings))
+        .route("/ui/settings/notify", post(save_notify))
+        .route("/ui/settings/notify/test", post(test_notify))
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
@@ -3324,6 +3400,9 @@ mod tests {
         askama::Template::render(&SettingsTemplate {
             account: crate::store::TEST_SUBJECT.into(),
             judge_pending: None,
+            gotify_url: String::new(),
+            gotify_token_set: false,
+            up_endpoint: String::new(),
             tokens,
             feedback: None,
             asks: None,
@@ -11851,5 +11930,47 @@ mod tests {
                 .unwrap();
             assert_eq!(res.status(), StatusCode::NOT_FOUND, "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn notification_channels_are_saved_masked_and_a_blank_token_keeps_the_stored_one() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_for(core.clone()).await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/settings/notify",
+                &cookie,
+                "gotify_url=https%3A%2F%2Fg%2Fmessage&gotify_token=abc&up_endpoint=",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let html = get(&app, "/ui/settings", &cookie).await;
+        assert!(html.contains("https://g/message"));
+        assert!(html.contains("••••"), "a stored token is shown as stored");
+        assert!(!html.contains("abc"), "and never rendered");
+        app.clone()
+            .oneshot(form("/ui/settings/notify", &cookie, "gotify_url=https%3A%2F%2Fg%2Fmessage&gotify_token=&up_endpoint="))
+            .await
+            .unwrap();
+        let notify = core.store.control.notify(&core.store.subject).await.unwrap();
+        assert_eq!(notify["gotify"]["token"], "abc");
+        app.clone()
+            .oneshot(form("/ui/settings/notify", &cookie, "gotify_url=&gotify_token=&up_endpoint=https%3A%2F%2Fu%2Fx"))
+            .await
+            .unwrap();
+        let notify = core.store.control.notify(&core.store.subject).await.unwrap();
+        assert!(notify.get("gotify").is_none(), "a blank url switches the channel off");
+        assert_eq!(notify["unifiedpush"]["endpoint"], "https://u/x");
+    }
+
+    #[tokio::test]
+    async fn a_test_on_an_unconfigured_channel_says_so() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_for(core).await;
+        let res = app.oneshot(form("/ui/settings/notify/test", &cookie, "channel=gotify")).await.unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("not configured"), "{html}");
     }
 }

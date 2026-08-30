@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS users (
   -- `engram --grant-judge`; there is no role model behind it and no page that
   -- sets it.
   can_judge    INTEGER NOT NULL DEFAULT 0,
+  -- Where a due reminder is pushed, namespaced JSON: {"gotify": {"url",
+  -- "token"}, "unifiedpush": {"endpoint"}}. '{}' means nowhere, and the
+  -- Remind unit is never armed for this user.
+  notify       TEXT NOT NULL DEFAULT '{}',
   created_at   INTEGER NOT NULL
 );
 

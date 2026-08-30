@@ -2,7 +2,7 @@
 //! Read-only over `moments`, plus the four writes a person makes with a
 //! button. No model call anywhere on this page.
 
-use crate::core::moments::{next_after, zone, DEFAULT_HOUR};
+use crate::core::moments::{zone, DEFAULT_HOUR};
 use crate::error::Result;
 use crate::store::moments::{DueRow, Kind, NewMoment, Source};
 use crate::tenants::Tenant;
