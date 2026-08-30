@@ -7,6 +7,7 @@ pub mod fetch;
 pub mod gaps;
 pub mod image;
 pub mod ingest;
+pub mod moments;
 pub mod pdf;
 pub mod ranking;
 pub mod recommend;
