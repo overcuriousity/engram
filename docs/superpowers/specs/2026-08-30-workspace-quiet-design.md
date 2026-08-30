@@ -69,9 +69,22 @@ gone, the marooned chip row is gone, and the empty third column is gone.
 `done_at` on the moment; the artifact stays embedded and searchable, and keeps
 its place at the top of *Last captured* forever. That is the complaint.
 
-**The rule.** When a moment is completed and no open moment remains for that
-artifact, and the capture carried `intent = "remind"`, the source is marked
-retired.
+**The rule.** When a moment is completed and no open moment remains for any
+artifact of that corpus, and some moment on that corpus was *read out of the
+note* rather than set by hand, the corpus is marked retired.
+
+"Read out of the note" is the `moments.source` column, which already records
+exactly this: `cue` and `classified` mean the note was recognised as a
+reminder, `set` means a person put a date on it, `extracted` means a date was
+mentioned in passing prose. The test is `EXISTS a moment on this corpus with
+source in ('cue','classified')`. It deliberately looks at every moment the
+corpus ever had, not just the one being completed — otherwise moving a cue
+reminder's date, which writes a fresh `set` row, would lose the note's
+history of having been a reminder in the first place.
+
+`intent` is not usable for this test: `src/jobs/moments.rs:59` only reads it
+back when a door forced it, and the cue and classifier paths never write it to
+`corpora.metadata`.
 
 The recurring case falls out for free: `complete_moment` arms the next
 occurrence, so an open moment still exists and nothing is retired. Snooze does
@@ -93,10 +106,10 @@ written to be kept.
 table, no deletion path, nothing to garbage-collect. `undone` clears it, so the
 undo already on screen restores the row and the note together.
 
-**The judgement call.** This fires only for notes engram classified as `remind`
-at capture. A date set by hand on an ordinary note — an article you gave a
-deadline — is not retired when done, because that note was never a reminder
-cue. It is a document with a date on it, and it stays a document.
+**The judgement call.** This fires only for notes engram read as reminders. A
+date set by hand on an ordinary note — an article you gave a deadline — is not
+retired when done, because that note was never a reminder cue. It is a document
+with a date on it, and it stays a document.
 
 ## 3. The due band: live, and styled
 
