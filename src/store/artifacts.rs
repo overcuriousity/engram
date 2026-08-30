@@ -1517,6 +1517,32 @@ impl Store {
         Ok(row.map(|r| (r.get("text"), r.get("meta_json"), r.get("reaped_at"))))
     }
 
+    /// Every artifact a live merge younger than `min_age_secs` was written
+    /// from — roots and the vias the chain passed through. The reap sweep
+    /// leaves these alone: undoing a merge needs its sources' text back, and
+    /// only a *fresh* merge still plausibly has an undo coming.
+    pub async fn sources_of_fresh_merges(&self, min_age_secs: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT s.root_id AS aid FROM artifact_sources s
+              JOIN artifacts m ON m.id = s.child_id
+             WHERE m.provenance = 'merged'
+               AND m.status = 'active' AND m.superseded_by IS NULL
+               AND m.created_at > ?
+             UNION
+             SELECT s.via_id AS aid FROM artifact_sources s
+              JOIN artifacts m ON m.id = s.child_id
+             WHERE m.provenance = 'merged'
+               AND m.status = 'active' AND m.superseded_by IS NULL
+               AND m.created_at > ?
+               AND s.via_id IS NOT NULL",
+        )
+        .bind(now() - min_age_secs)
+        .bind(now() - min_age_secs)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get("aid")).collect())
+    }
+
     /// How many retired rows still hold their text — the standing count the
     /// status line shows beside what the last sweep did.
     pub async fn retired_unreaped_count(&self) -> Result<i64> {
