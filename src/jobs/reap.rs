@@ -29,9 +29,67 @@ pub struct Report {
 
 pub async fn run(core: &Core) -> Result<Report> {
     let mut report = Report::default();
-    let (_cands, stamped) = nominees(core).await?;
+    let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
+    for c in &cands {
+        report.judged += 1;
+        match judge_one(core, c).await {
+            Ok(crate::infer::prompt::Reap::Worthless { reason }) => {
+                match reap_one(core, c, &reason).await {
+                    Ok(()) => {
+                        report.reaped += 1;
+                        tracing::info!(artifact_id = %c.id, reason, "reaped a retired artifact");
+                    }
+                    Err(e) => {
+                        tracing::warn!(artifact_id = %c.id, error = %e, "could not bury a worthless artifact")
+                    }
+                }
+            }
+            Ok(crate::infer::prompt::Reap::Valuable { reason }) => {
+                tracing::info!(artifact_id = %c.id, reason, "a retired artifact still holds value");
+            }
+            // A reply that failed or cannot be read acts on nothing; the row
+            // is simply a candidate again next interval. The sweep's cadence
+            // is the retry — no bookkeeping.
+            Err(e) => {
+                tracing::warn!(artifact_id = %c.id, error = %e, "reap judgement failed; candidate waits")
+            }
+        }
+    }
     Ok(report)
+}
+
+/// Act on `worthless`: copy to the graveyard and wipe the row, then delete
+/// the vector point.
+///
+/// Row before point, marker before delete — the same protocol every lifecycle
+/// write uses. A delete that fails leaves a marked row against a standing
+/// point, which is exactly the drift the repair pass reads
+/// `lifecycle_dirty` to find; nothing else in the system would notice. Under
+/// `lifecycle_lock` so no restore lands between the copy and the wipe.
+async fn reap_one(core: &Core, c: &crate::store::artifacts::Chunk, reason: &str) -> Result<()> {
+    let meta = serde_json::json!({
+        "reason": reason,
+        "status": c.status.as_str(),
+        "superseded_by": c.superseded_by,
+        "provenance": c.provenance.as_str(),
+        "tags": c.tags,
+        "corpus_id": c.corpus_id,
+        "corpus_span": c.corpus_span,
+        "created_at": c.created_at,
+        "retired_at": c.retired_at,
+    })
+    .to_string();
+    let _guard = core.lifecycle_lock.lock().await;
+    core.store.bury(&c.id, &meta).await?;
+    core.store.mark_lifecycle_dirty(&c.id).await?;
+    core.vectors
+        .delete_artifacts(std::slice::from_ref(&c.id))
+        .await?;
+    core.store
+        .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
+        .await?;
+    Ok(())
 }
 
 /// The free pass: who goes in front of the judge, and at what cost — three
@@ -284,6 +342,69 @@ mod tests {
             "the judge must see both sides: {}",
             prompts[0]
         );
+    }
+
+    #[tokio::test]
+    async fn a_worthless_verdict_reaches_the_graveyard_and_the_point_dies() {
+        let mut core = test_core().await;
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+            ]),
+        ));
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped, report.rescued), (1, 1, 0));
+
+        let row = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert_eq!(row.text, "");
+        assert!(row.reaped_at.is_some());
+        let (text, meta, _) = core
+            .store
+            .graveyard_row(&ids[0])
+            .await
+            .unwrap()
+            .expect("a grave");
+        assert!(text.contains("stale duplicate fact"));
+        assert!(meta.contains("covered"));
+        assert!(
+            core.vectors
+                .payloads_of(std::slice::from_ref(&ids[0]))
+                .await
+                .unwrap()
+                .is_empty(),
+            "the point must be gone"
+        );
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the marker must be cleared once the delete is acknowledged"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_reply_leaves_the_candidate_untouched() {
+        let mut core = test_core().await;
+        // An empty script: the call itself errors, which must act on nothing.
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![]),
+        ));
+        let ids = seed(&core, &["still here"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped), (1, 0));
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().text,
+            "still here"
+        );
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
     }
 
     #[tokio::test]
