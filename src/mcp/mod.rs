@@ -148,6 +148,44 @@ pub fn format_search_results(
 /// One hit's stages, in the order they ran. Named rather than counted: an
 /// agent gets this string and nothing else, so a number it cannot attribute
 /// to a stage is worse than no line at all.
+/// The `due` tool's answer: three sections, each row in its own zone, and one
+/// line when there is nothing.
+pub(crate) fn format_due(rows: &[crate::store::moments::DueRow], now: i64) -> String {
+    if rows.is_empty() {
+        return "_Nothing is due._".to_string();
+    }
+    let mut overdue = vec![];
+    let mut due = vec![];
+    let mut undated = vec![];
+    for r in rows {
+        let line = match r.moment.at {
+            None => format!("- **{}** (id: {})", r.title, r.moment.id),
+            Some(at) => format!(
+                "- **{}** — {} (id: {})",
+                r.title,
+                crate::web::due::when_words(at, now, crate::core::moments::zone(Some(&r.moment.tz))),
+                r.moment.id
+            ),
+        };
+        match r.moment.at {
+            None => undated.push(line),
+            Some(at) if at < now => overdue.push(line),
+            Some(_) => due.push(line),
+        }
+    }
+    let mut out = String::new();
+    for (head, lines) in [("## Overdue", overdue), ("## Due", due), ("## Undated", undated)] {
+        if lines.is_empty() {
+            continue;
+        }
+        out.push_str(head);
+        out.push('\n');
+        out.push_str(&lines.join("\n"));
+        out.push_str("\n\n");
+    }
+    out.trim_end().to_string()
+}
+
 fn why_line(e: &crate::core::explain::HitExplanation) -> String {
     if let Some(via) = &e.recalled_via {
         return format!("\n_why it is here: recalled beside `{via}`; never ranked._");
@@ -316,6 +354,26 @@ pub struct IngestParams {
     /// beside the text, never inside it.
     #[serde(default)]
     pub note: Option<String>,
+    /// `journal` to file `text` as today's diary entry. Nothing else is
+    /// accepted.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// The IANA time zone the text was written in (e.g. `Europe/Berlin`), so
+    /// a date in it is read there.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// `remind` to store `text` as a reminder: it is dated at capture and
+    /// comes back from `due` when its time approaches.
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DueParams {
+    /// How far ahead counts as due. The server's `time.horizon_hours` (48)
+    /// when absent.
+    #[serde(default)]
+    pub horizon_hours: Option<u64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -389,11 +447,17 @@ impl PkdbTools {
             return "Ingest failed: supply exactly one of `text`, `url` or `file_base64`."
                 .to_string();
         }
+        let time = match crate::web::api::capture_time(p.tz, p.origin, p.intent, ORIGIN_MCP) {
+            Ok(t) => t,
+            Err(e) => return format!("Ingest failed: {e}"),
+        };
         let outcome = if let Some(text) = p.text {
             core.ingest_capture(
-                Capture::new(text, ORIGIN_MCP)
+                Capture::new(text, time.origin)
                     .with_title(p.title)
-                    .with_note(p.note),
+                    .with_note(p.note)
+                    .with_tz(time.tz)
+                    .with_intent(time.intent),
             )
             .await
         } else if let Some(raw) = p.url {
@@ -494,6 +558,26 @@ impl PkdbTools {
             "{head}\n\n{}",
             page_of(&body, p.offset.unwrap_or(0), p.max_chars)
         )
+    }
+
+    #[tool(
+        name = "due",
+        description = "What the operator has asked to be reminded of: overdue, due \
+                       within the horizon (default 48h), and reminders still waiting \
+                       for a date. Read-only; `done` and `snooze` are on the web UI \
+                       and the REST API."
+    )]
+    async fn due(&self, Parameters(p): Parameters<DueParams>) -> String {
+        let core = match self.source.core().await {
+            Ok(c) => c,
+            Err(e) => return format!("Due failed: {e}"),
+        };
+        let now = core.clock.now();
+        let horizon = now + p.horizon_hours.unwrap_or(core.time.horizon_hours) as i64 * 3_600;
+        match core.store.open_due(now, horizon).await {
+            Ok(rows) => format_due(&rows, now),
+            Err(e) => format!("Due failed: {e}"),
+        }
     }
 
     #[tool(
@@ -1245,6 +1329,9 @@ mod tests {
             filename: None,
             title: None,
             note: None,
+            origin: None,
+            tz: None,
+            intent: None,
         }
     }
 
@@ -1450,5 +1537,76 @@ mod tests {
         let tools = PkdbTools::over(core);
         assert!(!tools.routes().has_route("ask"));
         assert!(tools.routes().has_route("search"));
+    }
+
+    fn due_row(title: &str, at: Option<i64>) -> crate::store::moments::DueRow {
+        crate::store::moments::DueRow {
+            moment: crate::store::moments::Moment {
+                id: format!("m-{title}"),
+                artifact_id: "a".into(),
+                kind: crate::store::moments::Kind::Due,
+                at,
+                until: None,
+                tz: "UTC".into(),
+                rule: None,
+                source: crate::store::moments::Source::Set,
+                span: None,
+                done_at: None,
+                snoozed_until: None,
+                notified_at: None,
+                created_at: 0,
+            },
+            title: title.into(),
+            opening: title.into(),
+        }
+    }
+
+    #[test]
+    fn the_due_tool_answers_in_three_sections_or_one_line() {
+        let now = 1_000_000;
+        let out = format_due(
+            &[due_row("late", Some(now - 60)), due_row("soon", Some(now + 3_600)), due_row("someday", None)],
+            now,
+        );
+        let (o, d, u) = (out.find("## Overdue").unwrap(), out.find("## Due").unwrap(), out.find("## Undated").unwrap());
+        assert!(o < d && d < u, "{out}");
+        assert!(out.contains("**late**") && out.contains("id: m-late"), "{out}");
+        assert_eq!(format_due(&[], now), "_Nothing is due._");
+    }
+
+    #[tokio::test]
+    async fn ingest_takes_a_journal_origin_and_refuses_any_other() {
+        let core = crate::core::test_support::test_core().await;
+        let tools = PkdbTools::over(core.clone());
+        let out = tools
+            .ingest(Parameters(IngestParams {
+                text: Some("Long day.".into()),
+                url: None,
+                file_base64: None,
+                filename: None,
+                title: None,
+                note: None,
+                origin: Some("journal".into()),
+                tz: Some("Europe/Berlin".into()),
+                intent: None,
+            }))
+            .await;
+        assert!(out.starts_with("Stored") || out.contains('`'), "{out}");
+        let recent = core.store.recent_captures(1).await.unwrap();
+        assert_eq!(recent[0].2, "journal");
+        let refused = tools
+            .ingest(Parameters(IngestParams {
+                text: Some("x".into()),
+                url: None,
+                file_base64: None,
+                filename: None,
+                title: None,
+                note: None,
+                origin: Some("api".into()),
+                tz: None,
+                intent: None,
+            }))
+            .await;
+        assert!(refused.contains("only `journal`"), "{refused}");
     }
 }
