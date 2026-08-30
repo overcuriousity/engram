@@ -3387,6 +3387,8 @@ mod tests {
             status: crate::store::artifacts::ArtifactStatus::Active,
             last_verified_at: None,
             cues: vec![],
+            retired_at: None,
+            reaped_at: None,
         }
     }
 

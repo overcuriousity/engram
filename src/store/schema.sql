@@ -128,7 +128,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
   -- — one crossing.
   activated_at     INTEGER NOT NULL DEFAULT 0,
   -- For a synthesized artifact: the questions it was written for, JSON list.
-  cues             TEXT    NOT NULL DEFAULT '[]'
+  cues             TEXT    NOT NULL DEFAULT '[]',
+  -- When this artifact left `active` (deprecate or supersede), cleared on the
+  -- way back. The reap sweep's age rule reads this; NULL on a retired row
+  -- means "never stamped" and the sweep stamps it fresh before judging.
+  retired_at       INTEGER,
+  -- When the reap sweep wiped this row's text into `graveyard`. A stub row —
+  -- links intact, text gone — never a candidate again.
+  reaped_at        INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);
@@ -664,6 +671,18 @@ CREATE TABLE IF NOT EXISTS moments (
 );
 CREATE INDEX IF NOT EXISTS idx_moments_open     ON moments(kind, done_at, at);
 CREATE INDEX IF NOT EXISTS idx_moments_artifact ON moments(artifact_id);
+
+-- Where a reaped artifact's text goes. Never read by search, FTS, or the
+-- embedder; permanent by design — its purpose is that no reap verdict is
+-- ever wrong invisibly. `meta_json` snapshots what the stub no longer says:
+-- provenance, tags, span, and the judge's one-line reason.
+CREATE TABLE IF NOT EXISTS graveyard (
+  id         TEXT PRIMARY KEY,
+  title      TEXT,
+  text       TEXT NOT NULL,
+  meta_json  TEXT NOT NULL,
+  reaped_at  INTEGER NOT NULL
+);
 
 -- Cursors that have no row to live on. Three keys so far:
 -- `associate.events_after`, `associate.judged_after`, `pursuit.events_after`.

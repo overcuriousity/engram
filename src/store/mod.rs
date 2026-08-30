@@ -147,7 +147,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 5] = [
+        const ADDITIVE: [(&str, &str, &str); 7] = [
             (
                 "artifacts",
                 "updated_at",
@@ -183,6 +183,19 @@ impl Store {
                 "corpora",
                 "retired_at",
                 "ALTER TABLE corpora ADD COLUMN retired_at INTEGER",
+            ),
+            // Both nullable, no default. NULL on an old retired row truthfully
+            // says "never stamped", and the reap sweep stamps it fresh before
+            // judging rather than a migration inventing a date.
+            (
+                "artifacts",
+                "retired_at",
+                "ALTER TABLE artifacts ADD COLUMN retired_at INTEGER",
+            ),
+            (
+                "artifacts",
+                "reaped_at",
+                "ALTER TABLE artifacts ADD COLUMN reaped_at INTEGER",
             ),
         ];
         for (table, column, ddl) in ADDITIVE {

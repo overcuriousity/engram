@@ -176,6 +176,12 @@ pub struct Chunk {
     /// For a synthesized artifact: the questions it was written for. Empty
     /// everywhere else.
     pub cues: Vec<String>,
+    /// When this artifact left `active`, cleared on the way back. What the
+    /// reap sweep's age rule reads.
+    pub retired_at: Option<i64>,
+    /// When the reap sweep wiped this row's text into `graveyard`. A stub —
+    /// links intact, text gone — never a candidate again.
+    pub reaped_at: Option<i64>,
 }
 
 /// Whether search may return an artifact: active and not hidden behind a
@@ -276,6 +282,8 @@ pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
+        retired_at: r.try_get("retired_at").ok().flatten(),
+        reaped_at: r.try_get("reaped_at").ok().flatten(),
     }
 }
 
@@ -362,6 +370,8 @@ impl Store {
             status: ArtifactStatus::Active,
             last_verified_at: Some(created_at),
             cues: vec![],
+            retired_at: None,
+            reaped_at: None,
         };
         sqlx::query(
             "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
@@ -441,6 +451,8 @@ impl Store {
             status: ArtifactStatus::Active,
             last_verified_at: Some(created_at),
             cues: new.cues.clone(),
+            retired_at: None,
+            reaped_at: None,
         };
         sqlx::query(
             "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, cues)
@@ -551,6 +563,8 @@ impl Store {
                 status: ArtifactStatus::Active,
                 last_verified_at: Some(created_at),
                 cues: vec![],
+                retired_at: None,
+                reaped_at: None,
             };
             sqlx::query(
                 "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
@@ -1065,11 +1079,20 @@ impl Store {
         // statements could be interrupted between, which is the exact failure
         // this is here to catch — a lifecycle change that never reached the
         // payload and that nothing afterwards knows to look for.
+        // `retired_at` rides the same statement for the same reason. Stamped
+        // through COALESCE so a loser re-pointed at a new winner keeps the
+        // clock of its first retirement; cleared when the row returns to
+        // active, so a reactivated artifact never walks into the reap sweep
+        // on a stale one.
         let res = sqlx::query(
-            "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1 WHERE id = ?",
+            "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1,
+                    retired_at = CASE WHEN ? THEN COALESCE(retired_at, ?) ELSE NULL END
+             WHERE id = ?",
         )
         .bind(by)
         .bind(status.as_str())
+        .bind(by.is_some())
+        .bind(now())
         .bind(artifact_id)
         .execute(&self.pool)
         .await?;
@@ -1086,12 +1109,21 @@ impl Store {
     pub async fn set_artifact_status(&self, id: &str, status: ArtifactStatus) -> Result<()> {
         // Marked dirty in the same statement, like `set_superseded_by`. See
         // `dirty_lifecycle_artifacts`.
+        // The same `retired_at` protocol as `set_superseded_by`: stamped on
+        // the way out of `active`, cleared on the way back, in the statement
+        // that moves the status.
         self.expect_updated(
-            sqlx::query("UPDATE artifacts SET status = ?, lifecycle_dirty = 1 WHERE id = ?")
-                .bind(status.as_str())
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query(
+                "UPDATE artifacts SET status = ?, lifecycle_dirty = 1,
+                        retired_at = CASE WHEN ? THEN COALESCE(retired_at, ?) ELSE NULL END
+                 WHERE id = ?",
+            )
+            .bind(status.as_str())
+            .bind(status != ArtifactStatus::Active)
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?,
         )
     }
 
@@ -2373,5 +2405,35 @@ mod tests {
             "{via:?}"
         );
         assert_eq!(s.synthesized_artifacts(10).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn retirement_stamps_retired_at_and_reactivation_clears_it() {
+        // The reap sweep's age rule reads this stamp; a transition that forgot
+        // to write it would leave an artifact retired forever without ever
+        // becoming a candidate, and one that forgot to clear it would let a
+        // reactivated artifact walk into the reaper with a stale clock.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "one"), nc(1, "two")])
+            .await
+            .unwrap();
+
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_some());
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Active)
+            .await
+            .unwrap();
+        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_none());
+
+        s.set_superseded_by(&made[0].id, Some(&made[1].id))
+            .await
+            .unwrap();
+        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_some());
+        s.set_superseded_by(&made[0].id, None).await.unwrap();
+        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_none());
     }
 }
