@@ -991,6 +991,35 @@
     if (head && target.id === 'results') head.textContent = '';
   }
 
+  // The two example phrasings under the box. A chip fills the box and stops
+  // there: the point is to put the phrasing in front of you, let the echo
+  // answer it, and leave the press to you. The synthetic `input` is what the
+  // form's own trigger and the idle column's hide both listen for, so a filled
+  // box behaves exactly as a typed one does.
+  //
+  // Bound on the document because `_box_hint.html` is swapped out of band the
+  // first time a capture ends an empty base, and a listener on the old node
+  // would go with it.
+  function exampleChips() {
+    document.addEventListener('click', function (e) {
+      var chip = e.target.closest && e.target.closest('.chip-example');
+      if (!chip) return;
+      e.preventDefault();
+      var box = document.querySelector('textarea[name="q"]');
+      if (!box) return;
+      box.value = chip.getAttribute('data-example') || '';
+      box.focus();
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  // The zone the echo reads dates in. Filled once, on load: it cannot be
+  // rendered server-side, and `Intl` is the only thing that knows it.
+  function boxZone() {
+    var el = document.getElementById('box-tz');
+    if (el) el.value = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  }
+
   // The way back to results after an Ask. Bound on the document because the
   // anchor is written into the rail by the stream driver, long after load.
   function railBack() {
@@ -2072,6 +2101,8 @@
     restoreReading();
     boxVerbs();
     railBack();
+    exampleChips();
+    boxZone();
     captureVerb();
     askDriver();
     refinePass();

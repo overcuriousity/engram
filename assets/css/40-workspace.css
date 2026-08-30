@@ -975,3 +975,27 @@ body { overflow-x: hidden; }
    laid out by `.verbs`, which is what they are positioned against. */
 .kind-row { display: contents; }
 .kind-row[hidden] { display: none; }
+
+/* ── The guidance line, and what the box says back ───────────────────────── */
+
+/* An example reads as a quotation you can press, not as a button. Three
+   buttons in a sentence would make the sentence a toolbar. */
+.chip-example {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--color-fg-secondary);
+  cursor: pointer;
+}
+.chip-example:hover { color: var(--color-fg-primary); text-decoration: underline; }
+
+/* `min-height` because the line arrives on a keystroke: without it the offer
+   and the band below shift down by a row the first time a cue is recognised. */
+.intent-echo {
+  display: block;
+  min-height: 1.2em;
+  font-size: var(--text-xs);
+  color: var(--color-due);
+}
+.intent-echo-kind { font-weight: 600; }

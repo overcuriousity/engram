@@ -1,0 +1,16 @@
+{# What the box will become if it is captured, said before it is.
+
+   Cue-only. It claims what the cue table proves and nothing else, so a note
+   with no cue echoes silence rather than "not a reminder": the embedding
+   classifier at capture can still fire where the table did not, and an echo
+   that had promised otherwise would be lying. That surprise lands in the safe
+   direction, and the arriving row in the band below is what makes it visible.
+
+   Read-only on purpose. Correcting the date before the capture would mean
+   threading an explicit stamp through the capture path for something the
+   band's own `later` is one click away from doing afterwards.
+
+   Always swapped, including empty. See `_box_hint.html`. #}
+<span id="intent-echo" class="intent-echo" hx-swap-oob="true">
+{%- if !kind.is_empty() %}<span class="intent-echo-kind">{{ kind }}</span> &middot; {{ when }}{% endif -%}
+</span>

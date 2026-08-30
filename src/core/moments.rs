@@ -84,6 +84,53 @@ pub const PROTOTYPES: &[(Intent, &str)] = &[
     (Intent::Journal, "сегодня наконец закончил проект"),
 ];
 
+/// The language each prototype is written in, in the order `PROTOTYPES` lists
+/// them. Kept beside that table rather than derived from it: a language tag is
+/// not recoverable from a sentence, and the two lists are read together or not
+/// at all.
+const PROTOTYPE_LANGS: &[&str] = &[
+    "en", "en", "de", "de", "fr", "es", "pt", "it", "nl", "pl", "tr", "ru", "en", "en", "de", "de",
+    "fr", "es", "pt", "it", "nl", "pl", "tr", "ru",
+];
+
+/// One reminder and one journal example, in the reader's language where the
+/// prototype table has it and in English where it does not.
+///
+/// Drawn from `PROTOTYPES` rather than written out again. These are examples
+/// of what the classifier reads, and a second copy of them would drift from it
+/// the first time a prototype is retuned — the page would then be teaching a
+/// phrasing the base no longer recognises, which is worse than teaching none.
+///
+/// `accept_language` is the raw header. Only the primary subtag of the first
+/// entry is read: `de-DE,de;q=0.9,en;q=0.8` is a reader who wants German, and
+/// weighing the rest to discover that is arithmetic for nothing.
+pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
+    debug_assert_eq!(PROTOTYPE_LANGS.len(), PROTOTYPES.len(), "one language per prototype");
+    let want = accept_language
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let pick = |intent: Intent| -> &'static str {
+        let of = |lang: &str| {
+            PROTOTYPES
+                .iter()
+                .zip(PROTOTYPE_LANGS)
+                .find(|((i, _), l)| *i == intent && **l == lang)
+                .map(|((_, p), _)| *p)
+        };
+        of(&want).or_else(|| of("en")).unwrap_or("")
+    };
+    (pick(Intent::Remind), pick(Intent::Journal))
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric()
 }
@@ -646,6 +693,20 @@ impl crate::core::Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn examples_come_from_the_prototypes_in_the_readers_language() {
+        let (remind, journal) = examples_for("de-DE,de;q=0.9,en;q=0.8");
+        assert!(remind.starts_with("erinnere mich"), "{remind}");
+        assert!(journal.starts_with("heute"), "{journal}");
+
+        let (remind, journal) = examples_for("");
+        assert!(remind.starts_with("remind me"), "English is the fallback: {remind}");
+        assert!(journal.starts_with("today i"), "{journal}");
+
+        let (remind, _) = examples_for("xx-YY");
+        assert!(remind.starts_with("remind me"), "an unknown language falls back too");
+    }
 
     #[test]
     fn a_remind_cue_fires_anywhere_in_the_opening() {

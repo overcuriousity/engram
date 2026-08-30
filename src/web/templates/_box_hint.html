@@ -1,18 +1,35 @@
-{# Two hints, because the two states need different sentences. With something
-   held, the useful thing to say is how to phrase a query — a whole sentence
-   embeds better than the two nouns from it a reader would otherwise type.
-   With nothing held there is no query to phrase, and the useful thing to say
-   is what this is and whose it is. The second half is not decoration: an
-   operator arriving through an identity provider never sees the login card,
-   so this is the only place the application introduces itself, and the
-   boundary is the question a person actually has before pasting their own
-   notes onto a server somebody else runs. #}
+{# The one line under the box, and the only guidance an idle page carries.
+
+   It replaces two: a sentence claiming that typing searches as you go, and a
+   second copy of the accepted file types that the Attach button's own `title`
+   and the input's `aria-label` already carry. An example teaches the first
+   better than the claim did, and the second was never guidance — the picker a
+   phone opens names what it will accept itself.
+
+   The examples are the classifier's own prototypes, in the reader's language:
+   see `moments::examples_for`. Nothing here is a second copy of anything, so
+   the page cannot come to teach a phrasing the base has stopped recognising.
+
+   A chip fills the box and does not submit. Pressing one puts the phrasing in
+   front of you and fires the echo below it, which is the whole loop in one
+   press — and a press is still yours to make.
+
+   With nothing held there is no phrasing worth teaching yet: two of the three
+   verbs cannot work on an empty base, and what a person actually wants to know
+   before pasting their own notes onto a server is whose base this is. #}
 <p id="box-hint" class="muted hint"{% if oob %} hx-swap-oob="true"{% endif %}>
   {%- if held -%}
-  Typing searches as you go. A sentence or a whole paragraph finds more than
-  keywords do — paste what you are looking at.
+  Try
+  <button type="button" class="chip-example" data-example="{{ example_remind }}">&ldquo;{{ example_remind }}&rdquo;</button>
+  or
+  <button type="button" class="chip-example" data-example="{{ example_journal }}">&ldquo;{{ example_journal }}&rdquo;</button>
+  &mdash; or paste a whole paragraph; a sentence finds more than keywords do.
   {%- else -%}
   engram keeps what you paste in your own words and finds it again by meaning,
   not by keywords. This base is yours: nobody else can search it.
   {%- endif -%}
 </p>
+{# The slot the echo swaps into. Present from first paint and swapped on every
+   answer, even an empty one: that is how an echo for text no longer in the box
+   dies rather than standing over the next thing typed. #}
+<span id="intent-echo" class="intent-echo"></span>

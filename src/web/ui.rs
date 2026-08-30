@@ -504,6 +504,62 @@ pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
 }
 
 #[derive(Template)]
+#[template(path = "_intent_echo.html")]
+pub(crate) struct IntentEchoTemplate {
+    /// `reminder`, `journal entry`, or empty for "the cue table proves
+    /// nothing about this text".
+    pub(crate) kind: &'static str,
+    pub(crate) when: String,
+}
+
+/// What the box would become if it were captured, from the cue table and the
+/// date rules alone.
+///
+/// It rides the search response because every keystroke already makes that
+/// request on a 120ms debounce, and everything here is pure string work: no
+/// model call, no embedding, no store read. A second request per keystroke to
+/// say one short line would cost more than the line is worth.
+///
+/// Deliberately without the reminder model, which `jobs::moments` consults
+/// first where one is configured. A model call on a keystroke is out of the
+/// question, so on such a base the echo can name a date the capture then
+/// improves on. It says what it can prove and the band below shows what
+/// actually happened.
+/// A template's markup as a string, for a fragment that is composed into
+/// another rather than returned on its own. An echo that could not render is
+/// no echo, never a 500 over a rail that is otherwise correct.
+pub(crate) fn render_echo(t: &IntentEchoTemplate) -> String {
+    t.render().unwrap_or_default()
+}
+
+pub(crate) fn intent_echo(q: &str, tz_name: Option<&str>, now: i64) -> IntentEchoTemplate {
+    use crate::core::moments::{absolute_dates, cue, relative_date, zone, Intent};
+    let tz = zone(tz_name);
+    match cue(q) {
+        Some(Intent::Remind) => {
+            // The same reading `date_reminder` does without its model: every
+            // absolute date still ahead, plus the relative table, nearest
+            // wins. `month_first` is false — the door does not carry a locale,
+            // and 4/9 is the fourth of September to most of the world.
+            let mut candidates: Vec<i64> =
+                absolute_dates(q, now, tz, false).into_iter().map(|f| f.at).filter(|a| *a > now).collect();
+            if let Some(r) = relative_date(q, now, tz) {
+                candidates.push(r.at);
+            }
+            IntentEchoTemplate {
+                kind: "reminder",
+                when: match candidates.into_iter().min() {
+                    Some(at) => crate::web::due::when_words(at, now, tz),
+                    None => "no date read — it will ask you for one".into(),
+                },
+            }
+        }
+        Some(Intent::Journal) => IntentEchoTemplate { kind: "journal entry", when: "today".into() },
+        None => IntentEchoTemplate { kind: "", when: String::new() },
+    }
+}
+
+#[derive(Template)]
 #[template(path = "_results.html")]
 struct ResultsTemplate {
     results: Vec<RenderedResult>,
@@ -525,6 +581,9 @@ struct ResultsTemplate {
     /// searches are not being recorded, and the button and the links go
     /// without.
     event_id: Option<String>,
+    /// The echo under the box, pre-rendered and shipped out of band with the
+    /// rail. See `intent_echo`.
+    echo: String,
     /// The query this rail was drawn for, carried by the gap button alone: a
     /// gap is a verdict about a wording, and a trailing keystroke can fold a
     /// later one into the same row before the button is pressed. See
@@ -549,6 +608,9 @@ pub(crate) struct IdleFootTemplate {
     /// counts to print and no last capture to name, so the line says what the
     /// program is for instead.
     pub(crate) held: bool,
+    /// The echo slot, emptied. An empty box proves no intent, and an echo left
+    /// standing over one would be describing text that is gone.
+    pub(crate) echo: String,
 }
 
 pub(crate) struct IdleRecentRow {
@@ -607,6 +669,7 @@ pub(crate) async fn idle_foot(tenant: &Tenant) -> Result<IdleFootTemplate> {
         corpora,
         recent,
         held: corpora > 0,
+        echo: render_echo(&intent_echo("", None, 0)),
     })
 }
 
@@ -1110,6 +1173,11 @@ pub(crate) struct UiSearchParams {
     /// `Store::record_search`.
     #[serde(default)]
     pub(crate) fold: Option<String>,
+    /// The viewer's IANA zone, filled onto the form by app.js. The echo under
+    /// the box reads a date out of what is being typed, and *tomorrow 09:00*
+    /// is a different second in Berlin than it is on the server.
+    #[serde(default)]
+    pub(crate) tz: Option<String>,
     /// Ask the rail to say why a row is where it is. Off unless the link
     /// carries it: the line is for an operator looking into a ranking, not
     /// something every keystroke paints. `/ui?explain=1` puts it on the form
@@ -1282,6 +1350,7 @@ pub(crate) async fn search_results(
         .into_iter()
         .map(|h| render_hit(0, h, &titles, explain))
         .collect();
+    let echo = render_echo(&intent_echo(&q, p.tz.as_deref(), tenant.core.clock.now()));
     let mut res = HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
         // good list is ordinary — it is the tail of any ranking — and saying
@@ -1298,6 +1367,7 @@ pub(crate) async fn search_results(
         // would assert a confirmation that never took place.
         reranked: outcome.timing.reranked,
         event_id: outcome.event,
+        echo,
         q,
     })
     .into_response();
@@ -4594,6 +4664,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typing_a_reminder_echoes_what_it_will_become() {
+        let (app, cookie) = app_with_session().await;
+        app.clone().oneshot(form("/ui/capture", &cookie, "text=mounting+an+image")).await.unwrap();
+        let html = get(
+            &app,
+            "/ui/search/results?q=remind+me+tomorrow+to+send+the+invoice&tz=Europe/Berlin",
+            &cookie,
+        )
+        .await;
+        assert!(html.contains(r#"id="intent-echo""#), "{html}");
+        assert!(html.contains("reminder"), "it says what it is: {html}");
+        assert!(html.contains("tomorrow 09:00"), "and when: {html}");
+    }
+
+    #[tokio::test]
+    async fn ordinary_text_echoes_nothing_at_all() {
+        let (app, cookie) = app_with_session().await;
+        app.clone().oneshot(form("/ui/capture", &cookie, "text=mounting+an+image")).await.unwrap();
+        let html = get(&app, "/ui/search/results?q=vector+index+rebuild", &cookie).await;
+        // The slot is swapped whatever the answer, so an echo for text that is
+        // no longer in the box cannot outlive it.
+        assert!(html.contains(r#"id="intent-echo""#), "{html}");
+        assert!(
+            !html.contains("intent-echo-kind"),
+            "the echo claims only what the cue table proves: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_examples_under_the_box_are_in_the_readers_language() {
+        let (app, cookie) = app_with_session().await;
+        app.clone().oneshot(form("/ui/capture", &cookie, "text=mounting+an+image")).await.unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .header("accept-language", "de-DE,de;q=0.9,en;q=0.8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("erinnere mich morgen"), "a German reader is shown German: {html}");
+        assert!(html.contains("chip-example"), "and it is pressable");
+    }
+
+    #[tokio::test]
     async fn the_idle_page_introduces_the_base_and_the_picker_is_reachable() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_for(core.clone()).await;
@@ -6584,6 +6703,7 @@ mod tests {
             associated: vec![],
             all_weak: true,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6691,6 +6811,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6716,6 +6837,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6827,6 +6949,7 @@ mod tests {
             associated: vec![render_hit(0, hit(None, Some("a")), &titles, false)],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6880,6 +7003,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6904,6 +7028,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6925,6 +7050,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6958,6 +7084,7 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6976,6 +7103,7 @@ mod tests {
             )],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -6996,6 +7124,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: true,
             q: String::new(),
@@ -7009,6 +7138,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -7089,6 +7219,7 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: true,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -7104,6 +7235,7 @@ mod tests {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -7344,6 +7476,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -7393,6 +7526,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -7414,6 +7548,7 @@ mod tests {
             associated: vec![],
             all_weak: false,
             event_id: None,
+            echo: String::new(),
             terms: String::new(),
             reranked: false,
             q: String::new(),
@@ -9891,11 +10026,13 @@ mod tests {
         // staged file sits inside it, so the serialisation is pinned to the
         // fields the search actually takes — without this, every keystroke
         // carries a filename into the query string. `rerank` is on the list
-        // for the refining pass, whose own flag rides this form's GET, and
-        // `explain` for the same reason: a name missing here is a flag the
-        // fragment is never asked with, however carefully the rest is wired.
+        // for the refining pass, whose own flag rides this form's GET,
+        // `explain` for the same reason, and `tz` because the echo under the
+        // box reads a date out of what is being typed: a name missing here is
+        // a flag the fragment is never asked with, however carefully the rest
+        // is wired.
         assert!(
-            page.contains(r#"hx-params="q,category,rerank,explain,fold""#),
+            page.contains(r#"hx-params="q,category,rerank,explain,fold,tz""#),
             "{page}"
         );
     }

@@ -166,6 +166,11 @@ struct WorkspaceTemplate {
     /// the one that can, and the rest appears when there is something for it
     /// to act on.
     held: bool,
+    /// The two example phrasings under the box, in the reader's language. See
+    /// `moments::examples_for`: they are the classifier's own prototypes, so
+    /// what the page teaches and what the base recognises cannot drift apart.
+    example_remind: &'static str,
+    example_journal: &'static str,
     /// Always false here: the shared partials this page renders inline —
     /// `_ask_verb.html`, `_keyhint.html`, `_box_hint.html`, `_pane_idle.html`
     /// — mark themselves `hx-swap-oob` for the other caller, `HeldTemplate`,
@@ -188,6 +193,10 @@ struct WorkspaceTemplate {
 #[template(path = "_held.html")]
 struct HeldTemplate {
     ask_enabled: bool,
+    /// See `WorkspaceTemplate`: `_box_hint.html` is one of the partials this
+    /// swaps, and it reads these two.
+    example_remind: &'static str,
+    example_journal: &'static str,
     /// True by definition: this fragment exists only for the transition into
     /// it. The field is here because the partials branch on it.
     held: bool,
@@ -198,13 +207,16 @@ struct HeldTemplate {
 /// Serves `HeldTemplate`, and only where something really is held: a page that
 /// asked for this before its capture stored would swap in an Ask verb over a
 /// base that still cannot answer.
-async fn held_regions(tenant: Tenant) -> Result<Response> {
+async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Response> {
     let (corpora, _) = tenant.core.store.held_brief().await?;
     if corpora == 0 {
         return Err(crate::error::Error::NotFound);
     }
+    let (example_remind, example_journal) = examples(&headers);
     Ok(HtmlTemplate(HeldTemplate {
         ask_enabled: crate::web::state::ask_enabled(&tenant),
+        example_remind,
+        example_journal,
         held: true,
         oob: true,
     })
@@ -216,8 +228,17 @@ async fn held_regions(tenant: Tenant) -> Result<Response> {
 /// Split out because the three deep links differ only in what is in the box
 /// and what happens on first paint; a copy of this per door is how they come
 /// to disagree about the chips.
+/// The reader's language, off the request. A header that is absent, empty or
+/// unreadable is a reader we know nothing about, and English is what the page
+/// says then.
+fn examples(headers: &axum::http::HeaderMap) -> (&'static str, &'static str) {
+    let raw = headers.get(axum::http::header::ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok());
+    crate::core::moments::examples_for(raw.unwrap_or(""))
+}
+
 async fn base_template(
     tenant: &Tenant,
+    headers: &axum::http::HeaderMap,
     q: String,
     category: String,
     open_with: &'static str,
@@ -258,6 +279,7 @@ async fn base_template(
     // still has to know: a search URL against an empty base is a page that
     // must not offer Ask either.
     let (corpora, _) = tenant.core.store.held_brief().await?;
+    let (example_remind, example_journal) = examples(headers);
     Ok(WorkspaceTemplate {
         judge_pending: crate::web::state::judge_pending(tenant).await,
         ask_enabled: crate::web::state::ask_enabled(tenant),
@@ -276,14 +298,20 @@ async fn base_template(
         open_with,
         idle,
         idle_state,
+        example_remind,
+        example_journal,
         held: corpora > 0,
         oob: false,
     })
 }
 
-async fn page(tenant: Tenant, Query(p): Query<UiSearchParams>) -> Result<Response> {
+async fn page(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<UiSearchParams>,
+) -> Result<Response> {
     let explain = p.explain.unwrap_or(false);
-    let mut t = base_template(&tenant, p.q, p.category.unwrap_or_default(), "").await?;
+    let mut t = base_template(&tenant, &headers, p.q, p.category.unwrap_or_default(), "").await?;
     t.explain = explain;
     Ok(HtmlTemplate(t).into_response())
 }
@@ -387,7 +415,11 @@ async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Re
 /// anything about the three pages having folded into one. A prefill that names
 /// an ask nobody recorded is not an error worth a page for: the box is simply
 /// empty, which is what an ordinary visit looks like.
-async fn capture_door(tenant: Tenant, Query(p): Query<CapturePrefill>) -> Result<Response> {
+async fn capture_door(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<CapturePrefill>,
+) -> Result<Response> {
     let prefilled = match &p.from_ask {
         Some(id) => tenant.core.store.ask_event(id).await?,
         None => None,
@@ -396,7 +428,7 @@ async fn capture_door(tenant: Tenant, Query(p): Query<CapturePrefill>) -> Result
         Some(ev) => (ev.answer, ev.id, ev.question),
         None => (String::new(), String::new(), String::new()),
     };
-    let mut t = base_template(&tenant, q, String::new(), "capture").await?;
+    let mut t = base_template(&tenant, &headers, q, String::new(), "capture").await?;
     t.prefill_ask = prefill_ask;
     t.prefill_question = prefill_question;
     Ok(HtmlTemplate(t).into_response())
@@ -973,7 +1005,11 @@ struct CarriedForm {
 /// it bridged. It existed because a query typed on the rail and then retyped
 /// into ask was the cost of two pages with nothing carried between them —
 /// there is one box now, and the query is already in it.
-async fn ask_door(tenant: Tenant, Query(p): Query<AskPrefill>) -> Result<Response> {
+async fn ask_door(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<AskPrefill>,
+) -> Result<Response> {
     if !tenant.core.asks() {
         return Err(crate::error::Error::NotFound);
     }
@@ -990,7 +1026,7 @@ async fn ask_door(tenant: Tenant, Query(p): Query<AskPrefill>) -> Result<Respons
         let q: String = url::form_urlencoded::byte_serialize(p.q.as_bytes()).collect();
         return Ok(axum::response::Redirect::to(&format!("/ui?q={q}")).into_response());
     }
-    let t = base_template(&tenant, p.q, String::new(), "ask").await?;
+    let t = base_template(&tenant, &headers, p.q, String::new(), "ask").await?;
     Ok(HtmlTemplate(t).into_response())
 }
 
@@ -1398,9 +1434,19 @@ mod tests {
             .await
             .unwrap();
         let html = body_of(res).await;
+        // Two examples and one clause, where four muted prose lines used to
+        // stack. The claim that typing searches is taught by a phrasing you
+        // can press rather than asserted at somebody — and the phrasings are
+        // the classifier's own prototypes, so the page cannot come to teach a
+        // wording the base has stopped recognising.
         assert!(
-            html.contains("Typing searches"),
+            html.contains("remind me"),
             "the one thing a first-time user cannot deduce from the page: {html}"
+        );
+        assert!(html.contains("chip-example"), "and it is pressable: {html}");
+        assert!(
+            html.contains("a sentence finds more than keywords do"),
+            "with the one true thing the old hint said kept: {html}"
         );
     }
 
@@ -1472,7 +1518,7 @@ mod tests {
             "a reranker serving search is what arms the refining pass"
         );
         assert!(
-            html.contains(r#"hx-params="q,category,rerank,explain,fold""#),
+            html.contains(r#"hx-params="q,category,rerank,explain,fold,tz""#),
             "hx-params is the allowlist for what rides a search GET; without \
              `rerank` on it the refining pass's own flag is filtered off the \
              wire and the server only ever runs the fast path — and `explain` \

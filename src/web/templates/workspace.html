@@ -54,7 +54,7 @@
                   input[!event.isComposing] changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() && open_with.is_empty() %},
                   load{% endif %}"
-      hx-params="q,category,rerank,explain,fold"
+      hx-params="q,category,rerank,explain,fold,tz"
       hx-indicator="#search-spinner"{% if search_reranks %} data-rerank="true"{% endif %}>
   {# `/ui?explain=1` and nothing else. `hx-params` above is an allowlist, so
      the name has to appear in both places or the fragment is asked without it
@@ -69,6 +69,11 @@
      used to overwrite that window's query and its whole pool while its rail
      went on naming the id on every row. See `_results.html`. #}
   <span id="fold-of"></span>
+  {# The viewer's zone, filled by app.js on load. The echo under the box reads
+     a date out of what is being typed, and *tomorrow 09:00* is a different
+     second in Berlin than it is wherever the server is. Named in `hx-params`
+     above or the allowlist strips it. #}
+  <input type="hidden" name="tz" id="box-tz">
   {# A textarea from the first keystroke to the last. It grows to a ten-line
      cap and then scrolls inside itself; it never switches element type, and it
      never infers a verb from a length or a newline. What decides which of the
