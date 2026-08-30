@@ -60,13 +60,15 @@ said about the original.
 Nothing here is fixtures. The corpus is whatever you actually want to search,
 and it is **not in this repository and must not be**.
 
-Pairs are made mostly by searching. A result opened from the rail and read for
-twenty seconds is recorded, provisionally, as the one the search was for; the
-bar under it — *Was this what you were looking for? Yes · No · Not sure* — makes
-that a person's verdict, and *Nothing here has it* on a rail that matched
-nothing records a gap. *Not sure* is not a verdict: it leaves the search for the
-deck, which is where a question nobody could answer in the moment belongs. Only
-what none of these labelled reaches `/ui/judge`,
+Pairs are made mostly by searching. Under a result opened from the rail there is
+a bar — *Was this what you were looking for? Yes · No · Not sure* — and on a rail
+that matched nothing there is *Nothing here has it*, which records a gap. Every
+pair comes from somebody pressing one of those. A long read used to count as a
+*Yes* on its own; it does not any more, because what it measured was a pane left
+open, which is an abandoned tab about as often as it is an answer. *Not sure* is
+not a verdict either: it leaves the search for the deck, which is where a
+question nobody could answer in the moment belongs. Only what none of these
+labelled reaches `/ui/judge`,
 where a recorded search comes back with the top five of its pool in the order
 the search gave them, the rest behind a fold, and you say which one you needed.
 Showing the order is a known cost: a person is likelier to confirm what came

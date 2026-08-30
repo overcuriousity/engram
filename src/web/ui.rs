@@ -1685,18 +1685,19 @@ async fn reread_uncovered_ui(
 struct DwellForm {
     #[serde(default)]
     secs: i64,
-    /// The search the artifact was opened from, where the pane knew one.
-    #[serde(default)]
-    event: Option<String>,
 }
-
-/// A read this long is taken as the search having found what it was for.
-/// Provisional — see `Store::implicit_hit` — but enough to give recall@10 a
-/// value from ordinary use, with nothing clicked.
-const DWELL_HIT_SECS: i64 = 20;
 
 /// The page saying how long an artifact was open, sent as the reader leaves
 /// it. `sendBeacon` lands here; nothing is rendered back.
+///
+/// A pursuit signal and nothing more. It used to also label the search: a read
+/// past twenty seconds was written as a hit, on the theory that recall could
+/// come from ordinary use with nothing clicked. It cannot. What the timer
+/// measures is a pane that stayed open, which is a tab abandoned as often as it
+/// is an answer — and because the beacon flushes as the pane is *left*, it
+/// arrived after the buttons it was overwriting and put a hit back on searches
+/// a person had just marked "not sure" or undone. The bar under the result is
+/// the whole of the answer now.
 async fn artifact_dwell(
     tenant: Tenant,
     Path(aid): Path<String>,
@@ -1705,17 +1706,6 @@ async fn artifact_dwell(
     tenant
         .core
         .record_dwell(&aid, f.secs, Some(&tenant.user.subject));
-    // Not for an artifact search will no longer return: `eval::export` drops
-    // the pair, so the hit would move the recall on the judging page and
-    // nothing in `pairs.json`. `judge::hit` and the verdict bar both refuse one
-    // for that reason, and a beacon is not the way around them. The pane omits
-    // `data-event` in that case, so this is the write agreeing with the page.
-    if let Some(event) = f.event.filter(|_| f.secs >= DWELL_HIT_SECS)
-        && tenant.core.learn.enabled
-        && tenant.core.store.get_artifact(&aid).await?.in_results()
-    {
-        tenant.core.store.implicit_hit(&event, &aid).await?;
-    }
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
@@ -2961,14 +2951,20 @@ async fn artifact_detail(
     //
     // Not for an artifact search will no longer return. `eval::export` freezes
     // only active, un-superseded artifacts and drops any pair naming something
-    // else, so a hit recorded here — by the bar, or by the dwell timer that
-    // reads the same id off the pane — would raise the recall and MRR on the
+    // else, so a hit recorded here would raise the recall and MRR on the
     // judging page while contributing nothing to `pairs.json`. `judge::hit`
-    // refuses one for that reason; so does this. No bar and no `data-event`
-    // means neither path can fire.
+    // refuses one for that reason; so does this. Without `search_event` the bar
+    // is not drawn, which is the only way a verdict can be given at all.
+    // And only the searcher's own event: the id arrives on a link, so it is
+    // whatever the caller sent. See `Store::event_is_mine`.
     if tenant.core.learn.enabled
         && d.in_results()
         && let Some(event) = p.event.as_deref()
+        && tenant
+            .core
+            .store
+            .event_is_mine(event, &tenant.user.subject)
+            .await?
         && tenant.core.store.open_event(event).await?
     {
         d.search_event = Some(event.to_string());
@@ -11353,9 +11349,6 @@ mod tests {
             page.contains(&format!("/ui/search/{event}/verdict")),
             "the bar does not name the search: {page}"
         );
-        // Named on the root beside the artifact, so the dwell timer can report
-        // which search the read belongs to.
-        assert!(page.contains(&format!("data-event=\"{event}\"")), "{page}");
         // The rail's own links carry the search that listed them.
         let rail = include_str!("templates/_results.html");
         assert!(rail.contains("&event={{ ev }}"), "{rail}");
@@ -11430,34 +11423,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reading_a_result_long_enough_confirms_it_without_a_click() {
+    async fn a_long_read_is_a_pursuit_signal_and_never_a_verdict() {
+        // A read past some threshold used to be written as the search having
+        // found its answer. What that measured was a pane left open, which is
+        // an abandoned tab as often as it is an answer — and because the beacon
+        // flushes as the pane is *left*, it landed after the buttons under the
+        // result and put a hit back onto searches a person had just marked
+        // "not sure" or undone. The timer still feeds the pursuit sweep; it no
+        // longer labels anything.
         let (app, cookie, handle, a, event) = searched_app().await;
-        // A glance is not a read.
         let res = app
             .clone()
             .oneshot(form(
                 &format!("/ui/artifacts/{a}/dwell"),
                 &cookie,
-                &format!("secs=5&event={event}"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
-
-        let res = app
-            .clone()
-            .oneshot(form(
-                &format!("/ui/artifacts/{a}/dwell"),
-                &cookie,
-                &format!("secs=42&event={event}"),
+                "secs=42",
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let s = handle.store.feedback_stats(0.0).await.unwrap();
-        assert_eq!((s.hits, s.pending), (1, 0), "{s:?}");
-        assert_eq!(s.recall_at_10, 1.0);
+        assert_eq!((s.hits, s.judged), (0, 0), "{s:?}");
+        assert_eq!(
+            handle.store.next_pending(0.0).await.unwrap().map(|e| e.id),
+            Some(event),
+            "the search is still a question for the deck"
+        );
     }
 
     #[tokio::test]
@@ -11574,12 +11565,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_search_somebody_else_made_cannot_be_opened_or_judged() {
+        // Every route that labels a search takes the event id from the page,
+        // because the page is what knows which search a row came from. An id
+        // is not a capability: guessing at one used to be enough to stamp an
+        // open onto another person's search, answer it, or call it a gap —
+        // and, by stamping `opened_at`, quietly stop their next keystroke
+        // folding as well.
+        let (app, cookie, handle, a, _) = searched_app().await;
+        let theirs = handle
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "image will not mount".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some("somebody-else".into()),
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![crate::store::feedback::NewCandidate {
+                        artifact_id: a.clone(),
+                        score: 1.0,
+                        similarity: Some(0.5),
+                        shown: true,
+                    }],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event={theirs}")).await;
+        assert!(
+            !page.contains("Was this what you were looking for?"),
+            "{page}"
+        );
+        let opened: Option<i64> =
+            sqlx::query_scalar("SELECT opened_at FROM search_events WHERE id = ?")
+                .bind(&theirs)
+                .fetch_one(&handle.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(opened, None, "their next keystroke still folds");
+
+        for body in [
+            format!("verdict=hit&artifact_id={a}"),
+            format!("verdict=no&artifact_id={a}"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(form(
+                    &format!("/ui/search/{theirs}/verdict"),
+                    &cookie,
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        }
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/search/{theirs}/gap"), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.judged, s.hits, s.gaps), (0, 0, 0), "{s:?}");
+    }
+
+    #[tokio::test]
     async fn a_deprecated_result_is_never_asked_about() {
         // `eval::export` drops any pair naming an artifact search will not
         // return, so a hit recorded against one raises the recall on the
         // judging page and contributes nothing to `pairs.json`. `judge::hit`
-        // refuses one; the bar under a result must not be a way around it, and
-        // neither must the dwell timer that reads the same id off the pane.
+        // refuses one, and the bar under a result must not be a way around it.
         let (app, cookie, handle, a, event) = searched_app().await;
         handle
             .store
@@ -11591,20 +11652,8 @@ mod tests {
             !page.contains("Was this what you were looking for?"),
             "{page}"
         );
-        assert!(
-            !page.contains("data-event="),
-            "the dwell timer would report a hit the benchmark cannot hold: {page}"
-        );
-        // And the writes refuse it too, not only the render: a beacon or a
-        // replayed form naming the pair is not the way around the guard.
-        app.clone()
-            .oneshot(form(
-                &format!("/ui/artifacts/{a}/dwell"),
-                &cookie,
-                &format!("secs=42&event={event}"),
-            ))
-            .await
-            .unwrap();
+        // And the write refuses it too, not only the render: a replayed form
+        // naming the pair is not the way around the guard.
         let res = app
             .clone()
             .oneshot(form(

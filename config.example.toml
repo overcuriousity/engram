@@ -487,14 +487,21 @@ max_dedupe_per_tick = 5
 # setting — an empty pool leaves every card with nothing to choose — and is put
 # back to the default with a line in the log.
 candidates = 20
-# Window in which another query — a longer one, a rewording, or the same one
-# again — replaces the previous event instead of starting its own, so a burst of
-# searches that ends in one open is one search. Opening a result closes the
-# window: the list that was read is the list the hit is scored on. 0 turns
-# folding off. Applies to the search box only, and only within one signed-in
-# operator: a call through the API or MCP is a deliberate query, not a
+# Window in which another query — a longer one, a shorter one, a rewording, or
+# the same one again — replaces the previous event instead of starting its own,
+# so a burst of searches that ends in one open is one search. Opening a result
+# closes the window: the list that was read is the list the hit is scored on. 0
+# turns folding off. Applies to the search box only, and only within one
+# signed-in operator: a call through the API or MCP is a deliberate query, not a
 # keystroke, and two people typing at once are not typing the same thing.
-coalesce_secs = 15
+#
+# Keep this at the length of a typing burst. Because *any* rewording folds, the
+# window doubles as how long a finished search has left to live: search, read
+# the titles, think, search again inside the window, and the first search is
+# gone — the one case where nobody opened anything being precisely what the
+# unmatched-gap sweep is there to catch. It was 15s, which is long enough to
+# swallow a second, deliberate question.
+coalesce_secs = 5
 # Days an unjudged captured search is kept. 0 keeps them forever. A judged hit
 # or gap is exempt: it is the labelled pair the whole feature exists to produce,
 # and expiring it would empty `--export-eval` a month at a time. A `discard` is

@@ -723,6 +723,11 @@ async fn search_verdict(
     }
     use crate::store::feedback::Labeller;
     let store = &tenant.core.store;
+    // The id comes off the page, so it is whatever the caller sent. One check
+    // for all four answers below — see `Store::event_is_mine`.
+    if !store.event_is_mine(&id, &tenant.user.subject).await? {
+        return Err(Error::NotFound);
+    }
     let state = match f.verdict.as_str() {
         "hit" => {
             // The same guard `judge::hit` states in full: `eval::export` drops
@@ -775,6 +780,15 @@ async fn search_verdict(
 /// replaces the button.
 async fn search_gap(tenant: Tenant, Path(id): Path<String>) -> Result<Response> {
     if !tenant.core.learn.enabled {
+        return Err(Error::NotFound);
+    }
+    // Only against the caller's own search — see `Store::event_is_mine`.
+    if !tenant
+        .core
+        .store
+        .event_is_mine(&id, &tenant.user.subject)
+        .await?
+    {
         return Err(Error::NotFound);
     }
     let line = match tenant.core.store.gap_event(&id).await? {

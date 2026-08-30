@@ -232,11 +232,24 @@ macro_rules! search_gaps_sql {
 /// A search nothing came close to answering.
 ///
 /// The similarity is not a column on `search_events` — it is on the candidate
-/// rows, one per result — so the test is an aggregate rather than a read.
-/// `MAX(...)` over no rows is `NULL`, and `NULL < ?` is not true, so a search
-/// that recorded no candidates is *not* a gap. That looks like an oversight and
-/// is not one: "nothing came close" is a claim about what was measured, and
-/// nothing was.
+/// rows, one per result — so the test is an aggregate rather than a read, and
+/// `MAX(...)` over no rows is `NULL`. Two different absences hide behind that
+/// one `NULL`, and only one of them is a gap.
+///
+/// A search that returned *nothing* is the plainest hole there is: the base was
+/// asked and had not one thing to offer. It is named here explicitly, because
+/// `NULL < ?` is not true and the aggregate alone would drop it — and nothing
+/// else picks it up. The deck will not deal it (see `dealable!`): a card with
+/// an empty list is unanswerable except by gap or discard, which is not a
+/// question worth a person's turn. So the sweep is where it lands.
+///
+/// Candidates that exist but were never *scored* are the other absence, and
+/// they are not a gap. That is the embedder down, or a query the lexical half
+/// answered on keywords alone — `search_inner` stores what the vector search
+/// returned, and it returned nothing. "Nothing came close" would be a claim
+/// about a measurement nobody took. `AND c.similarity IS NOT NULL` inside the
+/// aggregate keeps those out, the same reading `dealable!`'s inner `COALESCE`
+/// takes of them.
 ///
 /// A search that has been judged at all is left out. `gap` for the obvious
 /// reason — it would be two gaps, the same row said twice in two different
@@ -258,8 +271,9 @@ macro_rules! unmatched_gaps_from {
             AND e.verdict IS NULL
             AND NOT EXISTS (SELECT 1 FROM gap_coverage
                              WHERE kind = 'unmatched' AND gap_id = e.id)
-            AND (SELECT MAX(c.similarity) FROM search_candidates c
-                  WHERE c.event_id = e.id AND c.similarity IS NOT NULL) < ?"
+            AND (NOT EXISTS (SELECT 1 FROM search_candidates c WHERE c.event_id = e.id)
+                 OR (SELECT MAX(c.similarity) FROM search_candidates c
+                      WHERE c.event_id = e.id AND c.similarity IS NOT NULL) < ?)"
     };
 }
 
@@ -1289,11 +1303,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_search_that_measured_nothing_is_not_a_gap() {
-        // `MAX(...)` over no candidate rows is NULL, and NULL is not under the
-        // line. "Nothing came close" is a claim about what was measured.
+    async fn a_search_that_returned_nothing_is_an_unmatched_gap() {
+        // The plainest hole there is: the base was asked and had nothing at
+        // all. `MAX(...)` over no candidate rows is NULL and NULL is not under
+        // the line, so the aggregate alone would drop it — and the deck will
+        // not deal it either, because a card with an empty list has no question
+        // on it. Named explicitly here, or it falls between the two.
         let store = Store::memory().await.unwrap();
-        search_with(&store, "mount an E01", &[]).await;
+        let empty = search_with(&store, "mount an E01", &[]).await;
+
+        let unmatched: Vec<String> = store
+            .open_gaps("fake", 0.35)
+            .await
+            .unwrap()
+            .gaps
+            .iter()
+            .filter(|g| g.gap.kind == GapKind::Unmatched)
+            .map(|g| g.gap.id.clone())
+            .collect();
+        assert_eq!(unmatched, vec![empty]);
+    }
+
+    #[tokio::test]
+    async fn a_search_whose_candidates_were_never_scored_is_not_a_gap() {
+        // The other absence behind the same NULL, and this one is not a hole.
+        // The embedder was down, or the query was answered on keywords alone:
+        // `search_inner` stores what the vector search returned, and it
+        // returned nothing. "Nothing came close" would be a claim about a
+        // measurement nobody took.
+        let store = Store::memory().await.unwrap();
+        store
+            .record_search(
+                NewEvent {
+                    query: "mount an E01".into(),
+                    door: Door::Api,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0, 0.0],
+                    embed_model: "fake".into(),
+                    candidates: vec![crate::store::feedback::NewCandidate {
+                        artifact_id: "a-0".into(),
+                        score: 0.9,
+                        similarity: None,
+                        shown: true,
+                    }],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
 
         assert!(
             store

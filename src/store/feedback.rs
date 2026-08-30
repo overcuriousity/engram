@@ -193,10 +193,10 @@ impl Store {
     /// Capturing only deliberate searches would lose the most valuable case:
     /// `mark` is set on open, expand and submit, so a search where the operator
     /// found nothing useful and gave up would never be recorded. So everything
-    /// is captured, and an event whose query extends the previous one from the
-    /// same searcher — or repeats it verbatim — within `coalesce_secs` replaces
-    /// it. What survives is the final wording: the query that was actually
-    /// meant, asked once.
+    /// is captured, and any query from the same searcher within
+    /// `coalesce_secs` — longer, shorter or the same words again — replaces the
+    /// one before it. What survives is the final wording: the query that was
+    /// actually meant, asked once, holding the pool that answered it.
     ///
     /// Only text boxes fold, and only within one `scope`. That is the web UI's
     /// search field and the browser extension's panel, both of which search as
@@ -234,12 +234,24 @@ impl Store {
             _ => None,
         };
 
-        // Same burst, whatever the wording. A keystroke is one HTTP request
-        // among several in flight, so "fat" can land after "fat32", and a
-        // shorter prefix arriving late is dropped rather than folded forward.
-        // Anything else inside the window folds forward: a rewording is the
-        // same need said again, and a burst of three wordings ending in one
-        // open used to be three cards, two of them about words nobody meant.
+        // Same burst, whatever the wording. Everything inside the window folds
+        // forward: a rewording is the same need said again, and a burst of
+        // three wordings ending in one open used to be three cards, two of them
+        // about words nobody meant.
+        //
+        // A shorter query folds like any other, and used to not. The rule that
+        // dropped it read a shorter prefix as a keystroke arriving late — "fat"
+        // landing after "fat32" — and kept the longer stored wording as the one
+        // that was meant. Backspacing is indistinguishable from that at the
+        // point of the write and is not rare: the box searches as you type, so
+        // deleting a word is an ordinary edit. What the stale rule left behind
+        // was an event holding a *different* query and a *different* pool than
+        // the rail beside it was showing, named on every row of it — so an open
+        // was stamped, and a verdict later scored, against a search nobody was
+        // looking at. Folding forward keeps the stored event and what was
+        // rendered the same thing; the race it gave up on was already the rule
+        // everywhere else in this match, where the last write wins.
+        //
         // The one thing that stops a fold is an open — `opened_at` above —
         // because the pool that was read is the pool the hit is scored on.
         // The same query twice (the form fires on load, on submit and on every
@@ -248,13 +260,10 @@ impl Store {
         enum Fold {
             /// The stored event is an earlier wording of this one.
             Extends(String),
-            /// This is an earlier keystroke of the stored event, arriving late.
-            Superseded(String),
             New,
         }
         let fold = match prev.as_ref() {
             Some(r) => {
-                let prior: String = r.get("query");
                 let created: i64 = r.get("created_at");
                 // A window of zero means folding is off, not "fold within the
                 // same second" — which is what a plain `<=` gives, since both
@@ -272,11 +281,7 @@ impl Store {
                 // of it, so the empty search starts its own event instead.
                 let pool: i64 = r.get("pool");
                 let empties = ev.candidates.is_empty() && pool > 0;
-                if !fresh {
-                    Fold::New
-                } else if prior.len() > ev.query.len() && prior.starts_with(&ev.query) {
-                    Fold::Superseded(id)
-                } else if empties {
+                if !fresh || empties {
                     Fold::New
                 } else {
                     Fold::Extends(id)
@@ -285,11 +290,6 @@ impl Store {
             None => Fold::New,
         };
 
-        // Nothing to write: the final wording is already stored, and it was
-        // answered by a pool drawn for the query that was actually meant.
-        if let Fold::Superseded(id) = fold {
-            return Ok(id);
-        }
         let extends = match fold {
             Fold::Extends(id) => Some(id),
             _ => None,
@@ -394,9 +394,15 @@ pub enum Labeller {
     Deck,
     /// The bar under an opened result, or the gap button on the rail: at the
     /// moment, by the person who searched.
+    ///
+    /// The only other labeller there is. A read long enough used to count as a
+    /// hit on its own, and it is gone: what it measured was a page staying
+    /// open, which is a tab left behind as often as it is an answer, and it
+    /// arrived *after* the click it was overwriting — the beacon flushes when
+    /// the pane is left, so it landed on top of "not sure" and "undo" and put
+    /// a hit back that a person had just taken away. A verdict now comes from
+    /// somebody saying so.
     Confirm,
-    /// Reading a result long enough. Provisional: never overwrites the others.
-    Dwell,
 }
 
 impl Labeller {
@@ -404,7 +410,6 @@ impl Labeller {
         match self {
             Labeller::Deck => None,
             Labeller::Confirm => Some("confirm"),
-            Labeller::Dwell => Some("dwell"),
         }
     }
 }
@@ -432,7 +437,12 @@ pub struct PendingEvent {
 ///
 /// Two `COALESCE`s, for two different absences. The outer one: an empty pool
 /// reads as the weakest search there is, because a search that returned nothing
-/// is a hole rather than a card. The inner one: a candidate the vector half
+/// is a hole rather than a card — there is no list to point at, so the only
+/// answers left are gap and discard, and neither is worth spending a person's
+/// turn on. It is not thereby lost: `unmatched_gaps_from!` in `store::gaps`
+/// names the empty pool explicitly and the sweep raises it as a hole in the
+/// base, which is what it is. (It did not, once, and the search fell through
+/// the crack between the two.) The inner one: a candidate the vector half
 /// never scored reads as the *strongest*, because a similarity nobody measured
 /// is not evidence of a weak match. A hit found by the lexical half alone
 /// carries none — `search_inner` stores what the vector search returned, and
@@ -625,6 +635,30 @@ impl Store {
         )
     }
 
+    /// Whether this event was recorded by this searcher.
+    ///
+    /// Every route that labels a search takes the event id from the page — the
+    /// `?event=` on a rail link, the id in the verdict and gap posts — because
+    /// the page is what knows which search a row came from. An id is not a
+    /// capability, though: on an install with more than one person, anything
+    /// that acted on the id alone let one person stamp opens and verdicts onto
+    /// another's searches, and quietly break their coalescing besides, by
+    /// guessing at ids that are not secret. So the caller has to own the row.
+    ///
+    /// `scope = ?` and not `IS`: every search that can reach these routes came
+    /// through the UI door, and the UI door always names its subject (see
+    /// `Origin`). A row with no scope is not one of them.
+    pub async fn event_is_mine(&self, event_id: &str, scope: &str) -> Result<bool> {
+        Ok(
+            sqlx::query_scalar::<_, i64>("SELECT 1 FROM search_events WHERE id = ? AND scope = ?")
+                .bind(event_id)
+                .bind(scope)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some(),
+        )
+    }
+
     /// The search a result was opened from, named by the page that listed it.
     /// Stamped `opened_at`, which is what stops the next rewording folding into
     /// it — see `record_search`.
@@ -641,44 +675,21 @@ impl Store {
     /// them — or where a person has already spoken for it. That is what
     /// decides whether the bar under the artifact is drawn at all.
     pub async fn open_event(&self, event_id: &str) -> Result<bool> {
-        Ok(sqlx::query(
-            "UPDATE search_events SET opened_at = ?
-              WHERE id = ? AND (judged_at IS NULL OR judged_by = 'dwell')",
+        Ok(
+            sqlx::query(
+                "UPDATE search_events SET opened_at = ? WHERE id = ? AND judged_at IS NULL",
+            )
+            .bind(now())
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+                == 1,
         )
-        .bind(now())
-        .bind(event_id)
-        .execute(&self.pool)
-        .await?
-        .rows_affected()
-            == 1)
     }
 
-    /// A read long enough to count, as a hit — only where no person has said
-    /// anything. Whether it was written. A later read replaces an earlier one:
-    /// skimming the first result and reading the second is the second being
-    /// the one.
-    ///
-    /// `judged_by IS NULL` beside `judged_at IS NULL`: a "no" from the bar
-    /// leaves the event pending but marks it spoken for, and the dwell that
-    /// flushes when the pane is left must not put the hit straight back.
-    pub async fn implicit_hit(&self, event_id: &str, artifact_id: &str) -> Result<bool> {
-        Ok(sqlx::query(
-            "UPDATE search_events
-             SET judged_at = ?, verdict = 'hit', expect_id = ?, judged_by = 'dwell'
-             WHERE id = ?
-               AND ((judged_at IS NULL AND judged_by IS NULL) OR judged_by = 'dwell')",
-        )
-        .bind(now())
-        .bind(artifact_id)
-        .bind(event_id)
-        .execute(&self.pool)
-        .await?
-        .rows_affected()
-            == 1)
-    }
-
-    /// "Not this one": whatever a read recorded is withdrawn, the search stays
-    /// a question for the deck, and no later read may answer it.
+    /// "Not this one": the search stays a question for the deck, and the column
+    /// records that the answer came from a person rather than the deck.
     pub async fn decline(&self, event_id: &str) -> Result<()> {
         Self::judged_one(
             sqlx::query(
@@ -1227,24 +1238,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_keystroke_that_arrives_late_folds_into_the_wording_it_preceded() {
-        // Each keystroke is its own request, so "fat" can be committed after
-        // "fat32". Testing only whether the query grew left the earlier
-        // keystroke standing as a second event, and the judging queue filled
-        // with half-typed prefixes — the thing coalescing exists to prevent.
+    async fn a_shorter_query_folds_forward_like_any_other() {
+        // Deleting a word is an ordinary edit — the box searches as you type —
+        // and it used to be read as a half-typed keystroke arriving late, so
+        // the longer wording stayed and the shorter one was thrown away. What
+        // that left was a stored event holding a different query and a
+        // different pool than the rail beside it was showing, named on every
+        // row of it, so an open was stamped and a verdict scored against a
+        // search nobody was looking at. The record follows the box.
         let store = Store::memory().await.unwrap();
+        store
+            .record_search(ev("fat32 mount", Door::Ui), 15)
+            .await
+            .unwrap();
         store
             .record_search(ev("fat32", Door::Ui), 15)
             .await
             .unwrap();
-        store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
 
         assert_eq!(queries(&store).await, vec!["fat32"]);
         let candidates: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
             .fetch_one(&store.pool)
             .await
             .unwrap();
-        assert_eq!(candidates, 1, "the surviving event lost its pool");
+        assert_eq!(candidates, 1, "and the pool that answered it");
     }
 
     #[tokio::test]
@@ -1378,73 +1395,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_read_records_a_provisional_hit_that_no_human_has_to_give() {
+    async fn saying_no_leaves_the_search_a_question_for_the_deck() {
+        // "No" clears nothing into a verdict — it is a person saying the thing
+        // in front of them was not it, which is not the same as saying the
+        // base has nothing. So the search goes back to the deck, marked as
+        // having been spoken for by a person rather than by the deck.
         let store = Store::memory().await.unwrap();
-        let id = store
-            .record_search(ev("fat32", Door::Ui), 15)
-            .await
-            .unwrap();
-        assert!(store.implicit_hit(&id, "a1").await.unwrap());
-        let s = store.feedback_stats(0.0).await.unwrap();
-        assert_eq!((s.judged, s.hits), (1, 1));
-        assert_eq!(s.recall_at_10, 1.0);
-        assert_eq!(judged_by(&store, &id).await.as_deref(), Some("dwell"));
-        assert!(
-            store.next_pending(0.0).await.unwrap().is_none(),
-            "a search already labelled by reading is not dealt to the deck"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_read_never_overrules_a_person() {
-        let store = Store::memory().await.unwrap();
-        let id = store
-            .record_search(ev("fat32", Door::Ui), 15)
-            .await
-            .unwrap();
-        store
-            .judge(&id, Verdict::Gap, Labeller::Confirm)
-            .await
-            .unwrap();
-        assert!(!store.implicit_hit(&id, "a1").await.unwrap());
-        assert_eq!(store.feedback_stats(0.0).await.unwrap().gaps, 1);
-
-        // "No" clears nothing into a verdict, but it is still a person having
-        // spoken: the dwell that flushes when the pane is left must not put the
-        // hit straight back.
         let id = store.record_search(ev("ntfs", Door::Ui), 0).await.unwrap();
-        store.implicit_hit(&id, "a1").await.unwrap();
         store.decline(&id).await.unwrap();
-        assert!(!store.implicit_hit(&id, "a1").await.unwrap());
         let s = store.feedback_stats(0.0).await.unwrap();
-        assert_eq!(s.hits, 0, "the provisional hit was withdrawn");
+        assert_eq!((s.judged, s.hits), (0, 0));
+        assert_eq!(judged_by(&store, &id).await.as_deref(), Some("confirm"));
         assert_eq!(
             store.next_pending(0.0).await.unwrap().map(|e| e.id),
             Some(id),
             "and the search goes to the deck, still a question"
         );
-    }
-
-    #[tokio::test]
-    async fn a_later_read_replaces_an_earlier_one() {
-        // Skimming the first result and then reading the second is the second
-        // being the one. A read is provisional against a person, and equally
-        // provisional against the next read.
-        let store = Store::memory().await.unwrap();
-        let id = seed(&store, "fat32", &["a1", "a2"]).await;
-        assert!(store.implicit_hit(&id, "a1").await.unwrap());
-        assert!(
-            store.open_event(&id).await.unwrap(),
-            "a search labelled only by reading is still open to the next open"
-        );
-        assert!(store.implicit_hit(&id, "a2").await.unwrap());
-        let expect: Option<String> =
-            sqlx::query_scalar("SELECT expect_id FROM search_events WHERE id = ?")
-                .bind(&id)
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
-        assert_eq!(expect.as_deref(), Some("a2"));
     }
 
     #[tokio::test]
@@ -1507,24 +1473,30 @@ mod tests {
         assert_eq!(
             store.pending_count(0.35).await.unwrap(),
             1,
-            "a search that returned nothing is a hole, not a card"
+            "a search that returned nothing is a hole, not a card: there is no
+             list to point at, so the deck has no question to ask. It is not
+             lost — `store::gaps` raises it as an unmatched gap, which is what
+             `a_search_that_returned_nothing_is_an_unmatched_gap` holds it to."
         );
     }
 
     #[tokio::test]
-    async fn saying_yes_after_a_read_makes_the_hit_a_persons() {
+    async fn a_verdict_records_who_gave_it_and_undo_forgets_it() {
         let store = Store::memory().await.unwrap();
         let id = store
             .record_search(ev("fat32", Door::Ui), 15)
             .await
             .unwrap();
-        store.implicit_hit(&id, "a1").await.unwrap();
         store.judge_hit(&id, "a1", Labeller::Confirm).await.unwrap();
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("confirm"));
-        // Taking it back forgets who gave it, so a read can label it again.
+        // Taking it back returns the search to the deck with nothing on it —
+        // no verdict, no expectation, and no record of who once gave one.
         store.unjudge(&id).await.unwrap();
         assert_eq!(judged_by(&store, &id).await, None);
-        assert!(store.implicit_hit(&id, "a1").await.unwrap());
+        assert_eq!(
+            store.next_pending(0.0).await.unwrap().map(|e| e.id),
+            Some(id)
+        );
     }
 
     #[tokio::test]

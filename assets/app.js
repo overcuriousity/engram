@@ -626,19 +626,18 @@
   // pursuit signal there is, and it is sent as a beacon so leaving costs
   // nothing. Under three seconds is a glance, not a read, and is not sent.
   //
-  // Where the pane names the search it was opened from, that goes too: a
-  // read long enough is taken, provisionally, as the search having found
-  // what it was for. The server decides how long is long enough.
-  var dwell = { id: null, event: null, since: 0 };
+  // A pursuit signal only. This used to carry the search the pane was opened
+  // from, and a long enough read was written as that search having found its
+  // answer — but the beacon flushes as the pane is *left*, so it landed after
+  // the buttons under the result and overwrote them. The bar answers now.
+  var dwell = { id: null, since: 0 };
   function flushDwell() {
     if (!dwell.id) return;
     var secs = Math.round((Date.now() - dwell.since) / 1000);
     var id = dwell.id;
-    var event = dwell.event;
     dwell.id = null;
     if (secs < 3) return;
     var body = new URLSearchParams({ secs: String(secs) });
-    if (event) body.set('event', event);
     if (navigator.sendBeacon) {
       navigator.sendBeacon('/ui/artifacts/' + id + '/dwell', body);
     } else {
@@ -652,7 +651,6 @@
     flushDwell();
     if (id) {
       dwell.id = id;
-      dwell.event = open.getAttribute('data-event');
       dwell.since = Date.now();
     }
   }

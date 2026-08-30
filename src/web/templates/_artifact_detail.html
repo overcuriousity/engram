@@ -1,6 +1,4 @@
-{# `data-event` names the search this was opened from, where there is one, so
-   the dwell timer can report the read against it. #}
-<div data-terms="{{ d.terms }}" data-artifact="{{ d.id }}"{% if let Some(ev) = d.search_event %} data-event="{{ ev }}"{% endif %}>
+<div data-terms="{{ d.terms }}" data-artifact="{{ d.id }}">
   {# The way back to the list, for a narrow window where opening a result hides
      it. An installed app has no back button to fall back on. Hidden above
      60rem, where the rail is still on screen beside this — the same width that

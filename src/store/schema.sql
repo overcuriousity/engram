@@ -287,11 +287,13 @@ CREATE TABLE IF NOT EXISTS search_events (
   judged_at   INTEGER,
   verdict     TEXT,
   expect_id   TEXT,
-  -- Who gave the verdict: `confirm` from the bar under an opened result,
-  -- `dwell` from reading one long enough, NULL from the judge deck. A read is
-  -- the weakest of the three and never overwrites the other two — and a
-  -- `confirm` with no verdict is a person having said "not this one", which
-  -- keeps the search pending and keeps the read from labelling it.
+  -- Who gave the verdict: `confirm` from the bar under an opened result or the
+  -- gap button on the rail, NULL from the judge deck. A `confirm` with no
+  -- verdict is a person having said "not this one" — the search stays pending
+  -- and the column records that the answer came from the moment rather than
+  -- from the deck. A third value, `dwell`, was written by a read long enough
+  -- to count as a hit on its own; that is gone, and rows still carrying it are
+  -- verdicts nobody gave out loud.
   judged_by   TEXT,
   -- When a result from this search was opened. Freezes the pool: a rewording
   -- after an open starts its own event rather than folding into the list the
