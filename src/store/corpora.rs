@@ -585,13 +585,68 @@ impl Store {
     /// document, pulled to render a 60-character label. The prefix is chars,
     /// not bytes — SQLite's `substr` on text counts characters — and 400 of
     /// them is more than any label survives `markdown::snippet` with.
+    /// The last reminder read out of this note is done, so the note stops
+    /// being *recent*. Not a delete and not a hide: see `schema.sql`.
+    pub async fn retire_corpus(&self, corpus_id: &str, at: i64) -> Result<()> {
+        sqlx::query("UPDATE corpora SET retired_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(corpus_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The undo already on screen beside a completed reminder.
+    pub async fn unretire_corpus(&self, corpus_id: &str) -> Result<()> {
+        sqlx::query("UPDATE corpora SET retired_at = NULL WHERE id = ?")
+            .bind(corpus_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn is_retired(&self, corpus_id: &str) -> Result<bool> {
+        let at: Option<Option<i64>> =
+            sqlx::query_scalar("SELECT retired_at FROM corpora WHERE id = ?")
+                .bind(corpus_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(matches!(at, Some(Some(_))))
+    }
+
+    /// Which of these notes are retired, in one read. A result list asks once
+    /// for the whole page, the way `due_for` does.
+    pub async fn retired_among(
+        &self,
+        corpus_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        if corpus_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let marks = std::iter::repeat_n("?", corpus_ids.len()).collect::<Vec<_>>().join(",");
+        // `AssertSqlSafe` because the string is assembled here — the values are
+        // bound, and the only thing spliced in is a run of `?` this function
+        // counted itself. Same idiom as `due_for`.
+        let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM corpora WHERE retired_at IS NOT NULL AND id IN ({marks})"
+        )));
+        for id in corpus_ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
+    }
+
+    /// Newest first, retired notes excluded — a reminder that is done is not
+    /// one of the last things you kept. The day page is where it stays
+    /// visible, because a day is a record of what actually happened.
     pub async fn recent_captures(
         &self,
         limit: i64,
     ) -> Result<Vec<(String, Option<String>, String, i64, String)>> {
         Ok(sqlx::query_as(
             "SELECT id, title_hint, origin, created_at, substr(raw_text, 1, 400) \
-             FROM corpora ORDER BY created_at DESC, id DESC LIMIT ?",
+             FROM corpora WHERE retired_at IS NULL \
+             ORDER BY created_at DESC, id DESC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -803,6 +858,27 @@ mod tests {
         // A corpus deleted since is not a refusal: the artifact is still there
         // to read, it just no longer says where it came from.
         assert!(s.corpus_origin("gone").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_retired_corpus_leaves_the_recent_list_and_comes_back_on_undo() {
+        let s = Store::memory().await.unwrap();
+        let src = s
+            .insert_corpus("remind me friday to send the invoice", "ui", None)
+            .await
+            .unwrap();
+        assert_eq!(s.recent_captures(5).await.unwrap().len(), 1);
+
+        s.retire_corpus(&src.id, 1_700_000_000).await.unwrap();
+        assert!(
+            s.recent_captures(5).await.unwrap().is_empty(),
+            "a retired note is not a recent capture"
+        );
+        assert!(s.is_retired(&src.id).await.unwrap());
+
+        s.unretire_corpus(&src.id).await.unwrap();
+        assert_eq!(s.recent_captures(5).await.unwrap().len(), 1, "undo puts it back");
+        assert!(!s.is_retired(&src.id).await.unwrap());
     }
 
     #[tokio::test]

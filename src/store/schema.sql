@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS corpora (
   -- column cannot be both without losing the channel.
   source_url      TEXT,
   restored_at     INTEGER,
+  -- Set when the last reminder read out of this note was completed. The note
+  -- stays: it is still searchable, still on its day page, still the corpus its
+  -- artifacts belong to. What it stops being is a *recent capture* and a
+  -- competitor in the ranked half of a result list. NULL is the ordinary
+  -- state, and `undone` writes NULL back.
+  retired_at      INTEGER,
   -- What a door knew about the capture beyond the text: a note, file facts,
   -- EXIF. Namespaced JSON, '{}' when nothing was recorded.
   metadata        TEXT NOT NULL DEFAULT '{}'

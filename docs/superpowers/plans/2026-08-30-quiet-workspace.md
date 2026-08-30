@@ -12,12 +12,13 @@
 
 ## Global Constraints
 
-- Build and test on this machine with `./build-lowmem.sh test <args>`, never bare `cargo` — the box is 2 GB with no swap and a default `cargo test` link will OOM. `./build-lowmem.sh` forwards every argument to cargo.
+- Build and test with plain `cargo test <args>`. `./build-lowmem.sh` is for the 2 GB deployment box: it links through the toolchain's bundled lld, which the distro rustc on this machine does not ship (`collect2: fatal error: cannot find 'ld'`). This machine has 31 GB and 12 cores and needs none of it.
+- A dynamic `IN (…)` list must be wrapped in `sqlx::AssertSqlSafe`; sqlx 0.9 refuses a `&str` built at runtime. `src/store/moments.rs:190` is the idiom to copy.
 - No model call, no embedding call, and no network on any path this plan touches. `cue()`, the date rules and `when_words` are pure functions and must stay that way.
 - Nothing is ever deleted. Retirement is a nullable flag with an undo; there is no delete path anywhere in this plan.
 - Every user-visible sentence is written in the voice of the existing templates: plain, lowercase-after-the-first-word, no exclamation marks, no "please". Copy strings in this plan are exact and are not to be improved on.
 - Askama templates carry `{# … #}` comments explaining *why* a construct is the way it is, matching the density already in `workspace.html` and `_due.html`. A template edit with no comment where the surrounding file comments is incomplete.
-- Every task ends with `./build-lowmem.sh clippy --all-targets -- -D warnings` clean before its commit.
+- `cargo clippy` is not installed on this machine. Every task ends with `cargo check --all-targets` clean before its commit; run clippy wherever it is available before the branch is merged.
 
 ---
 
