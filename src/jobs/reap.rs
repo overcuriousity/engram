@@ -78,6 +78,62 @@ async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u
     Ok((cands, stamped))
 }
 
+/// One nominee, one call. The judge is `core.judge` — the same cheap
+/// completer dedupe uses — and it compares the candidate against what a
+/// searcher can actually reach: the successor row when one was named, and the
+/// nearest *live* neighbours by the candidate's stored vector. A candidate
+/// with no point simply gets no neighbours; the judge then sees only the
+/// successor, or nothing live at all, and the prompt's own bias ("when
+/// unsure, valuable") is what keeps that from destroying anything.
+async fn judge_one(
+    core: &Core,
+    c: &crate::store::artifacts::Chunk,
+) -> Result<crate::infer::prompt::Reap> {
+    let judge = core
+        .judge
+        .as_ref()
+        .ok_or_else(|| crate::error::Error::Validation("no judge model configured".into()))?;
+    let successor = match &c.superseded_by {
+        Some(id) => core.store.get_artifact(id).await.ok(),
+        None => None,
+    };
+    let mut neighbours: Vec<(String, String)> = Vec::new();
+    if let Ok(hits) = core.vectors.neighbours(&c.id, 6).await {
+        for h in hits {
+            if h.payload.artifact_id == c.id {
+                continue;
+            }
+            // Live means what `in_results` means; the payload's own status
+            // can lag the row, so the row answers.
+            if let Ok(Some(true)) = core.store.artifact_in_results(&h.payload.artifact_id).await {
+                neighbours.push((
+                    h.payload.title.clone().unwrap_or_else(|| "untitled".into()),
+                    h.payload.text.clone(),
+                ));
+            }
+            if neighbours.len() >= 5 {
+                break;
+            }
+        }
+    }
+    let case = crate::infer::prompt::ReapCase {
+        title: c.title.as_deref().unwrap_or("untitled"),
+        text: &c.text,
+        successor: successor
+            .as_ref()
+            .map(|s| (s.title.as_deref().unwrap_or("untitled"), s.text.as_str())),
+        neighbours: neighbours
+            .iter()
+            .map(|(t, x)| (t.as_str(), x.as_str()))
+            .collect(),
+    };
+    let user = crate::infer::prompt::reap_prompt(&case);
+    let permit = core.gate.background().await;
+    let reply = judge.complete(crate::infer::prompt::REAP_SYSTEM, &user).await;
+    permit.finished();
+    crate::infer::prompt::parse_reap(&reply?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +257,33 @@ mod tests {
             .unwrap();
         let (cands, _) = nominees(&core).await.unwrap();
         assert_eq!(cands.len(), 2, "an old merge has forfeited its undo window");
+    }
+
+    #[tokio::test]
+    async fn the_judge_sees_the_successor_and_answers_from_the_script() {
+        let mut core = test_core().await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+        ]));
+        core.judge = Some(scripted.clone());
+        let ids = seed(&core, &["the old wording", "the new wording"]).await;
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+        let c = core.store.get_artifact(&ids[0]).await.unwrap();
+        let verdict = judge_one(&core, &c).await.unwrap();
+        assert!(matches!(
+            verdict,
+            crate::infer::prompt::Reap::Worthless { .. }
+        ));
+        assert_eq!(scripted.calls(), 1);
+        let prompts = scripted.prompts();
+        assert!(
+            prompts[0].contains("the old wording") && prompts[0].contains("the new wording"),
+            "the judge must see both sides: {}",
+            prompts[0]
+        );
     }
 
     #[tokio::test]

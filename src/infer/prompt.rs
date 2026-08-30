@@ -176,6 +176,76 @@ pub struct Dedupe {
     pub merged: Option<MergedDraft>,
 }
 
+pub const REAP_SYSTEM: &str = r#"You decide whether a retired knowledge-base artifact still states anything the live base does not.
+
+You are given the retired artifact, the replacement that retired it if one was named, and the closest live artifacts. Read the retired text for facts a reader could act on or be wrong about, and check each one against the live texts.
+
+- "worthless" — every such fact is stated by the live texts shown. The retired text will be destroyed; only its metadata survives.
+- "valuable" — it states at least one thing the live texts do not. It will be rewritten into a live artifact.
+
+"worthless" destroys text and nobody confirms it first, so it asks for certainty rather than suspicion: if you can name one fact the live texts lack, the answer is "valuable". When you are unsure, answer "valuable" — a wrong "valuable" costs one rewrite; a wrong "worthless" cannot be taken back.
+
+Reply with JSON only: {"verdict":"worthless"|"valuable","reason":"one line naming the deciding fact"}"#;
+
+/// What the reap judge is shown: the candidate, its named replacement if the
+/// retirement was a supersession, and the nearest live artifacts.
+pub struct ReapCase<'a> {
+    pub title: &'a str,
+    pub text: &'a str,
+    /// `(title, text)` of the successor, when one was named.
+    pub successor: Option<(&'a str, &'a str)>,
+    /// `(title, text)`, nearest first.
+    pub neighbours: Vec<(&'a str, &'a str)>,
+}
+
+pub fn reap_prompt(case: &ReapCase<'_>) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "----- RETIRED ARTIFACT -----\nTitle: {}\n\n{}\n",
+        case.title, case.text
+    ));
+    if let Some((title, text)) = &case.successor {
+        s.push_str(&format!(
+            "----- ITS NAMED REPLACEMENT -----\nTitle: {title}\n\n{text}\n"
+        ));
+    }
+    if !case.neighbours.is_empty() {
+        s.push_str("----- CLOSEST LIVE ARTIFACTS -----\n");
+        for (i, (title, text)) in case.neighbours.iter().enumerate() {
+            s.push_str(&format!("[{}] Title: {title}\n\n{text}\n\n", i + 1));
+        }
+    }
+    s
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Reap {
+    Worthless { reason: String },
+    Valuable { reason: String },
+}
+
+pub fn parse_reap(body: &str) -> Result<Reap> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        verdict: String,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    let r: Raw = serde_json::from_value(unwrap_verdict(extract_json(body))?).map_err(|e| {
+        Error::MalformedLlmOutput(format!("reap reply was not the expected JSON: {e}"))
+    })?;
+    let reason = r.reason.unwrap_or_default();
+    // An unknown verdict is an error, never a default: this call's "worthless"
+    // destroys text, so a reply that cannot be read must act on nothing.
+    match r.verdict.as_str() {
+        "worthless" => Ok(Reap::Worthless { reason }),
+        "valuable" => Ok(Reap::Valuable { reason }),
+        other => Err(Error::MalformedLlmOutput(format!(
+            "reap verdict was neither worthless nor valuable: {other:?}"
+        ))),
+    }
+}
+
 pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be about the same thing, and decide what should happen to them.
 
 First, if NEITHER states anything a reader could act on or be wrong about — a body that is only its own title or file path, a bare link, boilerplate, an outline with nothing under its headings — answer "vacuous" and stop. It must hold for both: one empty artifact beside a real one is not this.
@@ -2528,5 +2598,35 @@ mod tests {
     fn the_remind_prompt_carries_the_clock_and_the_zone() {
         let p = remind_prompt("2026-08-30 12:00 (Sunday)", "Europe/Berlin", "remind me friday");
         assert!(p.contains("2026-08-30 12:00 (Sunday)") && p.contains("Europe/Berlin") && p.contains("remind me friday"));
+    }
+
+    #[test]
+    fn parse_reap_reads_both_verdicts_and_refuses_the_rest() {
+        assert_eq!(
+            parse_reap(r#"{"verdict":"worthless","reason":"covered by [1]"}"#).unwrap(),
+            Reap::Worthless { reason: "covered by [1]".into() }
+        );
+        assert_eq!(
+            parse_reap("```json\n{\"verdict\":\"valuable\",\"reason\":\"names a port\"}\n```").unwrap(),
+            Reap::Valuable { reason: "names a port".into() }
+        );
+        assert!(parse_reap(r#"{"verdict":"maybe","reason":""}"#).is_err());
+        assert!(parse_reap("no json here").is_err());
+    }
+
+    #[test]
+    fn reap_prompt_carries_candidate_successor_and_numbered_neighbours() {
+        let case = ReapCase {
+            title: "Old flag",
+            text: "use --legacy-peer-deps",
+            successor: Some(("New flag", "use --install-strategy")),
+            neighbours: vec![("N1", "first neighbour"), ("N2", "second neighbour")],
+        };
+        let p = reap_prompt(&case);
+        assert!(p.contains("RETIRED ARTIFACT") && p.contains("--legacy-peer-deps"));
+        assert!(p.contains("NAMED REPLACEMENT") && p.contains("--install-strategy"));
+        assert!(p.contains("[1] Title: N1") && p.contains("[2] Title: N2"));
+        let no_successor = ReapCase { successor: None, neighbours: vec![], ..case };
+        assert!(!reap_prompt(&no_successor).contains("NAMED REPLACEMENT"));
     }
 }
