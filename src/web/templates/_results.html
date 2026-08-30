@@ -84,6 +84,12 @@
         {% else %}
         <span class="rail-rank mono">{{ r.rank }}</span>
         {% endif %}
+        {# Why this row is below the line, said on the row. A demoted hit with
+           no reason given is indistinguishable from a ranking that went
+           wrong. #}
+        {% if r.retired %}
+        <span class="badge">done reminder</span>
+        {% endif %}
         {% if r.primed %}
         {% if r.in_sitting %}
         <span class="badge" title="Moved up: you have been in this one already today">primed · seen</span>

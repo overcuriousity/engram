@@ -893,6 +893,7 @@ impl Core {
                 in_sitting: false,
                 // The cliff was computed over scores this one was never in.
                 past_cliff: false,
+                retired: false,
                 similarity: None,
                 titled_by_corpus: false,
                 // What makes a reached artifact tellable apart from a retrieved
@@ -2870,6 +2871,7 @@ mod tests {
                 due_in: None,
                 in_sitting: false,
                 past_cliff: false,
+                retired: false,
                 similarity: None,
                 titled_by_corpus: false,
                 via: None,

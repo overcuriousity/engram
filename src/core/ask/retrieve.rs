@@ -331,6 +331,7 @@ mod tests {
             due_in: None,
             in_sitting: false,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: via.map(str::to_string),

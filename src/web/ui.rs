@@ -57,6 +57,9 @@ pub struct RenderedResult {
     /// rule; the rank stays, because it did place — the claim withdrawn is
     /// "this is an answer", not "this is fifth". See `search::cliff`.
     pub past_cliff: bool,
+    /// A reminder that is done. Badged, because a row that has quietly sunk
+    /// with no reason given reads as a ranking bug.
+    pub retired: bool,
     /// The title of the ranked hit that recalled this one. Set only on an
     /// associated hit, and it is what the row names.
     pub via_title: Option<String>,
@@ -1372,6 +1375,7 @@ pub(crate) fn render_hit(
         in_sitting: h.in_sitting,
         due_in: h.due_in.clone(),
         past_cliff: h.past_cliff,
+        retired: h.retired,
         via_title: h.via.as_ref().and_then(|v| titles.get(v).cloned()),
         reason: h.reason.clone(),
         why_ranked: explain
@@ -6497,6 +6501,7 @@ mod tests {
             due_in: None,
             in_sitting: false,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: None,
@@ -6602,6 +6607,7 @@ mod tests {
             in_sitting: false,
             due_in: None,
             past_cliff: false,
+            retired: false,
             via_title: None,
             model_written: false,
             origin_count: 0,
@@ -6740,6 +6746,7 @@ mod tests {
             due_in: None,
             in_sitting: false,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: via.map(str::to_string),
@@ -6787,6 +6794,7 @@ mod tests {
             in_sitting: false,
             due_in: None,
             past_cliff: false,
+            retired: false,
             via_title: via.map(str::to_string),
             reason: reason.map(str::to_string),
             model_written: false,
@@ -7000,6 +7008,7 @@ mod tests {
             in_sitting: false,
             due_in: None,
             past_cliff: false,
+            retired: false,
             via_title: None,
             reason: None,
             model_written: false,

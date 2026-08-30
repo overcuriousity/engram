@@ -205,6 +205,12 @@ pub struct SearchResult {
     /// dropped — but the page stops claiming it is an answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
+    /// The note this passage came from is a reminder that is done. It keeps
+    /// its place in the list and is moved to the tail rather than dropped:
+    /// search for its own words and it is still there. What it stops doing is
+    /// competing with the things that were written to be kept.
+    #[serde(default)]
+    pub retired: bool,
     /// Cosine similarity between the query and this hit, when the store could
     /// say. Comparable across queries where `score` is not, which is why the
     /// cliff is read from it whenever no reranker has calibrated the scores.
@@ -261,6 +267,7 @@ impl From<SearchHit> for SearchResult {
             due_at: None,
             due_in: None,
             past_cliff: false,
+            retired: false,
             similarity: h.similarity,
             titled_by_corpus: false,
             via: None,
@@ -1066,6 +1073,7 @@ impl Core {
                 due_at: None,
                 due_in: None,
                 past_cliff: false,
+                retired: false,
                 similarity: None,
                 titled_by_corpus: false,
                 // Set here, where `via` is known. Never ranked, so every other
@@ -1576,6 +1584,14 @@ impl Core {
             r.due_at = due_map.get(&r.artifact_id).copied();
             r.due_in = r.due_at.map(crate::web::judge::ago_or_ahead);
         }
+        // Retirement, read for the whole page in one query beside the due map.
+        {
+            let cids: Vec<String> = results.iter().map(|r| r.corpus_id.clone()).collect();
+            let retired = self.store.retired_among(&cids).await.unwrap_or_default();
+            for r in &mut results {
+                r.retired = retired.contains(&r.corpus_id);
+            }
+        }
         let due: std::collections::HashSet<String> = match self.time.lift {
             true => due_map.keys().cloned().collect(),
             false => Default::default(),
@@ -1711,7 +1727,19 @@ impl Core {
         // On the list the caller will see, in its final order: after priming,
         // after the truncate, and before association appends hits that never
         // competed for a place. Marks, never reorders or drops.
+        // Retired notes go to the tail before the cliff is read, never after.
+        // `mark_past_cliff` guarantees that what it marks is a *suffix* of the
+        // list, and `ask` truncates at the first marked hit — so marking a row
+        // in the middle would silently cut the answer short. `sort_by_key` is
+        // stable, so every other row keeps the order the ranking produced.
+        results.sort_by_key(|r| r.retired);
         mark_past_cliff(&mut results, reranked);
+        for r in results.iter_mut().filter(|r| r.retired) {
+            r.past_cliff = true;
+            if let Some(e) = r.explanation.as_mut() {
+                e.past_cliff = true;
+            }
+        }
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
@@ -1904,6 +1932,38 @@ mod tests {
             "the fixture stopped configuring a reranker: {named:?}"
         );
         assert_eq!(named, started, "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_retired_note_sinks_below_the_cliff_and_says_why() {
+        let core = test_core().await;
+        // Three ordinary notes, so `cliff` has the three scores it needs, and
+        // the reminder in a corpus of its own so it can be retired alone.
+        seed(
+            &core,
+            &[
+                ("the invoice for august", "admin", &[]),
+                ("invoice terms and conditions", "admin", &[]),
+                ("invoice numbering scheme", "admin", &[]),
+            ],
+        )
+        .await;
+        let cid = seed_from(&core, "reminder", &[("remind me friday to send the invoice", "admin", &[])]).await;
+
+        let before = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        let pos = before.iter().position(|r| r.corpus_id == cid).expect("it places while open");
+
+        core.store.retire_corpus(&cid, now_secs()).await.unwrap();
+        let after = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        let row = after.iter().find(|r| r.corpus_id == cid).expect("still findable — nothing was deleted");
+        assert!(row.retired, "the row says what it is");
+        assert!(row.past_cliff, "and it is below the line");
+        assert_eq!(
+            after[after.len() - 1].corpus_id,
+            cid,
+            "demoted to the tail, so `ask` still truncates a tail"
+        );
+        assert!(after.iter().position(|r| r.corpus_id == cid).unwrap() >= pos);
     }
 
     #[tokio::test]
@@ -3112,6 +3172,7 @@ mod tests {
                 due_at: None,
                 due_in: None,
                 past_cliff: false,
+                retired: false,
                 similarity: None,
                 titled_by_corpus: false,
                 via: None,
@@ -4214,6 +4275,7 @@ mod tests {
             due_at: None,
             due_in: None,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: None,
@@ -4328,6 +4390,7 @@ mod tests {
             due_at: None,
             due_in: None,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: None,
@@ -4388,6 +4451,7 @@ mod tests {
             due_at: None,
             due_in: None,
             past_cliff: false,
+            retired: false,
             similarity,
             titled_by_corpus: false,
             via: None,

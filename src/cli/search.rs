@@ -361,6 +361,7 @@ pub(crate) mod fixture {
             due_at: None,
             due_in: None,
             past_cliff,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: None,
