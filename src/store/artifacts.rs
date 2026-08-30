@@ -1434,6 +1434,101 @@ impl Store {
         Ok(())
     }
 
+    /// The retired artifacts the reap sweep may put in front of the judge:
+    /// out of `active` for at least `min_age_secs`, not already reaped, and
+    /// named by no open reminder — a note somebody still expects to be pushed
+    /// must keep its text whatever a model thinks of it. Oldest retirement
+    /// first, so the backlog drains in the order it accumulated.
+    ///
+    /// Age reads `retired_at` and nothing else. A retired row whose stamp is
+    /// NULL predates the column; `stamp_unaged_retired` gives it a fresh clock
+    /// and this query simply does not see it until that clock runs.
+    pub async fn reap_candidates(&self, min_age_secs: i64, limit: i64) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts
+              WHERE (status != 'active' OR superseded_by IS NOT NULL)
+                AND reaped_at IS NULL
+                AND retired_at IS NOT NULL AND retired_at < ?
+                AND NOT EXISTS (SELECT 1 FROM moments m
+                                 WHERE m.artifact_id = artifacts.id
+                                   AND m.done_at IS NULL)
+              ORDER BY retired_at ASC
+              LIMIT ?",
+        )
+        .bind(now() - min_age_secs)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
+    /// Give every retired row that predates `retired_at` a clock starting now.
+    /// The migration-free backfill: a fresh stamp is merely slow, where an
+    /// invented historical one would hand the reaper rows it was never told
+    /// to wait on.
+    pub async fn stamp_unaged_retired(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE artifacts SET retired_at = ?
+              WHERE (status != 'active' OR superseded_by IS NOT NULL)
+                AND retired_at IS NULL",
+        )
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Copy a row's text into the graveyard, then wipe it — one transaction,
+    /// copy first, so no failure order can destroy text that was not saved.
+    /// The stub keeps every column other rows hold threads into (`id`,
+    /// `status`, `superseded_by`, title, lineage); the `AFTER UPDATE OF text`
+    /// trigger empties the FTS entry on its own.
+    pub async fn bury(&self, id: &str, meta_json: &str) -> Result<()> {
+        let reaped_at = now();
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query(
+            "INSERT INTO graveyard (id, title, text, meta_json, reaped_at)
+             SELECT id, title, text, ?, ? FROM artifacts WHERE id = ?",
+        )
+        .bind(meta_json)
+        .bind(reaped_at)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        sqlx::query("UPDATE artifacts SET text = '', reaped_at = ? WHERE id = ?")
+            .bind(reaped_at)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// One grave, for tests and nothing else today: `(text, meta_json,
+    /// reaped_at)`.
+    pub async fn graveyard_row(&self, id: &str) -> Result<Option<(String, String, i64)>> {
+        let row = sqlx::query("SELECT text, meta_json, reaped_at FROM graveyard WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| (r.get("text"), r.get("meta_json"), r.get("reaped_at"))))
+    }
+
+    /// How many retired rows still hold their text — the standing count the
+    /// status line shows beside what the last sweep did.
+    pub async fn retired_unreaped_count(&self) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifacts
+              WHERE (status != 'active' OR superseded_by IS NOT NULL)
+                AND reaped_at IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     async fn count_by_embed_state(&self, corpus_id: &str, state: &str) -> Result<i64> {
         let row = sqlx::query(
             "SELECT COUNT(*) AS n FROM artifacts WHERE corpus_id = ? AND embed_state = ?",
@@ -2435,5 +2530,110 @@ mod tests {
         assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_some());
         s.set_superseded_by(&made[0].id, None).await.unwrap();
         assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_none());
+    }
+
+    /// Push an artifact's retirement into the past, as if it happened then.
+    async fn backdate_retired_at(s: &Store, id: &str, secs_ago: i64) {
+        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
+            .bind(now() - secs_ago)
+            .bind(id)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+    }
+
+    /// An open reminder on the artifact, the shape the reap rules must respect.
+    async fn insert_open_moment(s: &Store, artifact_id: &str) {
+        sqlx::query(
+            "INSERT INTO moments (id, artifact_id, kind, at, tz, source, created_at)
+             VALUES (?, ?, 'due', ?, 'UTC', 'set', ?)",
+        )
+        .bind(new_id())
+        .bind(artifact_id)
+        .bind(now() + 3_600)
+        .bind(now())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reap_candidates_apply_age_status_and_moment_rules() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "old"), nc(1, "young"), nc(2, "reminded")])
+            .await
+            .unwrap();
+        for c in &made {
+            s.set_artifact_status(&c.id, ArtifactStatus::Deprecated)
+                .await
+                .unwrap();
+        }
+        backdate_retired_at(&s, &made[0].id, 100 * 86_400).await;
+        // made[1] keeps its fresh stamp — too young.
+        backdate_retired_at(&s, &made[2].id, 100 * 86_400).await;
+        insert_open_moment(&s, &made[2].id).await;
+
+        let got = s.reap_candidates(90 * 86_400, 20).await.unwrap();
+        assert_eq!(
+            got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec![made[0].id.as_str()],
+            "only the old, unreminded retirement is a candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn stamping_gives_unaged_retired_rows_a_clock_and_nothing_else() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "retired"), nc(1, "active")])
+            .await
+            .unwrap();
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        // Simulate a row retired before the column existed.
+        sqlx::query("UPDATE artifacts SET retired_at = NULL WHERE id = ?")
+            .bind(&made[0].id)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(s.stamp_unaged_retired().await.unwrap(), 1);
+        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_some());
+        assert!(s.get_artifact(&made[1].id).await.unwrap().retired_at.is_none());
+        assert_eq!(s.stamp_unaged_retired().await.unwrap(), 0, "stamping is once");
+    }
+
+    #[tokio::test]
+    async fn bury_copies_then_wipes_in_one_transaction() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "ephemeral fact xylophone"), nc(1, "two")])
+            .await
+            .unwrap();
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        s.bury(&made[0].id, r#"{"reason":"nothing new"}"#).await.unwrap();
+
+        let row = s.get_artifact(&made[0].id).await.unwrap();
+        assert_eq!(row.text, "");
+        assert!(row.reaped_at.is_some());
+        assert!(
+            row.status != ArtifactStatus::Active,
+            "the stub keeps its status"
+        );
+        let (text, meta, _) = s.graveyard_row(&made[0].id).await.unwrap().unwrap();
+        assert!(text.contains("xylophone"), "the graveyard holds the full text");
+        assert!(meta.contains("nothing new"));
+
+        assert_eq!(s.retired_unreaped_count().await.unwrap(), 0);
+        s.set_artifact_status(&made[1].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert_eq!(s.retired_unreaped_count().await.unwrap(), 1);
     }
 }
