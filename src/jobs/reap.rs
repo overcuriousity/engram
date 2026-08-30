@@ -691,6 +691,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rescue_is_reaped_against_its_own_rewrite_on_the_second_pass() {
+        // The loop the design closes: rescue writes a live rewrite and
+        // supersedes the candidate, which stamps a *new* retired_at — so the
+        // second visit, an age later, judges the candidate against its own
+        // living rewrite and the likely verdict is worthless. The seam this
+        // test exists for: a rescue that failed to stamp a fresh clock would
+        // never be nominated again, and one that wiped anything would have
+        // destroyed text on a "valuable" verdict.
+        let mut core = test_core().await;
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"valuable","reason":"names the port"}"#.into(),
+                RESCUE_REPLY.into(),
+                r#"{"verdict":"worthless","reason":"the rewrite carries it"}"#.into(),
+            ]),
+        ));
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        // Pass 1: rescued, not reaped.
+        let first = run(&core).await.unwrap();
+        assert_eq!((first.reaped, first.rescued), (0, 1));
+        let new_id = core
+            .store
+            .get_artifact(&ids[0])
+            .await
+            .unwrap()
+            .superseded_by
+            .expect("superseded by the rewrite");
+        crate::jobs::embed::run(&core, &new_id).await.unwrap();
+
+        // An age passes.
+        backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
+
+        // Pass 2: the candidate is judged against its living rewrite and
+        // lands in the graveyard; the rewrite stays live.
+        let second = run(&core).await.unwrap();
+        assert_eq!((second.judged, second.reaped, second.rescued), (1, 1, 0));
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+        let rewrite = core.store.get_artifact(&new_id).await.unwrap();
+        assert!(rewrite.in_results());
+        assert_eq!(rewrite.text, "the port is 8443");
+    }
+
+    #[tokio::test]
     async fn the_first_pass_stamps_the_unaged_and_nominates_none_of_them() {
         let core = test_core().await;
         let ids = seed(&core, &["pre-column retirement"]).await;

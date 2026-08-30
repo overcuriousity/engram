@@ -52,6 +52,12 @@ positions those searches really gave. Not a proxy score.
   so what you use stays reachable. It never rewrites what is stored.
 - **Gaps** — questions the base could not answer are grouped, named and listed
   until you cover them.
+- **Reap** — what has been retired for a season (90 days by default) gets one
+  more look, from a model: whatever it still states that the live base does
+  not is rewritten into a live artifact; the rest is wiped from search and
+  index, full text kept in a graveyard table that nothing reads back. Bounded
+  per run, off with `reap.enabled = false`, and never touching anything an
+  open reminder still names.
 - **Time** — *remind me Friday to send the invoice* is a reminder, dated at
   capture and shown under the box when it comes due, with done, snooze and
   push to Gotify or UnifiedPush. The band fills itself while you watch, and a

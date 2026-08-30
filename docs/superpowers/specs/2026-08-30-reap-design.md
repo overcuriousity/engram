@@ -1,7 +1,27 @@
 # Reaping the retired — a graveyard, not a museum — Design
 
 Date: 2026-08-30
-Status: approved, not yet implemented
+Status: implemented (2026-08-30)
+
+> **Implementation notes.** The judge rides `core.judge` — the completer
+> dedupe already uses — so the spec's `reap.tier` key was dropped rather than
+> building per-sweep tier machinery no other sweep has; the rescue rewrite
+> rides the same completer with `RESCUE_SYSTEM` and the generation parser.
+> The `retired_at` backfill is a stamping pass inside the sweep
+> (`stamp_unaged_retired`), not a migration: a pre-column retired row gets a
+> fresh clock on first sight, same effect as §2's "backfilled to now". The
+> spec's FTS remarks predate the current schema, which has no FTS — the wipe
+> is one UPDATE and the Qdrant point delete. `bury` takes the reason inside
+> `meta_json` rather than as a third argument. Rescue re-points only a
+> candidate with no `superseded_by`; an already-superseded one keeps its old
+> winner and loses to the rewrite as a live neighbour on the second pass.
+> Sweep gating is `reap.enabled && core.judge.is_some()`. Adds
+> `src/jobs/reap.rs`; touches `src/store/schema.sql` (two columns, one
+> table), `src/store/mod.rs` (ADDITIVE), `src/store/artifacts.rs`,
+> `src/store/sweeps.rs` (`last_sweep_run`), `src/store/jobs.rs` (one stage),
+> `src/core/{mod,background,ingest}.rs`, `src/jobs/{mod,consolidate}.rs`
+> (drift repair deletes a reaped row's point), `src/infer/prompt.rs`,
+> `src/web/{api,ui}.rs`, `src/cli/status.rs`, `src/config.rs`, `README.md`.
 
 ## 1. Why
 
