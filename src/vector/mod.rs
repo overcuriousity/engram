@@ -394,6 +394,11 @@ pub trait VectorStore: Send + Sync {
     /// filter would cost a payload parse for a picture. No ordering is
     /// promised beyond determinism between identical calls.
     async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>>;
+    /// One point's dense vector, by artifact id. The moments stage compares
+    /// an artifact's own vector to intent prototypes; reading it back is one
+    /// point fetch, and re-embedding it would be a second call for a vector
+    /// already paid for. `None` for a point that is not there.
+    async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>>;
     async fn count(&self) -> Result<u64>;
     /// Which generation of the store a `count` was taken from, where the
     /// backing store has such a thing.

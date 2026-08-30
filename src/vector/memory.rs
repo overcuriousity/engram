@@ -483,6 +483,10 @@ impl VectorStore for MemoryVectors {
         Ok(())
     }
 
+    async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
+        Ok(self.points.read().unwrap().get(artifact_id).map(|p| p.vector.clone()))
+    }
+
     async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
         let r = self.points.read().unwrap();
         let mut ids: Vec<&String> = r.keys().collect();
@@ -537,6 +541,16 @@ mod tests {
             include_deprecated: true,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn dense_of_returns_the_stored_vector_and_none_for_a_stranger() {
+        let m = MemoryVectors::new();
+        m.upsert(vec![point("a1", "s1", vec![0.1, 0.2, 0.3], &[], "concept")])
+            .await
+            .unwrap();
+        assert_eq!(m.dense_of("a1").await.unwrap(), Some(vec![0.1, 0.2, 0.3]));
+        assert_eq!(m.dense_of("nope").await.unwrap(), None);
     }
 
     #[tokio::test]
