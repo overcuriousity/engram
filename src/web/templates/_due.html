@@ -1,10 +1,16 @@
 {# The band under the recommendation. Drawn around something or not at all:
-   with nothing due the div is empty and unbordered, and app.js removes it on
-   the first keystroke the way it removes the offer. `just` is the row the
-   viewer acted on, shown struck through with its undo for this render only.
+   with nothing due the div is empty and unbordered.
+
+   `refresh` is app.js's own event, fired when the box is emptied — by a
+   capture, or by hand. The band replaces itself in place, so what the column
+   shows on its way back is what is due now and not what was due a minute ago.
+
+   `just` is the row the viewer acted on, shown struck through with its undo
+   for this render only.
    `hx-vals` on the container is inherited by every button in it, so each
    action carries the viewer's zone. #}
 <div id="due" class="due{% if !rows.is_empty() || just.is_some() %} due-filled{% endif %}"
+     hx-post="/ui/due" hx-swap="outerHTML" hx-trigger="refresh"
      hx-vals='{"tz": "{{ tz }}"}'>
 {% if let Some(j) = just %}
   <p class="due-row due-done muted"><span class="due-title">Done</span>

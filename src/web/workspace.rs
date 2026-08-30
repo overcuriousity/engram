@@ -244,13 +244,15 @@ async fn base_template(
     // its complement: whatever will not be filled by a search on arrival is
     // filled by the idle rail here.
     let idle_state = q.is_empty() || !open_with.is_empty();
-    let idle = match idle_state {
-        true => crate::web::ui::idle_foot(tenant)
-            .await?
-            .render()
-            .map_err(|e| crate::error::Error::Internal(e.to_string()))?,
-        false => String::new(),
-    };
+    // Rendered whatever state the page arrived in. It is the idle column's
+    // closing line now rather than the rail's contents, so there is no list to
+    // flicker under a result set that is about to arrive — and a deep link
+    // whose box is cleared has to find the line already there, because what
+    // comes back from the results endpoint is an out-of-band swap onto it.
+    let idle = crate::web::ui::idle_foot(tenant)
+        .await?
+        .render()
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
     // The slimmest read there is, and the same one the idle rail takes. Asked
     // unconditionally because the deep-link path renders no idle rail and
     // still has to know: a search URL against an empty base is a page that

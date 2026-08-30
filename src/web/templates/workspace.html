@@ -255,27 +255,30 @@
    space. #}
 <div id="idle"{% if !idle_state %} hidden{% endif %}>
   {% include "_box_hint.html" %}
-  {# Gated on the state, not merely hidden by it. A `load` trigger fires for an
-     element inside a hidden parent as readily as for a visible one, so an
-     offer rendered onto a page that arrived with results would fetch itself,
-     write a `recommended_shown` row and be seen by nobody — inflating the
-     denominator of the one hit rate this area is measured by. #}
-  {% if idle_state %}
   {# Fetched rather than rendered because the bundle originates in the browser
-     and the server does not have it at first paint. app.js removes this one
-     on the first keystroke rather than hiding it: an offer is a measured
-     impression, and one computed for a situation that reappears in another is
-     a second impression nobody had. #}
-  {% if recommend %}
+     and the server does not have it at first paint.
+
+     Gated on the state, not merely hidden by it, and it is the one thing here
+     that is: a `load` trigger fires for an element inside a hidden parent as
+     readily as for a visible one, so an offer rendered onto a page that
+     arrived with results would fetch itself, write a `recommended_shown` row
+     and be seen by nobody — inflating the denominator of the one hit rate this
+     area is measured by. app.js *removes* this one on the first keystroke
+     rather than hiding it, for the same reason: an offer computed for one
+     situation, reappearing in another, is a second impression nobody had. #}
+  {% if recommend && idle_state %}
   <div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
        hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
   {% endif %}
-  {# `load` rather than `intersect once`: the band is no longer below the fold
+  {# In the document whatever state the page arrived in, unlike the offer: it
+     records nothing by being fetched, and clearing a deep-link search has to
+     reach a complete idle state rather than half of one.
+
+     `load` rather than `intersect once`: the band is no longer below the fold
      of a three-column page, and `intersect` never fires for an element inside
      a hidden parent that is revealed later. #}
   <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
        hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
-  {% endif %}
   {{ idle|safe }}
 </div>
 {% include "_keyhint.html" %}

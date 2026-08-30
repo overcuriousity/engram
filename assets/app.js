@@ -861,13 +861,54 @@
     });
   }
 
+  // The idle column is hidden, not removed. Removing it is how a reminder
+  // armed by a capture stayed invisible until a reload: Capture empties the
+  // box, the idle state is correct again, and there was no `#due` left in the
+  // document for the band to swap into.
+  //
+  // The offer is the one thing still genuinely removed. It is a measured
+  // impression — see `confirmOffer` — and an offer computed for one situation
+  // that reappears in another is a second impression nobody had.
+  //
+  // The three regions move together because they are one statement about what
+  // the page is doing: with an intent expressed there is a rail and a pane and
+  // a chip row to narrow with; with none there is the column.
+  function hideIdle() {
+    var idle = document.getElementById('idle');
+    if (idle) idle.hidden = true;
+    var area = document.getElementById('context-offer');
+    if (area) area.remove();
+    show('rail', true);
+    show('pane', true);
+    show('kind-row', true);
+  }
+
+  // The box is empty again, so the column is right again. The due band is
+  // re-fetched rather than left as it stands: it may have been hidden through
+  // a capture that armed something, and what it holds is a minute old.
+  function showIdle() {
+    var idle = document.getElementById('idle');
+    if (idle) idle.hidden = false;
+    show('rail', false);
+    show('pane', false);
+    show('kind-row', false);
+    var due = document.getElementById('due');
+    if (due) htmx.trigger(due, 'refresh');
+  }
+
+  function show(id, on) {
+    var el = document.getElementById(id);
+    if (el) el.hidden = !on;
+  }
+
+  // The offer alone, for the fetch that lands after the keystroke that
+  // dismissed it. Not `hideIdle`: by the time a slow offer arrives the box may
+  // be empty again and the column back on screen, and taking the column away
+  // because a stale offer turned up is the flicker the removal exists to
+  // prevent.
   function dropOffer() {
     var area = document.getElementById('context-offer');
     if (area) area.remove();
-    // What is due goes with it: once there is an intent, the box is the
-    // application and the band under it is furniture.
-    var due = document.getElementById('due');
-    if (due) due.remove();
   }
 
   // The other half of the impression. The server computes an offer without
@@ -897,10 +938,18 @@
     // first keystroke and kept logging impressions beside live queries.
     var box = document.querySelector('textarea[name="q"]');
     if (!box) return;
+    // Not `{ once: true }`. The column comes back when the box is emptied, so
+    // this is a transition and not a one-way dismissal — the offer inside it
+    // is the only part that goes for good, which is what `offerDismissed`
+    // records.
     box.addEventListener('input', function () {
-      offerDismissed = true;
-      dropOffer();
-    }, { once: true });
+      if (box.value.trim()) {
+        offerDismissed = true;
+        hideIdle();
+      } else {
+        showIdle();
+      }
+    });
   }
 
   // Say what went wrong where the answer was going to be.
@@ -1367,6 +1416,11 @@
     // with the idle rail, whose "Last captured" row is the capture landing.
     function refreshRail() {
       htmx.trigger(form, 'submit');
+      // The capture emptied the box, so the idle column is correct again — and
+      // this is the moment a reminder captured a second ago wants to appear.
+      // The band's own polling covers the gap between here and the background
+      // job that reads the intent out of the note.
+      showIdle();
     }
 
     // Hands back its promise: the press that carries a file too runs the two
@@ -2069,7 +2123,6 @@
         if (offerDismissed) dropOffer();
         else confirmOffer(e.target);
       }
-      if (e.target.id === 'due' && offerDismissed) dropOffer();
       zoneDayLinks(e.target);
       enhance(e.target);
       trackDwell();

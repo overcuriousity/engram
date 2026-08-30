@@ -4559,6 +4559,40 @@ mod tests {
     /// on the page from first paint: it once lived inside the staged box,
     /// which is hidden until a file is staged — a state that rendered
     /// correctly and a control nobody could reach.
+    /// The one contract behind "a reminder appears while you watch": the
+    /// column is hidden and revealed rather than removed, and the band is
+    /// re-fetchable in place.
+    ///
+    /// Asserted over the sources because the behaviour is a browser's. The
+    /// band used to be *removed* from the document on the first keystroke —
+    /// after which a capture emptied the box, the idle state was correct
+    /// again, and there was no `#due` left for anything to swap into. A
+    /// reminder armed a second ago was invisible until a reload, and no
+    /// server-side test could see it, because on the server nothing was wrong.
+    #[test]
+    fn the_idle_column_is_hidden_and_the_band_re_fetched_never_removed() {
+        let js = include_str!("../../assets/app.js");
+        assert!(js.contains("function showIdle()"), "nothing brings the column back");
+        assert!(
+            js.contains("htmx.trigger(due, 'refresh')"),
+            "the column comes back holding what was due a minute ago"
+        );
+        assert!(
+            !js.contains("if (due) due.remove()"),
+            "removing the band is the bug this pair of functions replaced"
+        );
+        let due = include_str!("templates/_due.html");
+        assert!(
+            due.contains(r#"hx-trigger="refresh""#),
+            "and the band has nothing to answer that event with"
+        );
+        let ws = include_str!("templates/workspace.html");
+        assert!(
+            ws.contains(r#"<div id="idle""#) && ws.contains(r#"<div id="due""#),
+            "the band lives inside the column, or hiding one does not hide the other"
+        );
+    }
+
     #[tokio::test]
     async fn the_idle_page_introduces_the_base_and_the_picker_is_reachable() {
         let core = crate::core::test_support::test_core().await;
