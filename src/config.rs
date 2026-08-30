@@ -36,6 +36,8 @@ pub struct Config {
     #[serde(default)]
     pub sitting: SittingConfig,
     #[serde(default)]
+    pub time: TimeConfig,
+    #[serde(default)]
     pub recommend: RecommendConfig,
     #[serde(default)]
     pub ui: UiConfig,
@@ -465,6 +467,31 @@ impl Default for SittingConfig {
         // reason above it, and a derived `Default` would put that reason a
         // refactor away from the value it explains.
         Self { prime: false }
+    }
+}
+
+/// A sense of time: what counts as due, what the front page calls coming up,
+/// and the classifier's line on a base too small to measure one.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TimeConfig {
+    /// A due reminder inside this many hours is shown on the front page and
+    /// may lift a search hit.
+    pub horizon_hours: u64,
+    /// Dates a note refers to inside this many days are listed under "Coming up".
+    pub coming_up_days: u64,
+    /// The cosine at which a prototype fires an intent, until the base has
+    /// thirty artifacts to measure the line from.
+    pub intent_at: f32,
+    /// Let an open due reminder lift a hit, bounded by `associate.prime_lift`.
+    pub lift: bool,
+    /// IANA zone for doors that send none. Empty means the server's.
+    pub default_tz: String,
+}
+
+impl Default for TimeConfig {
+    fn default() -> Self {
+        Self { horizon_hours: 48, coming_up_days: 7, intent_at: 0.80, lift: true, default_tz: String::new() }
     }
 }
 
@@ -2512,6 +2539,7 @@ impl Config {
             pursuit: PursuitConfig::default(),
             schedule: ScheduleConfig::default(),
             sitting: SittingConfig::default(),
+            time: TimeConfig::default(),
             recommend: RecommendConfig::default(),
             ui: UiConfig::default(),
         }

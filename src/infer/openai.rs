@@ -1024,6 +1024,12 @@ impl HttpCompleter {
         Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))
     }
 
+    /// Dating a note the classifier said is a reminder. Background only, and
+    /// the one call the time features make.
+    pub fn for_reminding(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("remind", prompt::remind_schema()))
+    }
+
     /// The model that writes an artifact from a pursuit, on the judges'
     /// endpoint: background work in a fixed shape, like every other judge.
     pub fn for_generating(cfg: &SynthesizeRole) -> Self {

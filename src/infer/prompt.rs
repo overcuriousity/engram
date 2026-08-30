@@ -785,6 +785,47 @@ pub fn gap_label_schema() -> serde_json::Value {
 
 /// The label out of the reply, trimmed of quotes and trailing punctuation;
 /// an empty label is an error, because a cluster must be called something.
+pub const REMIND_SYSTEM: &str = "You read one note somebody wrote to themselves and say when they \
+want to be reminded. Answer with JSON only. `when` is the local wall-clock date and time as \
+ISO-8601 without a zone (e.g. 2026-09-04T09:00), or null if the note names no time at all. \
+Relative words (tomorrow, next Friday, in two weeks) are resolved against the current time \
+you are given. A time of day that is not stated is 09:00. `rule` is an iCalendar RRULE using \
+only FREQ, INTERVAL, BYDAY (weekday codes), BYMONTHDAY, UNTIL, COUNT when the note says it \
+repeats, else null. `what` is the obligation in the note's own words. Never invent a date.";
+
+pub fn remind_prompt(now_local: &str, tz: &str, text: &str) -> String {
+    format!("Current local time: {now_local}\nTime zone: {tz}\n\nNote:\n{text}")
+}
+
+pub fn remind_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "when": { "type": ["string", "null"] },
+            "rule": { "type": ["string", "null"] },
+            "what": { "type": "string" }
+        },
+        "required": ["when", "rule", "what"],
+        "additionalProperties": false
+    })
+}
+
+/// What the reminding role answers. `what` is asked for because a model made
+/// to restate the obligation dates it more reliably, and discarded because
+/// the note is the reminder.
+#[derive(Debug, serde::Deserialize)]
+pub struct Remind {
+    pub when: Option<String>,
+    pub rule: Option<String>,
+    #[allow(dead_code)]
+    pub what: String,
+}
+
+pub fn parse_remind(reply: &str) -> Result<Remind> {
+    serde_json::from_str(extract_json(reply))
+        .map_err(|e| Error::MalformedLlmOutput(format!("remind reply was not the schema: {e}")))
+}
+
 pub fn parse_gap_label(reply: &str) -> Result<String> {
     let v: serde_json::Value = serde_json::from_str(extract_json(reply))
         .map_err(|e| Error::MalformedLlmOutput(format!("gap label was not JSON: {e}")))?;
@@ -1790,6 +1831,7 @@ mod tests {
             ("link", link_schema()),
             ("claims", claims_schema()),
             ("gap_label", gap_label_schema()),
+            ("remind", remind_schema()),
             ("plan", plan_schema()),
             ("artifacts", artifacts_schema()),
         ] {
@@ -2462,5 +2504,29 @@ mod tests {
     fn ask_prompt_skips_an_empty_excerpt() {
         let p = ask_prompt("q", &["[1] t\na".into(), String::new(), "[3] t\nc".into()]);
         assert_eq!(p, "Question: q\n\nExcerpts:\n\n[1] t\na\n\n---\n\n[3] t\nc");
+    }
+
+    #[test]
+    fn the_remind_schema_is_closed_and_rooted_in_an_object() {
+        let s = remind_schema();
+        assert_eq!(s["type"], "object");
+        assert_eq!(s["additionalProperties"], false);
+        assert_eq!(s["required"], serde_json::json!(["when", "rule", "what"]));
+    }
+
+    #[test]
+    fn a_remind_reply_parses_and_nulls_are_absent_dates() {
+        let r = parse_remind(r#"{"when":"2026-09-04T09:00","rule":null,"what":"send the invoice"}"#).unwrap();
+        assert_eq!(r.when.as_deref(), Some("2026-09-04T09:00"));
+        assert!(r.rule.is_none());
+        let r = parse_remind(r#"{"when":null,"rule":"FREQ=WEEKLY;BYDAY=MO","what":"x"}"#).unwrap();
+        assert!(r.when.is_none());
+        assert!(parse_remind("not json").is_err());
+    }
+
+    #[test]
+    fn the_remind_prompt_carries_the_clock_and_the_zone() {
+        let p = remind_prompt("2026-08-30 12:00 (Sunday)", "Europe/Berlin", "remind me friday");
+        assert!(p.contains("2026-08-30 12:00 (Sunday)") && p.contains("Europe/Berlin") && p.contains("remind me friday"));
     }
 }

@@ -1416,9 +1416,16 @@ impl Core {
             // The pursuit sweep looks at every recorded search, not at one
             // corpus; retention, dedupe arming and the context sweep look at
             // the whole collection for the same reason.
-            Stage::Pursuit | Stage::Retention | Stage::ArmDedupe | Stage::Context => {
+            Stage::Pursuit | Stage::Retention | Stage::ArmDedupe | Stage::Context | Stage::Remind => {
                 return Err(Error::Validation(
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
+                ));
+            }
+            // Re-read by the embed that lands, per artifact; a reprocess of the
+            // document reaches it through `Embed`.
+            Stage::Moments => {
+                return Err(Error::Validation(
+                    "the time in a document is re-read when it is re-embedded; reprocess Embed".into(),
                 ));
             }
             // A stored PDF can always be read again — with the ML build, or

@@ -146,6 +146,12 @@ pub struct Core {
     /// endpoint as the judges, its own response shape, background only.
     /// `None` with no synthesize role; gaps are then named by their terms.
     pub gap_namer: Option<Arc<dyn Completer>>,
+    /// The one model call time makes: dating a note the classifier said is a
+    /// reminder. `None` with no synthesize role; the stage then falls back to
+    /// the relative-word table.
+    pub reminder: Option<Arc<dyn Completer>>,
+    /// Intent prototypes, embedded once per process. See `Core::prototypes`.
+    pub protos: Arc<tokio::sync::OnceCell<crate::core::moments::Protos>>,
     /// The model that writes an artifact from a pursuit. Same endpoint as the
     /// judges, its own response shape, background only. `None` with no
     /// synthesize role.
@@ -216,6 +222,7 @@ pub struct Core {
     pub schedule: crate::config::ScheduleConfig,
     /// Whether the sitting may move a result. Carrying needs no setting.
     pub sitting: crate::config::SittingConfig,
+    pub time: crate::config::TimeConfig,
     /// Whether and how the area under the search box is filled. Read by the
     /// sweep and on the page-view path, so it lives here rather than being
     /// threaded down.
@@ -311,6 +318,9 @@ impl Core {
                 .map(|s| Arc::new(HttpCompleter::for_link_judging(s)) as Arc<dyn Completer>),
             gap_namer: synth
                 .map(|s| Arc::new(HttpCompleter::for_gap_naming(s)) as Arc<dyn Completer>),
+            reminder: synth
+                .map(|s| Arc::new(HttpCompleter::for_reminding(s)) as Arc<dyn Completer>),
+            protos: Arc::new(tokio::sync::OnceCell::new()),
             generator: synth
                 .map(|s| Arc::new(HttpCompleter::for_generating(s)) as Arc<dyn Completer>),
             planner: cfg.infer.ask.as_ref().and_then(|a| {
@@ -346,6 +356,7 @@ impl Core {
             pursuit: cfg.pursuit.clone(),
             schedule: cfg.schedule.clone(),
             sitting: cfg.sitting.clone(),
+            time: cfg.time.clone(),
             recommend: cfg.recommend.clone(),
             ui: cfg.ui.clone(),
             sittings: working.sittings,
@@ -536,6 +547,12 @@ pub mod test_support {
             gap_namer: Some(Arc::new(FakeCompleter {
                 reply: Some(r#"{"label":"Fake topic"}"#.into()),
             })),
+            // Says "no date", so the default core exercises the fallback; a
+            // test wanting a dated reply sets `reminder` itself.
+            reminder: Some(Arc::new(FakeCompleter {
+                reply: Some(r#"{"when":null,"rule":null,"what":"fake"}"#.into()),
+            })),
+            protos: Arc::new(tokio::sync::OnceCell::new()),
             generator: Some(Arc::new(FakeCompleter::default())),
             // Off, unlike the shipped default: a test that wants a fan-out puts
             // a completer here, and every other test gets one round and no
@@ -583,6 +600,7 @@ pub mod test_support {
             pursuit: crate::config::PursuitConfig::default(),
             schedule: crate::config::ScheduleConfig::default(),
             sitting: crate::config::SittingConfig::default(),
+            time: crate::config::TimeConfig::default(),
             // Off, unlike the shipped default: `recommends()` is two flags and
             // a test that leaves both alone must offer nothing. The
             // recommendation tests switch both on.

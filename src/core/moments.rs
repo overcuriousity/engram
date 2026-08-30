@@ -556,6 +556,57 @@ pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
     None
 }
 
+/// The intent prototypes as vectors under the running embed model, and the
+/// line measured from the base's own artifacts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Protos {
+    pub vectors: Vec<(Intent, Vec<f32>)>,
+    pub line: f32,
+}
+
+impl crate::core::Core {
+    /// Embeds the prototypes once per embed model and measures the line from
+    /// the base's own vectors. Cached in `meta` so a restart pays nothing, and
+    /// held in `protos` so a process reads `meta` once. Keyed by model, so a
+    /// switched embedder re-embeds and a reindex under the same one need not.
+    pub async fn prototypes(&self) -> crate::error::Result<&Protos> {
+        self.protos
+            .get_or_try_init(|| async {
+                let key = format!("moments.prototypes.{}", self.embedder.model());
+                let cached: Vec<(Intent, Vec<f32>)> = match self.store.meta_get(&key).await? {
+                    Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+                    None => vec![],
+                };
+                let vectors = if cached.len() == PROTOTYPES.len() {
+                    cached
+                } else {
+                    let docs: Vec<crate::infer::EmbedDoc> = PROTOTYPES
+                        .iter()
+                        .map(|(_, p)| crate::infer::EmbedDoc { title: None, text: p.to_string() })
+                        .collect();
+                    let permit = self.gate.background_light().await;
+                    let embedded = self.embedder.embed_documents(&docs).await;
+                    permit.finished();
+                    let vectors: Vec<(Intent, Vec<f32>)> =
+                        PROTOTYPES.iter().map(|(i, _)| *i).zip(embedded?).collect();
+                    self.store.meta_set(&key, &serde_json::to_string(&vectors).unwrap_or_default()).await?;
+                    vectors
+                };
+                let sample: Vec<Vec<f32>> = self
+                    .vectors
+                    .sample(200)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(_, v)| v)
+                    .collect();
+                let line = intent_line(&vectors, &sample, self.time.intent_at);
+                Ok(Protos { vectors, line })
+            })
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -71,13 +71,19 @@ pub enum Stage {
     /// of this faculty is that the learning is a sweep and the read is one
     /// vector query.
     Context,
+    /// One artifact, once its embedding has landed: read the time out of it.
+    /// No model unless a reminder was meant.
+    Moments,
+    /// Push what is due. Armed at the next due moment by every write that can
+    /// move it, never on a period.
+    Remind,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 17] = [
+    pub const ALL: [Stage; 19] = [
         Stage::Synthesize,
         Stage::Enrich,
         Stage::SegmentWindow,
@@ -95,6 +101,8 @@ impl Stage {
         Stage::Retention,
         Stage::ArmDedupe,
         Stage::Context,
+        Stage::Moments,
+        Stage::Remind,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -116,6 +124,8 @@ impl Stage {
             Stage::Retention => "retention",
             Stage::ArmDedupe => "arm_dedupe",
             Stage::Context => "context",
+            Stage::Moments => "moments",
+            Stage::Remind => "remind",
         }
     }
     /// Is someone waiting on this? `0` foreground, `1` background.
@@ -149,7 +159,9 @@ impl Stage {
             | Stage::Generate
             | Stage::Retention
             | Stage::ArmDedupe
-            | Stage::Context => 1,
+            | Stage::Context
+            | Stage::Moments
+            | Stage::Remind => 1,
         }
     }
 
@@ -172,6 +184,8 @@ impl Stage {
             "retention" => Some(Stage::Retention),
             "arm_dedupe" => Some(Stage::ArmDedupe),
             "context" => Some(Stage::Context),
+            "moments" => Some(Stage::Moments),
+            "remind" => Some(Stage::Remind),
             _ => None,
         }
     }
@@ -1773,5 +1787,14 @@ mod tests {
 
         assert!(!a.live_job(Stage::Consolidate, "collection").await.unwrap());
         assert!(b.live_job(Stage::Consolidate, "collection").await.unwrap());
+    }
+
+    #[test]
+    fn the_two_time_stages_round_trip_and_are_background() {
+        assert_eq!(Stage::parse("moments"), Some(Stage::Moments));
+        assert_eq!(Stage::parse("remind"), Some(Stage::Remind));
+        assert_eq!(Stage::Moments.as_str(), "moments");
+        assert_eq!(Stage::Remind.class(), 1);
+        assert_eq!(Stage::Moments.class(), 1);
     }
 }
