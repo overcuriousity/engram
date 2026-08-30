@@ -287,6 +287,18 @@ CREATE TABLE IF NOT EXISTS search_events (
   judged_at   INTEGER,
   verdict     TEXT,
   expect_id   TEXT,
+  -- Who gave the verdict: `confirm` from the bar under an opened result or the
+  -- gap button on the rail, NULL from the judge deck. A `confirm` with no
+  -- verdict is a person having said "not this one" — the search stays pending
+  -- and the column records that the answer came from the moment rather than
+  -- from the deck. A third value, `dwell`, was written by a read long enough
+  -- to count as a hit on its own; that is gone, and rows still carrying it are
+  -- verdicts nobody gave out loud.
+  judged_by   TEXT,
+  -- When a result from this search was opened. Freezes the pool: a rewording
+  -- after an open starts its own event rather than folding into the list the
+  -- person actually read.
+  opened_at   INTEGER,
   skips       INTEGER NOT NULL DEFAULT 0,
   -- Set when the operator says a `gap` search has since been covered.
   dismissed_at INTEGER,
@@ -312,6 +324,14 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   shown       INTEGER NOT NULL,
   PRIMARY KEY (event_id, rank)
 );
+-- `dealable!` asks two things of this table for every unjudged event, and the
+-- nav asks `dealable!` on every page render: whether the event has a pool at
+-- all, and the strongest similarity in it. The primary key answers the first
+-- one, and answered the second by seeking every row of the pool to read a
+-- column it does not carry. Holding `similarity` in the index makes that a
+-- covering read.
+CREATE INDEX IF NOT EXISTS idx_candidates_similarity
+  ON search_candidates(event_id, similarity);
 
 -- ── Tuning sweeps ────────────────────────────────────────────────────────────
 -- One row per background sweep over the judged pairs: what the running

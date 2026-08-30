@@ -995,6 +995,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: q.into(),
                     door,
                     scope: scope.map(str::to_string),

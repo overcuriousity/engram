@@ -191,6 +191,10 @@ pub struct ArtifactDetail {
     /// it is showing is the artifact's own text reflected back rather than the
     /// document it was drawn from.
     pub corpus_restored: bool,
+    /// The search this was opened from, when it was opened from the rail and
+    /// searches are being recorded. What the bar under the artifact and the
+    /// dwell timer both report against. See `Store::open_event`.
+    pub search_event: Option<String>,
     /// Link to the source, scrolled to and highlighting the exact lines this
     /// artifact was drawn from. Falls back to the plain source page for an
     /// artifact with no recorded span — a restored one, for instance.
@@ -216,6 +220,15 @@ pub struct ArtifactDetail {
     /// is what this resembles, the other is what it has been reached for
     /// together with, and they answer different questions.
     pub seen_together: Vec<SeenTogether>,
+}
+
+impl ArtifactDetail {
+    /// `Chunk::in_results`, read off what the pane already holds rather than
+    /// fetched again — and through that method's own predicate rather than a
+    /// second copy of it, so a third lifecycle state still changes one place.
+    fn in_results(&self) -> bool {
+        crate::store::artifacts::in_results(self.status, self.superseded_by.as_deref())
+    }
 }
 
 /// A neighbour, as one line in the pane.
@@ -499,6 +512,17 @@ struct ResultsTemplate {
     /// The tick beside the count is what makes the reordering legible as a
     /// refinement rather than a glitch.
     reranked: bool,
+    /// The search that filled this rail, where it was recorded. Every row
+    /// carries it onward, so an open, a verdict and the "nothing here has it"
+    /// button all name the one search they are answers about. `None` while
+    /// searches are not being recorded, and the button and the links go
+    /// without.
+    event_id: Option<String>,
+    /// The query this rail was drawn for, carried by the gap button alone: a
+    /// gap is a verdict about a wording, and a trailing keystroke can fold a
+    /// later one into the same row before the button is pressed. See
+    /// `Store::gap_event`.
+    q: String,
 }
 
 /// The rail before anything is asked: the base introducing itself.
@@ -1057,6 +1081,12 @@ pub(crate) struct UiSearchParams {
     /// the operator stops, whose answer reorders the rail it just painted.
     #[serde(default)]
     pub(crate) rerank: bool,
+    /// The search event this page is holding — the id the last answer handed
+    /// it, sent back so a typing burst folds into its own chain. A second tab
+    /// carries a different one, or none yet, and the two never collide. See
+    /// `Store::record_search`.
+    #[serde(default)]
+    pub(crate) fold: Option<String>,
     /// Ask the rail to say why a row is where it is. Off unless the link
     /// carries it: the line is for an operator looking into a ranking, not
     /// something every keystroke paints. `/ui?explain=1` puts it on the form
@@ -1136,6 +1166,9 @@ pub(crate) async fn search_results(
     // Function words are dropped: a query phrased as a situation is mostly
     // stopwords, and highlighting every "to" marks the whole card.
     let terms = highlightable_terms(p.q.trim());
+    // The wording this rail is about to be drawn for, kept because `p.q` is
+    // about to be moved into the search. Only the gap button reads it.
+    let q = p.q.trim().to_string();
     // What this sitting is working on. A typing burst folds into one entry
     // here as it does in the log, so what is carried is the query that was
     // meant rather than every prefix of it.
@@ -1179,7 +1212,11 @@ pub(crate) async fn search_results(
                 .by(tenant.user.subject)
                 // The live sitting, for priming. Off unless `sitting.prime` is
                 // on, and impossible at any door with no session.
-                .in_sitting(identity.session.clone()),
+                .in_sitting(identity.session.clone())
+                // The event this page is already holding, so a burst folds into
+                // its own chain and not into whatever this operator's other tab
+                // wrote last. Empty on the first search of a page.
+                .folding_onto(p.fold.filter(|f| !f.is_empty())),
         )
         .await?;
 
@@ -1237,6 +1274,8 @@ pub(crate) async fn search_results(
         // that failed or was skipped answered in vector order, and the tick
         // would assert a confirmation that never took place.
         reranked: outcome.timing.reranked,
+        event_id: outcome.event,
+        q,
     })
     .into_response();
     // Measured as before, reported where a browser already knows to show it.
@@ -1668,6 +1707,15 @@ struct DwellForm {
 
 /// The page saying how long an artifact was open, sent as the reader leaves
 /// it. `sendBeacon` lands here; nothing is rendered back.
+///
+/// A pursuit signal and nothing more. It used to also label the search: a read
+/// past twenty seconds was written as a hit, on the theory that recall could
+/// come from ordinary use with nothing clicked. It cannot. What the timer
+/// measures is a pane that stayed open, which is a tab abandoned as often as it
+/// is an answer — and because the beacon flushes as the pane is *left*, it
+/// arrived after the buttons it was overwriting and put a hit back on searches
+/// a person had just marked "not sure" or undone. The bar under the result is
+/// the whole of the answer now.
 async fn artifact_dwell(
     tenant: Tenant,
     Path(aid): Path<String>,
@@ -2315,7 +2363,13 @@ async fn settings(tenant: Tenant) -> Result<Response> {
         judge_pending: crate::web::state::judge_pending(&tenant).await,
         tokens: token_rows(&tenant).await?,
         feedback: match tenant.core.learn.enabled {
-            true => Some(tenant.core.store.feedback_stats().await?),
+            true => Some(
+                tenant
+                    .core
+                    .store
+                    .feedback_stats(tenant.core.weak_below)
+                    .await?,
+            ),
             false => None,
         },
         asks: match tenant.core.learn.enabled {
@@ -2868,6 +2922,7 @@ pub(crate) async fn build_artifact_detail(
         slice_label: slice.label,
         slice_lines: slice.lines,
         terms: terms.to_string(),
+        search_event: None,
     })
 }
 
@@ -2890,6 +2945,12 @@ struct ArtifactViewParams {
     /// every click lands in one bucket on Ops.
     #[serde(default)]
     rung: Option<String>,
+    /// The search this row was listed by, carried on the link the rail drew.
+    /// Present only on a rail row, so it says both which search this open
+    /// answers and that it came from a list of answers at all.
+    /// See `SearchOutcome::event`.
+    #[serde(default)]
+    event: Option<String>,
 }
 
 /// One route, two shapes. An htmx swap wants the pane's body; a pasted link
@@ -2901,7 +2962,31 @@ async fn artifact_detail(
     Path(cid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
 ) -> Result<Response> {
-    let d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
+    let mut d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
+    // Opened from the rail, which named the search that listed it. Stamped
+    // here rather than looked up: the id is on the link, so this open is
+    // attributed to the search it came from and to no other.
+    //
+    // Not for an artifact search will no longer return. `eval::export` freezes
+    // only active, un-superseded artifacts and drops any pair naming something
+    // else, so a hit recorded here would raise the recall and MRR on the
+    // judging page while contributing nothing to `pairs.json`. `judge::hit`
+    // refuses one for that reason; so does this. Without `search_event` the bar
+    // is not drawn, which is the only way a verdict can be given at all.
+    // And only the searcher's own event: the id arrives on a link, so it is
+    // whatever the caller sent. See `Store::event_is_mine`.
+    if tenant.core.learn.enabled
+        && d.in_results()
+        && let Some(event) = p.event.as_deref()
+        && tenant
+            .core
+            .store
+            .event_is_mine(event, &tenant.user.subject)
+            .await?
+        && tenant.core.store.open_event(event, &cid).await?
+    {
+        d.search_event = Some(event.to_string());
+    }
     // Opening a chunk is the deliberate act that counts as remembering it.
     tenant.core.mark_artifact_seen(&cid);
     // And the act the pursuit sweep reads: opened, or pivoted through — unless
@@ -5598,13 +5683,24 @@ mod tests {
             core.store
                 .record_search(
                     crate::store::feedback::NewEvent {
+                        fold_onto: None,
                         query: format!("search number {i}"),
                         door: crate::store::feedback::Door::Ui,
                         scope: None,
                         filters: "{}".into(),
                         query_vec: vec![0.1, 0.2],
                         embed_model: "fake".into(),
-                        candidates: vec![],
+                        // A pool, because a search that returned nothing is a
+                        // hole rather than a card and the deck does not deal
+                        // one — see `dealable!`. These stand for searches
+                        // waiting to be judged, so they have something to
+                        // judge.
+                        candidates: vec![crate::store::feedback::NewCandidate {
+                            artifact_id: format!("a{i}"),
+                            score: 0.9,
+                            similarity: Some(0.8),
+                            shown: true,
+                        }],
                         answered: false,
                     },
                     // No folding: these stand for separate searches, not one
@@ -6331,8 +6427,10 @@ mod tests {
             results: vec![loose],
             associated: vec![],
             all_weak: true,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         })
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
@@ -6434,8 +6532,10 @@ mod tests {
             results: vec![named, offered],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         })
         .unwrap();
 
@@ -6457,8 +6557,10 @@ mod tests {
             results: vec![row("a", "#1")],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         })
         .unwrap();
 
@@ -6563,8 +6665,10 @@ mod tests {
             results: vec![r],
             associated: vec![render_hit(0, hit(None, Some("a")), &titles, false)],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         })
         .unwrap();
         assert!(!html.contains("Untitled"), "{html}");
@@ -6612,8 +6716,10 @@ mod tests {
             results: vec![above.clone(), above.clone(), past, also_past],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6634,8 +6740,10 @@ mod tests {
             results: vec![above.clone(), above.clone(), above],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6653,8 +6761,10 @@ mod tests {
             results: vec![own, borrowed],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6684,8 +6794,10 @@ mod tests {
             results: vec![],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         };
         let body = template.render().unwrap();
         assert!(body.contains("Recalled by association"), "{body}");
@@ -6700,8 +6812,10 @@ mod tests {
                 Some("the tool and its errors"),
             )],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         };
         let body = judged.render().unwrap();
         assert!(body.contains("the tool and its errors"), "{body}");
@@ -6718,8 +6832,10 @@ mod tests {
             results: vec![rendered(Some("Mounting E01 images"), None)],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: true,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6729,8 +6845,10 @@ mod tests {
             results: vec![rendered(Some("Mounting E01 images"), None)],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6805,8 +6923,10 @@ mod tests {
             results: vec![ranked(true)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: true,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         };
         let body = weak_with_association.render().unwrap();
         assert!(
@@ -6818,8 +6938,10 @@ mod tests {
             results: vec![ranked(false)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         };
         let body = good_with_association.render().unwrap();
         assert!(
@@ -7056,8 +7178,10 @@ mod tests {
             results: vec![r],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -7103,8 +7227,10 @@ mod tests {
             results: vec![ranked(false)],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -7122,8 +7248,10 @@ mod tests {
             results: vec![r],
             associated: vec![],
             all_weak: false,
+            event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -9220,6 +9348,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "how do I mount an E01".into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,
@@ -9234,7 +9363,11 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .judge(&gap, crate::store::feedback::Verdict::Gap)
+            .judge(
+                &gap,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
             .await
             .unwrap();
         core.store
@@ -9405,6 +9538,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "judged one".into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,
@@ -9419,13 +9553,18 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .judge(&judged, crate::store::feedback::Verdict::Gap)
+            .judge(
+                &judged,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
             .await
             .unwrap();
         // Nothing came close.
         core.store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "nothing near one".into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,
@@ -9587,7 +9726,7 @@ mod tests {
         // `explain` for the same reason: a name missing here is a flag the
         // fragment is never asked with, however carefully the rest is wired.
         assert!(
-            page.contains(r#"hx-params="q,category,rerank,explain""#),
+            page.contains(r#"hx-params="q,category,rerank,explain,fold""#),
             "{page}"
         );
     }
@@ -11183,5 +11322,526 @@ mod tests {
         // The detail root names the artifact, which is what the page's timer reads.
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
         assert!(page.contains(&format!("data-artifact=\"{a}\"")), "{page}");
+    }
+
+    // ── Judging at the moment of search ──────────────────────────────────────
+
+    /// A recording session, one artifact, and one captured search of this
+    /// user's whose pool holds it.
+    async fn searched_app() -> (axum::Router, String, crate::core::Core, String, String) {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let a = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "mounting the image".into(),
+                    corpus_span: None,
+                    title: Some("mount".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        let event = handle
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: "image will not mount".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some(crate::store::TEST_SUBJECT.into()),
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![crate::store::feedback::NewCandidate {
+                        artifact_id: a.clone(),
+                        score: 1.0,
+                        similarity: Some(0.5),
+                        shown: true,
+                    }],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        (app, cookie, handle, a, event)
+    }
+
+    #[tokio::test]
+    async fn a_result_opened_from_the_rail_asks_whether_it_was_the_one() {
+        // The judge deck asks hours later, out of context, and the honest
+        // answer then is "I don't know, I was looking". Under the result just
+        // opened the answer is cheap, so that is where it is asked.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event={event}")).await;
+        assert!(
+            page.contains("Was this what you were looking for?"),
+            "{page}"
+        );
+        assert!(
+            page.contains(&format!("/ui/search/{event}/verdict")),
+            "the bar does not name the search: {page}"
+        );
+        // The rail's own links carry the search that listed them — on the
+        // `href` as well as on the `hx-get`. A middle-click, a ⌘-click and a
+        // load that reached the page without htmx are all the same open, and
+        // the plain `href` used to drop the event: the same act produced a
+        // label down one path and silence down the other.
+        let rail = include_str!("templates/_results.html");
+        let carries = |attr: &str| {
+            rail.contains(&format!(
+                r#"{attr}="/ui/artifacts/{{{{ r.artifact_id }}}}?terms={{{{ terms|urlencode }}}}{{% if let Some(ev) = event_id %}}&event={{{{ ev }}}}{{% endif %}}""#
+            ))
+        };
+        assert!(carries("href"), "{rail}");
+        assert!(carries("hx-get"), "{rail}");
+
+        // Reached any other way — a corpus page, a pasted link — there is no
+        // search to be the answer to.
+        let plain = get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
+        assert!(
+            !plain.contains("Was this what you were looking for?"),
+            "{plain}"
+        );
+        // And a bar was not the whole of the open: the rewording after it starts
+        // its own event because this one is now the list that was read.
+        handle
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: "image mount".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some(crate::store::TEST_SUBJECT.into()),
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                60,
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().captured, 2);
+    }
+
+    #[tokio::test]
+    async fn with_learning_off_a_result_is_just_a_result() {
+        let core = crate::core::test_support::test_core().await;
+        let handle = core.clone();
+        let (app, cookie) = app_with_cookie(core).await;
+        let src = handle
+            .store
+            .insert_corpus("raw", "web", None)
+            .await
+            .unwrap();
+        let a = handle
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "a".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        // With learning off nothing is captured, so the rail draws no event on
+        // its links and there is nothing for the bar to be a verdict on.
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event=whatever")).await;
+        assert!(
+            !page.contains("Was this what you were looking for?"),
+            "{page}"
+        );
+        let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
+        assert!(!rail.contains("Nothing here has it"), "{rail}");
+    }
+
+    #[tokio::test]
+    async fn a_long_read_is_a_pursuit_signal_and_never_a_verdict() {
+        // A read past some threshold used to be written as the search having
+        // found its answer. What that measured was a pane left open, which is
+        // an abandoned tab as often as it is an answer — and because the beacon
+        // flushes as the pane is *left*, it landed after the buttons under the
+        // result and put a hit back onto searches a person had just marked
+        // "not sure" or undone. The timer still feeds the pursuit sweep; it no
+        // longer labels anything.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{a}/dwell"),
+                &cookie,
+                "secs=42",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.hits, s.judged), (0, 0), "{s:?}");
+        assert_eq!(
+            handle.store.next_pending(0.0).await.unwrap().map(|e| e.id),
+            Some(event),
+            "the search is still a question for the deck"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bar_takes_yes_no_and_not_sure_and_each_can_be_taken_back() {
+        let (app, cookie, handle, a, event) = searched_app().await;
+        let verdict = |v: &str| {
+            form(
+                &format!("/ui/search/{event}/verdict"),
+                &cookie,
+                &format!("verdict={v}&artifact_id={a}"),
+            )
+        };
+        let res = app.clone().oneshot(verdict("hit")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bar = body_of(res).await;
+        assert!(bar.contains("undo"), "{bar}");
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.hits, s.pending), (1, 0), "{s:?}");
+
+        // Undo: a question again.
+        app.clone().oneshot(verdict("none")).await.unwrap();
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().pending, 1);
+
+        // No: still a question, for the deck — and one no read may answer.
+        app.clone().oneshot(verdict("no")).await.unwrap();
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().pending, 1);
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/artifacts/{a}/dwell"),
+                &cookie,
+                &format!("secs=42&event={event}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
+
+        // Not sure: no verdict at all. The search stays a question for the deck
+        // — it is not a discard, which says the search was never real and would
+        // drop it from the pairs, from the deck and out of the purge's
+        // exemption on the strength of somebody not remembering.
+        let res = app.clone().oneshot(verdict("skip")).await.unwrap();
+        let bar = body_of(res).await;
+        assert!(bar.contains("left for the deck"), "{bar}");
+        assert!(
+            !bar.contains("undo"),
+            "a skip is not a verdict to take back"
+        );
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.discards, s.judged, s.pending), (0, 0, 1), "{s:?}");
+    }
+
+    /// The search just recorded, read off the table rather than off the deck.
+    /// A search that returned nothing is not a card the deck deals — see
+    /// `dealable!` — and the rail asks about one of those.
+    async fn newest_event(handle: &crate::core::Core) -> String {
+        sqlx::query_scalar("SELECT id FROM search_events ORDER BY created_at DESC, id DESC LIMIT 1")
+            .fetch_one(&handle.store.pool)
+            .await
+            .expect("the search the rail was filled by")
+    }
+
+    #[tokio::test]
+    async fn the_rail_offers_a_gap_where_nothing_matches() {
+        // The deck's `N` key, moved to where the person is when they know.
+        let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
+        assert!(rail.contains("No matches."), "{rail}");
+        assert!(rail.contains("Nothing here has it"), "{rail}");
+        // The button names the search it is a verdict on. The query never
+        // reaches the client as data, so no wording can break the request: a
+        // `"` in `hx-vals` JSON used to make htmx throw and the button do
+        // nothing at all, silently.
+        let event = newest_event(&handle).await;
+        assert!(
+            rail.contains(&format!(
+                r#"hx-post="/ui/search/{event}/gap?q=nothing%20here""#
+            )),
+            "{rail}"
+        );
+        assert!(!rail.contains("hx-vals='{\"q\""), "{rail}");
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/search/{event}/gap?q=nothing%20here"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.gaps, s.pending), (1, 0), "{s:?}");
+        assert!(
+            body_of(res).await.contains("recorded as a gap"),
+            "the button did not say what it did"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rail_hands_the_box_the_search_it_should_fold_into() {
+        // The box types into one event by naming it, not by being the most
+        // recent thing this operator wrote — which is what a second window
+        // also is. The id goes back into the form out of band, and the next
+        // keystroke carries it.
+        let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        let rail = get_body(&app, &cookie, "/ui/search/results?q=fat32").await;
+        let first = newest_event(&handle).await;
+        assert!(
+            rail.contains(&format!(
+                r#"<span hx-swap-oob="innerHTML:#fold-of"><input type="hidden" name="fold" value="{first}">"#
+            )),
+            "{rail}"
+        );
+
+        // The next keystroke, naming it: one search, still.
+        get_body(
+            &app,
+            &cookie,
+            &format!("/ui/search/results?q=fat32+mount&fold={first}"),
+        )
+        .await;
+        assert_eq!(newest_event(&handle).await, first);
+        assert_eq!(
+            handle.store.feedback_stats(0.0).await.unwrap().captured,
+            1,
+            "the burst folded into the event the page was holding"
+        );
+
+        // A second window, holding nothing yet, does not fold into it.
+        get_body(&app, &cookie, "/ui/search/results?q=ntfs").await;
+        assert_eq!(
+            handle.store.feedback_stats(0.0).await.unwrap().captured,
+            2,
+            "the other window started its own search"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quotation_mark_in_the_query_does_not_break_the_gap_button() {
+        // The capture is on the request path at this door, so the rail comes
+        // back naming its own search whatever was typed — and the button
+        // carries an id rather than the words.
+        let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        let rail = get_body(
+            &app,
+            &cookie,
+            "/ui/search/results?q=say%20%22hi%22%20%5Cnow",
+        )
+        .await;
+        let event = newest_event(&handle).await;
+        // The wording rides the URL, so a quote is percent-encoded rather than
+        // spliced into an HTML attribute or a JSON blob.
+        let q = "say%20%22hi%22%20%5Cnow";
+        assert!(
+            rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap?q={q}""#)),
+            "{rail}"
+        );
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/search/{event}/gap?q={q}"), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().gaps, 1);
+    }
+
+    #[tokio::test]
+    async fn a_search_somebody_else_made_cannot_be_opened_or_judged() {
+        // Every route that labels a search takes the event id from the page,
+        // because the page is what knows which search a row came from. An id
+        // is not a capability: guessing at one used to be enough to stamp an
+        // open onto another person's search, answer it, or call it a gap —
+        // and, by stamping `opened_at`, quietly stop their next keystroke
+        // folding as well.
+        let (app, cookie, handle, a, _) = searched_app().await;
+        let theirs = handle
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: "image will not mount".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some("somebody-else".into()),
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![crate::store::feedback::NewCandidate {
+                        artifact_id: a.clone(),
+                        score: 1.0,
+                        similarity: Some(0.5),
+                        shown: true,
+                    }],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event={theirs}")).await;
+        assert!(
+            !page.contains("Was this what you were looking for?"),
+            "{page}"
+        );
+        let opened: Option<i64> =
+            sqlx::query_scalar("SELECT opened_at FROM search_events WHERE id = ?")
+                .bind(&theirs)
+                .fetch_one(&handle.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(opened, None, "their next keystroke still folds");
+
+        for body in [
+            format!("verdict=hit&artifact_id={a}"),
+            format!("verdict=no&artifact_id={a}"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(form(
+                    &format!("/ui/search/{theirs}/verdict"),
+                    &cookie,
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        }
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/search/{theirs}/gap?q=image%20will%20not%20mount"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.judged, s.hits, s.gaps), (0, 0, 0), "{s:?}");
+    }
+
+    #[tokio::test]
+    async fn a_deprecated_result_is_never_asked_about() {
+        // `eval::export` drops any pair naming an artifact search will not
+        // return, so a hit recorded against one raises the recall on the
+        // judging page and contributes nothing to `pairs.json`. `judge::hit`
+        // refuses one, and the bar under a result must not be a way around it.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        handle
+            .store
+            .set_artifact_status(&a, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event={event}")).await;
+        assert!(
+            !page.contains("Was this what you were looking for?"),
+            "{page}"
+        );
+        // And the write refuses it too, not only the render: a replayed form
+        // naming the pair is not the way around the guard.
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/search/{event}/verdict"),
+                &cookie,
+                &format!("verdict=hit&artifact_id={a}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
+    }
+
+    #[tokio::test]
+    async fn a_stale_bar_says_so_rather_than_writing_over_the_deck() {
+        // The bar is drawn against an unjudged search and the tab holding it
+        // can be left open for as long as anyone likes, so both of its writing
+        // answers can arrive after the deck has answered the same search.
+        // Neither replaces what is there; both come back saying why.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        handle
+            .store
+            .judge(
+                &event,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
+            .await
+            .unwrap();
+
+        for body in [
+            format!("verdict=hit&artifact_id={a}"),
+            format!("verdict=none&artifact_id={a}"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(form(&format!("/ui/search/{event}/verdict"), &cookie, &body))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            assert!(
+                body_of(res).await.contains("already judged"),
+                "the bar wrote over the deck instead of saying it could not"
+            );
+        }
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.gaps, s.hits, s.judged), (1, 0, 1), "{s:?}");
+    }
+
+    #[tokio::test]
+    async fn a_purged_search_is_not_the_bar_owner_s_any_more() {
+        // Where the bar's writing guards do *not* come into it: the ownership
+        // check runs first and a row that is gone belongs to nobody, so all
+        // four answers stop there. Worth pinning, because the store guards
+        // below it read as the thing standing between a stale tab and a purged
+        // event, and they are not — this is.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        handle.store.purge_feedback().await.unwrap();
+
+        for body in [
+            format!("verdict=hit&artifact_id={a}"),
+            format!("verdict=no&artifact_id={a}"),
+            format!("verdict=skip&artifact_id={a}"),
+            format!("verdict=none&artifact_id={a}"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(form(&format!("/ui/search/{event}/verdict"), &cookie, &body))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{body}");
+        }
     }
 }

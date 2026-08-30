@@ -178,14 +178,24 @@ pub struct Chunk {
     pub cues: Vec<String>,
 }
 
+/// Whether search may return an artifact: active and not hidden behind a
+/// winner. This is the predicate every consolidation decision gates on — what
+/// may win a cluster, be shown to the model, or be superseded — so it has
+/// exactly one spelling. A third lifecycle state changes this function, not a
+/// dozen call sites.
+///
+/// A free function rather than only `Chunk::in_results`, because the web layer
+/// asks the same question of a struct that is not a `Chunk` — `ui::
+/// ArtifactDetail`, which carries the two columns and not the chunk — and the
+/// copy it kept was a second spelling of exactly what this paragraph forbids.
+pub fn in_results(status: ArtifactStatus, superseded_by: Option<&str>) -> bool {
+    status == ArtifactStatus::Active && superseded_by.is_none()
+}
+
 impl Chunk {
-    /// Whether search may return this artifact: active and not hidden behind
-    /// a winner. This is the predicate every consolidation decision gates on —
-    /// what may win a cluster, be shown to the model, or be superseded — so it
-    /// has exactly one spelling. A third lifecycle state changes this method,
-    /// not a dozen call sites.
+    /// See [`in_results`].
     pub fn in_results(&self) -> bool {
-        self.status == ArtifactStatus::Active && self.superseded_by.is_none()
+        in_results(self.status, self.superseded_by.as_deref())
     }
 }
 
@@ -2286,6 +2296,7 @@ mod tests {
         let ev = s
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "q".into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,
@@ -2299,7 +2310,9 @@ mod tests {
             )
             .await
             .unwrap();
-        s.judge_hit(&ev, &made[0].id).await.unwrap();
+        s.judge_hit(&ev, &made[0].id, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         assert!(s.artifact_confirmed(&made[0].id).await.unwrap());
     }
 

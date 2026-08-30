@@ -128,7 +128,7 @@ pub async fn judge_pending(t: &crate::tenants::Tenant) -> Option<i64> {
             return None;
         }
     }
-    match t.core.store.pending_count().await {
+    match t.core.store.pending_count(t.core.weak_below).await {
         Ok(n) => Some(n),
         Err(e) => {
             tracing::warn!(error = %e, "could not count searches waiting to be judged");

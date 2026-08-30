@@ -53,6 +53,17 @@ impl FromRequestParts<AppState> for CanJudge {
         //
         // One indexed read on the control database, and only on this door. The
         // hot paths keep the snapshot, which is what the cache is for.
+        //
+        // What this gate covers, and what it does not: the judging deck, which
+        // labels anyone's searches out of context and is the only route in the
+        // tree that writes `config.toml`. It is deliberately not on the verdict
+        // bar or the rail's gap button in `workspace.rs` — those answer the
+        // caller's own search, at the moment of it, the way the ask bar does,
+        // and `event_is_mine` is what stands there instead. So `--revoke-judge`
+        // means "no deck and no tuning", not "cannot label a pair": a revoked
+        // user can still say yes, no or gap about a search they just ran, and
+        // those rows do reach `feedback_stats`, `--export-eval` and the sweep.
+        // Taking that away as well means taking the bar off their own results.
         let live = state
             .tenants
             .control()

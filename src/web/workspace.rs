@@ -49,6 +49,12 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/ask", get(ask_door).post(ask_submit))
         .route("/ui/ask/{id}/stream", get(ask_stream))
         .route("/ui/ask/{id}/verdict", post(ask_verdict))
+        // Judging at the moment of search: the bar under an opened result and
+        // the gap button on the rail. Open to whoever searched, like the ask
+        // bar — it is their own search — and unlike the deck, whose grant also
+        // covers writing `config.toml`.
+        .route("/ui/search/{id}/verdict", post(search_verdict))
+        .route("/ui/search/{id}/gap", post(search_gap))
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/ask/{id}/keep", post(ask_keep))
 }
@@ -690,6 +696,167 @@ async fn ask_verdict(
     Ok(axum::response::Html(ask_verdict_bar(&tenant, &id, false).await?).into_response())
 }
 
+#[derive(Template)]
+#[template(path = "_search_verdict.html")]
+struct SearchVerdictTemplate {
+    event_id: String,
+    artifact_id: String,
+    /// `hit` / `no` / `skip` for display; empty shows the buttons.
+    state: &'static str,
+}
+
+#[derive(serde::Deserialize)]
+struct SearchVerdictForm {
+    verdict: String,
+    artifact_id: String,
+}
+
+/// What the bar says when the write it was drawn for is refused. Every guard
+/// on this path — a verdict from the deck, a search that expired, a query the
+/// box has since moved on from — reaches the person as the same ordinary
+/// sentence, because from where they are sitting it is the same fact: the
+/// search they were looking at is no longer waiting for them.
+fn already_judged() -> Response {
+    axum::response::Html(
+        r#"<span class="muted">nothing to record — that search was already judged.</span>"#,
+    )
+    .into_response()
+}
+
+/// The bar under an opened result. `none` is the undo; `no` is "not this
+/// one", which leaves the search a question for the deck.
+async fn search_verdict(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<SearchVerdictForm>,
+) -> Result<Response> {
+    if !tenant.core.learn.enabled {
+        return Err(Error::NotFound);
+    }
+    use crate::store::feedback::Labeller;
+    let store = &tenant.core.store;
+    // The id comes off the page, so it is whatever the caller sent. One check
+    // for all four answers below — see `Store::event_is_mine`.
+    if !store.event_is_mine(&id, &tenant.user.subject).await? {
+        return Err(Error::NotFound);
+    }
+    let state = match f.verdict.as_str() {
+        "hit" => {
+            // The same guard `judge::hit` states in full: `eval::export` drops
+            // any pair naming an artifact search will not return, so recording
+            // one here would raise the recall on the judging page while
+            // contributing nothing to `pairs.json`. The bar is not drawn over
+            // such an artifact at all — see `ui::artifact_detail` — so this is
+            // the write refusing what the page already refuses to offer.
+            if !store.get_artifact(&f.artifact_id).await?.in_results() {
+                return Err(Error::Validation(
+                    "that one is deprecated or superseded, so the benchmark can't hold it".into(),
+                ));
+            }
+            // `NotFound` here is the store's guard, not a missing route: the
+            // deck can answer this search while the tab holding the bar is
+            // open, and `judge_hit` refuses to write over a verdict rather
+            // than replace it. The same line "no" gets, for the same reason.
+            match store
+                .judge_hit(&id, &f.artifact_id, Labeller::Confirm)
+                .await
+            {
+                Ok(()) => "hit",
+                Err(Error::NotFound) => return Ok(already_judged()),
+                Err(e) => return Err(e),
+            }
+        }
+        "no" => {
+            // The one answer that clears columns rather than filling them, so
+            // the one that can undo somebody else's work: the deck can judge
+            // this search while the tab holding the bar is open. Refused
+            // rather than applied, and said in the same words the rail's gap
+            // button uses for the same situation.
+            if !store.decline(&id).await? {
+                return Ok(already_judged());
+            }
+            "no"
+        }
+        // Not `Verdict::Discard`, which the deck's own key means and which says
+        // something else entirely: that the search was never real. A discard is
+        // dropped from the eval pairs, gone from the deck for good, and — alone
+        // among the verdicts — not exempt from the retention purge. Somebody
+        // unsure whether the result in front of them was the one has not said
+        // any of that. The deck's skip is what the label promises: the search
+        // stays a question and only sinks in the judging order.
+        "skip" => {
+            // Not a verdict, so nothing can have got here first, and a search
+            // already gone was refused by the ownership check above. What is
+            // left is the window between that check and this write, which
+            // retention and an Ops purge can both fall into. `judged_one` calls
+            // it `NotFound`, and a 404 is the one answer htmx will not swap —
+            // the button would do nothing at all, silently, where the other
+            // three say so in words.
+            match store.skip_event(&id).await {
+                Ok(()) => "skip",
+                Err(Error::NotFound) => return Ok(already_judged()),
+                Err(e) => return Err(e),
+            }
+        }
+        "none" => {
+            // Only back over what this bar wrote — `Labeller::Confirm`. The
+            // undo appears after "no", which leaves the search pending, so the
+            // deck can deal it and record a hit while the tab is still open;
+            // unguarded, this button then erased a confirmed pair. The store
+            // says so by matching nothing.
+            match store.unjudge(&id, Labeller::Confirm).await {
+                Ok(()) => "",
+                Err(Error::NotFound) => return Ok(already_judged()),
+                Err(e) => return Err(e),
+            }
+        }
+        v => return Err(Error::Validation(format!("unknown verdict {v}"))),
+    };
+    Ok(HtmlTemplate(SearchVerdictTemplate {
+        event_id: id,
+        artifact_id: f.artifact_id,
+        state,
+    })
+    .into_response())
+}
+
+/// The rail's "nothing here has it": a gap against the search that filled the
+/// rail, named by the page the way an open is. Answers with the line that
+/// replaces the button.
+///
+/// The query travels with the id for the same reason the open path names an
+/// artifact: it is what the button was drawn over, and a trailing keystroke can
+/// fold a later wording into the row between the render and the press. See
+/// `Store::gap_event`.
+#[derive(serde::Deserialize)]
+struct GapParams {
+    q: String,
+}
+
+async fn search_gap(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    axum::extract::Query(p): axum::extract::Query<GapParams>,
+) -> Result<Response> {
+    if !tenant.core.learn.enabled {
+        return Err(Error::NotFound);
+    }
+    // Only against the caller's own search — see `Store::event_is_mine`.
+    if !tenant
+        .core
+        .store
+        .event_is_mine(&id, &tenant.user.subject)
+        .await?
+    {
+        return Err(Error::NotFound);
+    }
+    let line = match tenant.core.store.gap_event(&id, p.q.trim()).await? {
+        true => "recorded as a gap: your base doesn't know this yet.",
+        false => "nothing to record — that search was already judged.",
+    };
+    Ok(axum::response::Html(format!(r#"<span class="muted">{line}</span>"#)).into_response())
+}
+
 async fn ask_carried(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -1282,7 +1449,7 @@ mod tests {
             "a reranker serving search is what arms the refining pass"
         );
         assert!(
-            html.contains(r#"hx-params="q,category,rerank,explain""#),
+            html.contains(r#"hx-params="q,category,rerank,explain,fold""#),
             "hx-params is the allowlist for what rides a search GET; without \
              `rerank` on it the refining pass's own flag is filtered off the \
              wire and the server only ever runs the fast path — and `explain` \

@@ -236,8 +236,14 @@ pub struct FeedbackConfig {
     /// over-fetches anyway, so the extra rows are free, and they are what lets a
     /// buried hit be confirmed later.
     pub candidates: usize,
-    /// Window in which a query that extends the previous one replaces it
-    /// instead of starting a new event. `0` turns folding off.
+    /// Window in which another query from the same searcher replaces the
+    /// previous event instead of starting a new one. `0` turns folding off.
+    ///
+    /// Sized for a typing burst and not for a train of thought. Any rewording
+    /// inside the window folds, so the window is also how long a finished
+    /// search has left to live: search, read the titles, search again, and the
+    /// first one is gone — including the case where nothing was opened, which
+    /// is exactly what the unmatched-gap sweep exists to see.
     pub coalesce_secs: i64,
     /// Days captured searches are kept. `0` keeps them forever.
     pub retain_days: i64,
@@ -252,7 +258,7 @@ impl Default for FeedbackConfig {
     fn default() -> Self {
         Self {
             candidates: 20,
-            coalesce_secs: 15,
+            coalesce_secs: 5,
             retain_days: 0,
             sweep_hours: 6,
             tune: TuneConfig::default(),

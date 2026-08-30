@@ -43,22 +43,36 @@
       <p class="judge-meta mono muted">{{ c.when }} · {{ c.door }}</p>
       <h2 class="judge-query">{{ c.query }}</h2>
       {% include "_judge_pulse.html" %}
-      <p class="muted hint judge-ask">Which of these was the one you needed?
-        <span class="mono">— {{ c.choices.len() }} candidates, unordered</span></p>
+      {# Two questions, not one. A search nobody opened anything from may not
+         have been a need at all; one where something was read and not
+         confirmed was. #}
+      {% if c.opened %}
+      <p class="muted hint judge-ask">You searched this and opened something — which of these was it?</p>
+      {% else %}
+      <p class="muted hint judge-ask">You searched this and opened nothing — was there something you wanted?</p>
+      {% endif %}
     </div>
 
     {# The pool is the only thing on this card that scrolls, and it is bounded
        so the question and the three ways out of it are always both on screen.
        The whole pool is in it: shortening the list is what would make a verdict
-       mean something it doesn't, and a scroll inside a box is not a shortening.
+       mean something it doesn't, and a fold inside a box is not a shortening.
        This is what the sticky action bar used to work around — twenty-three
        cards' worth of page, with the way out at the bottom of it. #}
     <div class="judge-pool">
-      {# Numbered for the keyboard only. The order is a hash of the event id, so
-         it carries no information about how the search ranked them — seeing
-         that would turn judging into agreeing. #}
+      {# In the order the search gave them, the first five open and the rest
+         behind a fold. Ordered on purpose: twenty unordered paragraphs forced a
+         linear read of all twenty, and the shuffle that kept the ranker's
+         opinion out of sight made the card unanswerable. The order is visible
+         now; the scores still are not. #}
       <ol class="judge-options">
         {% for o in c.choices %}
+        {% if loop.index0 == c.dealt() %}
+      </ol>
+      <details class="judge-more">
+        <summary>{{ c.folded() }} more, further down the list</summary>
+      <ol class="judge-options">
+        {% endif %}
         {# Deprecated and superseded artifacts stay in the pool at full length so
            the operator sees what the search actually returned, but they are
            disabled: `hit` would refuse them, and a refusal arriving after the
@@ -71,11 +85,10 @@
                   hx-vals='{"artifact_id": "{{ o.artifact_id }}"}'
                   hx-target="#card" hx-swap="innerHTML swap:220ms"
                   {% else %}disabled{% endif %}>
-            {# Only the first nine choosable options carry a number. The shortcut
-               is a single digit and `feedback.candidates` is 20 by default, so a
-               badge on the tenth would advertise a key that does nothing; a badge
-               on a disabled one would advertise a key that refuses. The column
-               stays either way so the titles line up. #}
+            {# Only the choosable options among the five dealt carry a number:
+               a badge behind the fold would advertise a key that presses what
+               cannot be seen; a badge on a disabled one would advertise a key
+               that refuses. The column stays either way so the titles line up. #}
             <span class="judge-key">{% if let Some(k) = o.key %}{{ k }}{% endif %}</span>
             {# No heading where there is no name. A verbatim passage has no title
                by design, and a list of "Untitled" is a column of a word that says
@@ -120,6 +133,9 @@
         </li>
         {% endfor %}
       </ol>
+      {% if c.folded() > 0 %}
+      </details>
+      {% endif %}
     </div>
 
     {# `data-key` is what the shortcut binds to. By position it bound to whatever
@@ -131,7 +147,7 @@
       <button class="btn btn-ghost btn-sm" data-key="n"
               hx-get="/ui/judge/{{ c.id }}/assign"
               hx-target="#card" hx-swap="innerHTML">
-        None of these <kbd>N</kbd>
+        Yes, something else <kbd>N</kbd>
       </button>
       <button class="btn btn-ghost btn-sm" data-key="s"
               hx-post="/ui/judge/{{ c.id }}/skip"
@@ -139,10 +155,17 @@
         Can't remember <kbd>S</kbd>
       </button>
       <span class="spacer"></span>
+      {# A discard: not a pair, not a gap, not a card again. The row is shared
+         by both questions above, and this one word of it cannot be: "I was
+         just looking" is an answer to "was there something you wanted?", and
+         over a search that demonstrably opened something it is a contradiction
+         — one an operator answering literally would spend a real labelled
+         search on, since a discard is dropped from the pairs, gone from the
+         deck for good and the one verdict retention still purges. #}
       <button class="btn btn-ghost btn-sm" data-key="x"
               hx-post="/ui/judge/{{ c.id }}/discard"
               hx-target="#card" hx-swap="innerHTML swap:220ms">
-        Not a real search <kbd>X</kbd>
+        {% if c.opened %}Not a real search{% else %}No, I was just looking{% endif %} <kbd>X</kbd>
       </button>
     </div>
   </article>

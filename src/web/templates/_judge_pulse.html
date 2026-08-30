@@ -7,31 +7,17 @@
    copy, swapped with everything else, and no `hx-swap-oob` left to keep in
    step.
 
-   Nothing here reacts to *which* verdict was given. What moves is progress
+   Nothing here reacts to *which* verdict was given. What moves is the count
    towards the next sweep — the work — never agreement with the ranker. The
    flash line above the card is where a judgement is spoken about, and its
-   loudness runs the other way on purpose. #}
+   loudness runs the other way on purpose.
+
+   A count, not a bar. There was an XP bar here, with a trail and a sheen; it
+   made the page prettier and the question no easier, and most of the distance
+   is covered by searching now rather than by this page. #}
 {% if let Some(p) = pulse %}
 <div id="judge-live" class="judge-live">
-  {# The bar is an object with a height, not the edge of one.
-
-     `--from` and `--to` are what let it move at all on a server-rendered swap:
-     the element that arrives is a new one, with no previous width to transition
-     away from, so the previous width is sent alongside the current one and the
-     fill is animated between the two. The pale trail goes straight to `--to`,
-     so for the length of the fill's delay the ground just won reads as area
-     rather than as a different endpoint. The notches are what make it a
-     distance instead of a percentage. #}
-  <div class="judge-xp{% if !p.delta.is_empty() %} judge-xp-moved{% endif %}"
-       style="--from:{{ p.pct_prev }}%;--to:{{ p.pct }}%"
-       role="progressbar" aria-valuenow="{{ p.judged }}"
-       aria-valuemin="{{ p.floor }}" aria-valuemax="{{ p.target }}">
-    <span class="judge-xp-trail"></span>
-    <span class="judge-xp-fill"></span>
-    <span class="judge-xp-notches"></span>
-    <span class="judge-xp-sheen"></span>
-  </div>
-  <p class="judge-xp-read mono">
+  <p class="judge-count mono">
     <b>{{ p.judged }}</b> / {{ p.target }} {{ p.label }}
   </p>
   {# Said in full only while it has never happened. After the first sweep the

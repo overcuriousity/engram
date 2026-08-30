@@ -94,6 +94,12 @@ pub struct SearchTiming {
 pub struct SearchOutcome {
     pub timing: SearchTiming,
     pub explanation: crate::core::explain::SearchExplanation,
+    /// The capture this search wrote, where the door waited for it. Only the
+    /// UI door does — it is the one whose answer a person then clicks, and the
+    /// id is what lets the open and the "nothing here has it" name the search
+    /// they came from instead of guessing at it. `None` everywhere else, and
+    /// wherever the capture is off or failed.
+    pub event: Option<String>,
 }
 
 /// A stage of the search pipeline, in the order it runs.
@@ -1581,6 +1587,10 @@ impl Core {
         // ordering is final. Off the request path via `Background`, like
         // `mark_seen` below it: a search must not get slower, or fail, because
         // bookkeeping did.
+        //
+        // Except at the UI door, which waits for its own capture — see
+        // `captured_event` below.
+        let mut captured_event = None;
         if self.learn.enabled && door.captured() {
             let candidates: Vec<crate::store::feedback::NewCandidate> = results
                 .iter()
@@ -1597,6 +1607,10 @@ impl Core {
                 query: query.q.trim().to_string(),
                 door,
                 scope: origin.scope.clone(),
+                // The event the page sending this is holding, where the door
+                // named one — what keeps a second tab's keystroke from folding
+                // into the first tab's search. See `record_search`.
+                fold_onto: origin.fold_onto.clone(),
                 filters: serde_json::json!({
                     "tags": query.tags,
                     "category": query.category,
@@ -1614,13 +1628,34 @@ impl Core {
                 // good it was, which is why `weak` is read beside it.
                 answered: results.first().is_some_and(|r| r.synthesized && !r.weak),
             };
-            let store = self.store.clone();
             let window = self.feedback.coalesce_secs;
-            self.background.spawn(async move {
-                if let Err(e) = store.record_search(event, window).await {
-                    tracing::warn!(error = %e, "could not record the search");
+            match door {
+                // The one door whose answer a person then clicks on. It waits,
+                // because the page it fills has to name the search on every row
+                // — that is what lets an open, a verdict and a gap report
+                // against the search they actually came from. Guessing at it
+                // afterwards, from recency and pool membership, was wrong in
+                // both directions: a fast click found no capture yet, and a
+                // slow one could be answered by an unrelated search that merely
+                // held the same artifact.
+                //
+                // The rule above still holds. This is one small transaction
+                // behind an embedding call and a vector search the person is
+                // already waiting on, and its failure is logged and dropped:
+                // the results go out either way, without the bar.
+                Door::Ui => match self.store.record_search(event, window).await {
+                    Ok(id) => captured_event = Some(id),
+                    Err(e) => tracing::warn!(error = %e, "could not record the search"),
+                },
+                _ => {
+                    let store = self.store.clone();
+                    self.background.spawn(async move {
+                        if let Err(e) = store.record_search(event, window).await {
+                            tracing::warn!(error = %e, "could not record the search");
+                        }
+                    });
                 }
-            });
+            }
         }
 
         results.truncate(limit);
@@ -1690,6 +1725,7 @@ impl Core {
                     reranked,
                     ..explanation
                 },
+                event: captured_event,
             },
         ))
     }
@@ -4369,6 +4405,9 @@ mod tests {
     async fn a_synthesized_artifact_leading_the_list_marks_the_search_answered() {
         let mut core = test_core().await;
         core.learn.enabled = true;
+        // Two deliberate searches, not one being reworded: with the window on
+        // the second would fold into the first and there would be one event.
+        core.feedback.coalesce_secs = 0;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let captured = core
             .store

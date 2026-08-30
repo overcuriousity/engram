@@ -1,0 +1,29 @@
+{# The bar under a result opened from the rail: the judge deck's question,
+   asked where the answer is cheap — at the moment, by the person who searched,
+   with the result in front of them. `_ask_verdict.html` applied to search.
+
+   Three answers, and none of them is "gap": whether *nothing* has it is a
+   verdict on the whole list, and the rail asks that where the list is.
+
+   Nor is "Not sure" a verdict. It is the deck's skip: the search stays a
+   question and only sinks in the order. Recording it as a discard — which says
+   the search was never real — spent the search on somebody not remembering. #}
+<div id="search-verdict" class="row ask-verdict">
+  {% if state.is_empty() %}
+    <span class="muted">Was this what you were looking for?</span>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"hit","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">Yes</button>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"no","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">No</button>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"skip","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">Not sure</button>
+  {% else if state == "skip" %}
+    {# No undo: a skip is not a verdict, so there is nothing to take back. The
+       search is still pending, and the deck will ask again later. #}
+    <span class="muted">left for the deck</span>
+  {% else %}
+    <span class="muted">{% if state == "hit" %}yes, this was it{% else %}not this one{% endif %}</span>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"none","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">undo</button>
+  {% endif %}
+</div>

@@ -33,7 +33,7 @@ pub fn link_target(a: &str, b: &str) -> String {
 /// The newest `created_at` a settled event may still have. An event is
 /// settled once `created_at < settled_cutoff(at, coalesce_secs)` — the exact
 /// complement of `record_search`'s fold predicate at
-/// `src/store/feedback.rs:206` (`at - created <= coalesce_secs`), so there is
+/// `src/store/feedback.rs:334` (`at - created <= coalesce_secs`), so there is
 /// no instant where both are true and an event still a keystroke away from
 /// folding gets replayed early.
 fn settled_cutoff(at: i64, coalesce_secs: i64) -> i64 {
@@ -622,6 +622,7 @@ mod tests {
         core.store
             .record_search(
                 NewEvent {
+                    fold_onto: None,
                     query: query.into(),
                     door: Door::Ui,
                     scope: None,
@@ -766,7 +767,7 @@ mod tests {
     #[tokio::test]
     async fn an_event_exactly_at_the_fold_boundary_waits_one_more_sweep() {
         // `record_search` treats an event as still foldable while
-        // `(at - created_at) <= coalesce_secs` (src/store/feedback.rs:206).
+        // `(at - created_at) <= coalesce_secs` (src/store/feedback.rs:334).
         // The sweep's read must be the complement of that with nothing
         // shared, or there is an instant where both are true and the sweep
         // binds an event a further keystroke could still fold into — the
@@ -821,7 +822,7 @@ mod tests {
     #[test]
     fn settled_cutoff_is_the_exact_complement_of_the_fold_predicate() {
         // `replay_events` folds an event's watermark against `settled_cutoff`
-        // with `<`. `record_search` (src/store/feedback.rs:206) treats an
+        // with `<`. `record_search` (src/store/feedback.rs:334) treats an
         // event as still foldable while `at - created <= coalesce_secs`. For
         // the two to share no instant, `created < settled_cutoff(at, cs)`
         // must be false exactly where `at - created <= cs` is true, and true
@@ -880,7 +881,10 @@ mod tests {
         on(&mut core).await;
         let ids = seed(&core, 3).await;
         let ev = record(&core, "q", &[&ids[0], &ids[1], &ids[2]], &[]).await;
-        core.store.judge_hit(&ev, &ids[0]).await.unwrap();
+        core.store
+            .judge_hit(&ev, &ids[0], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         settle(&core).await;
 
         run(&core).await.unwrap();
@@ -924,7 +928,10 @@ mod tests {
         let ids = seed(&core, 3).await;
         // ids[2] is never offered as a candidate at all.
         let ev = record(&core, "q", &[&ids[0], &ids[1]], &[]).await;
-        core.store.judge_hit(&ev, &ids[2]).await.unwrap();
+        core.store
+            .judge_hit(&ev, &ids[2], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         settle(&core).await;
 
         run(&core).await.unwrap();
@@ -967,7 +974,10 @@ mod tests {
         on(&mut core).await;
         let ids = seed(&core, 2).await;
         let g = record(&core, "nothing about this", &[&ids[0], &ids[1]], &[]).await;
-        core.store.judge(&g, Verdict::Gap).await.unwrap();
+        core.store
+            .judge(&g, Verdict::Gap, crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         settle(&core).await;
 
         run(&core).await.unwrap();
@@ -1617,7 +1627,10 @@ mod tests {
         let ids = seed(&core, 3).await;
 
         let first = record(&core, "one", &[&ids[0], &ids[1]], &[]).await;
-        core.store.judge_hit(&first, &ids[0]).await.unwrap();
+        core.store
+            .judge_hit(&first, &ids[0], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         sqlx::query("UPDATE search_events SET judged_at = 1000 WHERE id = ?")
             .bind(&first)
             .execute(&core.store.pool)
@@ -1629,7 +1642,10 @@ mod tests {
 
         // A second verdict written moments later, still inside second 1000.
         let second = record(&core, "two", &[&ids[0], &ids[2]], &[]).await;
-        core.store.judge_hit(&second, &ids[2]).await.unwrap();
+        core.store
+            .judge_hit(&second, &ids[2], crate::store::feedback::Labeller::Deck)
+            .await
+            .unwrap();
         sqlx::query("UPDATE search_events SET judged_at = 1000 WHERE id = ?")
             .bind(&second)
             .execute(&core.store.pool)

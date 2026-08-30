@@ -1,5 +1,16 @@
+{# The id this rail was recorded under, handed straight back to the box: the
+   next keystroke sends it, and the fold is onto this event rather than onto
+   whatever this operator's other tab wrote last. Out of band because the form
+   is not inside the target this fragment fills, and empty where nothing was
+   recorded — the box then has nothing to name and starts a new event, which is
+   what it should do. See `Store::record_search`. #}
+<span hx-swap-oob="innerHTML:#fold-of">{% if let Some(ev) = event_id %}<input type="hidden" name="fold" value="{{ ev }}">{% endif %}</span>
 {% if results.is_empty() && associated.is_empty() %}
   <p class="muted">No matches.</p>
+  {% if let Some(ev) = event_id %}
+  <p><button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
+             hx-target="this" hx-swap="outerHTML">Nothing here has it</button></p>
+  {% endif %}
 {% else %}
 <div data-terms="{{ terms }}">
   {# Counted off the list rather than passed in beside it, so the number and
@@ -25,6 +36,13 @@
       <div>These are the nearest artifacts, but none of them is a close match
         for what you typed. Check the spelling, or try describing the thing
         rather than naming it.</div>
+      {# The deck's "gap" key, moved to where the person is when they know.
+         A verdict on the whole list, so it sits with the line about the whole
+         list rather than under any one row. #}
+      {% if let Some(ev) = event_id %}
+      <p><button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
+                 hx-target="this" hx-swap="outerHTML">Nothing here has it</button></p>
+      {% endif %}
     </div>
   </div>
   {% endif %}
@@ -46,8 +64,19 @@
      rule empties the animation either way. #}
   <div class="rail-row">
     <a class="rail-item{% if r.past_cliff %} rail-past{% endif %}" role="option" aria-selected="false"
-       href="/ui/artifacts/{{ r.artifact_id }}"
-       hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
+       {# The search that listed this row travels with the link. It is what the
+          bar under the artifact reports against, and naming it here is what
+          keeps an open attributed to the search it came from rather than to
+          whichever recent search happened to hold the same artifact. Absent
+          while searches are not being recorded.
+
+          On the `href` as well as the `hx-get`, and identical to it: a
+          middle-click, a ⌘-click and a load that reached the page without htmx
+          are all the same open, and a link that carried the search down one
+          path and not the other produced a label from one and silence from the
+          other for the same act. #}
+       href="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}{% if let Some(ev) = event_id %}&event={{ ev }}{% endif %}"
+       hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}{% if let Some(ev) = event_id %}&event={{ ev }}{% endif %}"
        hx-target="#pane-content" hx-swap="innerHTML transition:true" hx-push-url="true">
       <div class="rail-head">
         {% if r.weak %}

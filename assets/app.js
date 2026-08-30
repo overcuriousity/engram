@@ -625,6 +625,11 @@
   // next pane swap, the page going away, the tab going hidden. The weakest
   // pursuit signal there is, and it is sent as a beacon so leaving costs
   // nothing. Under three seconds is a glance, not a read, and is not sent.
+  //
+  // A pursuit signal only. This used to carry the search the pane was opened
+  // from, and a long enough read was written as that search having found its
+  // answer — but the beacon flushes as the pane is *left*, so it landed after
+  // the buttons under the result and overwrote them. The bar answers now.
   var dwell = { id: null, since: 0 };
   function flushDwell() {
     if (!dwell.id) return;
@@ -644,7 +649,10 @@
     var id = open ? open.getAttribute('data-artifact') : null;
     if (id === dwell.id) return;
     flushDwell();
-    if (id) { dwell.id = id; dwell.since = Date.now(); }
+    if (id) {
+      dwell.id = id;
+      dwell.since = Date.now();
+    }
   }
 
   // ── The end of the empty base ─────────────────────────────────────────────
@@ -2262,7 +2270,12 @@
       // Disabled options are skipped, matching the badges: a deprecated or
       // superseded candidate is shown at its place in the pool but carries no
       // digit, and the numbering runs over the choosable ones without a gap.
-      var pick = card.querySelectorAll('.judge-option:not([disabled])')[Number(e.key) - 1];
+      // Options behind the fold are skipped too — they carry no digit, and a
+      // key that pressed what cannot be seen would be a verdict on nothing.
+      var pick = Array.prototype.filter.call(
+        card.querySelectorAll('.judge-option:not([disabled])'),
+        function (o) { return !o.closest('.judge-more'); }
+      )[Number(e.key) - 1];
       if (pick) { e.preventDefault(); pick.click(); }
       return;
     }

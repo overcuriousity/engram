@@ -385,6 +385,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: q.into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,
@@ -399,7 +400,11 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .judge(&id, crate::store::feedback::Verdict::Gap)
+            .judge(
+                &id,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
             .await
             .unwrap();
         id
