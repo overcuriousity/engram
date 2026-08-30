@@ -246,6 +246,12 @@ pub fn parse_reap(body: &str) -> Result<Reap> {
     }
 }
 
+pub const RESCUE_SYSTEM: &str = r#"You rewrite the still-valuable part of a retired knowledge-base artifact into one self-contained live artifact.
+
+You are given source excerpts, the closest live artifacts, and the one line naming what the sources state that the live base does not. Write an artifact carrying exactly that: use only the excerpts that bear on it and leave the rest out. Write only what the excerpts support — every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Do not restate what the live artifacts shown already say.
+
+Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
+
 pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be about the same thing, and decide what should happen to them.
 
 First, if NEITHER states anything a reader could act on or be wrong about — a body that is only its own title or file path, a bare link, boilerplate, an outline with nothing under its headings — answer "vacuous" and stop. It must hold for both: one empty artifact beside a real one is not this.

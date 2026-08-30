@@ -46,7 +46,22 @@ pub async fn run(core: &Core) -> Result<Report> {
                 }
             }
             Ok(crate::infer::prompt::Reap::Valuable { reason }) => {
-                tracing::info!(artifact_id = %c.id, reason, "a retired artifact still holds value");
+                // Bounded per run so one bad judging batch cannot flood the
+                // live base with model-written text. What is over the cap is
+                // logged and stays a candidate.
+                if report.rescued >= core.reap.max_rescues_per_run {
+                    tracing::info!(artifact_id = %c.id, reason, "valuable, but over this run's rescue cap; it waits");
+                    continue;
+                }
+                match rescue_one(core, c, &reason).await {
+                    Ok(new_id) => {
+                        report.rescued += 1;
+                        tracing::info!(artifact_id = %c.id, new_id, reason, "rescued a retired artifact into a rewrite");
+                    }
+                    Err(e) => {
+                        tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact; it waits")
+                    }
+                }
             }
             // A reply that failed or cannot be read acts on nothing; the row
             // is simply a candidate again next interval. The sweep's cadence
@@ -57,6 +72,141 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
     Ok(report)
+}
+
+/// The nearest artifacts a searcher can actually reach, `(title, text)`. Live
+/// means what `in_results` means; the payload's own status can lag the row,
+/// so the row answers. A candidate with no point gets none, which only ever
+/// defends it.
+async fn live_neighbours(core: &Core, id: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    if let Ok(hits) = core.vectors.neighbours(id, 6).await {
+        for h in hits {
+            if h.payload.artifact_id == id {
+                continue;
+            }
+            if let Ok(Some(true)) = core.store.artifact_in_results(&h.payload.artifact_id).await {
+                out.push((
+                    h.payload.title.clone().unwrap_or_else(|| "untitled".into()),
+                    h.payload.text.clone(),
+                ));
+            }
+            if out.len() >= 5 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Act on `valuable`: rewrite what remains into a live synthesized artifact
+/// and point the candidate at it.
+///
+/// What the rewrite is written *from* is the one rule that matters here. A
+/// source-text candidate (captured, passage, note) is its own material. A
+/// model-written one (merged, synthesized) is a paraphrase already, and a
+/// rewrite of it would be a paraphrase of a paraphrase posing as an original —
+/// so its material is the text of its roots through `artifact_sources`, and a
+/// candidate whose roots have lost their text (reaped themselves, or gone) is
+/// skipped rather than rewritten from the copy.
+///
+/// `insert_synthesized_artifact` is handed the candidate as the source list
+/// and resolves roots itself, so the lineage the new artifact records is
+/// root-true at any depth regardless of which branch fed the prompt.
+async fn rescue_one(
+    core: &Core,
+    c: &crate::store::artifacts::Chunk,
+    reason: &str,
+) -> Result<String> {
+    let judge = core
+        .judge
+        .as_ref()
+        .ok_or_else(|| crate::error::Error::Validation("no judge model configured".into()))?;
+    let mut excerpts: Vec<(String, String)> = Vec::new();
+    if c.provenance.is_source_text() {
+        excerpts.push((
+            c.title.clone().unwrap_or_else(|| "untitled".into()),
+            c.text.clone(),
+        ));
+    } else {
+        let roots = core
+            .store
+            .roots_of(std::slice::from_ref(&c.id))
+            .await?
+            .remove(&c.id)
+            .unwrap_or_default();
+        for root in &roots {
+            if let Ok(r) = core.store.get_artifact(root).await
+                && !r.text.trim().is_empty()
+            {
+                excerpts.push((
+                    r.title.clone().unwrap_or_else(|| "untitled".into()),
+                    r.text.clone(),
+                ));
+            }
+        }
+        if excerpts.is_empty() {
+            return Err(crate::error::Error::Validation(
+                "a model-written candidate with no surviving source text cannot be rescued".into(),
+            ));
+        }
+    }
+    let mut user = String::new();
+    user.push_str(&format!("What the live base lacks: {reason}\n\n"));
+    user.push_str("----- SOURCE EXCERPTS -----\n");
+    for (title, text) in &excerpts {
+        user.push_str(&format!("Title: {title}\n\n{text}\n\n"));
+    }
+    let neighbours = live_neighbours(core, &c.id).await;
+    if !neighbours.is_empty() {
+        user.push_str("----- CLOSEST LIVE ARTIFACTS -----\n");
+        for (title, text) in &neighbours {
+            user.push_str(&format!("Title: {title}\n\n{text}\n\n"));
+        }
+    }
+    let permit = core.gate.background().await;
+    let reply = judge
+        .complete(crate::infer::prompt::RESCUE_SYSTEM, &user)
+        .await;
+    permit.finished();
+    let g = crate::infer::prompt::parse_generation(&reply?)?;
+    let made = core
+        .store
+        .insert_synthesized_artifact(
+            &crate::store::artifacts::NewSynthesized {
+                text: g.text,
+                title: Some(g.title),
+                category: g.category,
+                tags: g.tags,
+                caveats: g.caveats,
+                cues: vec![format!("reap rescue: {reason}")],
+            },
+            std::slice::from_ref(&c.id),
+        )
+        .await?;
+    core.store
+        .enqueue(crate::store::jobs::Stage::Embed, "artifact", &made.id)
+        .await?;
+    // A deprecated candidate now has the winner a supersession names, so it
+    // gets one — through the store directly, not `core.supersede()`, whose
+    // both-active guard rightly refuses a retired loser. An already-superseded
+    // candidate keeps its pointer: its old winner retired it, and the rewrite
+    // will simply outrank it as a live neighbour on the second visit.
+    if c.superseded_by.is_none() {
+        let _guard = core.lifecycle_lock.lock().await;
+        core.store.set_superseded_by(&c.id, Some(&made.id)).await?;
+        core.vectors
+            .set_lifecycle(
+                &c.id,
+                crate::store::artifacts::ArtifactStatus::Superseded,
+                Some(&made.id),
+            )
+            .await?;
+        core.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
+            .await?;
+    }
+    Ok(made.id)
 }
 
 /// Act on `worthless`: copy to the graveyard and wipe the row, then delete
@@ -155,25 +305,7 @@ async fn judge_one(
         Some(id) => core.store.get_artifact(id).await.ok(),
         None => None,
     };
-    let mut neighbours: Vec<(String, String)> = Vec::new();
-    if let Ok(hits) = core.vectors.neighbours(&c.id, 6).await {
-        for h in hits {
-            if h.payload.artifact_id == c.id {
-                continue;
-            }
-            // Live means what `in_results` means; the payload's own status
-            // can lag the row, so the row answers.
-            if let Ok(Some(true)) = core.store.artifact_in_results(&h.payload.artifact_id).await {
-                neighbours.push((
-                    h.payload.title.clone().unwrap_or_else(|| "untitled".into()),
-                    h.payload.text.clone(),
-                ));
-            }
-            if neighbours.len() >= 5 {
-                break;
-            }
-        }
-    }
+    let neighbours = live_neighbours(core, &c.id).await;
     let case = crate::infer::prompt::ReapCase {
         title: c.title.as_deref().unwrap_or("untitled"),
         text: &c.text,
@@ -405,6 +537,113 @@ mod tests {
             "still here"
         );
         assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+    }
+
+    const RESCUE_REPLY: &str =
+        r#"{"artifact":{"title":"Kept fact","text":"the port is 8443","category":null,"tags":[],"caveats":[]}}"#;
+
+    #[tokio::test]
+    async fn a_valuable_deprecated_artifact_is_rewritten_and_superseded_by_the_rewrite() {
+        let mut core = test_core().await;
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"valuable","reason":"names the port"}"#.into(),
+                RESCUE_REPLY.into(),
+            ]),
+        ));
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped, report.rescued), (1, 0, 1));
+
+        let old = core.store.get_artifact(&ids[0]).await.unwrap();
+        let new_id = old.superseded_by.expect("superseded by the rewrite");
+        let new = core.store.get_artifact(&new_id).await.unwrap();
+        assert_eq!(new.provenance, crate::store::artifacts::Provenance::Synthesized);
+        assert_eq!(new.text, "the port is 8443");
+        assert!(new.in_results(), "the rewrite is live");
+        assert!(!old.text.is_empty(), "a rescue wipes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_model_written_candidate_is_rewritten_from_its_roots() {
+        let mut core = test_core().await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"verdict":"valuable","reason":"names the mount flags"}"#.into(),
+            RESCUE_REPLY.into(),
+        ]));
+        core.judge = Some(scripted.clone());
+        let ids = seed(&core, &["mount with ro,loop", "journal at /var/log"]).await;
+        let merge = core
+            .store
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "a paraphrase of both".into(),
+                    title: Some("M".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &ids,
+            )
+            .await
+            .unwrap();
+        core.store
+            .set_artifact_status(&merge.id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        backdate_retired_at(&core, &merge.id, 100 * 86_400).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!(report.rescued, 1);
+        let rescue_prompt = &scripted.prompts()[1];
+        assert!(
+            rescue_prompt.contains("mount with ro,loop")
+                && rescue_prompt.contains("journal at /var/log"),
+            "the rewrite must be fed source text: {rescue_prompt}"
+        );
+        assert!(
+            !rescue_prompt.contains("a paraphrase of both"),
+            "never the model-written candidate's own text"
+        );
+        let new_id = core
+            .store
+            .get_artifact(&merge.id)
+            .await
+            .unwrap()
+            .superseded_by
+            .unwrap();
+        let mut roots = core
+            .store
+            .roots_of(std::slice::from_ref(&new_id))
+            .await
+            .unwrap()
+            .remove(&new_id)
+            .unwrap();
+        roots.sort();
+        let mut want = ids.clone();
+        want.sort();
+        assert_eq!(roots, want, "the rewrite's lineage names the captured roots");
+    }
+
+    #[tokio::test]
+    async fn the_rescue_cap_holds() {
+        let mut core = test_core().await;
+        core.reap.max_rescues_per_run = 1;
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"valuable","reason":"one"}"#.into(),
+                RESCUE_REPLY.into(),
+                r#"{"verdict":"valuable","reason":"two"}"#.into(),
+            ]),
+        ));
+        let ids = seed(&core, &["first fact", "second fact"]).await;
+        for id in &ids {
+            deprecate_long_ago(&core, id).await;
+        }
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.rescued), (2, 1));
     }
 
     #[tokio::test]
