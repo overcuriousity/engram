@@ -179,7 +179,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             _,
         ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
         (Stage::Moments, _) => moments::run(core, &job.target_id).await,
-        (Stage::Remind, _) => Ok(()),
+        (Stage::Remind, _) => remind::run(core).await,
     };
 
     match result {

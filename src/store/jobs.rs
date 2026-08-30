@@ -426,6 +426,42 @@ impl Store {
         Ok(())
     }
 
+    /// Arm a unit at an absolute time, or move a waiting one there. A running
+    /// row is left alone: the run re-arms at its end. Attempts reset, because
+    /// this is new information and not a retry.
+    pub async fn arm_at(&self, stage: Stage, target_kind: &str, target_id: &str, run_after: i64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class, empty_runs)
+             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, 0)
+             ON CONFLICT(subject, stage, target_id) DO UPDATE SET
+               state = 'pending', run_after = excluded.run_after, attempts = 0, empty_runs = 0,
+               last_error = NULL, claimed_at = NULL, class = excluded.class
+             WHERE jobs.state IN ('pending', 'done', 'failed')",
+        )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(run_after)
+        .bind(now())
+        .bind(stage.class())
+        .execute(&self.control.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A waiting unit that has nothing to wait for. Marked done rather than
+    /// deleted, so the row keeps its history and `arm_at` can wake it again.
+    pub async fn disarm(&self, stage: Stage, target_id: &str) -> Result<()> {
+        sqlx::query("UPDATE jobs SET state = 'done' WHERE subject = ? AND stage = ? AND target_id = ? AND state = 'pending'")
+            .bind(&self.subject)
+            .bind(stage.as_str())
+            .bind(target_id)
+            .execute(&self.control.pool)
+            .await?;
+        Ok(())
+    }
+
     /// `arm_periodic`, carrying the count of consecutive runs that found
     /// nothing.
     ///

@@ -268,11 +268,20 @@ impl Store {
         Ok(rows.iter().map(row_of).collect())
     }
 
-    /// Re-arm the Remind unit at the earliest owed moment. Filled in with the
-    /// unit itself (Task 11); every write that can move the minimum already
-    /// calls it.
+    /// The Remind unit sleeps until the earliest owed moment. Called by every
+    /// write that can move that minimum; a user with no channel never has it
+    /// armed, and nothing owed disarms it.
     pub async fn rearm_remind(&self) -> Result<()> {
-        Ok(())
+        use crate::jobs::remind::{notify_targets, REMIND_TARGET};
+        use crate::store::jobs::Stage;
+        let notify = self.control.notify(&self.subject).await?;
+        if notify_targets(&notify).is_empty() {
+            return self.disarm(Stage::Remind, REMIND_TARGET).await;
+        }
+        match self.next_notify_at().await? {
+            Some(at) => self.arm_at(Stage::Remind, "collection", REMIND_TARGET, at).await,
+            None => self.disarm(Stage::Remind, REMIND_TARGET).await,
+        }
     }
 
     /// The Remind unit's next wake: the earliest owed moment, at any time.
