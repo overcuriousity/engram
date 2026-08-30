@@ -126,6 +126,53 @@ const JOINED: &str = "SELECT m.*, a.title, a.text FROM moments m JOIN artifacts 
 const OWED: &str = "m.kind = 'due' AND m.done_at IS NULL AND m.notified_at IS NULL AND m.at IS NOT NULL";
 
 impl Store {
+    /// A moment hangs off an artifact; the note is the artifact's corpus.
+    pub async fn corpus_of_moment(&self, moment_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT a.corpus_id FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
+             WHERE m.id = ?",
+        )
+        .bind(moment_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+
+    /// Any reminder still open on any artifact of this note. `complete_moment`
+    /// arms the next occurrence of a recurring reminder before this is asked,
+    /// so a recurring done answers `true` and retires nothing.
+    ///
+    /// `kind = 'due'` and not every kind: an event is a date the note mentions,
+    /// which nobody completes and which would therefore hold a note open
+    /// forever. Retirement is about reminders.
+    pub async fn has_open_reminder_for_corpus(&self, corpus_id: &str) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
+             WHERE a.corpus_id = ? AND m.kind = 'due' AND m.done_at IS NULL",
+        )
+        .bind(corpus_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// Was this note ever *read* as a reminder, as opposed to given a date by
+    /// a person? `source` already records exactly that: `cue` and `classified`
+    /// are the two readings, `set` is a person, `extracted` is a date
+    /// mentioned in passing prose. Every moment the note ever had is
+    /// considered, because moving a cue reminder's date writes a fresh `set`
+    /// row and the note does not stop having been a reminder.
+    pub async fn corpus_was_read_as_reminder(&self, corpus_id: &str) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
+             WHERE a.corpus_id = ? AND m.source IN ('cue', 'classified')",
+        )
+        .bind(corpus_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     pub async fn insert_moment(&self, m: &NewMoment) -> Result<String> {
         let id = new_id();
         sqlx::query(

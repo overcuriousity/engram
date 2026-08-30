@@ -588,6 +588,15 @@ impl crate::core::Core {
                     .await?;
             }
             self.store.rearm_remind().await?;
+            // Last, and only after the recurrence above has armed the next
+            // occurrence: "no open reminder remains" is a question about the
+            // state this call leaves behind, not the one it found.
+            if let Some(cid) = self.store.corpus_of_moment(id).await?
+                && !self.store.has_open_reminder_for_corpus(&cid).await?
+                && self.store.corpus_was_read_as_reminder(&cid).await?
+            {
+                self.store.retire_corpus(&cid, now).await?;
+            }
         }
         Ok(())
     }

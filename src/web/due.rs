@@ -128,6 +128,11 @@ async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> 
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.store.undo_done(&id).await?;
+    // The row comes back, so the note comes back with it. Unconditional: a
+    // corpus that was never retired is already NULL here.
+    if let Some(cid) = tenant.core.store.corpus_of_moment(&id).await? {
+        tenant.core.store.unretire_corpus(&cid).await?;
+    }
     tenant.core.store.rearm_remind().await?;
     render(&tenant, &f.tz, None).await
 }
@@ -267,6 +272,89 @@ mod tests {
         let res = app.oneshot(form(&format!("/ui/moments/{id}/undone"), &cookie, "tz=Europe/Berlin")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(core.store.moment(&id).await.unwrap().unwrap().done_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn done_retires_a_note_that_was_read_as_a_reminder() {
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() + 60)).await;
+        let cid = core.store.corpus_of_moment(&id).await.unwrap().unwrap();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        app.clone()
+            .oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin"))
+            .await
+            .unwrap();
+        assert!(
+            core.store.is_retired(&cid).await.unwrap(),
+            "the last read reminder closed, so the note retires"
+        );
+
+        app.oneshot(form(&format!("/ui/moments/{id}/undone"), &cookie, "tz=Europe/Berlin"))
+            .await
+            .unwrap();
+        assert!(
+            !core.store.is_retired(&cid).await.unwrap(),
+            "undo restores the row and the note together"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recurring_done_retires_nothing_because_the_next_one_is_open() {
+        let core = test_core().await;
+        let out = core.ingest_capture(Capture::new("Pay rent", "ui")).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
+        let id = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid,
+                kind: Kind::Due,
+                at: Some(at),
+                tz: "Europe/Berlin".into(),
+                rule: Some("FREQ=MONTHLY;BYMONTHDAY=1".into()),
+                source: Source::Cue,
+                span: None,
+            })
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        app.oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        assert!(
+            !core.store.is_retired(&out.id).await.unwrap(),
+            "an occurrence closed, the reminder did not"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hand_set_date_on_an_ordinary_note_does_not_retire_it() {
+        let core = test_core().await;
+        let out = core
+            .ingest_capture(Capture::new("An article about vector indexes", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let id = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid,
+                kind: Kind::Due,
+                at: Some(crate::store::now() + 60),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Set,
+                span: None,
+            })
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        app.oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        assert!(
+            !core.store.is_retired(&out.id).await.unwrap(),
+            "a document with a date on it stays a document"
+        );
     }
 
     #[tokio::test]
