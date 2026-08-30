@@ -96,6 +96,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # The IANA database, because the zone comes from the device
 # (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and a stored offset
 # cannot answer what happens across a DST boundary.
+regex = "1"
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 crossterm = "0.29.0"
 
