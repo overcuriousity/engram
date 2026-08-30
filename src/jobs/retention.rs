@@ -160,6 +160,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "old".into(),
                     door: crate::store::feedback::Door::Ui,
                     scope: None,

@@ -54,7 +54,7 @@
                   input[!event.isComposing] changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() && open_with.is_empty() %},
                   load{% endif %}"
-      hx-params="q,category,rerank,explain"
+      hx-params="q,category,rerank,explain,fold"
       hx-indicator="#search-spinner"{% if search_reranks %} data-rerank="true"{% endif %}>
   {# `/ui?explain=1` and nothing else. `hx-params` above is an allowlist, so
      the name has to appear in both places or the fragment is asked without it
@@ -62,6 +62,13 @@
      field was missing. app.js's refining pass reads it here too, so the
      second, reranked answer carries the same question the first one did. #}
   {% if explain %}<input type="hidden" name="explain" value="1">{% endif %}
+  {# Empty until the first answer comes back, which fills it out of band with
+     the id that answer was recorded under. The box then names its own last
+     search on every keystroke, and a burst folds into that one event instead
+     of into whatever this operator's other window wrote most recently — which
+     used to overwrite that window's query and its whole pool while its rail
+     went on naming the id on every row. See `_results.html`. #}
+  <span id="fold-of"></span>
   {# A textarea from the first keystroke to the last. It grows to a ten-line
      cap and then scrolls inside itself; it never switches element type, and it
      never infers a verb from a length or a newline. What decides which of the

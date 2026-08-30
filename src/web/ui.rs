@@ -518,6 +518,11 @@ struct ResultsTemplate {
     /// searches are not being recorded, and the button and the links go
     /// without.
     event_id: Option<String>,
+    /// The query this rail was drawn for, carried by the gap button alone: a
+    /// gap is a verdict about a wording, and a trailing keystroke can fold a
+    /// later one into the same row before the button is pressed. See
+    /// `Store::gap_event`.
+    q: String,
 }
 
 /// The rail before anything is asked: the base introducing itself.
@@ -1076,6 +1081,12 @@ pub(crate) struct UiSearchParams {
     /// the operator stops, whose answer reorders the rail it just painted.
     #[serde(default)]
     pub(crate) rerank: bool,
+    /// The search event this page is holding — the id the last answer handed
+    /// it, sent back so a typing burst folds into its own chain. A second tab
+    /// carries a different one, or none yet, and the two never collide. See
+    /// `Store::record_search`.
+    #[serde(default)]
+    pub(crate) fold: Option<String>,
     /// Ask the rail to say why a row is where it is. Off unless the link
     /// carries it: the line is for an operator looking into a ranking, not
     /// something every keystroke paints. `/ui?explain=1` puts it on the form
@@ -1155,6 +1166,9 @@ pub(crate) async fn search_results(
     // Function words are dropped: a query phrased as a situation is mostly
     // stopwords, and highlighting every "to" marks the whole card.
     let terms = highlightable_terms(p.q.trim());
+    // The wording this rail is about to be drawn for, kept because `p.q` is
+    // about to be moved into the search. Only the gap button reads it.
+    let q = p.q.trim().to_string();
     // What this sitting is working on. A typing burst folds into one entry
     // here as it does in the log, so what is carried is the query that was
     // meant rather than every prefix of it.
@@ -1198,7 +1212,11 @@ pub(crate) async fn search_results(
                 .by(tenant.user.subject)
                 // The live sitting, for priming. Off unless `sitting.prime` is
                 // on, and impossible at any door with no session.
-                .in_sitting(identity.session.clone()),
+                .in_sitting(identity.session.clone())
+                // The event this page is already holding, so a burst folds into
+                // its own chain and not into whatever this operator's other tab
+                // wrote last. Empty on the first search of a page.
+                .folding_onto(p.fold.filter(|f| !f.is_empty())),
         )
         .await?;
 
@@ -1257,6 +1275,7 @@ pub(crate) async fn search_results(
         // would assert a confirmation that never took place.
         reranked: outcome.timing.reranked,
         event_id: outcome.event,
+        q,
     })
     .into_response();
     // Measured as before, reported where a browser already knows to show it.
@@ -5664,6 +5683,7 @@ mod tests {
             core.store
                 .record_search(
                     crate::store::feedback::NewEvent {
+                        fold_onto: None,
                         query: format!("search number {i}"),
                         door: crate::store::feedback::Door::Ui,
                         scope: None,
@@ -6410,6 +6430,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         })
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
@@ -6514,6 +6535,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         })
         .unwrap();
 
@@ -6538,6 +6560,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         })
         .unwrap();
 
@@ -6645,6 +6668,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         })
         .unwrap();
         assert!(!html.contains("Untitled"), "{html}");
@@ -6695,6 +6719,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6718,6 +6743,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6738,6 +6764,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6770,6 +6797,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         };
         let body = template.render().unwrap();
         assert!(body.contains("Recalled by association"), "{body}");
@@ -6787,6 +6815,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         };
         let body = judged.render().unwrap();
         assert!(body.contains("the tool and its errors"), "{body}");
@@ -6806,6 +6835,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: true,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6818,6 +6848,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -6895,6 +6926,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         };
         let body = weak_with_association.render().unwrap();
         assert!(
@@ -6909,6 +6941,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         };
         let body = good_with_association.render().unwrap();
         assert!(
@@ -7148,6 +7181,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -7196,6 +7230,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -7216,6 +7251,7 @@ mod tests {
             event_id: None,
             terms: String::new(),
             reranked: false,
+            q: String::new(),
         }
         .render()
         .unwrap();
@@ -9312,6 +9348,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "how do I mount an E01".into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,
@@ -9501,6 +9538,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "judged one".into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,
@@ -9526,6 +9564,7 @@ mod tests {
         core.store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "nothing near one".into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,
@@ -9687,7 +9726,7 @@ mod tests {
         // `explain` for the same reason: a name missing here is a flag the
         // fragment is never asked with, however carefully the rest is wired.
         assert!(
-            page.contains(r#"hx-params="q,category,rerank,explain""#),
+            page.contains(r#"hx-params="q,category,rerank,explain,fold""#),
             "{page}"
         );
     }
@@ -11322,6 +11361,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "image will not mount".into(),
                     door: crate::store::feedback::Door::Ui,
                     scope: Some(crate::store::TEST_SUBJECT.into()),
@@ -11385,6 +11425,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "image mount".into(),
                     door: crate::store::feedback::Door::Ui,
                     scope: Some(crate::store::TEST_SUBJECT.into()),
@@ -11542,14 +11583,20 @@ mod tests {
         // nothing at all, silently.
         let event = newest_event(&handle).await;
         assert!(
-            rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap""#)),
+            rail.contains(&format!(
+                r#"hx-post="/ui/search/{event}/gap?q=nothing%20here""#
+            )),
             "{rail}"
         );
         assert!(!rail.contains("hx-vals='{\"q\""), "{rail}");
 
         let res = app
             .clone()
-            .oneshot(form(&format!("/ui/search/{event}/gap"), &cookie, ""))
+            .oneshot(form(
+                &format!("/ui/search/{event}/gap?q=nothing%20here"),
+                &cookie,
+                "",
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -11558,6 +11605,45 @@ mod tests {
         assert!(
             body_of(res).await.contains("recorded as a gap"),
             "the button did not say what it did"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rail_hands_the_box_the_search_it_should_fold_into() {
+        // The box types into one event by naming it, not by being the most
+        // recent thing this operator wrote — which is what a second window
+        // also is. The id goes back into the form out of band, and the next
+        // keystroke carries it.
+        let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        let rail = get_body(&app, &cookie, "/ui/search/results?q=fat32").await;
+        let first = newest_event(&handle).await;
+        assert!(
+            rail.contains(&format!(
+                r#"<span hx-swap-oob="innerHTML:#fold-of"><input type="hidden" name="fold" value="{first}">"#
+            )),
+            "{rail}"
+        );
+
+        // The next keystroke, naming it: one search, still.
+        get_body(
+            &app,
+            &cookie,
+            &format!("/ui/search/results?q=fat32+mount&fold={first}"),
+        )
+        .await;
+        assert_eq!(newest_event(&handle).await, first);
+        assert_eq!(
+            handle.store.feedback_stats(0.0).await.unwrap().captured,
+            1,
+            "the burst folded into the event the page was holding"
+        );
+
+        // A second window, holding nothing yet, does not fold into it.
+        get_body(&app, &cookie, "/ui/search/results?q=ntfs").await;
+        assert_eq!(
+            handle.store.feedback_stats(0.0).await.unwrap().captured,
+            2,
+            "the other window started its own search"
         );
     }
 
@@ -11574,13 +11660,16 @@ mod tests {
         )
         .await;
         let event = newest_event(&handle).await;
+        // The wording rides the URL, so a quote is percent-encoded rather than
+        // spliced into an HTML attribute or a JSON blob.
+        let q = "say%20%22hi%22%20%5Cnow";
         assert!(
-            rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap""#)),
+            rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap?q={q}""#)),
             "{rail}"
         );
         let res = app
             .clone()
-            .oneshot(form(&format!("/ui/search/{event}/gap"), &cookie, ""))
+            .oneshot(form(&format!("/ui/search/{event}/gap?q={q}"), &cookie, ""))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -11600,6 +11689,7 @@ mod tests {
             .store
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "image will not mount".into(),
                     door: crate::store::feedback::Door::Ui,
                     scope: Some("somebody-else".into()),
@@ -11649,7 +11739,11 @@ mod tests {
         }
         let res = app
             .clone()
-            .oneshot(form(&format!("/ui/search/{theirs}/gap"), &cookie, ""))
+            .oneshot(form(
+                &format!("/ui/search/{theirs}/gap?q=image%20will%20not%20mount"),
+                &cookie,
+                "",
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -11688,5 +11782,41 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
+    }
+
+    #[tokio::test]
+    async fn a_stale_bar_says_so_rather_than_writing_over_the_deck() {
+        // The bar is drawn against an unjudged search and the tab holding it
+        // can be left open for as long as anyone likes, so both of its writing
+        // answers can arrive after the deck has answered the same search.
+        // Neither replaces what is there; both come back saying why.
+        let (app, cookie, handle, a, event) = searched_app().await;
+        handle
+            .store
+            .judge(
+                &event,
+                crate::store::feedback::Verdict::Gap,
+                crate::store::feedback::Labeller::Deck,
+            )
+            .await
+            .unwrap();
+
+        for body in [
+            format!("verdict=hit&artifact_id={a}"),
+            format!("verdict=none&artifact_id={a}"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(form(&format!("/ui/search/{event}/verdict"), &cookie, &body))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            assert!(
+                body_of(res).await.contains("already judged"),
+                "the bar wrote over the deck instead of saying it could not"
+            );
+        }
+        let s = handle.store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.gaps, s.hits, s.judged), (1, 0, 1), "{s:?}");
     }
 }

@@ -324,6 +324,14 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   shown       INTEGER NOT NULL,
   PRIMARY KEY (event_id, rank)
 );
+-- `dealable!` asks two things of this table for every unjudged event, and the
+-- nav asks `dealable!` on every page render: whether the event has a pool at
+-- all, and the strongest similarity in it. The primary key answers the first
+-- one, and answered the second by seeking every row of the pool to read a
+-- column it does not carry. Holding `similarity` in the index makes that a
+-- covering read.
+CREATE INDEX IF NOT EXISTS idx_candidates_similarity
+  ON search_candidates(event_id, similarity);
 
 -- ── Tuning sweeps ────────────────────────────────────────────────────────────
 -- One row per background sweep over the judged pairs: what the running

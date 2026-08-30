@@ -1607,6 +1607,10 @@ impl Core {
                 query: query.q.trim().to_string(),
                 door,
                 scope: origin.scope.clone(),
+                // The event the page sending this is holding, where the door
+                // named one — what keeps a second tab's keystroke from folding
+                // into the first tab's search. See `record_search`.
+                fold_onto: origin.fold_onto.clone(),
                 filters: serde_json::json!({
                     "tags": query.tags,
                     "category": query.category,

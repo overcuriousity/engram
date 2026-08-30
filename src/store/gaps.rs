@@ -1234,6 +1234,7 @@ mod tests {
         let id = store
             .record_search(
                 NewEvent {
+                    fold_onto: None,
                     query: q.into(),
                     door: Door::Api,
                     scope: None,
@@ -1260,6 +1261,7 @@ mod tests {
         store
             .record_search(
                 NewEvent {
+                    fold_onto: None,
                     query: q.into(),
                     door: Door::Api,
                     scope: None,
@@ -1335,6 +1337,7 @@ mod tests {
         store
             .record_search(
                 NewEvent {
+                    fold_onto: None,
                     query: "mount an E01".into(),
                     door: Door::Api,
                     scope: None,

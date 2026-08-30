@@ -2296,6 +2296,7 @@ mod tests {
         let ev = s
             .record_search(
                 crate::store::feedback::NewEvent {
+                    fold_onto: None,
                     query: "q".into(),
                     door: crate::store::feedback::Door::Api,
                     scope: None,

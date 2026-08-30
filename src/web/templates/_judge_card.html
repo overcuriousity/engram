@@ -155,11 +155,17 @@
         Can't remember <kbd>S</kbd>
       </button>
       <span class="spacer"></span>
-      {# A discard: not a pair, not a gap, not a card again. #}
+      {# A discard: not a pair, not a gap, not a card again. The row is shared
+         by both questions above, and this one word of it cannot be: "I was
+         just looking" is an answer to "was there something you wanted?", and
+         over a search that demonstrably opened something it is a contradiction
+         — one an operator answering literally would spend a real labelled
+         search on, since a discard is dropped from the pairs, gone from the
+         deck for good and the one verdict retention still purges. #}
       <button class="btn btn-ghost btn-sm" data-key="x"
               hx-post="/ui/judge/{{ c.id }}/discard"
               hx-target="#card" hx-swap="innerHTML swap:220ms">
-        No, I was just looking <kbd>X</kbd>
+        {% if c.opened %}Not a real search{% else %}No, I was just looking{% endif %} <kbd>X</kbd>
       </button>
     </div>
   </article>

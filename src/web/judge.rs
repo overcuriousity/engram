@@ -531,7 +531,10 @@ async fn undo(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Resul
     // The event may have expired between the verdict and the second thoughts.
     // The store says so now rather than reporting a write it did not make; here
     // that is not an error, for the reason below.
-    match tenant.core.store.unjudge(&event_id).await {
+    // `Labeller::Deck`: the deck takes back the deck's own verdicts. One given
+    // at the moment of search, from the bar, belongs to the person who was
+    // there — the store refuses, and the card comes back unchanged.
+    match tenant.core.store.unjudge(&event_id, Labeller::Deck).await {
         Ok(()) | Err(crate::error::Error::NotFound) => {}
         Err(e) => return Err(e),
     }
@@ -1282,6 +1285,7 @@ mod tests {
             core.store
                 .record_search(
                     NewEvent {
+                        fold_onto: None,
                         query: "the image will not mount".into(),
                         door: Door::Ui,
                         scope: None,
@@ -1374,6 +1378,7 @@ mod tests {
         core.store
             .record_search(
                 NewEvent {
+                    fold_onto: None,
                     query: "sourdough".into(),
                     door: Door::Ui,
                     scope: None,
@@ -1496,6 +1501,16 @@ mod tests {
         let body = get(&app, "/ui/judge/next", &cookie).await;
         assert!(!body.contains("opened nothing"), "{body}");
         assert!(body.contains("which of these was it"), "{body}");
+        // And the discard follows the question. The action row is shared, so
+        // "I was just looking" stood under a card that said something *was*
+        // opened — a contradiction an operator answering it literally would
+        // spend a real labelled search on, since a discard leaves the deck for
+        // good and is the one verdict retention still purges.
+        assert!(
+            !body.contains("No, I was just looking"),
+            "the discard contradicts the question above it: {body}"
+        );
+        assert!(body.contains("Not a real search"), "{body}");
     }
 
     #[tokio::test]
@@ -1884,6 +1899,7 @@ mod tests {
             .store
             .record_search(
                 NewEvent {
+                    fold_onto: None,
                     query: "the one being judged".into(),
                     door: Door::Ui,
                     scope: None,

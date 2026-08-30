@@ -96,6 +96,9 @@ pub struct Origin {
     /// sitting out of the API and `/mcp`: an access token is not a
     /// conversation. Read only by priming, and only when `sitting.prime` is on.
     pub session: Option<String>,
+    /// The event this search is a rewording of, named by the page that is
+    /// typing. See `NewEvent::fold_onto`.
+    pub fold_onto: Option<String>,
 }
 
 impl From<Door> for Origin {
@@ -104,6 +107,7 @@ impl From<Door> for Origin {
             door,
             scope: None,
             session: None,
+            fold_onto: None,
         }
     }
 }
@@ -115,6 +119,7 @@ impl Door {
             door: self,
             scope: Some(scope.into()),
             session: None,
+            fold_onto: None,
         }
     }
 }
@@ -124,6 +129,13 @@ impl Origin {
     /// identity may say so — see `Origin::session`.
     pub fn in_sitting(mut self, session: Option<String>) -> Origin {
         self.session = session;
+        self
+    }
+
+    /// The search event the page sending this one is holding, where the door
+    /// can name one. See `NewEvent::fold_onto`.
+    pub fn folding_onto(mut self, event_id: Option<String>) -> Origin {
+        self.fold_onto = event_id;
         self
     }
 }
@@ -155,6 +167,10 @@ pub struct NewEvent {
     /// A synthesized artifact led the list above `weak_below`: the base
     /// answered, and the pursuit this lands in closes satisfied.
     pub answered: bool,
+    /// The event this one is a rewording of, as named by the page that is
+    /// typing — the id it was handed by the last answer it drew. `None` from a
+    /// door with nothing to name. See the fold rule in `record_search`.
+    pub fold_onto: Option<String>,
 }
 
 /// One recorded search as the pursuit sweep reads it.
@@ -198,7 +214,8 @@ impl Store {
     /// one before it. What survives is the final wording: the query that was
     /// actually meant, asked once, holding the pool that answered it.
     ///
-    /// Only text boxes fold, and only within one `scope`. That is the web UI's
+    /// Only text boxes fold, and only into the event the box is holding — see
+    /// `fold_onto` and the rule below it. That is the web UI's
     /// search field and the browser extension's panel, both of which search as
     /// you type — the panel debounces at 200ms, so one query still arrives as
     /// several. A call through the API or MCP is a deliberate query, and an
@@ -219,10 +236,50 @@ impl Store {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let at = now();
 
-        // `scope IS ?` rather than `=`, so a UI event recorded without a
-        // subject still finds its own predecessor instead of matching nothing.
+        // Which stored event this one may fold into, and the two doors answer
+        // that differently because only one of them can name a row.
+        //
+        // The web UI names it: every answer hands the page the id it was
+        // recorded under, and the box sends that id back with the next
+        // keystroke. So a fold is onto that one row and no other. Keyed on
+        // scope alone it was onto whatever the searcher wrote last through this
+        // door, which is the same row for every tab they have open — a second
+        // window searching inside the window overwrote the first one's query
+        // and its whole pool, while the first one's rail went on naming the id
+        // on every row. The open that followed was then either refused (the
+        // artifact is no longer in the pool) or scored against a query nobody
+        // in that tab had typed.
+        //
+        // The extension panel names nothing — the API answer it reads carries
+        // no event id — so it still folds by the searcher, and two panels of
+        // one browser can still collide inside the window. `scope IS ?` rather
+        // than `=` so an event recorded without a subject finds its own
+        // predecessor instead of matching nothing.
+        //
+        // Both carry the same two guards, and for the same reason the query
+        // below is guarded at all: a judged or opened event is finished, and
+        // folding into one would rewrite the search a verdict already answered.
         let prev = match ev.door {
-            Door::Ui | Door::Extension => {
+            Door::Ui => match ev.fold_onto.as_deref() {
+                Some(prev_id) => {
+                    sqlx::query(
+                        "SELECT id, created_at,
+                                (SELECT COUNT(*) FROM search_candidates
+                                  WHERE event_id = search_events.id) AS pool
+                           FROM search_events
+                          WHERE id = ? AND door = ? AND scope IS ?
+                            AND judged_at IS NULL AND opened_at IS NULL",
+                    )
+                    .bind(prev_id)
+                    .bind(ev.door.as_str())
+                    .bind(&ev.scope)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                }
+                // The first search of a page, which has nothing to fold into.
+                None => None,
+            },
+            Door::Extension => {
                 sqlx::query(
                     "SELECT id, created_at,
                             (SELECT COUNT(*) FROM search_candidates
@@ -617,12 +674,20 @@ impl Store {
         Ok(())
     }
 
+    /// `AND judged_at IS NULL`, as `decline` and `gap_event` both carry: the
+    /// bar under an opened result is drawn against an unjudged search, and the
+    /// deck can answer that same search in the time a tab is left open. Without
+    /// the guard, Yes in the stale tab overwrote whatever the deck had recorded
+    /// — a gap became a hit, and `pairs.json` gained a pair nobody meant. The
+    /// deck cannot hit an already-judged event (it deals only unjudged ones),
+    /// so this costs it nothing: for the deck, `NotFound` still means what it
+    /// meant, a row that is no longer there.
     pub async fn judge_hit(&self, event_id: &str, artifact_id: &str, by: Labeller) -> Result<()> {
         Self::judged_one(
             sqlx::query(
                 "UPDATE search_events
                  SET judged_at = ?, verdict = 'hit', expect_id = ?, judged_by = ?
-                 WHERE id = ?",
+                 WHERE id = ? AND judged_at IS NULL",
             )
             .bind(now())
             .bind(artifact_id)
@@ -745,16 +810,26 @@ impl Store {
     /// Not `judge`, which would report a second click as an error and a purged
     /// event as the same error: the button has two outcomes and both of them
     /// are ordinary.
-    pub async fn gap_event(&self, event_id: &str) -> Result<bool> {
+    ///
+    /// `AND query = ?` is this button's version of the check `open_event` makes
+    /// against the pool: the row may have been folded into by a trailing
+    /// keystroke between the rail being rendered and the button being pressed,
+    /// and the gap has to be recorded against the query that was on the screen.
+    /// Without it, "nothing here has it" could land on a later wording that did
+    /// return something — a hole reported in the base over a search that
+    /// answered. `false` where the query has moved on, which is the same
+    /// ordinary outcome as a search already judged.
+    pub async fn gap_event(&self, event_id: &str, query: &str) -> Result<bool> {
         Ok(sqlx::query(
             "UPDATE search_events
              SET judged_at = ?, verdict = ?, expect_id = NULL, judged_by = ?
-             WHERE id = ? AND judged_at IS NULL",
+             WHERE id = ? AND query = ? AND judged_at IS NULL",
         )
         .bind(now())
         .bind(Verdict::Gap.as_str())
         .bind(Labeller::Confirm.as_sql())
         .bind(event_id)
+        .bind(query)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -767,14 +842,23 @@ impl Store {
     /// than no pair at all: it is scored against the ranker as truth. Clearing
     /// `expect_id` with the verdict matters — a stale answer left behind would
     /// keep counting towards recall for a judgement nobody stands behind.
-    pub async fn unjudge(&self, event_id: &str) -> Result<()> {
+    ///
+    /// Takes back only what this labeller gave: `judged_by IS ?`, which is the
+    /// deck's NULL or the bar's `confirm`. An undo is a second thought about
+    /// one's own answer, and unguarded it was a way to erase somebody else's —
+    /// press No on the bar (which leaves the search pending), let the deck deal
+    /// it and record a hit, then press undo in the tab still holding the bar,
+    /// and the confirmed pair was gone. The same failure `decline` is guarded
+    /// against, on the button beside it.
+    pub async fn unjudge(&self, event_id: &str, by: Labeller) -> Result<()> {
         Self::judged_one(
             sqlx::query(
                 "UPDATE search_events
                  SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = NULL
-                 WHERE id = ?",
+                 WHERE id = ? AND judged_by IS ?",
             )
             .bind(event_id)
+            .bind(by.as_sql())
             .execute(&self.pool)
             .await?,
         )
@@ -797,6 +881,17 @@ impl Store {
     /// Split out of `feedback_stats`, which runs half a dozen queries and two
     /// joins: this one is read on every page render to draw the nav, and the
     /// nav must not cost what the ops page costs.
+    ///
+    /// It is not the single indexed count it once was — the nav counts what the
+    /// deck will actually deal, or it reads "12 waiting" over an empty deck —
+    /// so `dealable!` is two correlated subqueries per row it looks at. Both
+    /// seek `search_candidates` by `event_id`, which leads the primary key and
+    /// `idx_candidates_similarity`, so each is an index seek rather than a
+    /// scan; what it costs is that pair of seeks per unjudged event. With
+    /// `retain_days = 0` — the default, where nothing is ever trimmed — that
+    /// set only grows, and the events this predicate holds back (a query under
+    /// three characters, a pool of nothing) stay in it forever. If the nav ever
+    /// becomes the slow part of a page, that is the thing to measure.
     pub async fn pending_count(&self, weak_below: f32) -> Result<i64> {
         Ok(sqlx::query_scalar(concat!(
             "SELECT count(*) FROM search_events WHERE ",
@@ -1174,6 +1269,7 @@ mod tests {
 
     fn scoped(query: &str, door: Door, scope: Option<&str>) -> NewEvent {
         NewEvent {
+            fold_onto: None,
             query: query.into(),
             door,
             scope: scope.map(str::to_string),
@@ -1187,6 +1283,15 @@ mod tests {
                 shown: true,
             }],
             answered: false,
+        }
+    }
+
+    /// The next keystroke from a page already holding `prev` — what the box
+    /// sends once an answer has named the event it was recorded under.
+    fn after(prev: &str, query: &str, door: Door) -> NewEvent {
+        NewEvent {
+            fold_onto: Some(prev.to_string()),
+            ..ev(query, door)
         }
     }
 
@@ -1208,14 +1313,15 @@ mod tests {
         // early keystroke of it, and B's search — and its whole pool — was
         // never recorded at all.
         let store = Store::memory().await.unwrap();
-        store
+        let alice = store
             .record_search(scoped("backup restore", Door::Ui, Some("alice")), 15)
             .await
             .unwrap();
-        store
-            .record_search(scoped("backup", Door::Ui, Some("bob")), 15)
-            .await
-            .unwrap();
+        // Bob's page naming Alice's event, which an id off a page is always
+        // free to do — it is not a capability. The scope is what refuses.
+        let mut bob = scoped("backup", Door::Ui, Some("bob"));
+        bob.fold_onto = Some(alice.clone());
+        store.record_search(bob, 15).await.unwrap();
 
         let mut got = queries(&store).await;
         got.sort();
@@ -1249,8 +1355,17 @@ mod tests {
     #[tokio::test]
     async fn a_typing_burst_collapses_to_its_final_wording() {
         let store = Store::memory().await.unwrap();
-        for q in ["daten", "datentr", "datenträger nicht erkannt"] {
-            store.record_search(ev(q, Door::Ui), 15).await.unwrap();
+        // The box carries the id forward from each answer, the way the page
+        // does: one chain of keystrokes, folding into its own event.
+        let mut id = store
+            .record_search(ev("daten", Door::Ui), 15)
+            .await
+            .unwrap();
+        for q in ["datentr", "datenträger nicht erkannt"] {
+            id = store
+                .record_search(after(&id, q, Door::Ui), 15)
+                .await
+                .unwrap();
         }
         assert_eq!(queries(&store).await, vec!["datenträger nicht erkannt"]);
     }
@@ -1282,12 +1397,12 @@ mod tests {
         // row of it, so an open was stamped and a verdict scored against a
         // search nobody was looking at. The record follows the box.
         let store = Store::memory().await.unwrap();
-        store
+        let id = store
             .record_search(ev("fat32 mount", Door::Ui), 15)
             .await
             .unwrap();
         store
-            .record_search(ev("fat32", Door::Ui), 15)
+            .record_search(after(&id, "fat32", Door::Ui), 15)
             .await
             .unwrap();
 
@@ -1307,12 +1422,16 @@ mod tests {
         // one connection, so it cannot reproduce the busy-snapshot failure the
         // capture mutex is there for; only the file-backed store can.
         let store = Store::memory().await.unwrap();
+        // Every one of them names the id the page was holding when it fired,
+        // which is the same id for a burst still in flight.
+        let first = store.record_search(ev("d", Door::Ui), 15).await.unwrap();
         let mut tasks = Vec::new();
-        for n in 1..="datenträger".chars().count() {
+        for n in 2..="datenträger".chars().count() {
             let store = store.clone();
+            let first = first.clone();
             let q: String = "datenträger".chars().take(n).collect();
             tasks.push(tokio::spawn(async move {
-                store.record_search(ev(&q, Door::Ui), 15).await
+                store.record_search(after(&first, &q, Door::Ui), 15).await
             }));
         }
         for t in tasks {
@@ -1332,9 +1451,13 @@ mod tests {
         // `--export-eval` emitted five identical pairs that weighted that one
         // query five times over in recall@10 and MRR.
         let store = Store::memory().await.unwrap();
-        for _ in 0..3 {
-            store
-                .record_search(ev("fat32", Door::Ui), 15)
+        let mut id = store
+            .record_search(ev("fat32", Door::Ui), 15)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            id = store
+                .record_search(after(&id, "fat32", Door::Ui), 15)
                 .await
                 .unwrap();
         }
@@ -1364,7 +1487,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .record_search(ev("fat32", Door::Ui), 15)
+            .record_search(after(&first, "fat32", Door::Ui), 15)
             .await
             .unwrap();
 
@@ -1377,11 +1500,14 @@ mod tests {
         // ways. Folded only on prefix, each wording was its own card — three
         // questions about one thing, two of them about words nobody meant.
         let store = Store::memory().await.unwrap();
-        store
+        let id = store
             .record_search(ev("fat32", Door::Ui), 15)
             .await
             .unwrap();
-        store.record_search(ev("ntfs", Door::Ui), 15).await.unwrap();
+        store
+            .record_search(after(&id, "ntfs", Door::Ui), 15)
+            .await
+            .unwrap();
         assert_eq!(queries(&store).await, vec!["ntfs"]);
     }
 
@@ -1423,7 +1549,7 @@ mod tests {
         // against a search the artifact was never in.
         let store = Store::memory().await.unwrap();
         let id = store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
-        let mut later = ev("fat32", Door::Ui);
+        let mut later = after(&id, "fat32", Door::Ui);
         later.candidates[0].artifact_id = "a2".into();
         assert_eq!(store.record_search(later, 15).await.unwrap(), id, "folded");
         assert!(
@@ -1432,6 +1558,136 @@ mod tests {
         );
         // The row the fold left behind is still openable on its own terms.
         assert!(store.open_event(&id, "a2").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn yes_cannot_overwrite_a_verdict_somebody_else_gave() {
+        // The other half of the same race, on the button beside "no": the deck
+        // calls the search a gap while the tab holding the bar is open, and Yes
+        // in that stale tab replaced the gap with a hit — a pair in
+        // `pairs.json` nobody meant to put there.
+        let store = Store::memory().await.unwrap();
+        let id = store.record_search(ev("ntfs", Door::Ui), 0).await.unwrap();
+        store
+            .judge(&id, Verdict::Gap, Labeller::Deck)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.judge_hit(&id, "a1", Labeller::Confirm).await,
+            Err(crate::error::Error::NotFound)
+        ));
+        let s = store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.gaps, s.hits), (1, 0), "the gap stood: {s:?}");
+    }
+
+    #[tokio::test]
+    async fn undo_takes_back_only_what_this_labeller_gave() {
+        // "No" leaves the search pending, so the deck can deal it and record a
+        // hit while the bar — now showing undo — is still on screen. Pressing
+        // it wiped the confirmed pair, which is what `decline` two tests up is
+        // guarded against; the undo beside it was not.
+        let store = Store::memory().await.unwrap();
+        let id = store.record_search(ev("ntfs", Door::Ui), 0).await.unwrap();
+        assert!(store.decline(&id).await.unwrap());
+        store.judge_hit(&id, "a1", Labeller::Deck).await.unwrap();
+
+        assert!(matches!(
+            store.unjudge(&id, Labeller::Confirm).await,
+            Err(crate::error::Error::NotFound)
+        ));
+        assert_eq!(
+            store.feedback_stats(0.0).await.unwrap().hits,
+            1,
+            "the pair survived the stale tab"
+        );
+        // The deck's own undo still reaches the deck's own verdict.
+        store.unjudge(&id, Labeller::Deck).await.unwrap();
+        assert_eq!(store.feedback_stats(0.0).await.unwrap().hits, 0);
+    }
+
+    #[tokio::test]
+    async fn two_windows_of_one_searcher_do_not_fold_into_each_other() {
+        // Keyed on the searcher alone, a second window searching inside the
+        // window folded into the first one's event: it overwrote that query
+        // and its whole pool while the first window's rail went on naming the
+        // id on every row, so the open that followed was refused — or scored
+        // against words nobody in that window had typed. Each page names the
+        // event it is holding, and holds a different one.
+        let store = Store::memory().await.unwrap();
+        let tab_a = store
+            .record_search(scoped("fat32", Door::Ui, Some("me")), 15)
+            .await
+            .unwrap();
+        let tab_b = store
+            .record_search(scoped("ntfs", Door::Ui, Some("me")), 15)
+            .await
+            .unwrap();
+        assert_ne!(tab_a, tab_b, "the second window started its own search");
+
+        // Both go on typing, and each stays its own.
+        let mut b = scoped("ntfs mount", Door::Ui, Some("me"));
+        b.fold_onto = Some(tab_b.clone());
+        assert_eq!(store.record_search(b, 15).await.unwrap(), tab_b);
+        let mut got = queries(&store).await;
+        got.sort();
+        assert_eq!(got, vec!["fat32", "ntfs mount"]);
+        // And the first window's rail can still be answered.
+        assert!(store.open_event(&tab_a, "a1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_nav_count_reads_the_pool_through_an_index() {
+        // `pending_count` draws the nav on every page render, and `dealable!`
+        // asks two things of `search_candidates` for every unjudged event it
+        // looks at. Both have to be index reads: with `retain_days = 0` — the
+        // default, where nothing is trimmed — the set they run over only
+        // grows, and the events this predicate holds back stay in it forever.
+        let store = Store::memory().await.unwrap();
+        let plan: Vec<String> = sqlx::query(concat!(
+            "EXPLAIN QUERY PLAN SELECT count(*) FROM search_events WHERE ",
+            dealable!()
+        ))
+        .bind(0.3f32)
+        .fetch_all(&store.pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<String, _>("detail"))
+        .collect();
+        assert!(
+            plan.iter().all(|l| !l.contains("SCAN search_candidates")),
+            "the nav scans the pool table: {plan:#?}"
+        );
+        assert_eq!(
+            plan.iter()
+                .filter(|l| l.contains("idx_candidates_similarity"))
+                .count(),
+            2,
+            "both subqueries should be covered by the index: {plan:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gap_is_refused_where_the_box_has_moved_on() {
+        // The rail is drawn, a trailing keystroke folds a later wording into
+        // the same row, and only then is "nothing here has it" pressed. The
+        // gap belongs to the words that were on the screen: recorded against
+        // the newer ones it reports a hole in the base over a search that
+        // answered. Same check `open_event` makes against the pool.
+        let store = Store::memory().await.unwrap();
+        let id = store
+            .record_search(ev("fat32", Door::Ui), 15)
+            .await
+            .unwrap();
+        store
+            .record_search(after(&id, "fat32 mount", Door::Ui), 15)
+            .await
+            .unwrap();
+
+        assert!(!store.gap_event(&id, "fat32").await.unwrap());
+        assert_eq!(store.feedback_stats(0.0).await.unwrap().gaps, 0);
+        // The wording the row now holds is still answerable.
+        assert!(store.gap_event(&id, "fat32 mount").await.unwrap());
     }
 
     #[tokio::test]
@@ -1475,7 +1731,7 @@ mod tests {
         let id = store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
         assert!(store.open_event(&id, "a1").await.unwrap());
         store
-            .record_search(ev("fat32", Door::Ui), 15)
+            .record_search(after(&id, "fat32", Door::Ui), 15)
             .await
             .unwrap();
         assert_eq!(queries(&store).await, vec!["fat", "fat32"]);
@@ -1578,7 +1834,7 @@ mod tests {
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("confirm"));
         // Taking it back returns the search to the deck with nothing on it —
         // no verdict, no expectation, and no record of who once gave one.
-        store.unjudge(&id).await.unwrap();
+        store.unjudge(&id, Labeller::Confirm).await.unwrap();
         assert_eq!(judged_by(&store, &id).await, None);
         assert_eq!(
             store.next_pending(0.0).await.unwrap().map(|e| e.id),
@@ -1593,15 +1849,15 @@ mod tests {
             .record_search(scoped("xyz", Door::Ui, Some("me")), 15)
             .await
             .unwrap();
-        assert!(store.gap_event(&id).await.unwrap());
+        assert!(store.gap_event(&id, "xyz").await.unwrap());
         assert_eq!(store.feedback_stats(0.0).await.unwrap().gaps, 1);
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("confirm"));
         assert!(
-            !store.gap_event(&id).await.unwrap(),
+            !store.gap_event(&id, "xyz").await.unwrap(),
             "a second press finds nothing left to label"
         );
         assert!(
-            !store.gap_event("no-such-event").await.unwrap(),
+            !store.gap_event("no-such-event", "xyz").await.unwrap(),
             "and an event that is no longer there is not a gap either"
         );
     }
@@ -1634,8 +1890,8 @@ mod tests {
         // The candidates belong to the query that produced them. Keeping the
         // earlier ones would describe a result list that was never shown.
         let store = Store::memory().await.unwrap();
-        store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
-        let mut second = ev("fat32", Door::Ui);
+        let id = store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
+        let mut second = after(&id, "fat32", Door::Ui);
         second.candidates[0].artifact_id = "a2".into();
         store.record_search(second, 15).await.unwrap();
 
@@ -1663,7 +1919,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut filtered = ev("fat32", Door::Ui);
+        let mut filtered = after(&first, "fat32", Door::Ui);
         filtered.filters = r#"{"category":"recipes"}"#.into();
         filtered.candidates.clear();
         let second = store.record_search(filtered, 15).await.unwrap();
@@ -1683,11 +1939,11 @@ mod tests {
         // results is the documented case: one search, judged once, against the
         // narrowing that was actually meant.
         let store = Store::memory().await.unwrap();
-        store
+        let id = store
             .record_search(ev("fat32", Door::Ui), 15)
             .await
             .unwrap();
-        let mut filtered = ev("fat32", Door::Ui);
+        let mut filtered = after(&id, "fat32", Door::Ui);
         filtered.filters = r#"{"category":"disks"}"#.into();
         filtered.candidates[0].artifact_id = "a2".into();
         store.record_search(filtered, 15).await.unwrap();
@@ -1714,7 +1970,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .record_search(ev("fat32", Door::Ui), 15)
+            .record_search(after(&id, "fat32", Door::Ui), 15)
             .await
             .unwrap();
         assert_eq!(queries(&store).await, vec!["fat", "fat32"]);
@@ -1869,7 +2125,7 @@ mod tests {
         for res in [
             store.judge_hit(&id, "a", Labeller::Deck).await,
             store.judge(&id, Verdict::Gap, Labeller::Deck).await,
-            store.unjudge(&id).await,
+            store.unjudge(&id, Labeller::Deck).await,
             store.skip_event(&id).await,
         ] {
             assert!(

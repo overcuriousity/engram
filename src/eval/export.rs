@@ -161,6 +161,7 @@ mod tests {
         store
             .record_search(
                 NewEvent {
+                    fold_onto: None,
                     query: query.into(),
                     door: Door::Ui,
                     scope: None,

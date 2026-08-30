@@ -711,6 +711,18 @@ struct SearchVerdictForm {
     artifact_id: String,
 }
 
+/// What the bar says when the write it was drawn for is refused. Every guard
+/// on this path — a verdict from the deck, a search that expired, a query the
+/// box has since moved on from — reaches the person as the same ordinary
+/// sentence, because from where they are sitting it is the same fact: the
+/// search they were looking at is no longer waiting for them.
+fn already_judged() -> Response {
+    axum::response::Html(
+        r#"<span class="muted">nothing to record — that search was already judged.</span>"#,
+    )
+    .into_response()
+}
+
 /// The bar under an opened result. `none` is the undo; `no` is "not this
 /// one", which leaves the search a question for the deck.
 async fn search_verdict(
@@ -741,10 +753,18 @@ async fn search_verdict(
                     "that one is deprecated or superseded, so the benchmark can't hold it".into(),
                 ));
             }
-            store
+            // `NotFound` here is the store's guard, not a missing route: the
+            // deck can answer this search while the tab holding the bar is
+            // open, and `judge_hit` refuses to write over a verdict rather
+            // than replace it. The same line "no" gets, for the same reason.
+            match store
                 .judge_hit(&id, &f.artifact_id, Labeller::Confirm)
-                .await?;
-            "hit"
+                .await
+            {
+                Ok(()) => "hit",
+                Err(Error::NotFound) => return Ok(already_judged()),
+                Err(e) => return Err(e),
+            }
         }
         "no" => {
             // The one answer that clears columns rather than filling them, so
@@ -753,10 +773,7 @@ async fn search_verdict(
             // rather than applied, and said in the same words the rail's gap
             // button uses for the same situation.
             if !store.decline(&id).await? {
-                return Ok(axum::response::Html(
-                    r#"<span class="muted">nothing to record — that search was already judged.</span>"#,
-                )
-                .into_response());
+                return Ok(already_judged());
             }
             "no"
         }
@@ -772,8 +789,16 @@ async fn search_verdict(
             "skip"
         }
         "none" => {
-            store.unjudge(&id).await?;
-            ""
+            // Only back over what this bar wrote — `Labeller::Confirm`. The
+            // undo appears after "no", which leaves the search pending, so the
+            // deck can deal it and record a hit while the tab is still open;
+            // unguarded, this button then erased a confirmed pair. The store
+            // says so by matching nothing.
+            match store.unjudge(&id, Labeller::Confirm).await {
+                Ok(()) => "",
+                Err(Error::NotFound) => return Ok(already_judged()),
+                Err(e) => return Err(e),
+            }
         }
         v => return Err(Error::Validation(format!("unknown verdict {v}"))),
     };
@@ -788,7 +813,21 @@ async fn search_verdict(
 /// The rail's "nothing here has it": a gap against the search that filled the
 /// rail, named by the page the way an open is. Answers with the line that
 /// replaces the button.
-async fn search_gap(tenant: Tenant, Path(id): Path<String>) -> Result<Response> {
+///
+/// The query travels with the id for the same reason the open path names an
+/// artifact: it is what the button was drawn over, and a trailing keystroke can
+/// fold a later wording into the row between the render and the press. See
+/// `Store::gap_event`.
+#[derive(serde::Deserialize)]
+struct GapParams {
+    q: String,
+}
+
+async fn search_gap(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    axum::extract::Query(p): axum::extract::Query<GapParams>,
+) -> Result<Response> {
     if !tenant.core.learn.enabled {
         return Err(Error::NotFound);
     }
@@ -801,7 +840,7 @@ async fn search_gap(tenant: Tenant, Path(id): Path<String>) -> Result<Response> 
     {
         return Err(Error::NotFound);
     }
-    let line = match tenant.core.store.gap_event(&id).await? {
+    let line = match tenant.core.store.gap_event(&id, p.q.trim()).await? {
         true => "recorded as a gap: your base doesn't know this yet.",
         false => "nothing to record — that search was already judged.",
     };
@@ -1400,7 +1439,7 @@ mod tests {
             "a reranker serving search is what arms the refining pass"
         );
         assert!(
-            html.contains(r#"hx-params="q,category,rerank,explain""#),
+            html.contains(r#"hx-params="q,category,rerank,explain,fold""#),
             "hx-params is the allowlist for what rides a search GET; without \
              `rerank` on it the refining pass's own flag is filtered off the \
              wire and the server only ever runs the fast path — and `explain` \
