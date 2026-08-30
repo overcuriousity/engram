@@ -268,6 +268,13 @@ impl Store {
         Ok(rows.iter().map(row_of).collect())
     }
 
+    /// Re-arm the Remind unit at the earliest owed moment. Filled in with the
+    /// unit itself (Task 11); every write that can move the minimum already
+    /// calls it.
+    pub async fn rearm_remind(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// The Remind unit's next wake: the earliest owed moment, at any time.
     pub async fn next_notify_at(&self) -> Result<Option<i64>> {
         let r = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT MIN(COALESCE(m.snoozed_until, m.at)) AS at FROM moments m WHERE {OWED}")))

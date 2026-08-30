@@ -361,6 +361,20 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
             "could not arm the neighbour query; the sweep will find its pairs"
         );
     }
+    // The time in it is read once the vector it is compared against exists.
+    // Swallowed like the arming above: a failed follow-up must not fail the
+    // embed that was paid for, and the next embed of this artifact re-arms it.
+    if let Err(e) = core
+        .store
+        .rearm_idle_seq(crate::store::jobs::Stage::Moments, "artifact", &chunk.id, 0)
+        .await
+    {
+        tracing::warn!(
+            artifact_id = %chunk.id,
+            error = %e,
+            "could not arm the moments read; the next embed of this artifact will"
+        );
+    }
     // A merged artifact hides what it replaced only once it is itself in the
     // index, so the knowledge is never out of search on both sides at once.
     if chunk.provenance == crate::store::artifacts::Provenance::Merged
@@ -1093,6 +1107,15 @@ mod tests {
             .fetch_optional(&core.store.control.pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_embedded_artifact_arms_the_moments_read() {
+        let core = test_core().await;
+        let out = core.ingest_capture(crate::core::ingest::Capture::new("Anything at all", "ui")).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        assert_eq!(job_state(&core, Stage::Moments, &aid).await.as_deref(), Some("done"));
     }
 
     /// A merged artifact over two captured roots, indexed and nothing more.

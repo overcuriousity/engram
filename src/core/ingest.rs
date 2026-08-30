@@ -16,6 +16,8 @@ pub const ORIGIN_IMAGE: &str = "image";
 pub const ORIGIN_PDF: &str = "pdf";
 /// Text typed or pasted into the capture box.
 pub const ORIGIN_WEB: &str = "web";
+/// Written as a diary entry: the day page shows it in full, oldest first.
+pub const ORIGIN_JOURNAL: &str = "journal";
 /// A page read from a pasted link, by this server, as a stranger.
 pub const ORIGIN_FETCH: &str = "fetch";
 /// A share from a phone's share sheet — the Android share target, the iOS
@@ -168,6 +170,24 @@ impl Capture {
         self
     }
 
+    /// The IANA zone the door was in, so a date read out of the text is
+    /// resolved where it was written.
+    pub fn with_tz(mut self, tz: Option<String>) -> Self {
+        if let Some(t) = tz.filter(|t| !t.trim().is_empty()) {
+            self.metadata["tz"] = serde_json::Value::String(t);
+        }
+        self
+    }
+
+    /// A door that already knows this is a reminder (`engram -r`, `?intent=`)
+    /// says so, and the stage skips the classifier.
+    pub fn with_intent(mut self, intent: Option<crate::core::moments::Intent>) -> Self {
+        if let Some(i) = intent {
+            self.metadata["intent"] = serde_json::Value::String(i.as_str().into());
+        }
+        self
+    }
+
     pub fn with_source_url(mut self, url: Option<String>) -> Self {
         self.source_url = url;
         self
@@ -285,6 +305,16 @@ impl Core {
 
     /// The same thing, for a door that also knows where the text was read.
     pub async fn ingest_capture(&self, c: Capture) -> Result<IngestOutcome> {
+        // A note that opens like a diary entry is filed as one, on the doors
+        // where a person typed it. Cheap, exact, and undone with one click.
+        let mut c = c;
+        if crate::jobs::moments::JOURNALABLE.contains(&c.origin.as_str())
+            && crate::core::moments::cue(&c.text) == Some(crate::core::moments::Intent::Journal)
+        {
+            let was = std::mem::replace(&mut c.origin, ORIGIN_JOURNAL.to_string());
+            c.metadata["origin_was"] = serde_json::Value::String(was);
+        }
+        let c = c;
         let text = c.text.as_str();
         let origin = c.origin.as_str();
         let title_hint = c.title_hint.as_deref();
@@ -1342,6 +1372,28 @@ impl Core {
         // where the discard button now deletes real work.
         self.store.set_near_dupe(id, None, None).await?;
         Ok(())
+    }
+
+    /// A channel label with an undo, and the one write to `corpora.origin`
+    /// outside insert. `raw_text` is untouched.
+    pub async fn set_entry(&self, corpus_id: &str, on: bool) -> Result<()> {
+        let src = self.store.get_corpus(corpus_id).await?;
+        let mut meta = src.metadata.clone();
+        let origin = if on {
+            if src.origin == ORIGIN_JOURNAL {
+                return Ok(());
+            }
+            meta["origin_was"] = serde_json::Value::String(src.origin.clone());
+            ORIGIN_JOURNAL.to_string()
+        } else {
+            let was = meta["origin_was"].as_str().unwrap_or(ORIGIN_WEB).to_string();
+            if let Some(m) = meta.as_object_mut() {
+                m.remove("origin_was");
+            }
+            was
+        };
+        self.store.set_corpus_metadata(corpus_id, &meta).await?;
+        self.store.set_corpus_origin(corpus_id, &origin).await
     }
 
     pub async fn reprocess(&self, id: &str, stage: Stage) -> Result<()> {
@@ -3107,5 +3159,37 @@ mod tests {
             1,
             "its vector went with the corpus; the note has to be embedded again"
         );
+    }
+
+    #[tokio::test]
+    async fn a_journal_cue_at_capture_files_the_note_as_an_entry_and_can_be_undone() {
+        let core = test_core().await;
+        let out = core.ingest_capture(Capture::new("Heute war ein langer Tag.", "ui")).await.unwrap();
+        let c = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(c.origin, "journal");
+        assert_eq!(c.metadata["origin_was"], "ui");
+        core.set_entry(&out.id, false).await.unwrap();
+        let c = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(c.origin, "ui");
+        assert!(c.metadata.get("origin_was").is_none());
+        core.set_entry(&out.id, true).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+    }
+
+    #[tokio::test]
+    async fn a_journal_cue_through_the_api_or_mcp_is_left_alone() {
+        let core = test_core().await;
+        let out = core.ingest_capture(Capture::new("Heute war ein langer Tag.", "mcp")).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "mcp");
+    }
+
+    #[tokio::test]
+    async fn the_zone_a_door_sent_lands_in_metadata() {
+        let core = test_core().await;
+        let out = core
+            .ingest_capture(Capture::new("x", "ui").with_tz(Some("Europe/Berlin".into())))
+            .await
+            .unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().metadata["tz"], "Europe/Berlin");
     }
 }

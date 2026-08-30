@@ -468,6 +468,22 @@ impl Store {
     /// Names a corpus after the fact. Capture makes no inference call by
     /// design, so the name arrives later — once synthesis has read the document
     /// and knows what it is about.
+    /// The one write to `origin` outside insert: a capture becoming, or
+    /// ceasing to be, a journal entry. A channel label, never content.
+    pub async fn set_corpus_origin(&self, id: &str, origin: &str) -> Result<()> {
+        let n = sqlx::query("UPDATE corpora SET origin = ?, updated_at = ? WHERE id = ?")
+            .bind(origin)
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if n == 0 {
+            return Err(crate::error::Error::NotFound);
+        }
+        Ok(())
+    }
+
     pub async fn set_title_hint(&self, id: &str, title: &str) -> Result<()> {
         sqlx::query("UPDATE corpora SET title_hint = ?, updated_at = ? WHERE id = ?")
             .bind(title)

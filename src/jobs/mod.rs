@@ -7,11 +7,13 @@ pub mod embed;
 pub mod extract;
 pub mod gaps;
 pub mod merge;
+pub mod moments;
 pub mod passages;
 pub mod promote;
 pub mod pursuit;
 pub mod reconcile;
 pub mod relate;
+pub mod remind;
 pub mod retention;
 pub mod synthesize;
 pub mod window;
@@ -176,7 +178,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::Context,
             _,
         ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
-        (Stage::Moments | Stage::Remind, _) => Ok(()),
+        (Stage::Moments, _) => moments::run(core, &job.target_id).await,
+        (Stage::Remind, _) => Ok(()),
     };
 
     match result {
@@ -543,6 +546,14 @@ impl Worker {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// Run the queue dry. What every stage test does after a capture.
+    pub async fn drain(core: &crate::core::Core) {
+        while crate::jobs::run_one(core).await.unwrap() {}
     }
 }
 
