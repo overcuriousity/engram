@@ -298,6 +298,48 @@ pub struct CaptureQuery {
     pub title: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// The door's IANA zone, so a date in the text is read where it was written.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// `journal` to file the capture as an entry. Nothing else is accepted:
+    /// every other origin is what a door *is*, not what a caller asks for.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// `remind` to skip the classifier and date the note as a reminder.
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
+/// What the time features take from a capture request: the zone, the origin
+/// label, and a forced intent. Validated here so a typo is a 400 and not a
+/// silently ignored parameter.
+pub(crate) struct CaptureTime {
+    pub tz: Option<String>,
+    pub origin: &'static str,
+    pub intent: Option<crate::core::moments::Intent>,
+}
+
+pub(crate) fn capture_time(
+    tz: Option<String>,
+    origin: Option<String>,
+    intent: Option<String>,
+    default_origin: &'static str,
+) -> Result<CaptureTime> {
+    let origin = match origin.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+        None => default_origin,
+        Some("journal") => crate::core::ingest::ORIGIN_JOURNAL,
+        Some(other) => {
+            return Err(Error::Validation(format!("origin={other}: only `journal` can be asked for")));
+        }
+    };
+    let intent = match intent.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+        None => None,
+        Some("remind") => Some(crate::core::moments::Intent::Remind),
+        Some(other) => {
+            return Err(Error::Validation(format!("intent={other}: only `remind` can be asked for")));
+        }
+    };
+    Ok(CaptureTime { tz, origin, intent })
 }
 
 /// Whether a body is one link and nothing else.
@@ -408,6 +450,7 @@ async fn capture(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
+    let time = capture_time(q.tz.clone(), q.origin.clone(), q.intent.clone(), ORIGIN_WEB)?;
 
     if content_type.starts_with("text/plain") {
         let bytes = axum::body::Bytes::from_request(req, &())
@@ -429,9 +472,11 @@ async fn capture(
                 tenant
                     .core
                     .ingest_capture(
-                        crate::core::ingest::Capture::new(text, ORIGIN_WEB)
+                        crate::core::ingest::Capture::new(text, time.origin)
                             .with_title(q.title)
-                            .with_note(q.note),
+                            .with_note(q.note)
+                            .with_tz(time.tz)
+                            .with_intent(time.intent),
                     )
                     .await?
             }
@@ -446,6 +491,12 @@ async fn capture(
         let (mut fields, files) = read_capture_parts(m).await?;
         let title = q.title.or_else(|| fields.remove("title"));
         let note = q.note.or_else(|| fields.remove("note"));
+        let time = capture_time(
+            q.tz.or_else(|| fields.remove("tz")),
+            q.origin.or_else(|| fields.remove("origin")),
+            q.intent.or_else(|| fields.remove("intent")),
+            ORIGIN_WEB,
+        )?;
         let mut out: Vec<crate::core::ingest::IngestOutcome> = Vec::new();
 
         // A share sheet sends `url` and `text` for the same share, and the
@@ -477,9 +528,11 @@ async fn capture(
                 tenant
                     .core
                     .ingest_capture(
-                        crate::core::ingest::Capture::new(text, ORIGIN_WEB)
+                        crate::core::ingest::Capture::new(text, time.origin)
                             .with_title(title.clone())
-                            .with_note(note.clone()),
+                            .with_note(note.clone())
+                            .with_tz(time.tz.clone())
+                            .with_intent(time.intent),
                     )
                     .await?,
             );
@@ -1622,6 +1675,112 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         )
         .route("/vectors/sample", get(crate::web::vbg::sample))
         .route("/status", get(status))
+        .route("/moments", get(list_moments))
+        .route("/moments/{id}/done", post(moment_done))
+        .route("/moments/{id}/undone", post(moment_undone))
+        .route("/moments/{id}/snooze", post(moment_snooze))
+        .route("/moments/{id}/unsnooze", post(moment_unsnooze))
+        .route("/artifacts/{id}/moments", post(set_moment))
+}
+
+// ── Moments ──────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct MomentsQuery {
+    #[serde(default)]
+    pub from: Option<i64>,
+    #[serde(default)]
+    pub to: Option<i64>,
+    /// `due` (the default) or `event`.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// Reminders and dates in a window. `due` answers what the front page shows —
+/// open rows only, undated last; `event` answers what refers to the window.
+async fn list_moments(tenant: Tenant, Query(q): Query<MomentsQuery>) -> Result<Json<serde_json::Value>> {
+    let now = tenant.core.clock.now();
+    let from = q.from.unwrap_or(now);
+    let to = q.to.unwrap_or(now + tenant.core.time.horizon_hours as i64 * 3_600);
+    let rows = match q.kind.as_deref().unwrap_or("due") {
+        "due" => tenant.core.store.open_due(from, to).await?,
+        "event" => tenant.core.store.event_moments_between(from, to).await?,
+        other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
+    };
+    Ok(Json(serde_json::to_value(rows).map_err(|e| Error::Internal(e.to_string()))?))
+}
+
+async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
+    tenant.core.complete_moment(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn moment_undone(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
+    tenant.core.store.undo_done(&id).await?;
+    tenant.core.store.rearm_remind().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct SnoozeBody {
+    pub until: i64,
+}
+
+async fn moment_snooze(tenant: Tenant, Path(id): Path<String>, Json(b): Json<SnoozeBody>) -> Result<StatusCode> {
+    tenant.core.store.snooze(&id, b.until).await?;
+    tenant.core.store.rearm_remind().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn moment_unsnooze(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
+    tenant.core.store.unsnooze(&id).await?;
+    tenant.core.store.rearm_remind().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct NewMomentBody {
+    pub at: i64,
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// `due` (the default) or `event`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub rule: Option<String>,
+}
+
+/// The explicit door: a moment somebody set, on an artifact they name.
+async fn set_moment(
+    tenant: Tenant,
+    Path(aid): Path<String>,
+    Json(b): Json<NewMomentBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>)> {
+    tenant.core.store.get_artifact(&aid).await?;
+    let kind = match b.kind.as_deref().unwrap_or("due") {
+        "due" => crate::store::moments::Kind::Due,
+        "event" => crate::store::moments::Kind::Event,
+        other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
+    };
+    if let Some(rule) = b.rule.as_deref() {
+        crate::core::moments::validate_rule(rule).map_err(Error::Validation)?;
+    }
+    let tz = b.tz.filter(|t| !t.is_empty()).unwrap_or_else(|| "UTC".into());
+    let id = tenant
+        .core
+        .store
+        .insert_moment(&crate::store::moments::NewMoment {
+            artifact_id: aid,
+            kind,
+            at: Some(b.at),
+            tz,
+            rule: b.rule,
+            source: crate::store::moments::Source::Set,
+            span: None,
+        })
+        .await?;
+    tenant.core.store.rearm_remind().await?;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
 
 #[cfg(test)]
@@ -2229,7 +2388,7 @@ pub(crate) mod tests {
         b.body(Body::from(body.to_vec())).unwrap()
     }
 
-    fn post_json(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+    pub(crate) fn post_json(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
         Request::builder()
             .uri(uri)
             .method("POST")
@@ -3924,6 +4083,8 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod patch_tests {
+    use super::tests::{app_token_and_core, post_json};
+    use crate::web::test_support::json_of;
     use super::tests::*;
     use crate::store::artifacts::{EmbedState, NewArtifact};
     use crate::vector::SearchFilter;
@@ -4251,6 +4412,126 @@ mod patch_tests {
             ))
             .await
             .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn bearer_get(uri: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn moments_are_listed_set_completed_and_snoozed_over_the_api() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let at = crate::store::now() + 600;
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({"at": at, "tz": "Europe/Berlin", "kind": "due", "rule": "FREQ=MONTHLY;BYMONTHDAY=1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let list = json_of(app.clone().oneshot(bearer_get("/api/v1/moments?kind=due", &token)).await.unwrap()).await;
+        assert_eq!(list[0]["moment"]["id"], id);
+        assert_eq!(list[0]["opening"], "Pay rent");
+        assert!(!list[0]["title"].as_str().unwrap_or_default().is_empty());
+        let res = app
+            .clone()
+            .oneshot(post_json(&format!("/api/v1/moments/{id}/done"), &token, serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let list = json_of(
+            app.clone()
+                .oneshot(bearer_get(&format!("/api/v1/moments?kind=due&to={}", at + 40 * 86_400), &token))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(list.as_array().unwrap().len(), 1, "the next occurrence");
+        assert_ne!(list[0]["moment"]["id"], id);
+        let next = list[0]["moment"]["id"].as_str().unwrap().to_string();
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{next}/snooze"),
+                &token,
+                serde_json::json!({"until": at + 60 * 86_400}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(core.store.moment(&next).await.unwrap().unwrap().snoozed_until.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_rule_outside_the_subset_is_a_400_with_the_reason() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({"at": 1, "rule": "FREQ=HOURLY"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = json_of(res).await.to_string();
+        assert!(body.contains("HOURLY"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn capture_accepts_tz_origin_and_intent_and_refuses_other_origins() {
+        let (app, token, core) = app_token_and_core().await;
+        let text = |uri: &str, body: &str| {
+            Request::builder()
+                .uri(uri)
+                .method("POST")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "text/plain")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let res = app
+            .clone()
+            .oneshot(text("/api/v1/capture?tz=Europe/Berlin&origin=journal", "Long day."))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let c = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(c.origin, "journal");
+        assert_eq!(c.metadata["tz"], "Europe/Berlin");
+
+        let res = app
+            .clone()
+            .oneshot(text("/api/v1/capture?intent=remind", "call the bank tomorrow"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        assert_eq!(core.store.get_corpus(&id).await.unwrap().metadata["intent"], "remind");
+
+        let res = app.oneshot(text("/api/v1/capture?origin=mcp", "x")).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }
