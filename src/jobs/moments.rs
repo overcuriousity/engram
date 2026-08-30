@@ -16,7 +16,7 @@ use chrono::TimeZone;
 
 /// Origins the journal cue and classifier may rewrite. Not `api` or `mcp`:
 /// a program that wanted an entry says so with `origin`.
-pub const JOURNALABLE: &[&str] = &["ui", "cli", "share", "extension"];
+pub const JOURNALABLE: &[&str] = &[crate::core::ingest::ORIGIN_WEB, "ui", "cli", crate::core::ingest::ORIGIN_SHARE, "extension"];
 
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let art = core.store.get_artifact(artifact_id).await?;

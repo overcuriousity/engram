@@ -34,10 +34,13 @@
      captured, newest first, each a way back into its own source. #}
   <div class="label">Last captured</div>
   {% for r in recent %}
-  <a class="idle-row" href="/ui/corpora/{{ r.id }}">
-    <span class="idle-row-title">{{ r.label }}</span>
-    <span class="idle-row-when">{{ r.when }}</span>
-  </a>
+  {# Two links in one row: the title opens the source, the stamp opens the
+     day. A day is a page now, and every "today" on the workspace is a door
+     into it. #}
+  <span class="idle-row">
+    <a class="idle-row-title" href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>
+    <a class="idle-row-when" href="/ui/day/{{ r.day }}" data-day-link>{{ r.when }}</a>
+  </span>
   {% endfor %}
 </div>
 {% endif %}

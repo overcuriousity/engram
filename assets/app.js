@@ -852,6 +852,15 @@
   // already dismissed would swap itself back in.
   var offerDismissed = false;
 
+  // A day link carries the browser's zone, so the day page reads the day
+  // the viewer means and not the server's.
+  function zoneDayLinks(root) {
+    var tz = (Intl.DateTimeFormat().resolvedOptions().timeZone || '');
+    (root || document).querySelectorAll('a[data-day-link]').forEach(function (a) {
+      if (a.href.indexOf('?') < 0) a.href += '?tz=' + encodeURIComponent(tz);
+    });
+  }
+
   function dropOffer() {
     var area = document.getElementById('context-offer');
     if (area) area.remove();
@@ -2005,6 +2014,7 @@
     installNudge();
     primeSlow();
     contextOffer();
+    zoneDayLinks(document);
     restoreReading();
     boxVerbs();
     railBack();
@@ -2060,6 +2070,7 @@
         else confirmOffer(e.target);
       }
       if (e.target.id === 'due' && offerDismissed) dropOffer();
+      zoneDayLinks(e.target);
       enhance(e.target);
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.

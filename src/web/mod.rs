@@ -2,6 +2,7 @@ pub mod api;
 pub mod assets;
 pub mod auth_routes;
 pub mod corpus_view;
+pub mod day;
 pub mod due;
 pub mod extension;
 pub mod insights;
@@ -100,6 +101,7 @@ pub fn router(state: AppState) -> Router {
         .merge(judge::judge_router())
         .merge(insights::routes())
         .merge(due::routes())
+        .merge(day::routes())
         .merge(crate::mcp::mcp_router(state.clone()))
         .nest(
             "/api/v1",

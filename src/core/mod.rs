@@ -600,7 +600,10 @@ pub mod test_support {
             pursuit: crate::config::PursuitConfig::default(),
             schedule: crate::config::ScheduleConfig::default(),
             sitting: crate::config::SittingConfig::default(),
-            time: crate::config::TimeConfig::default(),
+            // The fake embedder hashes text into eight dimensions, where two
+            // unrelated strings clear 0.80 by chance and the classifier fires on
+            // noise. Tests of the classifier hand it vectors directly.
+            time: crate::config::TimeConfig { intent_at: 0.99, ..Default::default() },
             // Off, unlike the shipped default: `recommends()` is two flags and
             // a test that leaves both alone must offer nothing. The
             // recommendation tests switch both on.

@@ -608,6 +608,27 @@ impl Store {
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
+    /// Everything captured in a span of time, oldest first — a day, read in
+    /// the viewer's zone.
+    pub async fn corpora_between(&self, from: i64, to: i64) -> Result<Vec<Corpus>> {
+        let rows = sqlx::query("SELECT * FROM corpora WHERE created_at >= ? AND created_at < ? ORDER BY created_at, id")
+            .bind(from)
+            .bind(to)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(row_to_corpus).collect())
+    }
+
+    /// Entries that name a day in `metadata.day`: written on the day page
+    /// about a day other than the one they were written on.
+    pub async fn corpora_by_day(&self, day: &str) -> Result<Vec<Corpus>> {
+        let rows = sqlx::query("SELECT * FROM corpora WHERE json_extract(metadata, '$.day') = ? ORDER BY created_at, id")
+            .bind(day)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(row_to_corpus).collect())
+    }
+
     /// A page for a sweep that has to see every corpus exactly once: oldest
     /// first, resumed from the last row of the previous page.
     ///

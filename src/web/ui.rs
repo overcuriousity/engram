@@ -547,13 +547,16 @@ pub(crate) struct IdleRecentRow {
     pub(crate) label: String,
     /// "today", "3 days ago" — a jog, not a timestamp. See `judge::ago`.
     pub(crate) when: String,
+    /// The day, as a link target. UTC here; the day page re-reads it in the
+    /// browser's zone, which app.js appends on load.
+    pub(crate) day: String,
 }
 
 /// The name a capture goes by before synthesis titles it: the hint, or its
 /// opening words — with a word for the two origins that have none to open
 /// with. One rule, because the queue and the idle rail naming the same row
 /// differently would read as two captures.
-fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &str) -> String {
+pub(crate) fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &str) -> String {
     title_hint.unwrap_or_else(|| {
         if raw_text.is_empty() && origin == crate::core::ingest::ORIGIN_IMAGE {
             "photo".into()
@@ -581,6 +584,9 @@ pub(crate) async fn rail_idle(tenant: &Tenant) -> Result<RailIdleTemplate> {
         .into_iter()
         .map(
             |(id, title_hint, origin, created_at, opening)| IdleRecentRow {
+                day: chrono::DateTime::from_timestamp(created_at, 0)
+                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default(),
                 when: crate::web::judge::ago(created_at),
                 label: corpus_label(title_hint, &opening, &origin),
                 id,

@@ -264,7 +264,7 @@
    a guess, so it is a second area and not a rung. Fetched because the zone
    comes from the browser; removed on the first keystroke like the offer. #}
 {% if q.is_empty() %}
-<div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
+<div id="due" class="due" hx-post="/ui/due" hx-trigger="intersect once"
      hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
 {% endif %}
 

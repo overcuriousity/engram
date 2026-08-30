@@ -313,6 +313,10 @@ struct CapturedTemplate {
     /// only hint is a queue on Ops the writer has no reason to open.
     near_dupe_of: Option<String>,
     near_dupe_percent: i64,
+    /// The note opened like a diary entry and was filed as one. Said on the
+    /// receipt with its undo, because a channel label nobody asked for is
+    /// exactly the kind of thing that must not happen silently.
+    entry: bool,
 }
 
 async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Response> {
@@ -347,7 +351,14 @@ async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Re
         None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
     };
     let out = tenant.core.ingest_capture(capture).await?;
+    let entry = tenant
+        .core
+        .store
+        .corpus_origin(&out.id)
+        .await?
+        .is_some_and(|o| o.origin == crate::core::ingest::ORIGIN_JOURNAL);
     Ok(HtmlTemplate(CapturedTemplate {
+        entry,
         id: out.id,
         duplicate: out.duplicate,
         near_dupe_percent: out
@@ -1985,5 +1996,34 @@ mod tests {
                 "the server sends a `{name}` frame and the driver ignores it"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_cued_entry_says_so_on_the_receipt_with_its_undo() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/capture")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("text=Heute+war+ein+langer+Tag."))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(html.contains("Kept as today&rsquo;s entry"), "{html}");
+        assert!(html.contains("/entry\""), "the undo posts to the entry toggle");
+    }
+
+    #[tokio::test]
+    async fn the_rails_recent_row_links_its_stamp_to_the_day() {
+        let html = workspace_held("/ui").await;
+        assert!(html.contains(r#"href="/ui/day/"#), "{html}");
+        assert!(html.contains("data-day-link"));
     }
 }

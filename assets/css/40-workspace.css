@@ -802,6 +802,16 @@ body { overflow-x: hidden; }
 .due-coming { margin: 0.25rem 0 0; }
 .badge-due { color: var(--color-due); border-color: var(--color-due); }
 
+/* ── The day page ───────────────────────────────────────────────────────── */
+.day-nav { display: flex; align-items: baseline; gap: 1rem; margin: 1rem 0; }
+.day-nav h1 { flex: 1; text-align: center; margin: 0; font-size: var(--text-lg); }
+.day-entry { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.5rem; }
+.day-entry .btn { align-self: flex-start; }
+.day-line { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline; margin: 0.25rem 0; }
+.day-text { white-space: pre-wrap; flex: 1 1 100%; }
+.inline { display: inline; }
+.idle-row-when[href]:hover { text-decoration: underline; }
+
 /* ── A file, waiting to be sent ──────────────────────────────────────────── */
 
 /* The box holds only a file that exists: thumbnail, name, note, Remove. The
