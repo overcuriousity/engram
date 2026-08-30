@@ -425,6 +425,137 @@ pub fn relative_date(text: &str, captured_at: i64, tz: Tz) -> Option<Found> {
     Some(Found { at: stamp(tz, date, h, mi)?, span })
 }
 
+/// The RRULE subset: FREQ, INTERVAL, BYDAY (weekday codes), BYMONTHDAY, and
+/// UNTIL or COUNT. Spelled as iCalendar so a feed can carry it later; parsed
+/// here and nowhere else.
+#[derive(Debug)]
+struct Rule {
+    freq: Freq,
+    interval: u32,
+    by_day: Vec<Weekday>,
+    by_month_day: Option<u32>,
+    until: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Freq {
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
+fn parse_rule(rule: &str) -> Result<Rule, String> {
+    let mut r = Rule { freq: Freq::Daily, interval: 1, by_day: vec![], by_month_day: None, until: None };
+    let mut has_freq = false;
+    for part in rule.split(';').filter(|p| !p.is_empty()) {
+        let (k, v) = part.split_once('=').ok_or_else(|| format!("not key=value: {part}"))?;
+        match k {
+            "FREQ" => {
+                r.freq = match v {
+                    "DAILY" => Freq::Daily,
+                    "WEEKLY" => Freq::Weekly,
+                    "MONTHLY" => Freq::Monthly,
+                    "YEARLY" => Freq::Yearly,
+                    other => return Err(format!("FREQ={other} is outside the subset")),
+                };
+                has_freq = true;
+            }
+            "INTERVAL" => {
+                r.interval = v.parse::<u32>().ok().filter(|n| *n >= 1).ok_or("INTERVAL must be a positive integer")?
+            }
+            "BYDAY" => {
+                for d in v.split(',') {
+                    r.by_day.push(match d {
+                        "MO" => Weekday::Mon,
+                        "TU" => Weekday::Tue,
+                        "WE" => Weekday::Wed,
+                        "TH" => Weekday::Thu,
+                        "FR" => Weekday::Fri,
+                        "SA" => Weekday::Sat,
+                        "SU" => Weekday::Sun,
+                        other => return Err(format!("BYDAY={other}: weekday codes only, no ordinals")),
+                    });
+                }
+            }
+            "BYMONTHDAY" => {
+                r.by_month_day =
+                    Some(v.parse::<u32>().ok().filter(|n| (1..=31).contains(n)).ok_or("BYMONTHDAY out of range")?)
+            }
+            "UNTIL" => {
+                let dt = chrono::NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%SZ")
+                    .or_else(|_| {
+                        NaiveDate::parse_from_str(v, "%Y%m%d").map(|d| d.and_hms_opt(23, 59, 59).unwrap())
+                    })
+                    .map_err(|_| format!("UNTIL={v} is not a date"))?;
+                r.until = Some(dt.and_utc().timestamp());
+            }
+            "COUNT" => {
+                v.parse::<u32>().map_err(|_| "COUNT must be an integer")?;
+            }
+            other => return Err(format!("{other} is outside the subset")),
+        }
+    }
+    if !has_freq {
+        return Err("FREQ is required".into());
+    }
+    Ok(r)
+}
+
+pub fn validate_rule(rule: &str) -> Result<(), String> {
+    parse_rule(rule).map(|_| ())
+}
+
+/// The next occurrence strictly after `at`, keeping `at`'s wall-clock time in
+/// `tz`. None when the rule is exhausted or invalid. COUNT is the caller's to
+/// enforce by counting rows.
+pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
+    let r = parse_rule(rule).ok()?;
+    let start = tz.timestamp_opt(at, 0).single()?;
+    let time = start.time();
+    let origin = start.date_naive();
+    let mut date = origin;
+    // Day by day, bounded: the subset never needs more than four years of
+    // days per interval step to find the next occurrence (a yearly 29 Feb).
+    for _ in 0..(366 * 4 * r.interval as usize + 1) {
+        date += chrono::Duration::days(1);
+        let hit = match r.freq {
+            Freq::Daily => (date - origin).num_days() % r.interval as i64 == 0,
+            Freq::Weekly => {
+                let own = [origin.weekday()];
+                let days: &[Weekday] = if r.by_day.is_empty() { &own } else { &r.by_day };
+                let weeks = (date - origin).num_days().div_euclid(7);
+                days.contains(&date.weekday()) && weeks % r.interval as i64 == 0
+            }
+            Freq::Monthly => {
+                let dom = r.by_month_day.unwrap_or(origin.day());
+                let months = (date.year() - origin.year()) * 12 + (date.month() as i32 - origin.month() as i32);
+                date.day() == dom && months % r.interval as i32 == 0
+            }
+            Freq::Yearly => {
+                date.month() == origin.month()
+                    && date.day() == origin.day()
+                    && (date.year() - origin.year()) % r.interval as i32 == 0
+            }
+        };
+        if !hit {
+            continue;
+        }
+        let dt = date.and_time(time);
+        let Some(next) = tz.from_local_datetime(&dt).single().or_else(|| tz.from_local_datetime(&dt).earliest()) else {
+            continue;
+        };
+        let ts = next.timestamp();
+        if let Some(until) = r.until
+            && ts > until
+        {
+            return None;
+        }
+        return Some(ts);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +729,57 @@ mod tests {
         assert_eq!(zone(Some("Mars/Olympus")), chrono_tz::Tz::UTC);
         assert_eq!(zone(None), chrono_tz::Tz::UTC);
         assert_eq!(zone(Some("Europe/Berlin")), berlin());
+    }
+
+    #[test]
+    fn the_subset_is_accepted_and_the_rest_refused() {
+        for ok in [
+            "FREQ=DAILY",
+            "FREQ=WEEKLY;BYDAY=MO,WE",
+            "FREQ=MONTHLY;BYMONTHDAY=1",
+            "FREQ=YEARLY",
+            "FREQ=WEEKLY;INTERVAL=2;UNTIL=20271231T000000Z",
+            "FREQ=DAILY;COUNT=5",
+        ] {
+            assert!(validate_rule(ok).is_ok(), "{ok}");
+        }
+        for bad in ["FREQ=HOURLY", "FREQ=WEEKLY;BYDAY=2MO", "BYDAY=MO", "FREQ=WEEKLY;BYSETPOS=1", ""] {
+            assert!(validate_rule(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn weekly_keeps_the_wall_clock_across_dst() {
+        // Monday 2026-10-19 09:00 CEST → Monday 2026-10-26 09:00 CET (DST ends 25 Oct).
+        let at = berlin().with_ymd_and_hms(2026, 10, 19, 9, 0, 0).unwrap().timestamp();
+        let next = next_after("FREQ=WEEKLY;BYDAY=MO", at, berlin()).unwrap();
+        assert_eq!(local(next), "2026-10-26 09:00");
+        assert_eq!(next - at, 7 * 86_400 + 3_600, "one week and the hour DST gave back");
+    }
+
+    #[test]
+    fn byday_picks_the_next_listed_day() {
+        let mon = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
+        assert_eq!(local(next_after("FREQ=WEEKLY;BYDAY=MO,WE", mon, berlin()).unwrap()), "2026-09-02 09:00");
+    }
+
+    #[test]
+    fn monthly_on_the_31st_skips_short_months() {
+        let at = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
+        assert_eq!(local(next_after("FREQ=MONTHLY;BYMONTHDAY=31", at, berlin()).unwrap()), "2026-10-31 09:00");
+    }
+
+    #[test]
+    fn until_ends_the_rule() {
+        let at = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
+        assert!(next_after("FREQ=DAILY;UNTIL=20260831T235959Z", at, berlin()).is_none());
+        assert!(next_after("FREQ=DAILY;UNTIL=20260901T235959Z", at, berlin()).is_some());
+    }
+
+    #[test]
+    fn interval_and_yearly() {
+        let at = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
+        assert_eq!(local(next_after("FREQ=DAILY;INTERVAL=3", at, berlin()).unwrap()), "2026-09-03 09:00");
+        assert_eq!(local(next_after("FREQ=YEARLY", at, berlin()).unwrap()), "2027-08-31 09:00");
     }
 }
