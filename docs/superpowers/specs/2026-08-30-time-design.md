@@ -158,18 +158,36 @@ Matched case-insensitively, as a whole word, in the first 200 characters. A
 hit is certain and skips step 2. `journal` cues match only at the start of the
 text: *heute* mid-sentence is a word, at the head of a note it is an entry.
 
-**2. The embedder as classifier.** The same phrases, embedded once per embed
-model and cached under `meta` key `moments.prototypes.<model>` — a
-`--reindex` clears them. The artifact's stored embedding is compared by cosine
-against each intent's prototypes; the best score above
-`time.intent_at` (default 0.80, config) fires that intent as `classified`.
-`bge-m3` is multilingual, so the ten languages are the training set and the
-eleventh comes for free; a cue-table language is also a prototype language.
-This is `core::gaps::cosine` and the `recommend` ladder's shape, and no new
-dependency.
+**2. The embedder as classifier.** Each intent has ten to fifteen
+prototype *sentences* — the shape a note opens with (*remind me to send the
+invoice on friday*, *heute war ein langer tag*), never the bare cue word, which
+embeds as a dictionary entry and sits near nothing. Embedded once per embed
+model through the same `Embedder` and gate the `Embed` stage uses, and cached
+under `meta` key `moments.prototypes.<model>` — keyed on the model so a switch
+invalidates them, cleared by `--reindex`, held in `Core` after the first read.
 
-The `remind` prototypes are compared against the *first passage* of the corpus
-only. A pasted article that quotes "remind me" in paragraph nine is an article.
+The artifact's vector is read back from Qdrant by id — one point read, no
+re-embedding — and compared only for the *first passage* of the corpus: a
+pasted article that quotes "remind me" in paragraph nine is an article. The
+score is the **maximum** cosine over an intent's prototypes, not the mean; a
+note matches one phrasing, not the average of ten languages. `core::gaps::cosine`
+is the function. The best intent above the line fires as `classified`.
+
+The line is measured, not set: the prototypes are scored against the sample of
+the tenant's own artifact vectors that `vector.sample` already draws, the 99th
+percentile of that "ordinary note against a prototype" distribution is where
+*unrelated* ends, and the line is that value rounded up to a hundredth and
+clamped to `[0.70, 0.92]` — `gaps::link_threshold`, applied to a different
+question. Below thirty sampled vectors `time.intent_at` (config, 0.80) stands.
+This is what stops a base written in German from firing `journal` on every
+second note because German prose sits nearer the German prototypes than English
+prose does. `bge-m3` is multilingual, so the ten languages are the training set
+and the eleventh comes for free; a cue-table language is also a prototype
+language. No new dependency, no new call, and no trained head: ten examples a
+class is the regime where nearest-prototype beats anything fitted, and the
+labels a head would want — undos on *kept as today's entry*, dismissals of a
+misfired reminder — are already recorded by `source` and the undo for whoever
+wants to fit one later.
 
 **3. Absolute dates, by rule, on every artifact.** ISO (`2026-09-12`,
 `2026-09-12T14:00`), day-first and month-first numerics with the separator
