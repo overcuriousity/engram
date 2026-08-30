@@ -539,6 +539,50 @@ mod tests {
         assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn a_buried_stub_is_out_of_reach_by_consequence_not_by_filter() {
+        let mut core = test_core().await;
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+            ]),
+        ));
+        let ids = seed(&core, &["a fact about zeppelins", "its living successor"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+        backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
+        run(&core).await.unwrap();
+
+        // `include_deprecated` still means what it means — the stub is gone
+        // from it because it has no vector and no text, not because a new
+        // filter was taught about reaping.
+        let q = crate::core::search::SearchQuery {
+            q: "zeppelins".into(),
+            limit: 10,
+            tags: vec![],
+            category: None,
+            mark: false,
+            rerank: false,
+            explain: false,
+            include_deprecated: true,
+            include_superseded: true,
+        };
+        let hits = core
+            .search(&q, crate::store::feedback::Door::Ui)
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().all(|h| h.artifact_id != ids[0]),
+            "a reaped stub surfaced in search"
+        );
+        // And every thread other rows hold into the stub still resolves.
+        let stub = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert_eq!(stub.superseded_by.as_deref(), Some(ids[1].as_str()));
+    }
+
     const RESCUE_REPLY: &str =
         r#"{"artifact":{"title":"Kept fact","text":"the port is 8443","category":null,"tags":[],"caveats":[]}}"#;
 
