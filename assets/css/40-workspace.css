@@ -926,3 +926,21 @@ body { overflow-x: hidden; }
    placed earlier it would have wrapped the chips onto a third line, which
    costs the row the density it is arranged for. */
 .attach-types { flex: 1 0 100%; margin: 0.25rem 0 0; }
+
+/* ── The idle column ─────────────────────────────────────────────────────── */
+
+/* One measure wide, so the four short things under a full-width box read as a
+   column rather than as four bands across the page. */
+#idle { max-width: 46rem; }
+
+/* The closing line, and the only place an idle page says what the base holds.
+   It replaced a block of counts and a list of five captures in the rail — the
+   same five the middle column was already rendering in another shape. */
+.idle-foot { margin: 0.75rem 0 0; font-size: var(--text-xs); }
+.idle-foot a { color: inherit; }
+
+/* The chip row is revealed by app.js on the first keystroke. `display: contents`
+   so the wrapper adds no box of its own: the label and the chips go on being
+   laid out by `.verbs`, which is what they are positioned against. */
+.kind-row { display: contents; }
+.kind-row[hidden] { display: none; }

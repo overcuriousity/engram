@@ -540,11 +540,15 @@ struct ResultsTemplate {
 /// clearing a query goes back to it rather than to a "No matches." nobody
 /// searched for.
 #[derive(Template)]
-#[template(path = "_rail_idle.html")]
-pub(crate) struct RailIdleTemplate {
+#[template(path = "_idle_foot.html")]
+pub(crate) struct IdleFootTemplate {
     pub(crate) artifacts: i64,
     pub(crate) corpora: i64,
     pub(crate) recent: Vec<IdleRecentRow>,
+    /// Whether the base holds anything at all. With nothing held there are no
+    /// counts to print and no last capture to name, so the line says what the
+    /// program is for instead.
+    pub(crate) held: bool,
 }
 
 pub(crate) struct IdleRecentRow {
@@ -579,7 +583,7 @@ pub(crate) fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &
 /// Two counts and the last few captures, off the slimmest reads there are:
 /// the idle rail is on the most-opened screen, re-renders on every box-clear,
 /// and must cost nothing.
-pub(crate) async fn rail_idle(tenant: &Tenant) -> Result<RailIdleTemplate> {
+pub(crate) async fn idle_foot(tenant: &Tenant) -> Result<IdleFootTemplate> {
     let (corpora, artifacts) = tenant.core.store.held_brief().await?;
     let recent = tenant
         .core
@@ -598,10 +602,11 @@ pub(crate) async fn rail_idle(tenant: &Tenant) -> Result<RailIdleTemplate> {
             },
         )
         .collect();
-    Ok(RailIdleTemplate {
+    Ok(IdleFootTemplate {
         artifacts,
         corpora,
         recent,
+        held: corpora > 0,
     })
 }
 
@@ -1176,7 +1181,7 @@ pub(crate) async fn search_results(
     // limit is on the door rather than in app.js because it is the embedder's
     // bill either way, whatever the client was.
     if p.q.trim().is_empty() || p.q.chars().count() > MAX_QUERY_CHARS {
-        return Ok(HtmlTemplate(rail_idle(&tenant).await?).into_response());
+        return Ok(HtmlTemplate(idle_foot(&tenant).await?).into_response());
     }
 
     // The same terms the sparse branch derives, handed to the client so
@@ -4300,13 +4305,13 @@ mod tests {
             !trigger_of(&html).contains("load"),
             "and nothing is searched for on the way in: {html}"
         );
-        // Still is not blank. Nothing is coming to fill the rail through this
-        // door, so the rail renders the state it is actually in — the base
-        // introducing itself — rather than the column of nothing that state
+        // Still is not blank. Nothing is coming through this door, so the page
+        // renders the state it is actually in — the idle column, with the base
+        // saying what it holds — rather than the columns of nothing that state
         // was written to remove.
         assert!(
-            html.contains("This memory"),
-            "the rail says where the question is being asked: {html}"
+            html.contains(r#"id="idle-foot""#),
+            "the idle column says what the base holds: {html}"
         );
         // Every id the stream driver writes into has to survive the move; the
         // browser suite targets each of these by name.
@@ -4407,8 +4412,8 @@ mod tests {
         );
         assert!(html.contains(r#"id="box-form""#), "and it is the workspace");
         assert!(
-            html.contains("This memory"),
-            "whose rail is the idle one, not an empty column: {html}"
+            html.contains(r#"id="idle-foot""#),
+            "which paints its idle column, not two empty ones: {html}"
         );
         assert!(
             html.contains(&format!(r#"name="from_ask" value="{id}""#)),
@@ -4572,6 +4577,25 @@ mod tests {
             "and the staged box holds only the file, never the way to pick one"
         );
 
+        // The column, and what it is not. Four muted prose lines, a chip row
+        // marooned at the far end of the verb row, and the same five captures
+        // rendered twice in two shapes is what this page used to be.
+        let html = get(&app, "/ui", &cookie).await;
+        assert!(html.contains(r#"id="idle""#), "the column exists as one element");
+        // Asserted against the template source, not a render: facets come from
+        // the vector store and the fixture seeds none, so a render of this page
+        // carries no chip row to be wrong about. What is being asserted is the
+        // gate, and the gate is in the markup.
+        let tpl = include_str!("templates/workspace.html");
+        assert!(
+            tpl.contains(r#"<span id="kind-row" class="kind-row"{% if idle_state %} hidden{% endif %}>"#),
+            "chips qualify a search, and an idle page has none"
+        );
+        assert!(
+            !html.contains("or drop one anywhere on the page."),
+            "the attach prose is on the button's title: {html}"
+        );
+
         // A base with something in it introduces itself.
         core.ingest_capture(crate::core::ingest::Capture::new(
             "LevelDB tombstones survive compaction longer than the manual admits.",
@@ -4580,20 +4604,21 @@ mod tests {
         .await
         .unwrap();
         let html = get(&app, "/ui", &cookie).await;
-        assert!(html.contains("This memory"), "the rail names its idle act");
-        assert!(
-            html.contains("Last captured"),
-            "and shows what last went in"
-        );
+        assert!(html.contains("artifact"), "the closing line counts what is held");
+        assert!(html.contains("last kept"), "and names what last went in");
         assert!(
             html.contains("LevelDB tombstones"),
             "in the operator's words"
         );
+        // One list, not two. The rail used to render these same rows beside a
+        // middle column already rendering them, which is what made the page
+        // read as clutter.
+        assert!(!html.contains("Last captured"), "and only once: {html}");
 
         // Clearing the box returns to idle, not to "No matches." — which
         // would be a claim about a base nobody searched.
         let frag = get(&app, "/ui/search/results?q=", &cookie).await;
-        assert!(frag.contains("This memory"), "an empty query is idle again");
+        assert!(frag.contains(r#"id="idle-foot""#), "an empty query is idle again");
         assert!(!frag.contains("No matches"), "not a verdict on the base");
     }
 
@@ -7567,8 +7592,12 @@ mod tests {
             linked.contains("load"),
             "the deep link never asks for its own results"
         );
+        // The form's own trigger, not the page's text: the idle column below
+        // the box carries `load` triggers of its own — the offer and the due
+        // band each fetch themselves — and asserting over the whole document
+        // would read one of those as a search.
         assert!(
-            !page("/ui/search").await.contains("load"),
+            !trigger_of(&page("/ui/search").await).contains("load"),
             "an empty box has nothing to search for"
         );
     }
@@ -7817,8 +7846,8 @@ mod tests {
         let long = "answer+".repeat(MAX_QUERY_CHARS / 4);
         let frag = get(&app, &format!("/ui/search/results?q={long}"), &cookie).await;
         assert!(
-            frag.contains("This memory"),
-            "a pasted document must land on the idle rail:\n{frag}"
+            frag.contains(r#"id="idle-foot""#),
+            "a pasted document must land on the idle state:\n{frag}"
         );
         assert!(!frag.contains("No matches"), "and not as a verdict on it");
     }

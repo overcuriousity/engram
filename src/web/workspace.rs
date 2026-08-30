@@ -150,6 +150,12 @@ struct WorkspaceTemplate {
     /// fragment is what the results endpoint returns when the box is emptied
     /// — one account of the idle state, however it is reached.
     idle: String,
+    /// Whether this page paints its idle state: the column under the box, and
+    /// no rail and no pane. Exactly the condition `idle` is computed from, and
+    /// deliberately not "the box is empty" — the ask and capture doors arrive
+    /// with a filled box and run nothing, so for them nothing is coming and
+    /// the idle column is what the page has to show.
+    idle_state: bool,
     /// Whether the base holds anything at all.
     ///
     /// Onboarding here is a property of an empty base rather than of a new
@@ -237,8 +243,9 @@ async fn base_template(
     // The same condition the template's `load` trigger is written from, and
     // its complement: whatever will not be filled by a search on arrival is
     // filled by the idle rail here.
-    let idle = match q.is_empty() || !open_with.is_empty() {
-        true => crate::web::ui::rail_idle(tenant)
+    let idle_state = q.is_empty() || !open_with.is_empty();
+    let idle = match idle_state {
+        true => crate::web::ui::idle_foot(tenant)
             .await?
             .render()
             .map_err(|e| crate::error::Error::Internal(e.to_string()))?,
@@ -266,6 +273,7 @@ async fn base_template(
         prefill_question: String::new(),
         open_with,
         idle,
+        idle_state,
         held: corpora > 0,
         oob: false,
     })
@@ -1352,14 +1360,16 @@ mod tests {
             html.contains(r#"title="Type or attach something first""#),
             "the disabled verb names what it wants: {html}"
         );
-        // The element, not the phrase: the same sentence is already on the
-        // label's `title`, so asserting the words alone would pass on a page
-        // where the only copy of them is the tooltip this exists to replace.
+        // The types are on the label's `title` and on the input's `aria-label`,
+        // and nowhere else. The third copy — a line of prose under the verb
+        // row — was one of four muted sentences stacked under the box, and it
+        // was the one saying least: the picker a phone opens names what it
+        // accepts itself.
         assert!(
-            html.contains(r#"class="muted hint attach-types""#),
-            "and Attach names its types where a finger can read them, not only \
-             in a tooltip: {html}"
+            html.contains(r#"aria-label="Attach a file"#),
+            "and Attach still names its types to a screen reader: {html}"
         );
+        assert!(!html.contains("attach-types"), "but not a third time in prose: {html}");
     }
 
     /// Results appear beside a person who pressed nothing. The old hint

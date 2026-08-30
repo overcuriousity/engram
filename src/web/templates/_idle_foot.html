@@ -1,0 +1,37 @@
+{# The last line of the idle column, and the only place the base says what it
+   holds. It used to be the rail's own idle state — a block of counts above a
+   list of the last five captures, standing beside a middle column rendering
+   those same five rows in a different shape. One list is now one line.
+
+   Not `.rail-item` cards and not a list: these are not answers to anything.
+   The title opens its source, the stamp opens the day.
+
+   `hx-swap-oob` on both pieces, and inert on first paint: htmx reads
+   out-of-band attributes only on a swapped response, so the same fragment
+   renders in place inside `#idle` when the page is built and swaps itself
+   into that same place when the box is emptied again. One account of the idle
+   state, however it is reached. #}
+{# The rail's label, emptied. While the box is empty the rail is not on screen
+   at all, so "This memory" over a hidden column is a heading for nothing —
+   and left standing it is the heading the *next* act's results arrive under.
+   Cleared here, so whichever fragment fills the rail is the one that names
+   it. #}
+<div class="rail-act" hx-swap-oob="innerHTML:#rail-head"></div>
+<p id="idle-foot" class="idle-foot muted" hx-swap-oob="true">
+{%- if !held %}
+  {# No counts to print and no last capture to name. The one thing worth
+     saying to somebody who has put nothing in yet is what putting something
+     in does — and for an operator who arrived through an identity provider
+     and never saw the login card, this is the only place the program
+     introduces itself at all. #}
+  Nothing here yet. Paste anything worth keeping into the box above, or attach
+  a file — it becomes searchable, in your own words.
+{%- else %}
+  <span class="mono">{{ artifacts }}</span> artifact{% if artifacts != 1 %}s{% endif %}
+  from <span class="mono">{{ corpora }}</span> source{% if corpora != 1 %}s{% endif %}
+  {%- if let Some(r) = recent.first() %} &middot; last kept
+  <a href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>
+  <a href="/ui/day/{{ r.day }}" data-day-link>{{ r.when }}</a>
+  {%- endif %}
+{%- endif %}
+</p>
