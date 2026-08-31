@@ -307,8 +307,14 @@ impl Core {
     pub async fn ingest_capture(&self, c: Capture) -> Result<IngestOutcome> {
         // A note that opens like a diary entry is filed as one, on the doors
         // where a person typed it. Cheap, exact, and undone with one click.
+        //
+        // Not when the door already said this is something else: `engram -r
+        // "Heute den Bericht abgeben"` opens with a journal cue and is still a
+        // reminder, because the caller said so. A forced intent outranks a
+        // guess about the text — a forced `journal` agrees with it.
         let mut c = c;
-        if crate::jobs::moments::JOURNALABLE.contains(&c.origin.as_str())
+        if c.metadata["intent"].as_str().is_none_or(|i| i == crate::core::moments::Intent::Journal.as_str())
+            && crate::jobs::moments::JOURNALABLE.contains(&c.origin.as_str())
             && crate::core::moments::cue(&c.text) == Some(crate::core::moments::Intent::Journal)
         {
             let was = std::mem::replace(&mut c.origin, ORIGIN_JOURNAL.to_string());
@@ -3186,6 +3192,38 @@ mod tests {
         let core = test_core().await;
         let out = core.ingest_capture(Capture::new("Heute war ein langer Tag.", "mcp")).await.unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "mcp");
+    }
+
+    #[tokio::test]
+    async fn a_forced_remind_outranks_the_journal_cue() {
+        // `engram -r "Heute den Bericht abgeben"` opens like a diary entry and
+        // is a reminder anyway: the door said so.
+        let core = test_core().await;
+        let out = core
+            .ingest_capture(
+                Capture::new("Heute den Bericht abgeben.", "ui")
+                    .with_intent(Some(crate::core::moments::Intent::Remind)),
+            )
+            .await
+            .unwrap();
+        let c = core.store.get_corpus(&out.id).await.unwrap();
+        assert_eq!(c.origin, "ui", "not filed as an entry");
+        assert!(c.metadata.get("origin_was").is_none());
+        crate::jobs::test_support::drain(&core).await;
+        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1, "and it is a reminder");
+    }
+
+    #[tokio::test]
+    async fn a_forced_journal_agrees_with_the_cue() {
+        let core = test_core().await;
+        let out = core
+            .ingest_capture(
+                Capture::new("Heute war ein langer Tag.", "ui")
+                    .with_intent(Some(crate::core::moments::Intent::Journal)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
     }
 
     #[tokio::test]

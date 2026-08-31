@@ -193,6 +193,41 @@ impl Store {
         Ok(id)
     }
 
+    /// Does this artifact already carry a moment of this kind at this
+    /// instant? The moments stage asks before it re-inserts what it just read,
+    /// so a row `delete_read_moments` kept — one already done, pushed or
+    /// snoozed — is not doubled by the reading that would have made it again.
+    pub async fn has_moment_at(&self, artifact_id: &str, kind: Kind, at: i64) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = ? AND at = ?",
+        )
+        .bind(artifact_id)
+        .bind(kind.as_str())
+        .bind(at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// How many occurrences of one recurrence have existed on this artifact,
+    /// done rows included — the history of a recurring reminder is its rows,
+    /// so counting them is counting the occurrences.
+    pub async fn occurrences_of_rule(&self, artifact_id: &str, rule: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = 'due' AND rule = ?")
+            .bind(artifact_id)
+            .bind(rule)
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
+    /// Has a `COUNT=n` rule had its n occurrences? False for a rule with no
+    /// COUNT, which is open-ended, and for one that does not parse — an
+    /// unreadable rule is `next_after`'s to refuse, not this read's.
+    pub async fn rule_is_exhausted(&self, artifact_id: &str, rule: &str) -> Result<bool> {
+        let Some(count) = crate::core::moments::rule_count(rule) else { return Ok(false) };
+        Ok(self.occurrences_of_rule(artifact_id, rule).await? >= count as i64)
+    }
+
     pub async fn moment(&self, id: &str) -> Result<Option<Moment>> {
         Ok(sqlx::query("SELECT * FROM moments WHERE id = ?")
             .bind(id)
@@ -202,9 +237,19 @@ impl Store {
     }
 
     /// What the stage read last time, so a re-read replaces rather than
-    /// duplicates. A row somebody set is not the stage's to delete.
+    /// duplicates. A row somebody set is not the stage's to delete — and
+    /// neither is one that has since been acted on. Every embed re-arms this
+    /// stage, so without the second half a reindex or a switched embed model
+    /// would delete a reminder finished months ago and read it back fresh:
+    /// it would return to the band and push again. `done_at`, `notified_at`
+    /// and `snoozed_until` are the three marks that say a row has a history,
+    /// and a row with a history outlives the reading that made it.
     pub async fn delete_read_moments(&self, artifact_id: &str) -> Result<u64> {
-        Ok(sqlx::query("DELETE FROM moments WHERE artifact_id = ? AND source != 'set'")
+        Ok(sqlx::query(
+            "DELETE FROM moments
+              WHERE artifact_id = ? AND source != 'set'
+                AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL",
+        )
             .bind(artifact_id)
             .execute(&self.pool)
             .await?
@@ -227,7 +272,9 @@ impl Store {
     }
 
     /// The search lift's read: for these artifacts, the earliest open due
-    /// moment inside `[now, to)`.
+    /// moment before `to`, snoozes respected. No lower bound: a reminder that
+    /// is already overdue is the one that most deserves the badge and the
+    /// lift, and it is what `SearchResult::due_in`'s "1 h ago" is for.
     pub async fn due_for(&self, artifact_ids: &[String], now: i64, to: i64) -> Result<HashMap<String, i64>> {
         let mut out = HashMap::new();
         if artifact_ids.is_empty() {
@@ -236,11 +283,10 @@ impl Store {
         let marks = vec!["?"; artifact_ids.len()].join(",");
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT artifact_id, MIN(at) AS at FROM moments
-             WHERE kind = 'due' AND done_at IS NULL AND at >= ? AND at < ?
+             WHERE kind = 'due' AND done_at IS NULL AND at IS NOT NULL AND at < ?
                AND (snoozed_until IS NULL OR snoozed_until <= ?) AND artifact_id IN ({marks})
              GROUP BY artifact_id"
         )))
-        .bind(now)
         .bind(to)
         .bind(now);
         for id in artifact_ids {
@@ -363,7 +409,16 @@ impl Store {
     }
 
     pub async fn next_notify_at(&self) -> Result<Option<i64>> {
-        let r = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT MIN(COALESCE(m.snoozed_until, m.at)) AS at FROM moments m WHERE {OWED}")))
+        // The same join and the same status filter as `due_unnotified`: what
+        // the unit sleeps until must be something the unit will then find. A
+        // moment on an artifact that dedupe or a merge has since deprecated is
+        // invisible to the read but would still be the minimum here, and the
+        // job would wake, find nothing owed, and re-arm itself at that same
+        // past instant — forever.
+        let r = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT MIN(COALESCE(m.snoozed_until, m.at)) AS at FROM moments m
+             JOIN artifacts a ON a.id = m.artifact_id WHERE {OWED} AND a.status = 'active'"
+        )))
             .fetch_one(&self.pool)
             .await?;
         Ok(r.get("at"))
@@ -478,7 +533,68 @@ mod tests {
         s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
         let hit = s.due_for(&[aid.clone(), "other".into()], 500, 2_000).await.unwrap();
         assert_eq!(hit.get(&aid), Some(&1_000));
-        assert!(s.due_for(std::slice::from_ref(&aid), 1_500, 2_000).await.unwrap().is_empty(), "already past");
+        assert!(s.due_for(&["other".into()], 500, 2_000).await.unwrap().is_empty(), "not asked for");
+        assert!(s.due_for(std::slice::from_ref(&aid), 500, 900).await.unwrap().is_empty(), "past the window");
+    }
+
+    #[tokio::test]
+    async fn due_for_keeps_what_is_already_overdue() {
+        // The badge and the lift exist for the reminder you have missed as
+        // much as for the one ahead; `due_in` renders "1 h ago" for exactly
+        // this row.
+        let (s, aid) = store_with_artifact().await;
+        s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        let hit = s.due_for(std::slice::from_ref(&aid), 5_000, 9_000).await.unwrap();
+        assert_eq!(hit.get(&aid), Some(&1_000), "overdue still lifts");
+    }
+
+    #[tokio::test]
+    async fn what_the_unit_sleeps_until_is_something_it_will_then_find() {
+        // The wake time and the read must agree about the artifact. When they
+        // disagree the job wakes, finds nothing owed, re-arms itself at the
+        // same past instant, and spins.
+        let (s, aid) = store_with_artifact().await;
+        s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        assert_eq!(s.next_notify_at().await.unwrap(), Some(1_000));
+        s.set_artifact_status(&aid, crate::store::artifacts::ArtifactStatus::Deprecated).await.unwrap();
+        assert!(s.due_unnotified(9_000).await.unwrap().is_empty());
+        assert_eq!(s.next_notify_at().await.unwrap(), None, "nothing to find, so nothing to wait for");
+    }
+
+    #[tokio::test]
+    async fn a_re_read_replaces_what_was_read_and_keeps_what_was_acted_on() {
+        // Every embed re-arms the moments stage, so this runs on any reindex
+        // or embed-model switch. A reminder already finished or already pushed
+        // must not come back from it.
+        let (s, aid) = store_with_artifact().await;
+        let fresh = s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        let done = s.insert_moment(&due(&aid, Some(2_000))).await.unwrap();
+        let pushed = s.insert_moment(&due(&aid, Some(3_000))).await.unwrap();
+        let put_off = s.insert_moment(&due(&aid, Some(4_000))).await.unwrap();
+        s.mark_done(&done, 10).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&pushed), 10).await.unwrap();
+        s.snooze(&put_off, 9_000).await.unwrap();
+
+        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 1, "only the untouched reading");
+        assert!(s.moment(&fresh).await.unwrap().is_none());
+        for kept in [&done, &pushed, &put_off] {
+            assert!(s.moment(kept).await.unwrap().is_some(), "a row with a history outlives the reading");
+        }
+        assert!(s.has_moment_at(&aid, Kind::Due, 2_000).await.unwrap(), "and the stage knows not to make it twice");
+        assert!(!s.has_moment_at(&aid, Kind::Due, 1_000).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_counted_recurrence_is_exhausted_by_its_rows() {
+        let (s, aid) = store_with_artifact().await;
+        let mut m = due(&aid, Some(1_000));
+        m.rule = Some("FREQ=DAILY;COUNT=2".into());
+        assert!(!s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2").await.unwrap(), "none yet");
+        s.insert_moment(&m).await.unwrap();
+        assert!(!s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2").await.unwrap());
+        s.insert_moment(&m).await.unwrap();
+        assert!(s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2").await.unwrap(), "two of two");
+        assert!(!s.rule_is_exhausted(&aid, "FREQ=DAILY").await.unwrap(), "open-ended is never exhausted");
     }
 
     #[tokio::test]

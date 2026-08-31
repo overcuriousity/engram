@@ -482,7 +482,14 @@ struct Rule {
     by_day: Vec<Weekday>,
     by_month_day: Option<u32>,
     until: Option<i64>,
+    count: Option<u32>,
 }
+
+/// The largest INTERVAL the subset accepts. `next_after` walks day by day and
+/// its bound scales with the interval, so an unbounded one is an unbounded
+/// loop inside a request. Every hundredth year is past anything a reminder
+/// means, and a rule beyond it is a typo or an attack, not an intention.
+pub const MAX_INTERVAL: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Freq {
@@ -493,7 +500,8 @@ enum Freq {
 }
 
 fn parse_rule(rule: &str) -> Result<Rule, String> {
-    let mut r = Rule { freq: Freq::Daily, interval: 1, by_day: vec![], by_month_day: None, until: None };
+    let mut r =
+        Rule { freq: Freq::Daily, interval: 1, by_day: vec![], by_month_day: None, until: None, count: None };
     let mut has_freq = false;
     for part in rule.split(';').filter(|p| !p.is_empty()) {
         let (k, v) = part.split_once('=').ok_or_else(|| format!("not key=value: {part}"))?;
@@ -509,7 +517,11 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                 has_freq = true;
             }
             "INTERVAL" => {
-                r.interval = v.parse::<u32>().ok().filter(|n| *n >= 1).ok_or("INTERVAL must be a positive integer")?
+                r.interval = v
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| (1..=MAX_INTERVAL).contains(n))
+                    .ok_or_else(|| format!("INTERVAL must be between 1 and {MAX_INTERVAL}"))?
             }
             "BYDAY" => {
                 for d in v.split(',') {
@@ -538,7 +550,7 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                 r.until = Some(dt.and_utc().timestamp());
             }
             "COUNT" => {
-                v.parse::<u32>().map_err(|_| "COUNT must be an integer")?;
+                r.count = Some(v.parse::<u32>().ok().filter(|n| *n >= 1).ok_or("COUNT must be a positive integer")?);
             }
             other => return Err(format!("{other} is outside the subset")),
         }
@@ -553,9 +565,16 @@ pub fn validate_rule(rule: &str) -> Result<(), String> {
     parse_rule(rule).map(|_| ())
 }
 
+/// How many occurrences the rule allows in all, `None` for open-ended. A
+/// bounded recurrence is bounded by its rows: see `Store::occurrences_of_rule`
+/// and `complete_moment`, which is where this is enforced.
+pub fn rule_count(rule: &str) -> Option<u32> {
+    parse_rule(rule).ok()?.count
+}
+
 /// The next occurrence strictly after `at`, keeping `at`'s wall-clock time in
-/// `tz`. None when the rule is exhausted or invalid. COUNT is the caller's to
-/// enforce by counting rows.
+/// `tz`. None when the rule is exhausted or invalid. COUNT is enforced by
+/// `complete_moment`, which counts the occurrences already on the artifact.
 pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
     let r = parse_rule(rule).ok()?;
     let start = tz.timestamp_opt(at, 0).single()?;
@@ -619,7 +638,12 @@ impl crate::core::Core {
         let now = self.clock.now();
         if let Some(m) = self.store.moment(id).await? {
             self.store.mark_done(id, now).await?;
+            // A bounded recurrence is bounded by its rows: the done row stays,
+            // so the occurrences that have existed are the ones on the
+            // artifact carrying this rule — including the one just completed.
+            // At COUNT, nothing further is armed.
             if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
+                && !self.store.rule_is_exhausted(&m.artifact_id, rule).await?
                 && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
             {
                 self.store
@@ -693,6 +717,37 @@ impl crate::core::Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_counted_recurrence_stops_at_its_count() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let out = core.ingest_capture(crate::core::ingest::Capture::new("Water the plants", "ui")).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let rule = "FREQ=DAILY;COUNT=2";
+        let first = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp()),
+                tz: "Europe/Berlin".into(),
+                rule: Some(rule.into()),
+                source: Source::Cue,
+                span: None,
+            })
+            .await
+            .unwrap();
+
+        core.complete_moment(&first).await.unwrap();
+        assert_eq!(core.store.occurrences_of_rule(&aid, rule).await.unwrap(), 2, "the second occurrence is armed");
+        let second = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(second.len(), 1);
+        core.complete_moment(&second[0].moment.id).await.unwrap();
+        assert_eq!(core.store.occurrences_of_rule(&aid, rule).await.unwrap(), 2, "two of two, and no third");
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
+    }
 
     #[test]
     fn examples_come_from_the_prototypes_in_the_readers_language() {
@@ -891,9 +946,21 @@ mod tests {
         ] {
             assert!(validate_rule(ok).is_ok(), "{ok}");
         }
-        for bad in ["FREQ=HOURLY", "FREQ=WEEKLY;BYDAY=2MO", "BYDAY=MO", "FREQ=WEEKLY;BYSETPOS=1", ""] {
+        for bad in [
+            "FREQ=HOURLY",
+            "FREQ=WEEKLY;BYDAY=2MO",
+            "BYDAY=MO",
+            "FREQ=WEEKLY;BYSETPOS=1",
+            "",
+            // `next_after` walks day by day and its bound scales with the
+            // interval: unbounded here is an unbounded loop inside a request.
+            "FREQ=DAILY;INTERVAL=0",
+            "FREQ=DAILY;INTERVAL=4000000000",
+        ] {
             assert!(validate_rule(bad).is_err(), "{bad}");
         }
+        assert_eq!(rule_count("FREQ=DAILY;COUNT=5"), Some(5), "COUNT is kept, not discarded");
+        assert_eq!(rule_count("FREQ=DAILY"), None);
     }
 
     #[test]

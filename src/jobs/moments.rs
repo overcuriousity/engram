@@ -34,9 +34,15 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
 
     core.store.delete_read_moments(artifact_id).await?;
 
-    // 3. Absolute dates, every artifact, no model.
+    // 3. Absolute dates, every artifact, no model. A date a kept row already
+    // covers is not inserted again: `delete_read_moments` leaves behind what
+    // has been done, pushed or snoozed, and re-reading the same prose must not
+    // put a second copy of it on the page.
     let found = absolute_dates(&art.text, src.created_at, tz, month_first);
     for f in &found {
+        if core.store.has_moment_at(artifact_id, Kind::Event, f.at).await? {
+            continue;
+        }
         core.store
             .insert_moment(&NewMoment {
                 artifact_id: artifact_id.into(),
@@ -74,6 +80,11 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         }
         Some(Intent::Remind) => {
             let (at, rule) = date_reminder(core, &art.text, src.created_at, tz, &tz_name, &found).await;
+            if let Some(at) = at
+                && core.store.has_moment_at(artifact_id, Kind::Due, at).await?
+            {
+                return Ok(());
+            }
             core.store
                 .insert_moment(&NewMoment {
                     artifact_id: artifact_id.into(),
@@ -182,6 +193,41 @@ mod tests {
         let captured = core.store.get_corpus(&cid).await.unwrap().created_at;
         let at = rows[0].moment.at.unwrap();
         assert!(at > captured && at < captured + 2 * 86_400, "tomorrow 09:00 lies within two days");
+    }
+
+    #[tokio::test]
+    async fn a_re_read_does_not_resurrect_a_finished_reminder() {
+        // Every embed re-arms this stage, so a reindex or an embed-model
+        // switch runs it again over the same prose. What the operator already
+        // finished must not come back and must not be pushed again.
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (_, aid) = first_passage(&core, "Remind me tomorrow to send the invoice", "ui", Some("Europe/Berlin")).await;
+        run(&core, &aid).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let id = rows[0].moment.id.clone();
+        core.store.mark_done(&id, crate::store::now()).await.unwrap();
+
+        run(&core, &aid).await.unwrap();
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "it stays done");
+        assert!(core.store.moment(&id).await.unwrap().unwrap().done_at.is_some(), "and it is the same row");
+    }
+
+    #[tokio::test]
+    async fn a_re_read_does_not_double_a_date_already_pushed() {
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (_, aid) =
+            first_passage(&core, "Remind me tomorrow to send the invoice", "ui", Some("Europe/Berlin")).await;
+        run(&core, &aid).await.unwrap();
+        let id = core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.id.clone();
+        core.store.mark_notified(std::slice::from_ref(&id), crate::store::now()).await.unwrap();
+
+        run(&core, &aid).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "one reminder, not two");
+        assert_eq!(rows[0].moment.id, id, "the row that was pushed, not a fresh one owed a push");
     }
 
     #[tokio::test]

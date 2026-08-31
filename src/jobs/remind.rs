@@ -52,8 +52,13 @@ pub async fn push(http: &reqwest::Client, target: &Target, title: &str, message:
 }
 
 /// Post what is owed, one message per moment, record it, and sleep until the
-/// next. A failed post returns the error so the queue backs off; nothing is
-/// marked notified that was not delivered.
+/// next.
+///
+/// A moment is marked notified once any channel has taken it, and the error
+/// is returned only when every channel refused. Retrying a moment that
+/// reached one of two channels would deliver it twice there, and a duplicate
+/// push is worse than a missing one on the flakier channel — the row itself
+/// is still on the band either way.
 pub async fn run(core: &Core) -> Result<()> {
     let targets = notify_targets(&core.store.control.notify(&core.store.subject).await?);
     if targets.is_empty() {
@@ -71,8 +76,19 @@ pub async fn run(core: &Core) -> Result<()> {
             crate::core::moments::zone(Some(&row.moment.tz)),
         );
         let message = format!("{}\n{}", row.opening, when);
+        let mut delivered = false;
+        let mut failure = None;
         for t in &targets {
-            push(&http, t, &row.title, &message).await?;
+            match push(&http, t, &row.title, &message).await {
+                Ok(()) => delivered = true,
+                Err(e) => {
+                    tracing::warn!(moment_id = %row.moment.id, error = %e, "a push channel refused");
+                    failure = Some(e);
+                }
+            }
+        }
+        if !delivered {
+            return Err(failure.expect("targets is non-empty, so a run with no delivery has an error"));
         }
         core.store.mark_notified(std::slice::from_ref(&row.moment.id), now).await?;
     }
@@ -119,6 +135,62 @@ mod tests {
         .fetch_optional(&core.store.control.pool)
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn one_channel_refusing_does_not_push_the_other_one_twice() {
+        // The retry would re-post to the channel that already took it. A row
+        // delivered somewhere is a row that has been delivered.
+        let good = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&good)
+            .await;
+        let bad = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&bad)
+            .await;
+        let mut core = test_core().await;
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({
+                    "gotify": {"url": format!("{}/message", good.uri()), "token": "tok"},
+                    "unifiedpush": {"endpoint": format!("{}/up", bad.uri())},
+                }),
+            )
+            .await
+            .unwrap();
+        let now = crate::store::now();
+        core.clock = Clock::Fixed(now);
+        let id = due_at(&core, now - 10).await;
+
+        run(&core).await.unwrap();
+        assert!(core.store.moment(&id).await.unwrap().unwrap().notified_at.is_some(), "delivered somewhere");
+        run(&core).await.unwrap(); // the retry: `expect(1)` on the good server verifies on drop
+    }
+
+    #[tokio::test]
+    async fn nothing_delivered_anywhere_is_still_an_error() {
+        let bad = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&bad)
+            .await;
+        let mut core = test_core().await;
+        core.store
+            .control
+            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": format!("{}/up", bad.uri())}}))
+            .await
+            .unwrap();
+        let now = crate::store::now();
+        core.clock = Clock::Fixed(now);
+        let id = due_at(&core, now - 10).await;
+        assert!(run(&core).await.is_err(), "the queue backs off");
+        assert!(core.store.moment(&id).await.unwrap().unwrap().notified_at.is_none());
     }
 
     #[tokio::test]

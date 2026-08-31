@@ -87,9 +87,21 @@ impl DayTemplate {
 
 /// The day's `[from, to)` in Unix seconds, in the viewer's zone.
 fn bounds(date: NaiveDate, tz: Tz) -> Option<(i64, i64)> {
-    let from = tz.from_local_datetime(&date.and_hms_opt(0, 0, 0)?).earliest()?.timestamp();
-    let to = tz.from_local_datetime(&(date + chrono::Duration::days(1)).and_hms_opt(0, 0, 0)?).earliest()?.timestamp();
-    Some((from, to))
+    Some((day_start(date, tz)?, day_start(date + chrono::Duration::days(1), tz)?))
+}
+
+/// Local midnight — or, where there is no local midnight, the first instant of
+/// the day there is. A zone whose clocks go forward at 00:00 (Havana, and
+/// Santiago and São Paulo historically) has one day a year with no 00:00 at
+/// all, and that day's page is reachable from every "today" link.
+fn day_start(date: NaiveDate, tz: Tz) -> Option<i64> {
+    for hour in 0..4 {
+        let local = date.and_hms_opt(hour, 0, 0)?;
+        if let Some(d) = tz.from_local_datetime(&local).earliest() {
+            return Some(d.timestamp());
+        }
+    }
+    None
 }
 
 fn hm(at: i64, tz: Tz) -> String {
@@ -216,7 +228,11 @@ async fn set_entry(
     let back = headers
         .get("referer")
         .and_then(|v| v.to_str().ok())
-        .filter(|r| r.starts_with('/') || r.contains("/ui/"))
+        // Only a path of our own. An absolute URL is somebody else's origin
+        // however much of "/ui/" it contains, and this is a 303 out of an
+        // authenticated route: `https://evil.example/ui/` would be an open
+        // redirect. `//host` is protocol-relative and is a URL, not a path.
+        .filter(|r| r.starts_with('/') && !r.starts_with("//"))
         .unwrap_or("/ui/day/today")
         .to_string();
     Ok(Redirect::to(&back).into_response())
@@ -255,6 +271,30 @@ mod tests {
         assert!(html.contains("Nothing on this day"));
         assert!(html.contains(r#"action="/ui/day/2026-08-30/entry""#));
         assert!(html.contains("/ui/day/2026-08-29") && html.contains("/ui/day/2026-08-31"));
+    }
+
+    #[test]
+    fn a_day_with_no_local_midnight_still_has_bounds() {
+        // Havana moved its clocks forward at 00:00 on 2026-03-08: there is no
+        // 00:00 that day, and `.earliest()` on it is None. The day page is
+        // reachable from every "today" link and must not 404 for it.
+        let tz: Tz = "America/Havana".parse().unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
+        let (from, to) = bounds(day, tz).expect("the day starts at 01:00, not never");
+        assert!(from < to);
+        assert_eq!(hm(from, tz), "01:00");
+    }
+
+    #[tokio::test]
+    async fn the_entry_toggle_does_not_redirect_off_site() {
+        let core = test_core().await;
+        let out = core.ingest_capture(crate::core::ingest::Capture::new("Long day.", "ui")).await.unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let mut req = form(&format!("/ui/corpora/{}/entry", out.id), &cookie, "on=1");
+        req.headers_mut().insert("referer", "https://evil.example/ui/".parse().unwrap());
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers()["location"], "/ui/day/today", "an absolute URL is somebody else's origin");
     }
 
     #[tokio::test]

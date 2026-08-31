@@ -63,13 +63,23 @@ pub(crate) struct EventView {
     pub span: String,
 }
 
+/// The row the viewer just acted on: what happened to it, and the route that
+/// takes it back. A snooze that says "Done" and offers `undone` undoes
+/// nothing — `undone` clears a `done_at` that is already NULL and leaves
+/// `snoozed_until` set, so the row stays hidden with no way back.
+pub(crate) struct Just {
+    pub id: String,
+    pub verb: &'static str,
+    pub undo: &'static str,
+}
+
 #[derive(Template)]
 #[template(path = "_due.html")]
 pub(crate) struct DueTemplate {
     pub rows: Vec<DueView>,
     pub events: Vec<EventView>,
     pub tz: String,
-    pub just: Option<String>,
+    pub just: Option<Just>,
     /// The stamp this render happened at, sent back with the next request so
     /// the band can tell a row the viewer has already seen from one that
     /// arrived while they were looking elsewhere. The band is stateless; this
@@ -122,13 +132,14 @@ pub(crate) fn when_words(at: i64, now: i64, tz: Tz) -> String {
     }
 }
 
-async fn render(
-    tenant: &Tenant,
-    tz_name: &str,
-    just: Option<String>,
-    since: i64,
-) -> Result<Response> {
+async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64) -> Result<Response> {
     let tz = zone(Some(tz_name));
+    // The zone as the zone table spells it, never as the form spelled it. It
+    // is echoed back into the fragment's `hx-vals` JSON, and Askama's escaping
+    // does not survive the round trip through the HTML parser: a quote in the
+    // value would break the JSON and every button on the band would silently
+    // stop sending the zone. An unknown name is UTC here, as everywhere.
+    let tz_name = tz.name();
     let now = tenant.core.clock.now();
     let horizon = now + tenant.core.time.horizon_hours as i64 * 3_600;
     let rows = tenant
@@ -190,7 +201,7 @@ async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
 
 async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.complete_moment(&id).await?;
-    render(&tenant, &f.tz, Some(id), f.since).await
+    render(&tenant, &f.tz, Some(Just { id, verb: "Done", undo: "undone" }), f.since).await
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -221,11 +232,13 @@ fn snooze_until(word: &str, now: i64, tz: Tz) -> Option<i64> {
 }
 
 async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+    let mut just = None;
     if let Some(until) = snooze_until(&f.until, tenant.core.clock.now(), zone(Some(&f.tz))) {
         tenant.core.store.snooze(&id, until).await?;
         tenant.core.store.rearm_remind().await?;
+        just = Some(Just { id, verb: "Snoozed", undo: "unsnooze" });
     }
-    render(&tenant, &f.tz, Some(id), f.since).await
+    render(&tenant, &f.tz, just, f.since).await
 }
 
 async fn unsnooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -249,7 +262,7 @@ async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
                 artifact_id: m.artifact_id,
                 kind: Kind::Due,
                 at: Some(at),
-                tz: f.tz.clone(),
+                tz: tz.name().to_string(),
                 rule: m.rule,
                 source: Source::Set,
                 span: None,
@@ -436,6 +449,41 @@ mod tests {
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(until, 0).unwrap();
         assert_eq!(local.format("%H:%M").to_string(), "09:00");
         assert!(until > crate::store::now());
+    }
+
+    #[tokio::test]
+    async fn a_snooze_says_snoozed_and_its_undo_unsnoozes() {
+        // "Done" with an `undone` button would clear a `done_at` that is
+        // already NULL, leave `snoozed_until` set, and the row would stay gone.
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() - 60)).await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let html = body_of(
+            app.clone()
+                .oneshot(form(&format!("/ui/moments/{id}/snooze"), &cookie, "until=hour&tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("Snoozed"), "{html}");
+        assert!(html.contains(&format!("/ui/moments/{id}/unsnooze")), "the undo undoes this: {html}");
+        assert!(!html.contains(&format!("/ui/moments/{id}/undone")));
+
+        app.oneshot(form(&format!("/ui/moments/{id}/unsnooze"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        assert!(core.store.moment(&id).await.unwrap().unwrap().snoozed_until.is_none(), "and it comes back");
+    }
+
+    #[tokio::test]
+    async fn the_zone_is_echoed_as_the_zone_table_spells_it() {
+        // It lands inside the fragment's `hx-vals` JSON, where a quote would
+        // break every button on the band.
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe%2FBerlin%22%2C%22x%22%3A%22")).await.unwrap(),
+        )
+        .await;
+        assert!(html.contains(r#"{"tz": "UTC""#), "an unreadable zone is UTC, not echoed back: {html}");
     }
 
     #[tokio::test]

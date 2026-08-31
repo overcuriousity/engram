@@ -13,7 +13,8 @@
    nothing.
 
    `just` is the row the viewer acted on, shown struck through with its undo
-   for this render only.
+   for this render only — its own undo: what undoes a snooze is not what
+   undoes a completion.
    `hx-vals` on the container is inherited by every button in it, so each
    action carries the viewer's zone — and `since`, which is when this render
    happened. The band keeps no state anywhere else: a row created after the
@@ -23,8 +24,8 @@
      hx-trigger="refresh{% if let Some(s) = refresh_in %}, every {{ s }}s{% endif %}"
      hx-vals='{"tz": "{{ tz }}", "since": "{{ since }}"}'>
 {% if let Some(j) = just %}
-  <p class="due-row due-done muted"><span class="due-title">Done</span>
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ j }}/undone" hx-target="#due" hx-swap="outerHTML">undo</button></p>
+  <p class="due-row due-done muted"><span class="due-title">{{ j.verb }}</span>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ j.id }}/{{ j.undo }}" hx-target="#due" hx-swap="outerHTML">undo</button></p>
 {% endif %}
 {% for r in rows %}
   {# `due-new` is on a row whose moment did not exist when this band last

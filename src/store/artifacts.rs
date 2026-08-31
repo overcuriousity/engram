@@ -1440,6 +1440,11 @@ impl Store {
     /// must keep its text whatever a model thinks of it. Oldest retirement
     /// first, so the backlog drains in the order it accumulated.
     ///
+    /// `kind = 'due'` and not every kind, for the same reason
+    /// `has_open_reminder_for_corpus` says so: an event is a date the prose
+    /// mentions, nobody ever completes it, and counting it here would make
+    /// every artifact a date was read out of permanently un-reapable.
+    ///
     /// Age reads `retired_at` and nothing else. A retired row whose stamp is
     /// NULL predates the column; `stamp_unaged_retired` gives it a fresh clock
     /// and this query simply does not see it until that clock runs.
@@ -1451,7 +1456,7 @@ impl Store {
                 AND retired_at IS NOT NULL AND retired_at < ?
                 AND NOT EXISTS (SELECT 1 FROM moments m
                                  WHERE m.artifact_id = artifacts.id
-                                   AND m.done_at IS NULL)
+                                   AND m.kind = 'due' AND m.done_at IS NULL)
               ORDER BY retired_at ASC
               LIMIT ?",
         )
