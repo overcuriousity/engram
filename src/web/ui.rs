@@ -609,8 +609,15 @@ pub(crate) struct IdleFootTemplate {
     /// counts to print and no last capture to name, so the line says what the
     /// program is for instead.
     pub(crate) held: bool,
-    /// The echo slot, emptied. An empty box proves no intent, and an echo left
-    /// standing over one would be describing text that is gone.
+    /// The echo slot, emptied — and only where this fragment is a *swap*.
+    ///
+    /// An empty box proves no intent, and an echo left standing over one would
+    /// be describing text that is gone, so the box-clear response has to carry
+    /// this. On first paint it is empty instead: the slot already exists in
+    /// `_box_hint.html` under the box, an out-of-band attribute is inert on a
+    /// page that was never swapped, and rendering it anyway gave the document
+    /// two `id="intent-echo"` elements — of which htmx would only ever resolve
+    /// the first.
     pub(crate) echo: String,
 }
 
@@ -646,7 +653,9 @@ pub(crate) fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &
 /// Two counts and the last few captures, off the slimmest reads there are:
 /// the idle rail is on the most-opened screen, re-renders on every box-clear,
 /// and must cost nothing.
-pub(crate) async fn idle_foot(tenant: &Tenant) -> Result<IdleFootTemplate> {
+/// `oob` says which of the two renderings this is: the swap that returns the
+/// page to idle carries the emptied echo, the inline first paint does not.
+pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemplate> {
     let (corpora, artifacts) = tenant.core.store.held_brief().await?;
     let recent = tenant
         .core
@@ -670,7 +679,11 @@ pub(crate) async fn idle_foot(tenant: &Tenant) -> Result<IdleFootTemplate> {
         corpora,
         recent,
         held: corpora > 0,
-        echo: render_echo(&intent_echo("", None, 0)),
+        echo: if oob {
+            render_echo(&intent_echo("", None, 0))
+        } else {
+            String::new()
+        },
     })
 }
 
@@ -1250,7 +1263,7 @@ pub(crate) async fn search_results(
     // limit is on the door rather than in app.js because it is the embedder's
     // bill either way, whatever the client was.
     if p.q.trim().is_empty() || p.q.chars().count() > MAX_QUERY_CHARS {
-        return Ok(HtmlTemplate(idle_foot(&tenant).await?).into_response());
+        return Ok(HtmlTemplate(idle_foot(&tenant, true).await?).into_response());
     }
 
     // The same terms the sparse branch derives, handed to the client so
@@ -4751,6 +4764,29 @@ mod tests {
             !html.contains("or drop one anywhere on the page."),
             "the attach prose is on the button's title: {html}"
         );
+        // One of each, and both under the box.
+        //
+        // `_box_hint.html` was included twice — once in the search form and
+        // once inside `#idle` — so an idle page printed the guidance sentence
+        // and both example chips twice and carried duplicate `id="box-hint"`
+        // and `id="intent-echo"` elements. An out-of-band swap resolves the
+        // first match only, which made every copy below it dead markup, and
+        // the textarea's `aria-describedby` names the id once.
+        assert_eq!(
+            html.matches(r#"id="box-hint""#).count(),
+            1,
+            "the hint under the box is in the document once: {html}"
+        );
+        assert_eq!(
+            html.matches(r#"id="intent-echo""#).count(),
+            1,
+            "and so is the slot the echo swaps into: {html}"
+        );
+        // Under the box, not inside the column app.js hides on the first
+        // keystroke: the echo says what is being typed *now*.
+        let tpl = include_str!("templates/workspace.html");
+        let hint = tpl.find(r#"{% include "_box_hint.html" %}"#).expect("the include");
+        assert!(hint < tpl.find(r#"<div id="idle""#).expect("the column"));
 
         // A base with something in it introduces itself.
         core.ingest_capture(crate::core::ingest::Capture::new(

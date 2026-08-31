@@ -270,7 +270,7 @@ async fn base_template(
     // flicker under a result set that is about to arrive — and a deep link
     // whose box is cleared has to find the line already there, because what
     // comes back from the results endpoint is an out-of-band swap onto it.
-    let idle = crate::web::ui::idle_foot(tenant)
+    let idle = crate::web::ui::idle_foot(tenant, false)
         .await?
         .render()
         .map_err(|e| crate::error::Error::Internal(e.to_string()))?;

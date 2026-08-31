@@ -553,6 +553,41 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
     }
 }
 
+/// Retired notes to the tail, then the cliff, then the tail marked with it.
+///
+/// One function because the order is the whole of it. Marks, never reorders
+/// beyond the demotion, never drops.
+///
+/// `mark_past_cliff` guarantees that what it marks is a *suffix* of the list,
+/// and `ask` truncates at the first marked hit — so marking a row in the
+/// middle would silently cut the answer short. `sort_by_key` is stable, so
+/// every other row keeps the order the ranking produced.
+///
+/// The cliff is read over the live prefix and not the whole list. A retired
+/// row keeps its score, and a retired row with a *high* one — demoted here,
+/// not dropped — lands at the tail and makes the last position satisfy
+/// `score >= cut`: `mark_past_cliff` then finds its `from` at the end of the
+/// list and marks nothing at all. Scores `[0.90(retired), 0.88, 0.87, 0.30,
+/// 0.29]` gave a cut of 0.87 and left the 0.30 and 0.29 above the line — in
+/// `ask`, back in the answer — so one retired row switched the cliff off for
+/// everything. The retired tail is marked below whatever the cliff says, so
+/// reading the cliff over the rows the cliff is about costs nothing and is the
+/// only reading that means anything.
+fn sink_retired_and_mark_the_cliff(results: &mut [SearchResult], reranked: bool) {
+    results.sort_by_key(|r| r.retired);
+    let live = results
+        .iter()
+        .position(|r| r.retired)
+        .unwrap_or(results.len());
+    mark_past_cliff(&mut results[..live], reranked);
+    for r in results.iter_mut().filter(|r| r.retired) {
+        r.past_cliff = true;
+        if let Some(e) = r.explanation.as_mut() {
+            e.past_cliff = true;
+        }
+    }
+}
+
 /// Activation above the capture baseline, per artifact: what use has added,
 /// and nothing else. The arithmetic is `links::engagement_at`, which promotion
 /// and the insights page read the same quantity through.
@@ -1726,20 +1761,8 @@ impl Core {
             .count();
         // On the list the caller will see, in its final order: after priming,
         // after the truncate, and before association appends hits that never
-        // competed for a place. Marks, never reorders or drops.
-        // Retired notes go to the tail before the cliff is read, never after.
-        // `mark_past_cliff` guarantees that what it marks is a *suffix* of the
-        // list, and `ask` truncates at the first marked hit — so marking a row
-        // in the middle would silently cut the answer short. `sort_by_key` is
-        // stable, so every other row keeps the order the ranking produced.
-        results.sort_by_key(|r| r.retired);
-        mark_past_cliff(&mut results, reranked);
-        for r in results.iter_mut().filter(|r| r.retired) {
-            r.past_cliff = true;
-            if let Some(e) = r.explanation.as_mut() {
-                e.past_cliff = true;
-            }
-        }
+        // competed for a place.
+        sink_retired_and_mark_the_cliff(&mut results, reranked);
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
@@ -4424,6 +4447,70 @@ mod tests {
         let mut flat = vec![dummy("a", 0.5), dummy("b", 0.5), dummy("c", 0.5)];
         mark_past_cliff(&mut flat, true);
         assert!(flat.iter().all(|r| !r.past_cliff));
+    }
+
+    /// One retired row used to switch the cliff off for the whole list.
+    ///
+    /// A retired hit is demoted to the tail, not dropped, and it keeps its
+    /// score. With a high one it made the *last* position satisfy `score >=
+    /// cut`, so the mark started at the end of the list and the genuinely weak
+    /// rows above it lost the mark — in `ask`, they were no longer truncated
+    /// out of the answer. The cliff is read over the live prefix now, and the
+    /// retired tail is marked whatever the cliff said.
+    #[test]
+    fn a_retired_hit_at_the_tail_does_not_take_the_cliff_with_it() {
+        let dummy = |id: &str, score: f32, retired: bool| SearchResult {
+            artifact_id: id.into(),
+            corpus_id: "c".into(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            in_sitting: false,
+            due_at: None,
+            due_in: None,
+            past_cliff: false,
+            retired,
+            similarity: None,
+            titled_by_corpus: false,
+            via: None,
+            reason: None,
+            explanation: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+        };
+        // The retired row scores highest of all, and is first in the ranking.
+        let mut results = vec![
+            dummy("retired", 0.90, true),
+            dummy("a", 0.88, false),
+            dummy("b", 0.87, false),
+            dummy("c", 0.30, false),
+            dummy("d", 0.29, false),
+        ];
+        sink_retired_and_mark_the_cliff(&mut results, true);
+        assert_eq!(
+            results
+                .iter()
+                .map(|r| r.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d", "retired"],
+            "the retired row sinks to the tail"
+        );
+        assert_eq!(
+            results.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, true, true, true],
+            "the fall between 0.87 and 0.30 is still where the cliff is"
+        );
+        // And what is marked is still a suffix, which is what `ask` truncates on.
+        let first = results.iter().position(|r| r.past_cliff).unwrap();
+        assert!(results[first..].iter().all(|r| r.past_cliff));
     }
 
     /// The default configuration has no reranker, and the scores are then

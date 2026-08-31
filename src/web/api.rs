@@ -355,6 +355,39 @@ pub(crate) fn capture_time(
     Ok(CaptureTime { tz, origin, intent })
 }
 
+/// Refuse the three time fields on a capture that is not verbatim text.
+///
+/// They used to be validated and then silently dropped: only the text branch
+/// applies them, so `{"url": …, "tz": "Europe/Berlin"}` came back a success
+/// with any date in the fetched page read in the server's zone, and
+/// `origin=journal` on a URL was accepted and ignored.
+///
+/// Refused rather than honoured, because for a fetched page and an uploaded
+/// file two of the three cannot mean anything: `origin` there is the *reader*
+/// — `web`, `pdf`, `image`, decided by what came back — not a claim the caller
+/// gets to make, and `intent` is a statement about a sentence somebody typed.
+/// `tz` would mean something, and does not reach the segmentation path for
+/// those captures; saying so is the honest answer until it does.
+pub(crate) fn refuse_time_fields(
+    tz: Option<&str>,
+    origin: Option<&str>,
+    intent: Option<&str>,
+) -> Result<()> {
+    let named: Vec<&str> = [("tz", tz), ("origin", origin), ("intent", intent)]
+        .into_iter()
+        .filter(|(_, v)| v.is_some_and(|v| !v.trim().is_empty()))
+        .map(|(k, _)| k)
+        .collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Validation(format!(
+        "{} only applies to a text capture — a link or a file is read by the server, \
+         and its origin and any date in it come from what it turns out to be",
+        named.join(", ")
+    )))
+}
+
 /// Whether a body is one link and nothing else.
 ///
 /// The single guess this endpoint makes, and it is made because every share
@@ -480,7 +513,12 @@ async fn capture(
         let text = String::from_utf8(bytes.to_vec())
             .map_err(|_| Error::Validation("that body is not valid UTF-8 text".into()))?;
         let out = match only_a_url(&text) {
-            Some(u) => tenant.core.ingest_url(&u, q.title, q.note).await?,
+            Some(u) => {
+                // The body is one link, so this is a fetch and not a capture
+                // of what was sent. See `refuse_time_fields`.
+                refuse_time_fields(q.tz.as_deref(), q.origin.as_deref(), q.intent.as_deref())?;
+                tenant.core.ingest_url(&u, q.title, q.note).await?
+            }
             None => {
                 tenant
                     .core
@@ -504,10 +542,15 @@ async fn capture(
         let (mut fields, files) = read_capture_parts(m).await?;
         let title = q.title.or_else(|| fields.remove("title"));
         let note = q.note.or_else(|| fields.remove("note"));
+        // Read out before `capture_time` takes them, so the refusal below can
+        // still name what the caller sent in the form as well as in the query.
+        let raw_tz = fields.remove("tz");
+        let raw_origin = fields.remove("origin");
+        let raw_intent = fields.remove("intent");
         let time = capture_time(
-            q.tz.or_else(|| fields.remove("tz")),
-            q.origin.or_else(|| fields.remove("origin")),
-            q.intent.or_else(|| fields.remove("intent")),
+            q.tz.clone().or_else(|| raw_tz.clone()),
+            q.origin.clone().or_else(|| raw_origin.clone()),
+            q.intent.clone().or_else(|| raw_intent.clone()),
             ORIGIN_WEB,
         )?;
         let mut out: Vec<crate::core::ingest::IngestOutcome> = Vec::new();
@@ -521,6 +564,18 @@ async fn capture(
                 .get("text")
                 .and_then(|t| only_a_url(t).map(|u| u.to_string()))
         });
+        // Nothing here will be a text capture, so nothing here can carry the
+        // three fields. Judged after `shared_url` is resolved, because a `url`
+        // takes the text with it and a share that turns out to be a link is a
+        // fetch. Where a text part *is* captured they apply to it, and the
+        // files beside it are read on their own terms as they always were.
+        if shared_url.is_some() || !fields.contains_key("text") {
+            refuse_time_fields(
+                q.tz.as_deref().or(raw_tz.as_deref()),
+                q.origin.as_deref().or(raw_origin.as_deref()),
+                q.intent.as_deref().or(raw_intent.as_deref()),
+            )?;
+        }
         if let Some(raw) = shared_url {
             fields.remove("text");
             let u = url::Url::parse(&raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
@@ -615,6 +670,8 @@ async fn capture(
                 ceiling / (1024 * 1024)
             )));
         }
+        // A PDF or a photo, read by the server on its own terms.
+        refuse_time_fields(q.tz.as_deref(), q.origin.as_deref(), q.intent.as_deref())?;
         let out = tenant
             .core
             .ingest_file(bytes.to_vec(), None, q.title, q.note, ORIGIN_WEB)
@@ -4110,6 +4167,71 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
+
+    /// The three fields reach only the text branch, so a capture that is not
+    /// verbatim text has to refuse them rather than take them and drop them.
+    ///
+    /// They were validated and then silently ignored: a client sending
+    /// `?tz=Europe/Berlin` with a link got a 201 and any date in the fetched
+    /// page read in the server's zone, and `origin=journal` on a link was
+    /// accepted and had no effect at all.
+    #[tokio::test]
+    async fn the_time_fields_are_refused_where_they_would_be_dropped() {
+        let (app, token) = app_and_token().await;
+        let text = |uri: &str, body: &str| {
+            Request::builder()
+                .uri(uri)
+                .method("POST")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "text/plain")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        // A body that is one link is a fetch, not a capture of what was sent.
+        for uri in [
+            "/api/v1/capture?tz=Europe/Berlin",
+            "/api/v1/capture?origin=journal",
+            "/api/v1/capture?intent=remind",
+        ] {
+            let res = app.clone().oneshot(text(uri, "https://example.com/a")).await.unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{uri} was accepted and dropped");
+        }
+        // A PDF or an image read by the server, same answer.
+        let res = app
+            .clone()
+            .oneshot(raw_post("/api/v1/capture?tz=Europe/Berlin", &token, "image/png", &a_png()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        // A multipart carrying only files, same answer.
+        let res = app
+            .clone()
+            .oneshot(multipart(
+                "/api/v1/capture?tz=Europe/Berlin",
+                &token,
+                &[],
+                &[FilePart {
+                    field: "file",
+                    filename: "a.txt",
+                    mime: Some("text/plain"),
+                    body: b"a procedure worth keeping",
+                }],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        // But a multipart whose text part IS the capture still takes them.
+        let res = app
+            .oneshot(multipart(
+                "/api/v1/capture",
+                &token,
+                &[("text", "Heute war ein langer Tag."), ("tz", "Europe/Berlin")],
+                &[],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
 }
 
 #[cfg(test)]
@@ -4565,4 +4687,5 @@ mod patch_tests {
         let res = app.oneshot(text("/api/v1/capture?origin=mcp", "x")).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
+
 }

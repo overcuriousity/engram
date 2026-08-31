@@ -447,6 +447,18 @@ impl PkdbTools {
             return "Ingest failed: supply exactly one of `text`, `url` or `file_base64`."
                 .to_string();
         }
+        // Before `capture_time` takes them: the three fields reach only the
+        // text branch, and a client told "Stored" while its zone was dropped
+        // has been lied to.
+        if p.text.is_none()
+            && let Err(e) = crate::web::api::refuse_time_fields(
+                p.tz.as_deref(),
+                p.origin.as_deref(),
+                p.intent.as_deref(),
+            )
+        {
+            return format!("Ingest failed: {e}");
+        }
         let time = match crate::web::api::capture_time(p.tz, p.origin, p.intent, ORIGIN_MCP) {
             Ok(t) => t,
             Err(e) => return format!("Ingest failed: {e}"),

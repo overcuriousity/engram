@@ -247,8 +247,10 @@
 
 {# The idle column: everything the page shows when nobody has typed. One
    element, because app.js hides and reveals it as a unit, and because the
-   four things in it are one statement — here is how to write to me, here is
-   something you might want, here is what you asked for, here is what I hold.
+   three things in it are one statement — here is something you might want,
+   here is what you asked for, here is what I hold. The line that says how to
+   write to me is not among them: it lives under the box, where it still means
+   something once someone has started typing.
 
    Hidden rather than removed on the first keystroke. Removing it is what made
    a reminder armed by a capture invisible until a reload: the capture empties
@@ -259,7 +261,14 @@
    the band is below it: the eye lands last on the thing that earned the
    space. #}
 <div id="idle"{% if !idle_state %} hidden{% endif %}>
-  {% include "_box_hint.html" %}
+  {# `_box_hint.html` is NOT included here. It belongs to the box: the textarea
+     names it in `aria-describedby`, and the `#intent-echo` slot inside it is
+     what says what the box just read — both of which have to survive the first
+     keystroke, which is exactly when this column is hidden. Included a second
+     time it also gave the document two `#box-hint` and two `#intent-echo`
+     elements, and an out-of-band swap resolves the first match only, so this
+     copy was dead markup rendering the guidance sentence and both example
+     chips twice. #}
   {# Fetched rather than rendered because the bundle originates in the browser
      and the server does not have it at first paint.
 

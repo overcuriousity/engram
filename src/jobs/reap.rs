@@ -118,10 +118,15 @@ async fn rescue_one(
     c: &crate::store::artifacts::Chunk,
     reason: &str,
 ) -> Result<String> {
-    let judge = core
-        .judge
+    // `core.generator`, not `core.judge`: `RESCUE_SYSTEM` asks for
+    // `{"artifact":{…}}` and `parse_generation` reads exactly that, which is
+    // `for_generating`'s response format. Under the judge's the endpoint
+    // constrained every rewrite into a dedupe verdict, so no rescue could
+    // parse however good the reply was.
+    let writer = core
+        .generator
         .as_ref()
-        .ok_or_else(|| crate::error::Error::Validation("no judge model configured".into()))?;
+        .ok_or_else(|| crate::error::Error::Validation("no generator model configured".into()))?;
     let mut excerpts: Vec<(String, String)> = Vec::new();
     if c.provenance.is_source_text() {
         excerpts.push((
@@ -165,7 +170,7 @@ async fn rescue_one(
         }
     }
     let permit = core.gate.background().await;
-    let reply = judge
+    let reply = writer
         .complete(crate::infer::prompt::RESCUE_SYSTEM, &user)
         .await;
     permit.finished();
@@ -242,53 +247,68 @@ async fn reap_one(core: &Core, c: &crate::store::artifacts::Chunk, reason: &str)
     Ok(())
 }
 
-/// The free pass: who goes in front of the judge, and at what cost — three
-/// SQL statements and one payload read, no model call.
+/// How many rows are read for every one the sweep means to judge.
 ///
-/// The SQL half (age, status, no open reminder) lives in `reap_candidates`.
-/// The two rules here need what SQLite does not hold: the usage stamps live
-/// only on the vector point, and a candidate seen since it was retired is
-/// still earning its keep; and a source of a *fresh* active merge keeps its
-/// text because the merge's undo needs it — an old merge has forfeited that
-/// window (nobody unmerges after `min_age_days`), which is the one price the
-/// design accepts.
+/// The one rule left outside SQL — has this candidate been *seen* since it was
+/// retired — lives on the vector point, so it can only be applied after the
+/// page has been fetched, which means it eats into the page. Fetching exactly
+/// `max_judged_per_run` rows and filtering afterwards judged fewer than it was
+/// asked to, and on a run where the whole page was filtered it judged nothing
+/// at all — every time, since the ordering is stable and the same rows come
+/// back on the next run.
+///
+/// A retrieval on a long-retired artifact is rare by construction, so a
+/// factor and not a paging loop: reading four rows to keep one is a cheap
+/// query against a query that has to hold a cursor.
+const OVERFETCH: i64 = 4;
+
+/// The free pass: who goes in front of the judge, and at what cost — two SQL
+/// statements and one payload read, no model call.
+///
+/// Everything SQLite can state lives in `reap_candidates`: age, status, no
+/// open reminder, and not a source of a *fresh* active merge — that last one
+/// because the merge's undo needs its sources' text, while an old merge has
+/// forfeited that window (nobody unmerges after `min_age_days`), which is the
+/// one price the design accepts.
+///
+/// The one rule left here is the one SQLite does not hold: the usage stamps
+/// live only on the vector point, and a candidate seen since it was retired is
+/// still earning its keep. See `OVERFETCH` for what that costs.
 async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u64)> {
     let stamped = core.store.stamp_unaged_retired().await?;
     if stamped > 0 {
         tracing::info!(stamped, "gave pre-column retirements a clock");
     }
     let min_age_secs = (core.reap.min_age_days as i64).saturating_mul(86_400);
+    let want = core.reap.max_judged_per_run as i64;
     let mut cands = core
         .store
-        .reap_candidates(min_age_secs, core.reap.max_judged_per_run as i64)
+        .reap_candidates(min_age_secs, want.saturating_mul(OVERFETCH))
         .await?;
     if cands.is_empty() {
         return Ok((cands, stamped));
     }
     let ids: Vec<String> = cands.iter().map(|c| c.id.clone()).collect();
     let payloads = core.vectors.payloads_of(&ids).await?;
-    let protected: std::collections::HashSet<String> = core
-        .store
-        .sources_of_fresh_merges(min_age_secs)
-        .await?
-        .into_iter()
-        .collect();
     cands.retain(|c| {
         // A candidate always has a stamp — the SQL requires it — so a missing
         // one can only defend the row, never expose it.
         let retired_at = c.retired_at.unwrap_or(i64::MAX);
-        let seen = payloads
+        !payloads
             .get(&c.id)
             .and_then(|p| p.last_seen_at)
-            .is_some_and(|t| t >= retired_at);
-        !seen && !protected.contains(&c.id)
+            .is_some_and(|t| t >= retired_at)
     });
+    // The cap is the sweep's, not the query's: what is over it is still oldest
+    // -first and comes back on the next run.
+    cands.truncate(want.max(0) as usize);
     Ok((cands, stamped))
 }
 
-/// One nominee, one call. The judge is `core.judge` — the same cheap
-/// completer dedupe uses — and it compares the candidate against what a
-/// searcher can actually reach: the successor row when one was named, and the
+/// One nominee, one call. The judge is `core.reaper` — the judges' endpoint
+/// under reap's own response format, because a reap verdict is not a dedupe
+/// verdict and the grammar is carried by the completer — and it compares the
+/// candidate against what a searcher can actually reach: the successor row when one was named, and the
 /// nearest *live* neighbours by the candidate's stored vector. A candidate
 /// with no point simply gets no neighbours; the judge then sees only the
 /// successor, or nothing live at all, and the prompt's own bias ("when
@@ -298,9 +318,9 @@ async fn judge_one(
     c: &crate::store::artifacts::Chunk,
 ) -> Result<crate::infer::prompt::Reap> {
     let judge = core
-        .judge
+        .reaper
         .as_ref()
-        .ok_or_else(|| crate::error::Error::Validation("no judge model configured".into()))?;
+        .ok_or_else(|| crate::error::Error::Validation("no reap model configured".into()))?;
     let successor = match &c.superseded_by {
         Some(id) => core.store.get_artifact(id).await.ok(),
         None => None,
@@ -455,7 +475,7 @@ mod tests {
         let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             r#"{"verdict":"worthless","reason":"covered"}"#.into(),
         ]));
-        core.judge = Some(scripted.clone());
+        core.reaper = Some(scripted.clone());
         let ids = seed(&core, &["the old wording", "the new wording"]).await;
         core.store
             .set_superseded_by(&ids[0], Some(&ids[1]))
@@ -479,7 +499,7 @@ mod tests {
     #[tokio::test]
     async fn a_worthless_verdict_reaches_the_graveyard_and_the_point_dies() {
         let mut core = test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
                 r#"{"verdict":"worthless","reason":"covered"}"#.into(),
             ]),
@@ -524,7 +544,7 @@ mod tests {
     async fn a_failed_reply_leaves_the_candidate_untouched() {
         let mut core = test_core().await;
         // An empty script: the call itself errors, which must act on nothing.
-        core.judge = Some(std::sync::Arc::new(
+        core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![]),
         ));
         let ids = seed(&core, &["still here"]).await;
@@ -542,7 +562,7 @@ mod tests {
     #[tokio::test]
     async fn a_buried_stub_is_out_of_reach_by_consequence_not_by_filter() {
         let mut core = test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
                 r#"{"verdict":"worthless","reason":"covered"}"#.into(),
             ]),
@@ -589,11 +609,13 @@ mod tests {
     #[tokio::test]
     async fn a_valuable_deprecated_artifact_is_rewritten_and_superseded_by_the_rewrite() {
         let mut core = test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
                 r#"{"verdict":"valuable","reason":"names the port"}"#.into(),
-                RESCUE_REPLY.into(),
             ]),
+        ));
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![RESCUE_REPLY.into()]),
         ));
         let ids = seed(&core, &["the admin port is 8443"]).await;
         deprecate_long_ago(&core, &ids[0]).await;
@@ -613,11 +635,15 @@ mod tests {
     #[tokio::test]
     async fn a_model_written_candidate_is_rewritten_from_its_roots() {
         let mut core = test_core().await;
+        core.reaper = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"valuable","reason":"names the mount flags"}"#.into(),
+            ]),
+        ));
         let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"verdict":"valuable","reason":"names the mount flags"}"#.into(),
             RESCUE_REPLY.into(),
         ]));
-        core.judge = Some(scripted.clone());
+        core.generator = Some(scripted.clone());
         let ids = seed(&core, &["mount with ro,loop", "journal at /var/log"]).await;
         let merge = core
             .store
@@ -641,7 +667,8 @@ mod tests {
 
         let report = run(&core).await.unwrap();
         assert_eq!(report.rescued, 1);
-        let rescue_prompt = &scripted.prompts()[1];
+        // The generator's own script, so the rescue is its first and only call.
+        let rescue_prompt = &scripted.prompts()[0];
         assert!(
             rescue_prompt.contains("mount with ro,loop")
                 && rescue_prompt.contains("journal at /var/log"),
@@ -675,12 +702,14 @@ mod tests {
     async fn the_rescue_cap_holds() {
         let mut core = test_core().await;
         core.reap.max_rescues_per_run = 1;
-        core.judge = Some(std::sync::Arc::new(
+        core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
                 r#"{"verdict":"valuable","reason":"one"}"#.into(),
-                RESCUE_REPLY.into(),
                 r#"{"verdict":"valuable","reason":"two"}"#.into(),
             ]),
+        ));
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![RESCUE_REPLY.into()]),
         ));
         let ids = seed(&core, &["first fact", "second fact"]).await;
         for id in &ids {
@@ -700,12 +729,14 @@ mod tests {
         // never be nominated again, and one that wiped anything would have
         // destroyed text on a "valuable" verdict.
         let mut core = test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
                 r#"{"verdict":"valuable","reason":"names the port"}"#.into(),
-                RESCUE_REPLY.into(),
                 r#"{"verdict":"worthless","reason":"the rewrite carries it"}"#.into(),
             ]),
+        ));
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![RESCUE_REPLY.into()]),
         ));
         let ids = seed(&core, &["the admin port is 8443"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();

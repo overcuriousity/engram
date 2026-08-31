@@ -92,7 +92,14 @@ pub async fn run(core: &Core) -> Result<()> {
         }
         core.store.mark_notified(std::slice::from_ref(&row.moment.id), now).await?;
     }
-    core.store.rearm_remind().await
+    // The re-arm is NOT here. `arm_at` only moves a row in `pending`, `done`
+    // or `failed`, and while this runs the row is `running` — so an arming
+    // from inside the run is a no-op, `complete_job` then closes the row with
+    // `run_after` at the instant that just passed, and the unit never wakes
+    // for the second reminder. `jobs::run_claimed` re-arms after the row is
+    // closed, the same order `embed::rearm_if_more` follows and for the same
+    // reason.
+    Ok(())
 }
 
 #[cfg(test)]
@@ -240,10 +247,60 @@ mod tests {
         let now = crate::store::now();
         core.clock = Clock::Fixed(now);
         let id = due_at(&core, now - 10).await;
-        run(&core).await.unwrap();
+        // Through the queue, as a worker runs it: the re-arm lives in
+        // `run_claimed`, after the row is closed, because `arm_at` refuses a
+        // row that is still `running`.
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        assert_eq!(job.stage, Stage::Remind);
+        crate::jobs::run_claimed(&core, job).await.unwrap();
         assert!(core.store.moment(&id).await.unwrap().unwrap().notified_at.is_some());
         run(&core).await.unwrap(); // nothing owed: no second post — `expect(1)` verifies on drop
         assert!(run_after_of(&core).await.is_none(), "nothing left to wait for");
+    }
+
+    /// The second reminder, and the seam it fell through.
+    ///
+    /// The re-arm used to be the last line of `run`, where the unit's own row
+    /// is still `running` — and `arm_at` only moves a row that is `pending`,
+    /// `done` or `failed`. So the upsert did nothing, `complete_job` closed
+    /// the row with `run_after` at the instant that had just passed, and the
+    /// unit never woke again: two moments due at different times meant one
+    /// push and then silence, until some unrelated write happened to re-arm
+    /// it. Driven through `run_claimed` on purpose — calling `run` directly is
+    /// what hid this, because no running row exists there.
+    #[tokio::test]
+    async fn pushing_the_first_reminder_leaves_the_unit_waiting_for_the_second() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut core = test_core().await;
+        core.store
+            .control
+            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}))
+            .await
+            .unwrap();
+        let now = crate::store::now();
+        core.clock = Clock::Fixed(now);
+        // The later one first: `due_at` drains the queue, and a unit already
+        // armed at a past second would be claimed by that drain.
+        let later = due_at(&core, now + 3_000).await;
+        let owed = due_at(&core, now - 10).await;
+        assert_eq!(run_after_of(&core).await, Some(now - 10));
+
+        let job = core.store.claim_job().await.unwrap().unwrap();
+        assert_eq!(job.stage, Stage::Remind);
+        crate::jobs::run_claimed(&core, job).await.unwrap();
+
+        assert!(core.store.moment(&owed).await.unwrap().unwrap().notified_at.is_some());
+        assert!(core.store.moment(&later).await.unwrap().unwrap().notified_at.is_none());
+        assert_eq!(
+            run_after_of(&core).await,
+            Some(now + 3_000),
+            "the unit slept through the second reminder"
+        );
     }
 
     #[tokio::test]

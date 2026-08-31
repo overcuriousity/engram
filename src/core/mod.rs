@@ -150,6 +150,12 @@ pub struct Core {
     /// reminder. `None` with no synthesize role; the stage then falls back to
     /// the relative-word table.
     pub reminder: Option<Arc<dyn Completer>>,
+    /// The judge that rules on a retired artifact: still worth something, or
+    /// nothing the live base does not already say. Same endpoint as the other
+    /// judges, its own response shape — the reap verdict is not a duplicate
+    /// verdict, and asking it under that grammar could only ever fail to
+    /// parse. `None` with no synthesize role.
+    pub reaper: Option<Arc<dyn Completer>>,
     /// Intent prototypes, embedded once per process. See `Core::prototypes`.
     pub protos: Arc<tokio::sync::OnceCell<crate::core::moments::Protos>>,
     /// The model that writes an artifact from a pursuit. Same endpoint as the
@@ -321,6 +327,7 @@ impl Core {
                 .map(|s| Arc::new(HttpCompleter::for_gap_naming(s)) as Arc<dyn Completer>),
             reminder: synth
                 .map(|s| Arc::new(HttpCompleter::for_reminding(s)) as Arc<dyn Completer>),
+            reaper: synth.map(|s| Arc::new(HttpCompleter::for_reaping(s)) as Arc<dyn Completer>),
             protos: Arc::new(tokio::sync::OnceCell::new()),
             generator: synth
                 .map(|s| Arc::new(HttpCompleter::for_generating(s)) as Arc<dyn Completer>),
@@ -554,6 +561,7 @@ pub mod test_support {
             reminder: Some(Arc::new(FakeCompleter {
                 reply: Some(r#"{"when":null,"rule":null,"what":"fake"}"#.into()),
             })),
+            reaper: Some(Arc::new(FakeCompleter::default())),
             // Pre-filled and empty: no test pays an embed call for the
             // prototypes, and the hash-vector embedder cannot fire the
             // classifier on noise. `prototypes()` has its own test, over a
@@ -842,6 +850,7 @@ mod tests {
         assert!(!core.asks());
         assert!(core.synthesizer.is_none() && core.completer.is_none());
         assert!(core.judge.is_none() && core.link_judge.is_none() && core.gap_namer.is_none());
+        assert!(core.reaper.is_none() && core.generator.is_none());
         assert_eq!(core.synthesis, crate::config::SynthesisMode::Off);
     }
 }

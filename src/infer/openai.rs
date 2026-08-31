@@ -1030,6 +1030,17 @@ impl HttpCompleter {
         Self::judging(cfg, ("remind", prompt::remind_schema()))
     }
 
+    /// The judge that rules on a retired artifact, on the judges' endpoint.
+    ///
+    /// Its own completer for the reason `for_link_judging` is: the response
+    /// format lives in the struct, and reap asks a question the dedupe grammar
+    /// cannot express. Sharing `for_judging` meant every reap verdict came back
+    /// as `{"verdict":{"relation":…}}` and failed to parse, so the sweep judged
+    /// each nominee at full cost and acted on none of them.
+    pub fn for_reaping(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("reap", prompt::reap_schema()))
+    }
+
     /// The model that writes an artifact from a pursuit, on the judges'
     /// endpoint: background work in a fixed shape, like every other judge.
     pub fn for_generating(cfg: &SynthesizeRole) -> Self {

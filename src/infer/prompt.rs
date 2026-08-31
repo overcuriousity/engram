@@ -850,6 +850,32 @@ pub fn parse_generation(reply: &str) -> Result<Generated> {
     Ok(g)
 }
 
+/// The shape `parse_reap` will accept.
+///
+/// Its own schema, and not the dedupe one, because reap is its own question:
+/// under `("verdict", dedupe_schema())` the endpoint forces every reply into
+/// `{"verdict":{"relation":…}}`, `parse_reap` then finds no `verdict` string,
+/// and every candidate is logged as an unreadable judgement. Nothing is ever
+/// reaped or rescued — the sweep runs, costs a call per nominee, and acts on
+/// nothing. Every other distinct question here has its own completer for the
+/// same reason; see `for_link_judging`.
+///
+/// Flat at the root rather than wrapped, because that is the shape
+/// `REAP_SYSTEM` asks for in prose. `unwrap_verdict` passes it through
+/// untouched: it unwraps only when `verdict` holds an *object*, and here it
+/// holds the verdict word itself.
+pub fn reap_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["worthless", "valuable"]},
+            "reason": {"type": "string"}
+        },
+        "required": ["verdict", "reason"],
+        "additionalProperties": false
+    })
+}
+
 pub fn gap_label_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1908,6 +1934,7 @@ mod tests {
             ("claims", claims_schema()),
             ("gap_label", gap_label_schema()),
             ("remind", remind_schema()),
+            ("reap", reap_schema()),
             ("plan", plan_schema()),
             ("artifacts", artifacts_schema()),
         ] {
@@ -2604,6 +2631,24 @@ mod tests {
     fn the_remind_prompt_carries_the_clock_and_the_zone() {
         let p = remind_prompt("2026-08-30 12:00 (Sunday)", "Europe/Berlin", "remind me friday");
         assert!(p.contains("2026-08-30 12:00 (Sunday)") && p.contains("Europe/Berlin") && p.contains("remind me friday"));
+    }
+
+    /// The grammar and the parser, on the one call that destroys text.
+    ///
+    /// Reap ran under `dedupe_schema` for its whole first life: the endpoint
+    /// forced every reply into `{"verdict":{"relation":…}}`, `parse_reap` found
+    /// no verdict word, and the sweep paid for a call per nominee and acted on
+    /// none of them. This is that pairing written down — every word the schema
+    /// permits is a verdict the parser reads, in the shape the schema produces.
+    #[test]
+    fn every_verdict_the_reap_schema_allows_is_one_the_parser_knows() {
+        let schema = reap_schema();
+        let allowed = schema["properties"]["verdict"]["enum"].as_array().unwrap();
+        assert!(!allowed.is_empty());
+        for v in allowed {
+            let reply = serde_json::json!({"verdict": v, "reason": "why"}).to_string();
+            parse_reap(&reply).unwrap_or_else(|e| panic!("the schema permits {v}, which the parser refuses: {e}"));
+        }
     }
 
     #[test]

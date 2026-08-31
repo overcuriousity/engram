@@ -999,3 +999,16 @@ body { overflow-x: hidden; }
   color: var(--color-due);
 }
 .intent-echo-kind { font-weight: 600; }
+
+/* The same trap as `.btn`, `.keyhint`, `.staged` and `.kind-row` above, and
+   the two elements it hurts most: `.rail { display: flex }` and, on a wide
+   screen, `.regions-rail-focus-source > .region-focus { display: flex }` are
+   author rules, and an author rule beats the UA's `[hidden] { display: none }`
+   whatever its specificity. So `hideIdle`/`showIdle` set `hidden` on `#rail`
+   and `#pane` and nothing happened: an idle page still drew the empty rail
+   column and the empty pane beside it — the column of nothing this state
+   exists to remove.
+   Last in the file on purpose. `.pane[hidden]` and the container rule that
+   opens the pane are both one class plus one more selector, so the tie is
+   broken by source order and this has to come after it. */
+.rail[hidden], .pane[hidden] { display: none; }

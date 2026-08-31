@@ -508,6 +508,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         link_judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         gap_namer: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         reminder: None,
+        reaper: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         protos: Arc::new(tokio::sync::OnceCell::new()),
         time: engram::config::TimeConfig::default(),
         reap: engram::config::ReapConfig::default(),

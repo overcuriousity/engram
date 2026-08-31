@@ -193,6 +193,16 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             if job.stage == Stage::Embed && job.target_kind == "corpus" {
                 embed::rearm_if_more(core, &job.target_id).await?;
             }
+            // Same rule, and the same reason `remind::run` does not do this
+            // itself: the unit sleeps until the *earliest* owed moment, so
+            // every run has to name the next one. `arm_at` refuses a `running`
+            // row — that guard is what stops a queued sweep receding forever —
+            // so an arming from inside the handler was silently a no-op, and
+            // with two reminders due the second never fired until an unrelated
+            // write happened to re-arm the unit.
+            if job.stage == Stage::Remind {
+                core.store.rearm_remind().await?;
+            }
             rearm_periodic(core, &job, did_work).await;
             arm_successor(core, &job).await;
             Ok(true)

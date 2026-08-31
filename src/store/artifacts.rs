@@ -1448,6 +1448,17 @@ impl Store {
     /// Age reads `retired_at` and nothing else. A retired row whose stamp is
     /// NULL predates the column; `stamp_unaged_retired` gives it a fresh clock
     /// and this query simply does not see it until that clock runs.
+    /// The fresh-merge rule is here and not in the caller for one reason: the
+    /// `LIMIT` runs before any filtering the caller can do, so a rule applied
+    /// afterwards throws away part of the page and the sweep judges fewer rows
+    /// than it was asked to — and, because the ordering is stable, it selects
+    /// the same blocked rows on every run and never reaches the backlog behind
+    /// them. A rule SQLite can state has to be stated to SQLite.
+    ///
+    /// One rule is left to the caller because it cannot be written here at
+    /// all: whether a candidate has been *seen* since it was retired lives on
+    /// the vector point, not in this database. See `jobs::reap::nominees`,
+    /// which over-fetches to absorb it.
     pub async fn reap_candidates(&self, min_age_secs: i64, limit: i64) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(
             "SELECT * FROM artifacts
@@ -1457,9 +1468,25 @@ impl Store {
                 AND NOT EXISTS (SELECT 1 FROM moments m
                                  WHERE m.artifact_id = artifacts.id
                                    AND m.kind = 'due' AND m.done_at IS NULL)
+                AND id NOT IN (
+                  SELECT s.root_id FROM artifact_sources s
+                    JOIN artifacts m ON m.id = s.child_id
+                   WHERE m.provenance = 'merged'
+                     AND m.status = 'active' AND m.superseded_by IS NULL
+                     AND m.created_at > ?
+                  UNION
+                  SELECT s.via_id FROM artifact_sources s
+                    JOIN artifacts m ON m.id = s.child_id
+                   WHERE m.provenance = 'merged'
+                     AND m.status = 'active' AND m.superseded_by IS NULL
+                     AND m.created_at > ?
+                     AND s.via_id IS NOT NULL
+                )
               ORDER BY retired_at ASC
               LIMIT ?",
         )
+        .bind(now() - min_age_secs)
+        .bind(now() - min_age_secs)
         .bind(now() - min_age_secs)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -1520,32 +1547,6 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| (r.get("text"), r.get("meta_json"), r.get("reaped_at"))))
-    }
-
-    /// Every artifact a live merge younger than `min_age_secs` was written
-    /// from — roots and the vias the chain passed through. The reap sweep
-    /// leaves these alone: undoing a merge needs its sources' text back, and
-    /// only a *fresh* merge still plausibly has an undo coming.
-    pub async fn sources_of_fresh_merges(&self, min_age_secs: i64) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT s.root_id AS aid FROM artifact_sources s
-              JOIN artifacts m ON m.id = s.child_id
-             WHERE m.provenance = 'merged'
-               AND m.status = 'active' AND m.superseded_by IS NULL
-               AND m.created_at > ?
-             UNION
-             SELECT s.via_id AS aid FROM artifact_sources s
-              JOIN artifacts m ON m.id = s.child_id
-             WHERE m.provenance = 'merged'
-               AND m.status = 'active' AND m.superseded_by IS NULL
-               AND m.created_at > ?
-               AND s.via_id IS NOT NULL",
-        )
-        .bind(now() - min_age_secs)
-        .bind(now() - min_age_secs)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get("aid")).collect())
     }
 
     /// How many retired rows still hold their text — the standing count the

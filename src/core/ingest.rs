@@ -1392,6 +1392,17 @@ impl Core {
             meta["origin_was"] = serde_json::Value::String(src.origin.clone());
             ORIGIN_JOURNAL.to_string()
         } else {
+            // The mirror of the guard above, and it has to be here for a
+            // stronger reason than symmetry: the first undo removes
+            // `origin_was`, so a second one — a re-post of the `on=0` form on
+            // the capture receipt, a back-navigation — finds nothing to
+            // restore and falls through to `web`. That silently rewrote a
+            // `cli`, `share` or `extension` capture's channel to one it never
+            // came through. A corpus that is not a journal entry has nothing
+            // to undo.
+            if src.origin != ORIGIN_JOURNAL {
+                return Ok(());
+            }
             let was = meta["origin_was"].as_str().unwrap_or(ORIGIN_WEB).to_string();
             if let Some(m) = meta.as_object_mut() {
                 m.remove("origin_was");
@@ -3185,6 +3196,33 @@ mod tests {
         assert!(c.metadata.get("origin_was").is_none());
         core.set_entry(&out.id, true).await.unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+    }
+
+    /// The undo is idempotent, and a note that is not an entry has none.
+    ///
+    /// `origin_was` is removed by the first undo, so a second one — the `on=0`
+    /// form on the capture receipt re-posted, a back-navigation — found
+    /// nothing to restore and fell through to `web`. That rewrote the channel
+    /// a capture actually came through, on a corpus the button was never about.
+    #[tokio::test]
+    async fn undoing_an_entry_twice_leaves_the_channel_it_came_through() {
+        let core = test_core().await;
+        let out = core.ingest_capture(Capture::new("Heute war ein langer Tag.", "cli")).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+        core.set_entry(&out.id, false).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "cli");
+        core.set_entry(&out.id, false).await.unwrap();
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().origin,
+            "cli",
+            "a second undo invented a channel the capture never came through"
+        );
+
+        // And a note that was never an entry is untouched by the off switch.
+        let plain = core.ingest_capture(Capture::new("Die Portnummer ist 8443.", "share")).await.unwrap();
+        assert_eq!(core.store.get_corpus(&plain.id).await.unwrap().origin, "share");
+        core.set_entry(&plain.id, false).await.unwrap();
+        assert_eq!(core.store.get_corpus(&plain.id).await.unwrap().origin, "share");
     }
 
     #[tokio::test]
