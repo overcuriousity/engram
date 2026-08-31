@@ -76,7 +76,7 @@ encoding_rs = "0.8.35"
 # `pdf-text` is the pure-Rust rung: no ONNX runtime, no native libraries, no
 # models to fetch. `--features pdf-ml` swaps in the layout and table models for
 # anyone who wants them; nothing in this tree assumes they are there.
-docling = { version = "=1.14.2", default-features = false, features = ["pdf-text"] }
+docling = { version = "=1.18.1", default-features = false, features = ["pdf-text"] }
 
 url = "2"
 # Rewriting config.toml in place when a tuning recommendation is applied.
