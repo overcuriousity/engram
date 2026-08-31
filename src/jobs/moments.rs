@@ -6,7 +6,8 @@
 //! `remind` intent, and a base with no chat model reads the date by rule.
 
 use crate::core::moments::{
-    absolute_dates, classify, cue, relative_date, validate_rule, zone, Found, Intent, DEFAULT_HOUR,
+    absolute_dates, classify, clock_offset, cue, relative_date, validate_rule, zone, Found, Intent,
+    DEFAULT_HOUR,
 };
 use crate::core::Core;
 use crate::error::Result;
@@ -146,6 +147,14 @@ async fn date_reminder(
     if let Some(r) = relative_date(text, captured_at, tz) {
         candidates.push(r.at);
     }
+    // An offset inside the day — *in 10 minuten*, *in einer halben stunde*.
+    // Behind the model deliberately: the model reads a typo, a quarter of an
+    // hour and a wording no table lists, and this only covers the plain forms.
+    // It is here because without it the rule path cannot express the shape at
+    // all: `relative_date` considers dates after today and nothing shorter.
+    if let Some(o) = clock_offset(text, captured_at) {
+        candidates.push(o.at);
+    }
     (candidates.into_iter().min(), None)
 }
 
@@ -194,6 +203,28 @@ mod tests {
         let captured = core.store.get_corpus(&cid).await.unwrap().created_at;
         let at = rows[0].moment.at.unwrap();
         assert!(at > captured && at < captured + 2 * 86_400, "tomorrow 09:00 lies within two days");
+    }
+
+    /// The reported shape, through the whole stage: *erinnere mich in 10
+    /// minuten an xy* came back dated to the next day at the right clock time.
+    /// The model owns this wording — it reads the typos and the phrasings no
+    /// table lists — but where there is none, the rule path can now say a time
+    /// inside the day at all, which it could not before.
+    #[tokio::test]
+    async fn an_offset_inside_the_day_is_dated_without_a_model() {
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (cid, aid) =
+            first_passage(&core, "Erinnere mich in 10 Minuten an den Ofen", "ui", Some("Europe/Berlin")).await;
+        run(&core, &aid).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let captured = core.store.get_corpus(&cid).await.unwrap().created_at;
+        assert_eq!(
+            rows[0].moment.at,
+            Some(captured + 600),
+            "ten minutes after the second it was captured, and on that day"
+        );
     }
 
     #[tokio::test]

@@ -891,7 +891,10 @@ pub const REMIND_SYSTEM: &str = "You read one note somebody wrote to themselves 
 want to be reminded. Answer with JSON only. `when` is the local wall-clock date and time as \
 ISO-8601 without a zone (e.g. 2026-09-04T09:00), or null if the note names no time at all. \
 Relative words (tomorrow, next Friday, in two weeks) are resolved against the current time \
-you are given. A time of day that is not stated is 09:00. `rule` is an iCalendar RRULE using \
+you are given. That time carries minutes, and an offset shorter than a day is counted off it: \
+at 16:57, `in 10 minutes` is 17:07 the same day, `in einer halben stunde` is 17:27 the same day. \
+Only move to the next date when the arithmetic actually passes midnight. A time of day that is \
+not stated is 09:00, but an offset states one. `rule` is an iCalendar RRULE using \
 only FREQ, INTERVAL, BYDAY (weekday codes), BYMONTHDAY, UNTIL, COUNT when the note says it \
 repeats, else null. `what` is the obligation in the note's own words. Never invent a date.";
 

@@ -521,9 +521,84 @@ const WEEKDAYS: &[(&str, Weekday)] = &[
 static IN_N: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)\b(\d{1,3})\s+(days?|tag(?:e|en)?|jours?|d[ií]as?|giorn[oi]|dag(?:en)?|dni|gün|дня|дней|weeks?|wochen?|semaines?|semanas?|settimane?|weken|tygodni(?:e)?|hafta|недел[иья])\b").unwrap()
 });
+/// `in 10 minuten`, `in half an hour`, `daqui a 20 minutos`, `через час`, …
+///
+/// The preposition is required, and it is what separates an offset from a
+/// duration: *das 30-minuten meeting* says how long something takes, *in 30
+/// minuten* says when to be reminded. `IN_N` can do without one because a note
+/// naming three days rarely means anything else.
+///
+/// The ten languages the month and weekday tables carry, minus Turkish, which
+/// puts its word after the unit and is read by `SONRA` below.
+static IN_CLOCK: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(concat!(
+        // Longest first, so `dentro de` is not read as a bare `de`.
+        r"(?i)\b(?:daqui a|dentro de|binnen|dans|über|in|en|em|tra|fra|over|za|через)\s+",
+        // Half, where it stands before the count: *in half an hour*.
+        r"(?P<h1>half\s+(?:an\s+)?|pół\s+)?",
+        // The count, or the written-out one that stands in for it. Both are
+        // optional: *через час* and *za godzinę* name the hour and nothing
+        // else, which `bare` below is what allows.
+        r"(?:(?P<n>\d{1,4})|(?P<art>an|a|une?|un['’]|eine[rm]?|un[ao]|uma|um|een|één|jedn[aey]))?",
+        r"(?:['’]\s*|\s+)?",
+        // And half where it stands after it: *in einer halben stunde*.
+        r"(?P<h2>halb(?:e|en|es)?\s+)?",
+        r"(?P<unit>minut(?:e|en|es|os?|y|ów|i)?|mins?\.?|минут(?:ы|у)?|dakika|",
+        r"stunden?|std\.?|hours?|hrs?|h|heures?|horas?|ore|ora|uur|godzin[aeyę]?|saat|час(?:а|ов)?)\b",
+    ))
+    .unwrap()
+});
+
+/// Turkish puts it after the unit: *10 dakika sonra*, *bir saat sonra*.
+static SONRA: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\b(?:(\d{1,4})|bir|yarım)\s+(dakika|saat)\s+sonra\b").unwrap()
+});
+
+/// The hour, named alone. *In an hour* is idiomatic with no article in Russian
+/// and Polish and elided in Italian, so the count may be missing — but only
+/// for these, and only in the singular. A bare plural is a span of time being
+/// described (*in Stunden*, *en horas*), never a time to be reminded at.
+const BARE_ONE: [&str; 9] =
+    ["час", "godzinę", "godzina", "ora", "stunde", "heure", "hour", "hora", "uur"];
+
 static AT_TIME: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)\b(?:at|um|à|a las|alle|om|o|saat|в)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|uhr|h)?\b").unwrap()
 });
+
+/// The second an offset inside the day names, counted off the second the note
+/// was captured — `in 10 minuten`, `in einer halben stunde`, `in 2 Std.`.
+///
+/// Arithmetic rather than a date: `relative_date` only ever considers a date
+/// strictly after today, and `IN_N` counts nothing shorter than a day, so
+/// before this the shape had nowhere to land. It is the rule path's answer
+/// only; where a model dates reminders it is asked first, and a note whose
+/// wording this misses — a typo, a quarter of an hour, *gleich* — is exactly
+/// what the model is better at.
+pub fn clock_offset(text: &str, captured_at: i64) -> Option<Found> {
+    let lower = text.to_lowercase();
+    if let Some(c) = SONRA.captures(&lower) {
+        let n: i64 = c.get(1).map_or(Ok(1), |m| m.as_str().parse()).ok()?;
+        let seconds = if &c[2] == "dakika" { n * 60 } else { n * 3_600 };
+        // `yarım` is the half, and it stands where the count would.
+        let seconds = if c.get(1).is_none() && lower.contains("yarım") { seconds / 2 } else { seconds };
+        return (seconds > 0).then(|| Found { at: captured_at + seconds, span: c[0].to_string() });
+    }
+    let c = IN_CLOCK.captures(&lower)?;
+    let unit = c["unit"].to_lowercase();
+    // Nothing between the preposition and the unit: only the hour, and only
+    // where naming it alone is how the language says it.
+    if c.name("n").is_none() && c.name("art").is_none() && !BARE_ONE.contains(&unit.as_str()) {
+        return None;
+    }
+    // No digits is the written-out one: *in an hour*, *in einer stunde*.
+    let n: i64 = c.name("n").map_or(Ok(1), |m| m.as_str().parse()).ok()?;
+    let minutes = unit.starts_with("min") || unit.starts_with("мин") || unit.starts_with("dak");
+    let seconds = if minutes { n * 60 } else { n * 3_600 };
+    // *Half an hour*, and only ever half of what was named: half of ten
+    // minutes is a precision nobody writing this sentence meant.
+    let seconds = if c.name("h1").is_some() || c.name("h2").is_some() { seconds / 2 } else { seconds };
+    (seconds > 0).then(|| Found { at: captured_at + seconds, span: c[0].to_string() })
+}
 
 /// The nearest future date the relative words name, or none. A weekday, with
 /// or without "next", is the next such day strictly after today.
@@ -1102,6 +1177,100 @@ mod tests {
             assert_eq!(f.map(|x| local(x.at)).as_deref(), Some(want), "{text}");
         }
         assert!(relative_date("nothing here", captured(), berlin()).is_none());
+    }
+
+    /// The reported shape: *erinnere mich in 10 minuten an xy* landed on the
+    /// next day at the right clock time, and only saying *heute* fixed it. An
+    /// offset this small is arithmetic on the second it was captured, and
+    /// nothing here could do it: `IN_N` counts days and weeks, and
+    /// `relative_date` only ever considers a date strictly after today.
+    #[test]
+    fn an_offset_inside_the_day_is_read_off_the_second_it_was_captured() {
+        for (text, want) in [
+            ("erinnere mich in 10 minuten an den ofen", 600),
+            ("erinnere mich in 10 Minuten an den Ofen", 600),
+            ("remind me in 25 minutes to check the oven", 1_500),
+            ("in 90 min den ofen prüfen", 5_400),
+            ("erinnere mich in 2 stunden", 7_200),
+            ("in 2 Std. nachsehen", 7_200),
+            ("remind me in an hour", 3_600),
+            ("erinnere mich in einer stunde", 3_600),
+            ("erinnere mich in einer halben stunde", 1_800),
+            ("remind me in half an hour", 1_800),
+            ("rappelle-moi dans 20 minutes", 1_200),
+            ("через 15 минут", 900),
+        ] {
+            assert_eq!(
+                clock_offset(text, captured()).map(|f| f.at - captured()),
+                Some(want),
+                "{text}"
+            );
+        }
+    }
+
+    /// The same ten languages the month and weekday tables carry. Turkish puts
+    /// its word after the unit, and Russian, Polish and Italian name the hour
+    /// with no count at all, which is what `BARE_ONE` is for.
+    #[test]
+    fn an_offset_reads_in_ten_languages() {
+        for (text, want) in [
+            ("remind me in 10 minutes", 600),
+            ("erinnere mich in 10 minuten", 600),
+            ("rappelle-moi dans 10 minutes", 600),
+            ("recuérdame en 10 minutos", 600),
+            ("lembra-me daqui a 10 minutos", 600),
+            ("dentro de 10 minutos", 600),
+            ("ricordami tra 10 minuti", 600),
+            ("herinner me over 10 minuten", 600),
+            ("przypomnij mi za 10 minut", 600),
+            ("10 dakika sonra hatırlat", 600),
+            ("напомни через 10 минут", 600),
+            // The hour, and the several ways of naming one of it.
+            ("remind me in an hour", 3_600),
+            ("in einer stunde", 3_600),
+            ("dans une heure", 3_600),
+            ("in un'ora", 3_600),
+            ("dentro de una hora", 3_600),
+            ("em uma hora", 3_600),
+            ("over een uur", 3_600),
+            ("za godzinę", 3_600),
+            ("bir saat sonra", 3_600),
+            ("через час", 3_600),
+            // And half of one.
+            ("remind me in half an hour", 1_800),
+            ("erinnere mich in einer halben stunde", 1_800),
+            ("yarım saat sonra", 1_800),
+        ] {
+            assert_eq!(
+                clock_offset(text, captured()).map(|f| f.at - captured()),
+                Some(want),
+                "{text}"
+            );
+        }
+    }
+
+    /// What it must not read. A duration is not an offset: the note names how
+    /// long something takes, or which meeting it is, and neither says when to
+    /// be reminded. The preposition is what separates the two, and it is the
+    /// reason this asks for one where `IN_N` does not.
+    #[test]
+    fn a_duration_is_not_an_offset() {
+        for text in [
+            "erinnere mich morgen an das 30-minuten meeting",
+            "the standup is 15 minutes, remind me tomorrow",
+            "erinnere mich morgen an den zahnarzttermin",
+            "in 3 days",
+            "in 2 Wochen",
+            // A span being described, not a time to be reminded at. The count
+            // is missing and the unit is plural, which is the pair `BARE_ONE`
+            // refuses.
+            "das dauert noch in stunden gerechnet ewig",
+            "esto se mide en horas",
+            "it is measured in minutes",
+            "nothing here",
+        ] {
+            assert_eq!(clock_offset(text, captured()), None, "{text}");
+        }
     }
 
     /// The reported shape: a weekday, then a bare time. `AT_TIME` demands a
