@@ -374,8 +374,11 @@ mod tests {
 
     use crate::store::artifacts::{ArtifactStatus, NewArtifact, NewMerged};
 
+    /// One corpus holding one artifact per text. The corpus text is the texts
+    /// themselves: `insert_corpus` deduplicates on content, so two seeds with a
+    /// fixed string would be one note and not two.
     async fn seed(core: &Core, texts: &[&str]) -> Vec<String> {
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let src = core.store.insert_corpus(&texts.join(" | "), "web", None).await.unwrap();
         let rows: Vec<NewArtifact> = texts
             .iter()
             .enumerate()
@@ -419,7 +422,7 @@ mod tests {
     #[tokio::test]
     async fn an_active_young_seen_or_reminded_artifact_is_never_nominated() {
         let core = test_core().await;
-        let ids = seed(&core, &["active", "young", "seen", "reminded", "clean"]).await;
+        let ids = seed(&core, &["active", "young", "seen", "unreachable-reminder", "clean"]).await;
         // ids[0] stays active.
         core.store
             .set_artifact_status(&ids[1], ArtifactStatus::Deprecated)
@@ -434,25 +437,40 @@ mod tests {
             )
             .await
             .unwrap(); // seen after retirement
+        // Retired, with a reminder of its own. Nobody can reach that reminder —
+        // a retired artifact is on no band — so it holds nothing back, which is
+        // the whole of the difference from the note below.
         deprecate_long_ago(&core, &ids[3]).await;
+        open_reminder(&core, "m1", &ids[3]).await;
+        deprecate_long_ago(&core, &ids[4]).await;
+
+        // A second note, still live and still reminding. Its retired artifact
+        // keeps its text: somebody means to act on this note.
+        let pair = seed(&core, &["live", "retired-beside-a-live-reminder"]).await;
+        open_reminder(&core, "m2", &pair[0]).await;
+        deprecate_long_ago(&core, &pair[1]).await;
+
+        let (cands, _) = nominees(&core).await.unwrap();
+        let mut got = cands.iter().map(|c| c.id.as_str()).collect::<Vec<_>>();
+        got.sort_unstable();
+        let mut want = vec![ids[3].as_str(), ids[4].as_str()];
+        want.sort_unstable();
+        assert_eq!(got, want, "the old unseen retirements, the live reminder's note aside");
+    }
+
+    /// A due moment nobody has completed, on this artifact.
+    async fn open_reminder(core: &Core, moment_id: &str, artifact_id: &str) {
         sqlx::query(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, created_at)
-             VALUES ('m1', ?, 'due', ?, 'UTC', 'set', ?)",
+             VALUES (?, ?, 'due', ?, 'UTC', 'set', ?)",
         )
-        .bind(&ids[3])
+        .bind(moment_id)
+        .bind(artifact_id)
         .bind(crate::store::now() + 3_600)
         .bind(crate::store::now())
         .execute(&core.store.pool)
         .await
         .unwrap();
-        deprecate_long_ago(&core, &ids[4]).await;
-
-        let (cands, _) = nominees(&core).await.unwrap();
-        assert_eq!(
-            cands.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            vec![ids[4].as_str()],
-            "only the old, unseen, unreminded retirement is nominated"
-        );
     }
 
     #[tokio::test]

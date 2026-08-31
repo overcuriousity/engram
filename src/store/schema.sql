@@ -643,8 +643,8 @@ CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
 -- ── Moments ──────────────────────────────────────────────────────────────────
 -- A time attached to an artifact. `due` is a reminder; `event` is a date the
 -- note refers to. The note is the reminder text — there is none apart from it.
--- Only `done_at`, `snoozed_until` and `notified_at` ever change on a row; a
--- wrong date is a new row with source 'set', and the misreading stays.
+-- A wrong date is corrected on the row itself — see `moved_from`, which keeps
+-- the misreading — so that a recurrence still has exactly one row per firing.
 CREATE TABLE IF NOT EXISTS moments (
   id            TEXT PRIMARY KEY,
   artifact_id   TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
@@ -659,7 +659,10 @@ CREATE TABLE IF NOT EXISTS moments (
   tz            TEXT NOT NULL,
   -- RRULE subset (FREQ, INTERVAL, BYDAY, BYMONTHDAY, UNTIL, COUNT), or NULL.
   rule          TEXT,
-  -- 'set' | 'cue' | 'classified' | 'extracted'.
+  -- 'set' | 'cue' | 'classified' | 'extracted' | 'armed'. `armed` is the next
+  -- occurrence a completed recurrence put on the band: nobody set it and no
+  -- reading of the prose would make it again, so the moments stage must not
+  -- delete it the way it deletes what it read.
   source        TEXT NOT NULL,
   -- The text the date was read from, verbatim, so a misread is visible.
   span          TEXT,
@@ -667,6 +670,16 @@ CREATE TABLE IF NOT EXISTS moments (
   snoozed_until INTEGER,
   -- Set once the push went out, so a restart never sends it twice.
   notified_at   INTEGER,
+  -- The instant this row was first read at, kept when somebody moves the row
+  -- to the date they meant. Two jobs: it is the misreading, still visible, and
+  -- it is what stops the moments stage re-inserting a fresh row at the date the
+  -- operator explicitly corrected away from on the next re-read. NULL where the
+  -- row had no instant to move off — a reminder nobody could date.
+  moved_from    INTEGER,
+  -- When somebody moved it. The fourth mark that says a row has a history, and
+  -- separate from `moved_from` because dating an undated reminder is a move
+  -- with no old instant to record and must still leave a mark.
+  moved_at      INTEGER,
   created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_moments_open     ON moments(kind, done_at, at);

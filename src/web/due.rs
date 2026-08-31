@@ -605,7 +605,11 @@ mod tests {
         // it leaves no `done` behind on the day it has left.
         let moved = core.store.moment(&id).await.unwrap().unwrap();
         assert!(moved.done_at.is_none(), "a move does not close anything");
-        assert_eq!(moved.source, Source::Set, "and it is a row somebody set");
+        // `source` is untouched: it records how the date got here, and
+        // correcting *when* says nothing about *how*. What says a person has
+        // been at this row is `moved_from`, which is also the misreading kept.
+        assert_eq!(moved.source, Source::Cue, "the reading that made it still stands");
+        assert!(moved.moved_at.is_some(), "and the row is marked as one somebody moved");
         let rows = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].moment.id, id);

@@ -6,8 +6,8 @@
 //! `remind` intent, and a base with no chat model reads the date by rule.
 
 use crate::core::moments::{
-    absolute_dates, classify, clock_offset, cue, relative_date, validate_rule, zone, Found, Intent,
-    DEFAULT_HOUR,
+    absolute_dates, classify, clock_offset, cue, default_zone_name, relative_date, validate_rule, zone,
+    Found, Intent, DEFAULT_HOUR,
 };
 use crate::core::Core;
 use crate::error::Result;
@@ -27,9 +27,14 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         .as_str()
         .filter(|t| !t.is_empty())
         .map(String::from)
-        .unwrap_or_else(|| core.time.default_tz.clone());
+        .unwrap_or_else(|| default_zone_name(&core.time.default_tz));
     let tz = zone(Some(&tz_name));
-    let tz_name = if tz_name.is_empty() { "UTC".to_string() } else { tz_name };
+    // The zone as the zone table spells it, and never as the metadata spelled
+    // it. What is stored on the moment is what the day page and the recurrence
+    // read the wall-clock back out of, so a name that did not resolve must not
+    // be written down as though it had: the dates were read in UTC, and the row
+    // has to say UTC.
+    let tz_name = tz.name().to_string();
     let month_first = src.metadata["locale"].as_str().is_some_and(|l| l.eq_ignore_ascii_case("en-US"));
     let first = art.ordinal == 0;
 
@@ -76,7 +81,16 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     };
 
     match intent {
-        Some(Intent::Journal) if JOURNALABLE.contains(&src.origin.as_str()) => {
+        // Not on a note whose filing was already undone. The stage re-derives
+        // the intent on every re-embed, and the undo only put `origin` back —
+        // so a reindex or a switched embed model silently filed the note as an
+        // entry again, over an operator who had said no. `set_entry` records
+        // the refusal for exactly this read; turning the entry back on by hand
+        // clears it.
+        Some(Intent::Journal)
+            if JOURNALABLE.contains(&src.origin.as_str())
+                && !src.metadata["entry_refused"].as_bool().unwrap_or(false) =>
+        {
             core.set_entry(cid, true).await?;
         }
         Some(Intent::Remind) => {
@@ -366,6 +380,78 @@ mod tests {
         run(&core, &aid).await.unwrap();
         assert_eq!(core.store.event_moments_between(0, i64::MAX).await.unwrap().len(), 1, "not two");
         assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1, "the set row stayed");
+    }
+
+    #[tokio::test]
+    async fn the_occurrence_a_completion_armed_survives_the_next_re_read() {
+        // Every embed re-arms this stage. The successor `complete_moment` puts
+        // on the band carried the parent's `cue`, so the stage took it for
+        // something it had read and deleted it — and the re-read then found the
+        // original instant still on the artifact, still done, and armed nothing
+        // in its place. The recurrence ended at its first completion, silently.
+        let mut core = test_core().await;
+        core.reminder = Some(std::sync::Arc::new(FakeCompleter {
+            reply: Some(r#"{"when":"2026-09-04T09:00","rule":"FREQ=WEEKLY;BYDAY=FR","what":"water the plants"}"#.into()),
+        }));
+        let (_, aid) = first_passage(&core, "Remind me every friday to water the plants", "ui", Some("Europe/Berlin")).await;
+        run(&core, &aid).await.unwrap();
+        let first = core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.id.clone();
+        core.complete_moment(&first).await.unwrap();
+        let armed = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(armed.len(), 1, "the completion armed the next friday");
+        assert_eq!(armed[0].moment.source, Source::Armed);
+        let next = armed[0].moment.id.clone();
+
+        run(&core, &aid).await.unwrap();
+        let after = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(after.len(), 1, "still one open occurrence");
+        assert_eq!(after[0].moment.id, next, "and it is the one the completion armed");
+    }
+
+    #[tokio::test]
+    async fn a_date_the_operator_corrected_is_not_read_back_on_the_next_re_read() {
+        // Moving a row updates it in place, so nothing is left parked at the
+        // instant the stage read. Without `moved_from` the next re-read simply
+        // made a second reminder at the date that had just been corrected away
+        // from — and that one, not the corrected one, is what pushed.
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (_, aid) = first_passage(&core, "Remind me tomorrow to send the invoice", "ui", Some("Europe/Berlin")).await;
+        run(&core, &aid).await.unwrap();
+        let row = core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.clone();
+        let read_at = row.at.unwrap();
+        core.store.move_moment(&row.id, read_at + 3 * 86_400, "Europe/Berlin").await.unwrap();
+
+        run(&core, &aid).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "one reminder, on the date the operator meant");
+        assert_eq!(rows[0].moment.id, row.id);
+        assert_eq!(rows[0].moment.at, Some(read_at + 3 * 86_400));
+        assert_eq!(rows[0].moment.moved_from, Some(read_at), "and the misreading is kept");
+    }
+
+    #[tokio::test]
+    async fn an_undone_journal_filing_is_not_filed_again_by_the_next_re_read() {
+        // The undo put `origin` back and nothing recorded that it had happened,
+        // so this stage — which derives the intent afresh on every embed — filed
+        // the note as an entry again on the next reindex.
+        let core = test_core().await;
+        let out = core.ingest_capture(Capture::new("Vandaag eindelijk de tuin gedaan.", "cli")).await.unwrap();
+        core.store.set_corpus_origin(&out.id, "cli").await.unwrap();
+        drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        run(&core, &aid).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+
+        core.set_entry(&out.id, false).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "cli");
+        run(&core, &aid).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "cli", "the refusal outlives the re-read");
+
+        // And it is a refusal, not a ban: filing it by hand withdraws it.
+        core.set_entry(&out.id, true).await.unwrap();
+        run(&core, &aid).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
     }
 
     #[tokio::test]

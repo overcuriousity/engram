@@ -220,6 +220,16 @@
   {% include "_box_hint.html" %}
 </form>
 
+{# Where a capture answers, and deliberately outside `#pane`.
+   It lived in the pane, which is hidden whenever the box is empty — and a
+   capture is the one act that empties the box itself. `refreshRail` clears the
+   box and calls `showIdle` in the same turn the receipt is swapped in, so
+   "Captured — view source" and the undo beside a note filed as today's entry
+   flashed and vanished, and the undo for a wrongly-cued entry was unreachable
+   without a reload. Under the box it survives the page going idle, which is
+   the state a finished capture leaves the page in. #}
+<div id="capture-result"></div>
+
 
 {# Present only when the box was filled from an answer. It rides the capture so
    that what gets stored records the question and the artifacts the answer was
@@ -358,7 +368,6 @@
      answer below it is the signal for everyone who can see it. #}
   <p id="ask-status" class="sr-only" role="status"></p>
   <div id="ask-result"></div>
-  <div id="capture-result"></div>
   {# The artifact swaps in *here*, never over the whole pane: the ask and
      capture targets above exist nowhere else on the page, and a result click
      that replaced the pane's innerHTML destroyed them — after which Ask

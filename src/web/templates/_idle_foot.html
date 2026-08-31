@@ -32,7 +32,10 @@
   from <span class="mono">{{ corpora }}</span> source{% if corpora != 1 %}s{% endif %}
   {%- if let Some(r) = recent.first() %} &middot; last kept
   <a href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>
-  <a href="/ui/day/{{ r.day }}" data-day-link>{{ r.when }}</a>
+  {#- `data-day-at` is the capture's instant: app.js rebuilds the whole href
+      from it in the viewer's zone, because the date baked into the path here
+      is UTC and the day page reads its window locally. #}
+  <a href="/ui/day/{{ r.day }}" data-day-link data-day-at="{{ r.at }}">{{ r.when }}</a>
   {%- endif %}
 {%- endif %}
 </p>

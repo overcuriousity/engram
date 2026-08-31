@@ -338,6 +338,21 @@ pub(crate) fn capture_time(
     intent: Option<String>,
     default_origin: &'static str,
 ) -> Result<CaptureTime> {
+    // The zone gets the same treatment as the other two, which the doc above
+    // has always claimed it did. An unparseable name fell through `zone` to
+    // UTC, so `?tz=Europe/Berlim` was a 201 and every date in the note was
+    // read, stored and rendered two hours off — the silently ignored parameter
+    // this function exists to rule out. Kept as the zone table spells it, so
+    // what is stored is what the day page and the recurrence read back.
+    let tz = match tz.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        None => None,
+        Some(name) => match name.parse::<chrono_tz::Tz>() {
+            Ok(z) => Some(z.name().to_string()),
+            Err(_) => {
+                return Err(Error::Validation(format!("tz={name}: not an IANA zone name")));
+            }
+        },
+    };
     let origin = match origin.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
         None => default_origin,
         Some("journal") => crate::core::ingest::ORIGIN_JOURNAL,
@@ -1856,7 +1871,17 @@ async fn set_moment(
     if let Some(rule) = b.rule.as_deref() {
         crate::core::moments::validate_rule(rule).map_err(Error::Validation)?;
     }
-    let tz = b.tz.filter(|t| !t.is_empty()).unwrap_or_else(|| "UTC".into());
+    // As strictly as `kind` and `rule` beside it. A name that does not parse
+    // fell through to UTC and stayed on the row, so a typo silently moved every
+    // occurrence of a recurrence by the caller's whole offset — and the row
+    // then said UTC, as though somebody had asked for it.
+    let tz = match b.tz.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        None => "UTC".to_string(),
+        Some(name) => match name.parse::<chrono_tz::Tz>() {
+            Ok(z) => z.name().to_string(),
+            Err(_) => return Err(Error::Validation(format!("tz={name}: not an IANA zone name"))),
+        },
+    };
     let id = tenant
         .core
         .store
@@ -4761,6 +4786,67 @@ mod patch_tests {
 
         let res = app.oneshot(text("/api/v1/capture?origin=mcp", "x")).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_zone_the_table_does_not_know_is_refused_and_not_quietly_read_in_utc() {
+        // The doc on `capture_time` claims a typo is a 400 and not a silently
+        // ignored parameter, and the zone was the one field it was not true of:
+        // `zone` turned an unreadable name into UTC, so `?tz=Europe/Berlim` was
+        // a 201 with every date in the note two hours out.
+        let (app, token, core) = app_token_and_core().await;
+        let text = |uri: &str, body: &str| {
+            Request::builder()
+                .uri(uri)
+                .method("POST")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "text/plain")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let res = app.clone().oneshot(text("/api/v1/capture?tz=Europe/Berlim", "call the bank tomorrow")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(json_of(res).await["error"].as_str().unwrap_or_default().contains("Europe/Berlim"));
+
+        // And a name it does know is stored as the table spells it.
+        let res = app.oneshot(text("/api/v1/capture?tz=Europe%2FBerlin", "call the bank tomorrow")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        assert_eq!(core.store.get_corpus(&id).await.unwrap().metadata["tz"], "Europe/Berlin");
+    }
+
+    #[tokio::test]
+    async fn setting_a_moment_refuses_a_zone_the_table_does_not_know() {
+        // As `kind` and `rule` beside it already were. A typo here moved every
+        // occurrence of the recurrence by the caller's whole offset, and the
+        // row then said UTC as though somebody had asked for it.
+        let (app, token, core) = app_token_and_core().await;
+        let out = core.ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui")).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({ "at": 1_800_000_000i64, "tz": "Europe/Berlim" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "and nothing was written");
+
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({ "at": 1_800_000_000i64, "tz": "Europe/Berlin" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.tz, "Europe/Berlin");
     }
 
 }

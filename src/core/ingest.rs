@@ -1390,6 +1390,13 @@ impl Core {
                 return Ok(());
             }
             meta["origin_was"] = serde_json::Value::String(src.origin.clone());
+            // Turning it on by hand withdraws an earlier refusal, so the stage
+            // may file this note again. Only a person reaches here with `true`
+            // while the flag stands: `jobs::moments` reads the flag first and
+            // does not call.
+            if let Some(m) = meta.as_object_mut() {
+                m.remove("entry_refused");
+            }
             ORIGIN_JOURNAL.to_string()
         } else {
             // The mirror of the guard above, and it has to be here for a
@@ -1407,6 +1414,12 @@ impl Core {
             if let Some(m) = meta.as_object_mut() {
                 m.remove("origin_was");
             }
+            // The refusal has to outlive the undo, because the reading that
+            // filed the note does not stop being true. `jobs::moments` derives
+            // the intent again on every re-embed and would file it a second
+            // time — a reindex or a switched embed model quietly overruling the
+            // operator, on a note they had already put back.
+            meta["entry_refused"] = serde_json::Value::Bool(true);
             was
         };
         self.store.set_corpus_metadata(corpus_id, &meta).await?;

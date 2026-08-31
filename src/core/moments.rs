@@ -293,6 +293,37 @@ pub fn zone(name: Option<&str>) -> Tz {
     name.and_then(|n| n.parse::<Tz>().ok()).unwrap_or(Tz::UTC)
 }
 
+/// The zone the server itself is in, named the way the zone table names it, or
+/// `UTC` where the platform cannot say. Resolved once: it is read on the path
+/// of every capture that arrives without a zone, and asking the host on each
+/// one is a syscall and a file read for an answer that does not change.
+static SERVER_ZONE: LazyLock<String> = LazyLock::new(|| {
+    match iana_time_zone::get_timezone().ok().filter(|n| n.parse::<Tz>().is_ok()) {
+        Some(n) => n,
+        None => {
+            tracing::info!("the platform cannot name its zone; dates from doors that send none are read in UTC");
+            Tz::UTC.name().to_string()
+        }
+    }
+});
+
+/// The zone a door that sent none is read in: what `time.default_tz` names, or
+/// — where it is empty, which is the shipped default — the server's own.
+///
+/// The empty default has always been documented as "the server's zone", in the
+/// field's own doc and in `config.example.toml`. It resolved to UTC, because
+/// `""` is not a zone `zone` can parse, so every capture from a door with no
+/// zone of its own had its dates read, stored and rendered two hours off on a
+/// Berlin server — silently, and with the moment then labelled `UTC` as though
+/// somebody had asked for it.
+pub fn default_zone_name(configured: &str) -> String {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return SERVER_ZONE.clone();
+    }
+    configured.to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub at: i64,
@@ -317,6 +348,61 @@ const MONTHS: [&[&str]; 12] = [
     &["november", "novembre", "noviembre", "novembro", "listopada", "listopad", "kasım", "ноября", "ноябрь"],
     &["december", "dezember", "décembre", "decembre", "diciembre", "dezembro", "dicembre", "grudnia", "grudzień", "aralık", "декабря", "декабрь"],
 ];
+
+/// Month words that are also everyday words, in the language they would be
+/// read from. A bare `<number> <word>` is only a date for these when something
+/// else in the sentence says so — see `named_month_is_supported`.
+///
+/// The list is short on purpose, and short in two directions.
+///
+/// It is about ambiguity and not about abbreviation: `sept`, `okt` and
+/// `ноября` are month words and nothing else, and they go on reading bare.
+/// `may` is an everyday English modal, `march` and `marches` are verbs, `mars`
+/// is a planet, `mart` and `marche` are markets. Without this, "Section 3 may
+/// be revised", "review 5 may need work" and "the last 2 march entries" each
+/// put an event on the front page under "Coming up".
+///
+/// And it stops at words that are ambiguous in the language a reader would
+/// actually be typing them in. `mai`, `maj` and `maja` are May and nothing else
+/// where they are written, and *3 mai* is how that date is written in French —
+/// demanding a preposition for it would cost more dates than it saved. Every
+/// word here has an everyday English reading, because that is where the
+/// collisions were.
+///
+/// Matched against the word as written, lowercased, and not against the month
+/// it resolves to: it is the spelling that is ambiguous, not September.
+const AMBIGUOUS_MONTH_WORDS: &[&str] =
+    &["mar", "march", "marche", "marches", "mars", "mart", "may"];
+
+/// Words that put a date after them: the last word before the match is one of
+/// these, and the number that follows is a day rather than a count.
+///
+/// Prepositions and nothing else. A verb like *review* or a noun like *section*
+/// is exactly what the ambiguous readings turned out to be sitting behind.
+const DATE_MARKERS: &[&str] = &[
+    "on", "at", "by", "from", "until", "till", "since", "before", "after",
+    "am", "an", "ab", "bis", "seit", "vom", "den", "zum",
+    "le", "du", "des", "jusqu'au", "dès",
+    "el", "al", "desde", "hasta", "em", "no", "na", "até", "de",
+    "il", "dal", "entro",
+    "op", "vanaf", "tot",
+    "w", "do", "od", "dnia",
+    "в", "до", "с", "от",
+];
+
+/// Whether a `<number> <month word>` reading has something behind it beyond the
+/// two tokens themselves: a dot (*3. Mai*, *Mar. 3*), a preposition in front
+/// (*on 3 May*), a year behind it (*3 May 2027*), or a time (*3 May at 10*).
+fn named_month_is_supported(text: &str, matched: &str, start: usize, year: Option<i32>, timed: bool) -> bool {
+    if matched.contains('.') || year.is_some() || timed {
+        return true;
+    }
+    text[..start]
+        .split_whitespace()
+        .next_back()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase())
+        .is_some_and(|w| DATE_MARKERS.contains(&w.as_str()))
+}
 
 fn month_of(word: &str) -> Option<u32> {
     let w = word.to_lowercase();
@@ -475,7 +561,17 @@ pub fn absolute_dates(text: &str, captured_at: i64, tz: Tz, month_first: bool) -
             None => roll_forward(tz, captured_at, day, month),
         };
         let Some(date) = date else { continue };
-        let (h, mi) = time_after(&text[end..]);
+        let time = time_read(&text[end..]);
+        // The one reading with no punctuation of its own to prove it is a date:
+        // two words, a small number and a word that happens to begin a month
+        // name. Where that word is also an everyday word, something else in the
+        // sentence has to say so.
+        if AMBIGUOUS_MONTH_WORDS.contains(&name.to_lowercase().as_str())
+            && !named_month_is_supported(text, m.as_str(), m.start(), year, time.is_some())
+        {
+            continue;
+        }
+        let (h, mi) = time.unwrap_or((DEFAULT_HOUR, 0));
         if let Some(at) = stamp(tz, date, h, mi) {
             out.push((m.start(), end, Found { at, span: m.as_str().to_string() }));
         }
@@ -831,7 +927,14 @@ impl crate::core::Core {
                         at: Some(next),
                         tz: m.tz,
                         rule: m.rule.clone(),
-                        source: m.source,
+                        // Not the parent's reading. Nothing read this
+                        // occurrence out of the prose and nobody set it, and a
+                        // row wearing `cue` here is one the moments stage takes
+                        // for its own on the next re-embed and deletes — after
+                        // which the re-read finds the original instant, sees it
+                        // done, and arms nothing. The recurrence ended at its
+                        // first completion, silently. See `Source::Armed`.
+                        source: crate::store::moments::Source::Armed,
                         span: m.span,
                     })
                     .await?;
@@ -1146,6 +1249,59 @@ mod tests {
             let f = absolute_dates(text, captured(), berlin(), false);
             assert_eq!(f.first().map(|x| local(x.at)).as_deref(), Some(want), "{text}");
         }
+    }
+
+    #[test]
+    fn an_everyday_word_that_begins_a_month_name_is_not_a_date_on_its_own() {
+        // `may` is an English modal, `march` a verb, and `month_of` matches any
+        // word of three letters or more that *prefixes* a month name. Each of
+        // these put an event on the front page under "Coming up".
+        for text in [
+            "Section 3 may be revised",
+            "review 5 may need work",
+            "the last 2 march entries",
+            "chapter 7 mars the argument",
+            "put 9 marches on the calendar",
+        ] {
+            assert!(absolute_dates(text, captured(), berlin(), false).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_month_word_still_reads_when_the_sentence_says_it_is_a_date() {
+        // The guard asks for one supporting signal, and there are four: a dot,
+        // a preposition in front, a year behind, or a time.
+        for (text, want) in [
+            ("on 3 May", "2027-05-03 09:00"),
+            ("Termin am 3. Mai", "2027-05-03 09:00"),
+            ("due 3 May 2027", "2027-05-03 09:00"),
+            ("3 May at 10", "2027-05-03 10:00"),
+        ] {
+            let f = absolute_dates(text, captured(), berlin(), false);
+            assert_eq!(f.first().map(|x| local(x.at)).as_deref(), Some(want), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_unambiguous_month_name_needs_nothing_behind_it() {
+        // The list is about ambiguity and not about abbreviation: a word that
+        // is a month word and nothing else goes on reading bare.
+        for text in ["meeting 12 September", "spotkanie 5 października", "встреча 7 ноября"] {
+            assert!(!absolute_dates(text, captured(), berlin(), false).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_empty_default_zone_is_the_servers_own() {
+        // `""` is documented — in the field's doc and in config.example.toml —
+        // as the server's zone, and resolved to UTC, because `zone("")` cannot
+        // parse it. Every door that sent no zone had its dates read two hours
+        // off on a Berlin server.
+        let named = default_zone_name("Europe/Berlin");
+        assert_eq!(named, "Europe/Berlin", "a named zone is used as it stands");
+        let empty = default_zone_name("");
+        assert!(empty.parse::<Tz>().is_ok(), "and the fallback is a zone the table knows: {empty}");
+        assert_eq!(default_zone_name("  "), empty, "whitespace is empty");
     }
 
     #[test]

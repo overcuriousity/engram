@@ -25,7 +25,7 @@ pub async fn run(
     let mut ids = Vec::new();
     for target in targets {
         let read = read_target(target)?;
-        let tz = local_zone();
+        let tz = zone_for(&read.content_type, &read.bytes);
         let meta = Meta { title, note, tz: tz.as_deref(), origin: None, intent: None };
         ids.push(post(&http, e, read.bytes, &read.content_type, read.label, meta, face).await?);
     }
@@ -45,7 +45,7 @@ pub async fn run_piped(
     face: &crate::cli::face::Face,
 ) -> Result<Vec<String>> {
     let http = client()?;
-    let tz = local_zone();
+    let tz = zone_for("text/plain", text.as_bytes());
     let id = post(
         &http,
         e,
@@ -87,6 +87,32 @@ struct Meta<'a> {
 /// The zone this process is in, or none where the platform cannot say.
 pub(crate) fn local_zone() -> Option<String> {
     iana_time_zone::get_timezone().ok()
+}
+
+/// The zone to send for a capture whose kind this end has not been told — a
+/// path, a link, a pipe — which is to say: only where the server will take it.
+///
+/// `/capture` refuses the three time fields on every branch that is not a
+/// verbatim text capture, because a PDF, a photo and a fetched page are read on
+/// the server's own terms and a zone attached to one is a parameter that would
+/// be silently dropped. Sent unconditionally, as it was, this made every
+/// `engram -c report.pdf`, `-c photo.jpg`, `-c https://example.com` and
+/// `echo https://x | engram` fail with `tz only applies to a text capture` on
+/// any host that can name its zone at all.
+///
+/// The condition is `refuse_time_fields`' own, mirrored: text/plain, and not a
+/// body that is nothing but a link — which the server reads as a fetch.
+fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
+    if !content_type.starts_with("text/plain") {
+        return None;
+    }
+    let is_a_link = std::str::from_utf8(bytes)
+        .ok()
+        .is_some_and(|t| crate::web::api::only_a_url(t).is_some());
+    if is_a_link {
+        return None;
+    }
+    local_zone()
 }
 
 /// One piece of text, sent as the reminder or the entry a verb said it is.
@@ -458,6 +484,48 @@ mod tests {
         let ids = run(&e, &[text.to_string()], None, None, &off()).await.unwrap();
         let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
         assert_eq!(stored.raw_text, text);
+    }
+
+    #[tokio::test]
+    async fn a_photo_a_document_and_a_link_are_captured_where_this_host_knows_its_zone() {
+        // The three time fields are refused on every branch of `/capture` that
+        // is not a verbatim text capture, and the zone used to be attached to
+        // every target regardless. On any host that can name its zone — which
+        // is every ordinary desktop — this made `-c report.pdf`, `-c photo.jpg`
+        // and `-c https://…` fail outright with `tz only applies to a text
+        // capture`. The one branch the CLI tests exercised was `.txt`, which is
+        // the one branch that accepts it.
+        let (e, _core) = endpoint().await;
+        assert!(local_zone().is_some(), "the fixture needs a host that names its zone");
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, crate::web::test_support::a_png()).unwrap();
+
+        run(&e, &[png.display().to_string()], None, None, &off()).await.expect("a photo");
+
+        // A link is a fetch, and this fixture has nothing to fetch — so it is
+        // the *reason* that is asserted. What must not come back is the door
+        // refusing the request before it ever tried.
+        for said in [
+            run(&e, &["https://example.com/a".into()], None, None, &off()).await.err(),
+            run_piped(&e, "https://example.com/b".into(), None, None, &off()).await.err(),
+        ] {
+            let said = said.map(|e| e.to_string()).unwrap_or_default();
+            assert!(!said.contains("tz only applies"), "the door refused the link over a zone: {said}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_note_still_travels_with_the_zone_it_was_typed_in() {
+        let (e, core) = endpoint().await;
+        let want = local_zone().expect("the fixture needs a host that names its zone");
+        let id = run_text(&e, "Remind me tomorrow at 9".into(), None, None, None, Some("remind"), &off())
+            .await
+            .unwrap();
+        assert_eq!(core.store.get_corpus(&id).await.unwrap().metadata["tz"], want);
+
+        let ids = run_piped(&e, "an ordinary note".into(), None, None, &off()).await.unwrap();
+        assert_eq!(core.store.get_corpus(&ids[0]).await.unwrap().metadata["tz"], want, "a pipe of prose is a text capture");
     }
 
     #[tokio::test]

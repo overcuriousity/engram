@@ -854,11 +854,35 @@
 
   // A day link carries the browser's zone, so the day page reads the day
   // the viewer means and not the server's.
+  //
+  // `data-day-at` is the other half of that, and the half `?tz=` could not
+  // reach: where the server wrote the date into the path itself it wrote it in
+  // UTC, while the day page builds its window in the viewer's zone. East of
+  // Greenwich every capture between local midnight and the offset therefore
+  // linked to the previous day, which answered "Nothing on this day." Given the
+  // instant, the path is rebuilt here from the local date instead.
   function zoneDayLinks(root) {
     var tz = (Intl.DateTimeFormat().resolvedOptions().timeZone || '');
     (root || document).querySelectorAll('a[data-day-link]').forEach(function (a) {
+      var at = a.getAttribute('data-day-at');
+      if (at) {
+        var local = localDay(parseInt(at, 10) * 1000);
+        if (local) a.href = '/ui/day/' + local;
+      }
       if (a.href.indexOf('?') < 0) a.href += '?tz=' + encodeURIComponent(tz);
     });
+  }
+
+  // `YYYY-MM-DD` for an instant, in the browser's own zone. Built from the
+  // parts rather than sliced out of `toISOString`, which is UTC and is the bug
+  // above; `en-CA` is the locale that already spells a date this way.
+  function localDay(ms) {
+    var d = new Date(ms);
+    if (isNaN(d.getTime())) return '';
+    var p = ('0');
+    return d.getFullYear() + '-' +
+      (p + (d.getMonth() + 1)).slice(-2) + '-' +
+      (p + d.getDate()).slice(-2);
   }
 
   // The idle column is hidden, not removed. Removing it is how a reminder
@@ -1480,7 +1504,14 @@
         // line in here, and a receipt that overwrites the other one is how the
         // page came to report only whichever request was slower.
         swap: 'beforeend',
-        values: { text: text, from_ask: fromAsk ? fromAsk.value : '' }
+        // The zone travels with the text. Without it the box stored none and
+        // the server read *tomorrow at 9* in its own default, while the echo
+        // directly under the box had already told the operator 09:00 in theirs.
+        values: {
+          text: text,
+          from_ask: fromAsk ? fromAsk.value : '',
+          tz: (document.getElementById('box-tz') || {}).value || ''
+        }
       // A transport failure rejects, and nothing catching it was an unhandled
       // rejection on top of a capture that visibly did nothing.
       }).catch(function () {}).then(function () {

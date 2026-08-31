@@ -212,6 +212,18 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
 }
 
 async fn entry(tenant: Tenant, Path(date): Path<String>, Form(f): Form<EntryForm>) -> Result<Response> {
+    // The date is a date, exactly as `page` demands — and for both of the
+    // reasons `page` has plus one of its own. Unchecked, `POST
+    // /ui/day/garbage/entry` stored a capture carrying `metadata.day =
+    // "garbage"` that no day page could ever show; and axum percent-decodes a
+    // path parameter, so a segment holding a CR or an LF made `Redirect::to`
+    // fail `HeaderValue::try_from` and answer 500 *after* the entry had been
+    // written — which is the failure the comment just below says was fixed for
+    // the zone, arriving through the other half of the same URL.
+    let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else { return Err(Error::NotFound) };
+    // Round-tripped through the parse, so what goes into the header and into
+    // `metadata.day` is the canonical spelling and not whatever spelled it.
+    let date = day.format("%Y-%m-%d").to_string();
     // Through the zone table before it reaches a `Location` header. A raw form
     // value is not header-safe — `tz=Ü`, or anything carrying a control
     // character, made `Redirect::to` build a header axum then refused to send,
@@ -337,6 +349,25 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert_eq!(res.headers()["location"], "/ui/day/2026-08-28?tz=UTC");
+    }
+
+    #[tokio::test]
+    async fn a_day_that_is_not_a_date_stores_nothing_and_answers_404() {
+        // `page` refused it and `entry` did not. Unchecked, the capture landed
+        // with `metadata.day = "garbage"`, where no day page could ever show
+        // it — and a segment carrying a control character made `Redirect::to`
+        // fail on the way out, so the answer was a 500 *after* the write.
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        for date in ["garbage", "2026-13-40", "2026-08-30%0d%0aX", "today"] {
+            let res = app
+                .clone()
+                .oneshot(form(&format!("/ui/day/{date}/entry"), &cookie, "text=Long+day.&tz=Europe/Berlin"))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{date}");
+        }
+        assert!(core.store.recent_captures(5).await.unwrap().is_empty(), "and nothing was stored");
     }
 
     #[tokio::test]

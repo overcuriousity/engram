@@ -500,6 +500,12 @@ impl Default for TimeConfig {
 /// The reap sweep: revisit long-retired artifacts, bury what the live base
 /// already states, rewrite what it does not. Runs only where a judge model is
 /// configured — the rules alone nominate, they never tombstone.
+///
+/// The one stage that destroys captured text, which is why every field of it
+/// is written out in `config.example.toml` rather than left to these defaults:
+/// a sweep an operator cannot find is one they cannot turn off. Nothing is
+/// lost — `graveyard` keeps the text and the judge's reason permanently — but
+/// a buried artifact leaves search, FTS and the vector store.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ReapConfig {
@@ -2683,6 +2689,26 @@ mod tests {
         assert!(cfg.learn.enabled);
         assert_eq!(cfg.recommend.max_clusters, 5);
         assert_eq!(cfg.recommend.weights.of("network"), 0.6);
+    }
+
+    #[test]
+    fn the_example_config_carries_the_reap_block() {
+        // Read as text before it is parsed, for the reason the background and
+        // recommend blocks are: `#[serde(default)]` would fill every one of
+        // these numbers in on a file that never mentions reaping, and a
+        // load-and-compare test would pass over a sweep nobody can find. This
+        // one destroys captured text, so "documented" is the assertion that
+        // matters most, and every key it turns on is named one at a time.
+        let path = std::path::Path::new("config.example.toml");
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(raw.contains("\n[reap]\n"), "the block is documented");
+        for key in ["enabled", "interval_mins", "min_age_days", "max_judged_per_run", "max_rescues_per_run"] {
+            assert!(raw.contains(&format!("\n{key} = ")), "{key} is unnamed");
+        }
+        let cfg = Config::load(Some(path)).unwrap();
+        assert!(cfg.reap.enabled);
+        assert_eq!(cfg.reap.min_age_days, 90);
+        assert_eq!(cfg.reap.max_rescues_per_run, 3);
     }
 
     #[test]

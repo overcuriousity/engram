@@ -339,6 +339,14 @@ struct CaptureForm {
     /// what it was written from — even if the operator rewrote every word of it.
     #[serde(default)]
     from_ask: Option<String>,
+    /// The viewer's zone, from the hidden `#box-tz` app.js fills on load — the
+    /// same field the echo under the box already reads its dates in.
+    ///
+    /// Without it the flagship path stored no zone at all: *remind me tomorrow
+    /// at 9*, echoed under the box in Berlin as 09:00, landed as a moment at
+    /// 09:00 UTC and the band underneath said 11:00.
+    #[serde(default)]
+    tz: Option<String>,
 }
 
 #[derive(Template)]
@@ -388,7 +396,7 @@ async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Re
         },
         None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
     };
-    let out = tenant.core.ingest_capture(capture).await?;
+    let out = tenant.core.ingest_capture(capture.with_tz(viewer_zone(f.tz.as_deref()))).await?;
     let entry = tenant
         .core
         .store
@@ -407,6 +415,23 @@ async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Re
         near_dupe_of: out.near_duplicate.map(|n| n.corpus_id),
     })
     .into_response())
+}
+
+/// The zone the box was typed in, as the zone table spells it.
+///
+/// A name that does not parse is dropped rather than refused: this is a hidden
+/// field the browser fills from `Intl`, nobody typed it, and a 400 here would
+/// lose the text of a capture over a zone database that disagrees with ours.
+/// Dropping it falls back to `time.default_tz`, which is the server's own zone.
+fn viewer_zone(tz: Option<&str>) -> Option<String> {
+    let name = tz.map(str::trim).filter(|t| !t.is_empty())?;
+    match name.parse::<chrono_tz::Tz>() {
+        Ok(z) => Some(z.name().to_string()),
+        Err(_) => {
+            tracing::warn!(tz = %name, "the box sent a zone the table does not know; reading its dates in the default");
+            None
+        }
+    }
 }
 
 /// The capture door: the workspace with the box already filled.
@@ -2083,5 +2108,80 @@ mod tests {
         let html = workspace_held("/ui").await;
         assert!(html.contains(r#"href="/ui/day/"#), "{html}");
         assert!(html.contains("data-day-link"));
+        // The instant, so app.js can rebuild the path in the viewer's zone. The
+        // date in the href is UTC and the day page builds its window locally,
+        // so east of Greenwich every capture between local midnight and the
+        // offset linked to a page reading "Nothing on this day."
+        assert!(html.contains("data-day-at="), "{html}");
+    }
+
+    /// The two halves the server cannot check for itself: the zone the box
+    /// posts, and the day a stamp links to.
+    #[test]
+    fn the_box_sends_its_zone_and_a_day_link_is_rebuilt_locally() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("getElementById('box-tz')"),
+            "the capture reads the same hidden field the echo already does"
+        );
+        assert!(
+            js.contains("data-day-at"),
+            "a day link is rebuilt from the instant, in the viewer's zone: the              date the server wrote into the path is UTC"
+        );
+        assert!(
+            js.contains("function localDay("),
+            "and from the local parts, never sliced out of toISOString, which              is the UTC this exists to correct"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_capture_receipt_outlives_the_page_going_idle() {
+        // A capture empties the box, and an empty box hides `#pane`. With the
+        // receipt inside the pane, "Captured — view source" and the undo beside
+        // a note filed as today's entry were swapped in and hidden in the same
+        // turn: the undo for a wrongly-cued entry was unreachable without a
+        // reload.
+        let html = workspace_held("/ui").await;
+        let pane = html.find(r#"<div id="pane""#).expect("the pane is on the page");
+        let receipt = html.find(r#"<div id="capture-result">"#).expect("and so is the receipt");
+        assert!(receipt < pane, "the receipt is above the pane, not inside it: {html}");
+    }
+
+    #[tokio::test]
+    async fn the_box_stores_the_zone_it_was_typed_in() {
+        // The flagship path. Without it *remind me tomorrow at 9* was echoed
+        // under the box as 09:00 in the viewer's zone and stored in the
+        // server's, and the band underneath then said something else.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let post = |app: axum::Router, cookie: String, body: &'static str| async move {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/ui/capture")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            body_of(res).await
+        };
+
+        post(app.clone(), cookie.clone(), "text=Remind+me+tomorrow+at+9&tz=Europe%2FBerlin").await;
+        let stored = core.store.recent_captures(1).await.unwrap();
+        let cid = stored[0].0.clone();
+        assert_eq!(core.store.get_corpus(&cid).await.unwrap().metadata["tz"], "Europe/Berlin");
+
+        // A zone the table does not know is dropped rather than stored: nobody
+        // typed this field, and a 400 would lose the text of the capture.
+        post(app, cookie, "text=Another+note+entirely&tz=Europe%2FBerlim").await;
+        let stored = core.store.recent_captures(1).await.unwrap();
+        let cid = stored[0].0.clone();
+        assert!(core.store.get_corpus(&cid).await.unwrap().metadata["tz"].is_null());
     }
 }

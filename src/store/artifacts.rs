@@ -1445,6 +1445,16 @@ impl Store {
     /// mentions, nobody ever completes it, and counting it here would make
     /// every artifact a date was read out of permanently un-reapable.
     ///
+    /// And the reminder that holds a row back is the note's, on an artifact
+    /// that is still active — `has_open_reminder_for_corpus`' question, asked
+    /// in SQL. It used to be any open due row on the candidate itself, which
+    /// is a row nobody can ever reach: every candidate is retired by
+    /// definition, every query that lists a reminder says `status = 'active'`,
+    /// and so a reminder on a retired artifact has no band, no Done button and
+    /// no way of ever being closed. It excluded its artifact from the sweep
+    /// permanently. What is worth protecting is the note a person is still
+    /// being reminded about, and that is what this asks.
+    ///
     /// Age reads `retired_at` and nothing else. A retired row whose stamp is
     /// NULL predates the column; `stamp_unaged_retired` gives it a fresh clock
     /// and this query simply does not see it until that clock runs.
@@ -1461,13 +1471,20 @@ impl Store {
     /// which over-fetches to absorb it.
     pub async fn reap_candidates(&self, min_age_secs: i64, limit: i64) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(
-            "SELECT * FROM artifacts
+            // `art` and not the bare table name: the reminder clause below joins
+            // `artifacts` a second time, and inside that subquery an unaliased
+            // `artifacts.corpus_id` resolves to the *inner* copy — which made
+            // the comparison trivially true and every open reminder anywhere in
+            // the base hold back every candidate in it.
+            "SELECT * FROM artifacts art
               WHERE (status != 'active' OR superseded_by IS NOT NULL)
                 AND reaped_at IS NULL
                 AND retired_at IS NOT NULL AND retired_at < ?
                 AND NOT EXISTS (SELECT 1 FROM moments m
-                                 WHERE m.artifact_id = artifacts.id
-                                   AND m.kind = 'due' AND m.done_at IS NULL)
+                                 JOIN artifacts live ON live.id = m.artifact_id
+                                WHERE live.corpus_id = art.corpus_id
+                                  AND live.status = 'active'
+                                  AND m.kind = 'due' AND m.done_at IS NULL)
                 AND id NOT IN (
                   SELECT s.root_id FROM artifact_sources s
                     JOIN artifacts m ON m.id = s.child_id
@@ -1515,12 +1532,24 @@ impl Store {
     /// The stub keeps every column other rows hold threads into (`id`,
     /// `status`, `superseded_by`, title, lineage); the `AFTER UPDATE OF text`
     /// trigger empties the FTS entry on its own.
+    ///
+    /// The row has to still be a candidate at the instant it is buried, and not
+    /// merely at the instant it was nominated. `nominees` reads a whole page up
+    /// front and the sweep then spends one model call per row, so an operator
+    /// who reactivates an artifact while its judgement is in flight would have
+    /// a verdict about a retired row wipe the text of a live one. The predicate
+    /// is `reap_candidates`' own; missing it, this answers `NotFound` and
+    /// `reap::run` logs a burial that did not happen, which is the right
+    /// outcome for a verdict that has been overtaken.
     pub async fn bury(&self, id: &str, meta_json: &str) -> Result<()> {
         let reaped_at = now();
         let mut tx = self.pool.begin().await?;
         let res = sqlx::query(
             "INSERT INTO graveyard (id, title, text, meta_json, reaped_at)
-             SELECT id, title, text, ?, ? FROM artifacts WHERE id = ?",
+             SELECT id, title, text, ?, ? FROM artifacts
+              WHERE id = ?
+                AND (status != 'active' OR superseded_by IS NOT NULL)
+                AND reaped_at IS NULL",
         )
         .bind(meta_json)
         .bind(reaped_at)
@@ -2594,7 +2623,7 @@ mod tests {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
-            .insert_artifacts(&src.id, &[nc(0, "old"), nc(1, "young"), nc(2, "reminded")])
+            .insert_artifacts(&src.id, &[nc(0, "old"), nc(1, "young"), nc(2, "unreachable-reminder")])
             .await
             .unwrap();
         for c in &made {
@@ -2604,15 +2633,32 @@ mod tests {
         }
         backdate_retired_at(&s, &made[0].id, 100 * 86_400).await;
         // made[1] keeps its fresh stamp — too young.
+        // A reminder on a retired artifact is on no band and has no button: it
+        // can never be completed, and counting it kept this row out of the
+        // sweep permanently.
         backdate_retired_at(&s, &made[2].id, 100 * 86_400).await;
         insert_open_moment(&s, &made[2].id).await;
 
+        // A second note, whose live artifact still carries an open reminder.
+        // The retired one beside it is what the rule is actually for: somebody
+        // is still being reminded about this note, so its text stays.
+        // Its own text: `insert_corpus` deduplicates on content, and a second
+        // "raw" would be the same note again rather than a second one.
+        let other = s.insert_corpus("another note", "web", None).await.unwrap();
+        let pair = s
+            .insert_artifacts(&other.id, &[nc(0, "live"), nc(1, "retired-beside-a-live-reminder")])
+            .await
+            .unwrap();
+        insert_open_moment(&s, &pair[0].id).await;
+        s.set_artifact_status(&pair[1].id, ArtifactStatus::Deprecated).await.unwrap();
+        backdate_retired_at(&s, &pair[1].id, 100 * 86_400).await;
+
         let got = s.reap_candidates(90 * 86_400, 20).await.unwrap();
-        assert_eq!(
-            got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            vec![made[0].id.as_str()],
-            "only the old, unreminded retirement is a candidate"
-        );
+        let mut ids = got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>();
+        ids.sort_unstable();
+        let mut want = vec![made[0].id.as_str(), made[2].id.as_str()];
+        want.sort_unstable();
+        assert_eq!(ids, want, "the old retirements, the note with a live reminder aside");
     }
 
     #[tokio::test]
@@ -2636,6 +2682,30 @@ mod tests {
         assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_some());
         assert!(s.get_artifact(&made[1].id).await.unwrap().retired_at.is_none());
         assert_eq!(s.stamp_unaged_retired().await.unwrap(), 0, "stamping is once");
+    }
+
+    #[tokio::test]
+    async fn burying_an_artifact_that_is_live_again_does_nothing() {
+        // `nominees` reads a page up front and the sweep then spends one model
+        // call per row, so a verdict can land on an artifact somebody has since
+        // put back. Unguarded, the burial wiped the text of a live row.
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s.insert_artifacts(&src.id, &[nc(0, "still wanted")]).await.unwrap();
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated).await.unwrap();
+        // Reactivated while the judgement was in flight.
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Active).await.unwrap();
+
+        assert!(matches!(s.bury(&made[0].id, "{}").await, Err(Error::NotFound)));
+        let row = s.get_artifact(&made[0].id).await.unwrap();
+        assert_eq!(row.text, "still wanted", "the text of a live row is untouched");
+        assert!(row.reaped_at.is_none());
+        assert!(s.graveyard_row(&made[0].id).await.unwrap().is_none());
+
+        // And a row already buried is not buried twice.
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated).await.unwrap();
+        s.bury(&made[0].id, "{}").await.unwrap();
+        assert!(matches!(s.bury(&made[0].id, "{}").await, Err(Error::NotFound)));
     }
 
     #[tokio::test]

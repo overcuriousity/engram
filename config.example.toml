@@ -718,8 +718,44 @@ intent_at = 0.80
 # dates never lift.
 lift = true
 # IANA zone for doors that send none (the API without ?tz=, MCP without tz).
-# Empty means the server's own zone.
+# Empty means the server's own zone, as the host names it — and UTC where the
+# platform cannot say. Name a zone here if the server's own is not the one your
+# notes are written in.
 default_tz = ""
+
+# ── Reaping ──────────────────────────────────────────────────────────────────
+# The sweep that revisits long-retired artifacts and decides, one model call
+# each, whether the live base already says what they say. A worthless one is
+# buried: its text is copied into the `graveyard` table and wiped from the
+# artifact, and its vector point is deleted. A valuable one is rewritten into a
+# fresh artifact.
+#
+# This is the only stage in the base that destroys text an operator captured,
+# so read it before leaving it on. Nothing is lost — `graveyard` is permanent
+# by design, and every burial keeps the judge's one-line reason with it — but a
+# buried artifact is out of search, out of FTS and out of the vector store, and
+# putting one back is a manual read of that table.
+#
+# It runs only where a judge model is configured. The free rules nominate; they
+# never tombstone on their own.
+[reap]
+# The sweep at all. Off means retired artifacts keep their text forever, which
+# is what every base did before this stage existed.
+enabled = true
+# How often the sweep runs. Once a day: the backlog it drains accumulated over
+# months, and there is nothing to be gained by draining it faster.
+interval_mins = 1440
+# How long an artifact must have been retired before it is judged at all. The
+# clock is `artifacts.retired_at`, and a row retired before that column existed
+# is given a fresh one on the first sweep rather than a date invented for it —
+# so an upgrade waits this long again before anything is judged.
+min_age_days = 90
+# Model calls per run, and so the sweep's whole inference budget. Rows over the
+# cap stay candidates, oldest first, and come back on the next run.
+max_judged_per_run = 20
+# Rewrites per run, bounded separately: one bad judging batch must not be able
+# to flood the live base with model-written text.
+max_rescues_per_run = 3
 
 # ── Scheduling ───────────────────────────────────────────────────────────────
 # The queue is the scheduler. Whether somebody is waiting on a unit is a

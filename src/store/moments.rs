@@ -35,6 +35,13 @@ pub enum Source {
     Cue,
     Classified,
     Extracted,
+    /// The next occurrence of a recurrence, armed by the completion of the one
+    /// before it. Not a reading of the prose and not a person's doing, and the
+    /// distinction is load-bearing: `delete_read_moments` would otherwise take
+    /// it for something it read and delete it on the next re-embed, after
+    /// which the re-read finds the original instant still done and arms
+    /// nothing — the recurrence would end silently at its first completion.
+    Armed,
 }
 
 impl Source {
@@ -44,6 +51,7 @@ impl Source {
             Source::Cue => "cue",
             Source::Classified => "classified",
             Source::Extracted => "extracted",
+            Source::Armed => "armed",
         }
     }
     pub fn parse(s: &str) -> Option<Source> {
@@ -52,6 +60,7 @@ impl Source {
             "cue" => Some(Source::Cue),
             "classified" => Some(Source::Classified),
             "extracted" => Some(Source::Extracted),
+            "armed" => Some(Source::Armed),
             _ => None,
         }
     }
@@ -71,6 +80,13 @@ pub struct Moment {
     pub done_at: Option<i64>,
     pub snoozed_until: Option<i64>,
     pub notified_at: Option<i64>,
+    /// The instant this row was read at before somebody moved it. `None` on a
+    /// row nobody has moved — and also on one that was moved off no instant at
+    /// all, which is what dating an undated reminder is. `moved_at` is the mark
+    /// that tells those two apart.
+    pub moved_from: Option<i64>,
+    /// When somebody moved this row, or `None` if nobody has.
+    pub moved_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -107,6 +123,8 @@ fn moment_of(r: &sqlx::sqlite::SqliteRow) -> Moment {
         done_at: r.get("done_at"),
         snoozed_until: r.get("snoozed_until"),
         notified_at: r.get("notified_at"),
+        moved_from: r.get("moved_from"),
+        moved_at: r.get("moved_at"),
         created_at: r.get("created_at"),
     }
 }
@@ -147,10 +165,17 @@ impl Store {
     /// `kind = 'due'` and not every kind: an event is a date the note mentions,
     /// which nobody completes and which would therefore hold a note open
     /// forever. Retirement is about reminders.
+    ///
+    /// `a.status = 'active'` because every query that *lists* a reminder says
+    /// so. A row on a deprecated or superseded artifact is on no band and has
+    /// no button, so nobody can ever complete it; counting it here held the
+    /// note open forever on the strength of a reminder that had already
+    /// vanished from the screen.
     pub async fn has_open_reminder_for_corpus(&self, corpus_id: &str) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
-             WHERE a.corpus_id = ? AND m.kind = 'due' AND m.done_at IS NULL",
+             WHERE a.corpus_id = ? AND m.kind = 'due' AND m.done_at IS NULL \
+               AND a.status = 'active'",
         )
         .bind(corpus_id)
         .fetch_one(&self.pool)
@@ -162,8 +187,9 @@ impl Store {
     /// a person? `source` already records exactly that: `cue` and `classified`
     /// are the two readings, `set` is a person, `extracted` is a date
     /// mentioned in passing prose. Every moment the note ever had is
-    /// considered, because moving a cue reminder's date writes a fresh `set`
-    /// row and the note does not stop having been a reminder.
+    /// considered, and moving a reminder's date leaves `source` alone — see
+    /// `move_moment` — because correcting a date the base read wrong does not
+    /// make the note stop having been read as a reminder.
     pub async fn corpus_was_read_as_reminder(&self, corpus_id: &str) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
@@ -206,12 +232,24 @@ impl Store {
     /// second copy. Read the finished "call the bank" back with `= ?` and NULL
     /// never equals NULL, so every re-read — every reindex, every switched
     /// embed model — put another undated row on the band.
+    ///
+    /// `moved_from` is consulted for the same reason and answers the other
+    /// half of it: a row the operator moved is no longer parked at the instant
+    /// the stage read, so without this the next re-read put a fresh row back on
+    /// exactly the date they corrected away from — the reminder twice over, and
+    /// the wrong one pushing. The second clause is inert when there is no
+    /// instant to compare: `moved_from IS NOT NULL` cannot hold while the bound
+    /// value is NULL, so an undated reminder still matches on `at` alone and
+    /// not on every unmoved row of its kind.
     pub async fn has_moment_at(&self, artifact_id: &str, kind: Kind, at: Option<i64>) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = ? AND at IS ?",
+            "SELECT COUNT(*) FROM moments
+              WHERE artifact_id = ? AND kind = ?
+                AND (at IS ? OR (moved_from IS NOT NULL AND moved_from IS ?))",
         )
         .bind(artifact_id)
         .bind(kind.as_str())
+        .bind(at)
         .bind(at)
         .fetch_one(&self.pool)
         .await?;
@@ -253,11 +291,24 @@ impl Store {
     /// it would return to the band and push again. `done_at`, `notified_at`
     /// and `snoozed_until` are the three marks that say a row has a history,
     /// and a row with a history outlives the reading that made it.
+    ///
+    /// `moved_at` is a fourth mark of the same kind: a row somebody moved has
+    /// been acted on, and it keeps its `source` so that the note still counts
+    /// as having been read as a reminder. The mark is `moved_at` and not
+    /// `moved_from` because dating a reminder nobody could date is a move off
+    /// no instant, and that row has to survive the next re-read just as much.
+    ///
+    /// `armed` joins `set` as a source this never touches. The successor of a
+    /// completed recurrence carries the parent's reading in `source` but is not
+    /// itself a reading, and no re-read of the prose would produce it: deleted
+    /// here, it was gone for good, because the re-read then found the original
+    /// instant still on the artifact — done — and armed nothing in its place.
     pub async fn delete_read_moments(&self, artifact_id: &str) -> Result<u64> {
         Ok(sqlx::query(
             "DELETE FROM moments
-              WHERE artifact_id = ? AND source != 'set'
-                AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL",
+              WHERE artifact_id = ? AND source NOT IN ('set', 'armed')
+                AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL
+                AND moved_at IS NULL",
         )
             .bind(artifact_id)
             .execute(&self.pool)
@@ -342,16 +393,29 @@ impl Store {
     /// is not completing, so it leaves no `done` row behind on the day it used
     /// to fall on, and — the reason this is an UPDATE and not the done-plus-
     /// insert it once was — a recurrence still has exactly one row per real
-    /// firing, which is what `occurrences_of_rule` counts. A moved row is a
-    /// row somebody set, so `source` says so and the stage will not touch it.
+    /// firing, which is what `occurrences_of_rule` counts.
+    ///
+    /// `source` is left alone. It records how the date got here — a reading or
+    /// a person — and a correction to *when* is not a claim about *how*:
+    /// overwriting it with `set` made a moved cue reminder stop counting as one
+    /// the base had read, and `corpus_was_read_as_reminder` then left the note
+    /// un-retired when it was finished. What tells the stage to keep its hands
+    /// off is `moved_from`, which is also the misreading itself, kept.
+    ///
+    /// `COALESCE` so the first move is the one recorded: the instant worth
+    /// keeping is the one the base read out of the prose, not whatever the
+    /// operator typed on their way to the date they meant.
     ///
     /// The snooze and the notification go with the old date: both were about
     /// an instant that is no longer this row's.
     pub async fn move_moment(&self, id: &str, at: i64, tz: &str) -> Result<()> {
         sqlx::query(
-            "UPDATE moments SET at = ?, tz = ?, source = 'set', snoozed_until = NULL, notified_at = NULL
+            "UPDATE moments
+                SET moved_from = COALESCE(moved_from, at), moved_at = ?, at = ?, tz = ?,
+                    snoozed_until = NULL, notified_at = NULL
               WHERE id = ?",
         )
+        .bind(crate::store::now())
         .bind(at)
         .bind(tz)
         .bind(id)
@@ -715,6 +779,69 @@ mod tests {
         s.insert_moment(&m).await.unwrap();
         assert!(s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2").await.unwrap(), "two of two");
         assert!(!s.rule_is_exhausted(&aid, "FREQ=DAILY").await.unwrap(), "open-ended is never exhausted");
+    }
+
+    #[tokio::test]
+    async fn a_moved_row_keeps_its_reading_and_outlives_the_next_re_read() {
+        let (s, aid) = store_with_artifact().await;
+        let id = s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        s.move_moment(&id, 5_000, "Europe/Berlin").await.unwrap();
+
+        let m = s.moment(&id).await.unwrap().unwrap();
+        assert_eq!(m.at, Some(5_000));
+        assert_eq!(m.moved_from, Some(1_000), "the misreading is kept");
+        assert!(m.moved_at.is_some());
+        assert_eq!(m.source, Source::Cue, "moving says nothing about how the date got here");
+
+        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 0, "a moved row has a history");
+        assert!(
+            s.has_moment_at(&aid, Kind::Due, Some(1_000)).await.unwrap(),
+            "and the stage will not put a fresh one back on the date that was corrected away from"
+        );
+
+        // A second move keeps the first instant: what is worth keeping is what
+        // the base read, not the operator's own way to the date they meant.
+        s.move_moment(&id, 9_000, "Europe/Berlin").await.unwrap();
+        assert_eq!(s.moment(&id).await.unwrap().unwrap().moved_from, Some(1_000));
+    }
+
+    #[tokio::test]
+    async fn dating_an_undated_reminder_is_a_move_with_no_instant_to_keep() {
+        // The one move with nothing to record in `moved_from`, and the row has
+        // to survive the next re-read all the same — which is why the mark is
+        // `moved_at` and not `moved_from`.
+        let (s, aid) = store_with_artifact().await;
+        let id = s.insert_moment(&due(&aid, None)).await.unwrap();
+        s.move_moment(&id, 5_000, "Europe/Berlin").await.unwrap();
+        let m = s.moment(&id).await.unwrap().unwrap();
+        assert_eq!(m.moved_from, None);
+        assert!(m.moved_at.is_some());
+        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 0, "and it is not read away");
+    }
+
+    #[tokio::test]
+    async fn an_armed_occurrence_is_not_what_the_stage_read() {
+        let (s, aid) = store_with_artifact().await;
+        let mut m = due(&aid, Some(1_000));
+        m.source = Source::Armed;
+        let armed = s.insert_moment(&m).await.unwrap();
+        let read = s.insert_moment(&due(&aid, Some(2_000))).await.unwrap();
+        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 1, "only the reading");
+        assert!(s.moment(&armed).await.unwrap().is_some());
+        assert!(s.moment(&read).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_reminder_nobody_can_reach_does_not_hold_its_note_open() {
+        // Every query that lists a reminder says `status = 'active'`. On a
+        // deprecated artifact the row is on no band and has no button, so
+        // counting it held the note open on a reminder nobody could finish.
+        let (s, aid) = store_with_artifact().await;
+        let cid = s.get_artifact(&aid).await.unwrap().corpus_id.unwrap();
+        s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        assert!(s.has_open_reminder_for_corpus(&cid).await.unwrap());
+        s.set_artifact_status(&aid, crate::store::artifacts::ArtifactStatus::Deprecated).await.unwrap();
+        assert!(!s.has_open_reminder_for_corpus(&cid).await.unwrap());
     }
 
     #[tokio::test]

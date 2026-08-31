@@ -626,9 +626,15 @@ pub(crate) struct IdleRecentRow {
     pub(crate) label: String,
     /// "today", "3 days ago" — a jog, not a timestamp. See `judge::ago`.
     pub(crate) when: String,
-    /// The day, as a link target. UTC here; the day page re-reads it in the
-    /// browser's zone, which app.js appends on load.
+    /// The day, as a link target, in UTC — the no-JS fallback and nothing
+    /// more. The day page builds its window in the *viewer's* zone, so east of
+    /// Greenwich every capture between local midnight and the offset landed on
+    /// the day before and the page said "Nothing on this day". `?tz=` could not
+    /// save it: the date is already in the path by then. app.js rewrites the
+    /// whole href from `at` below, in the zone only the browser knows.
     pub(crate) day: String,
+    /// When the capture landed, in Unix seconds, for that rewrite.
+    pub(crate) at: i64,
 }
 
 /// The name a capture goes by before synthesis titles it: the hint, or its
@@ -668,6 +674,7 @@ pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemp
                 day: chrono::DateTime::from_timestamp(created_at, 0)
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_default(),
+                at: created_at,
                 when: crate::web::judge::ago(created_at),
                 label: corpus_label(title_hint, &opening, &origin),
                 id,

@@ -1568,6 +1568,8 @@ mod tests {
                 done_at: None,
                 snoozed_until: None,
                 notified_at: None,
+                moved_from: None,
+                moved_at: None,
                 created_at: 0,
             },
             title: title.into(),
