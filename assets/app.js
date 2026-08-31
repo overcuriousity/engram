@@ -2137,9 +2137,36 @@
     });
   }
 
+  // The band polls, and a swap replaces every row in it — including the
+  // `later` a person has just opened and the date they are half way through
+  // typing. Opening `later` and watching it shut a second later is not a
+  // disclosure anyone can use, and no poll interval makes that acceptable: at
+  // five minutes it is a rarer version of the same defect.
+  //
+  // Only the band's own requests are held off. A snooze or a `done` is a
+  // button inside the band asking to be swapped, and must always land.
+  function dueBusy() {
+    var band = document.getElementById('due');
+    if (!band) return false;
+    if (band.querySelector('details[open]')) return true;
+    if (document.activeElement && band.contains(document.activeElement)) return true;
+    // A date typed but not yet submitted. Nothing else on the band holds text.
+    return Array.prototype.some.call(band.querySelectorAll('input'), function (i) {
+      return i.value !== '';
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
     dueTick();
+    document.body.addEventListener('htmx:beforeSwap', function (e) {
+      if (!e.target || e.target.id !== 'due') return;
+      var cfg = e.detail && e.detail.requestConfig;
+      // The poll and the `refresh` event both name the band as their source;
+      // a button names itself.
+      if (cfg && cfg.elt && cfg.elt !== e.target) return;
+      if (dueBusy()) e.detail.shouldSwap = false;
+    });
     // A second is the resolution of the last minute of a countdown, and the
     // work is a handful of rows: cheaper than the poll it replaces.
     setInterval(dueTick, 1000);

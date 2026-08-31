@@ -339,11 +339,16 @@ static NAMED_MONTH_FIRST: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 static YEAR_AFTER: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^\.?,?\s+(\d{4})\b").unwrap());
-/// A time directly after a date: `T14:30`, ` um 10 Uhr`, ` at 3pm`, `, 14:00`.
+/// A time directly after a date: `T14:30`, ` um 10 Uhr`, ` at 3pm`, `, 14:00`,
+/// ` 13:45 Uhr`.
+///
 /// Accepted only with a marker — a joining word, a colon or a suffix — so
-/// `01.03.2027 5 apples` does not read the five as an hour.
+/// `01.03.2027 5 apples` does not read the five as an hour. The joining word
+/// is one of three ways to be marked and not a requirement: *Freitag 13:45
+/// Uhr* is as plainly a time as *Freitag um 13:45*, and demanding the *um*
+/// silently returned nine in the morning for it.
 static TIME_AFTER: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?i)^(?:T|\s*(?:(um|at|à|a las|alle|om|o|saat|в|,)\s*))?(\d{1,2})(?::(\d{2}))?\s*(am|pm|uhr|h)?\b").unwrap()
+    regex::Regex::new(r"(?i)^(?:T|\s*(?:(um|at|à|a las|alle|om|o|saat|в|,)\s*)?)(\d{1,2})(?::(\d{2}))?\s*(am|pm|uhr|h)?\b").unwrap()
 });
 
 fn stamp(tz: Tz, date: NaiveDate, hour: u32, minute: u32) -> Option<i64> {
@@ -365,12 +370,19 @@ fn roll_forward(tz: Tz, captured_at: i64, day: u32, month: u32) -> Option<NaiveD
 
 /// `(hour, minute)` read from the text right after a date, or the default.
 fn time_after(rest: &str) -> (u32, u32) {
-    let Some(c) = TIME_AFTER.captures(rest) else { return (DEFAULT_HOUR, 0) };
+    time_read(rest).unwrap_or((DEFAULT_HOUR, 0))
+}
+
+/// The same, saying whether it read anything at all. A caller with a second
+/// place to look needs to tell "no time here" from "nine in the morning",
+/// which the defaulted form has thrown away by the time it returns.
+fn time_read(rest: &str) -> Option<(u32, u32)> {
+    let c = TIME_AFTER.captures(rest)?;
     let marked = c.get(1).is_some() || c.get(3).is_some() || c.get(4).is_some() || rest.starts_with('T');
     if !marked {
-        return (DEFAULT_HOUR, 0);
+        return None;
     }
-    let mut hour: u32 = c[2].parse().unwrap_or(DEFAULT_HOUR);
+    let mut hour: u32 = c[2].parse().ok()?;
     let suffix = c.get(4).map(|m| m.as_str().to_lowercase());
     if suffix.as_deref() == Some("pm") && hour < 12 {
         hour += 12;
@@ -379,9 +391,9 @@ fn time_after(rest: &str) -> (u32, u32) {
         hour = 0;
     }
     if hour > 23 {
-        return (DEFAULT_HOUR, 0);
+        return None;
     }
-    (hour, c.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or(0))
+    Some((hour, c.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or(0)))
 }
 
 pub fn absolute_dates(text: &str, captured_at: i64, tz: Tz, month_first: bool) -> Vec<Found> {
@@ -506,10 +518,6 @@ static AT_TIME: LazyLock<regex::Regex> = LazyLock::new(|| {
 pub fn relative_date(text: &str, captured_at: i64, tz: Tz) -> Option<Found> {
     let lower = text.to_lowercase();
     let today = tz.timestamp_opt(captured_at, 0).single()?.date_naive();
-    let (h, mi) = match AT_TIME.find(&lower) {
-        Some(m) => time_after(&lower[m.start()..]),
-        None => (DEFAULT_HOUR, 0),
-    };
     let mut best: Option<(NaiveDate, String)> = None;
     let mut consider = |d: NaiveDate, span: &str| {
         if d > today && best.as_ref().is_none_or(|(b, _)| d < *b) {
@@ -541,6 +549,17 @@ pub fn relative_date(text: &str, captured_at: i64, tz: Tz) -> Option<Found> {
         consider(today + chrono::Duration::days(if weeks { n * 7 } else { n }), &c[0]);
     }
     let (date, span) = best?;
+    // Right after the word that named the day first, the way a date's own time
+    // is read — *Freitag 13:45 Uhr* is the same sentence as *12. September
+    // 13:45 Uhr* and had no reason to parse differently. `AT_TIME` second,
+    // because it demands a joining word and so cannot see that form at all;
+    // it still covers *am Freitag den Termin um 14 Uhr*, where the time is not
+    // adjacent to the day.
+    let (h, mi) = lower
+        .find(span.as_str())
+        .and_then(|i| time_read(&lower[i + span.len()..]))
+        .or_else(|| AT_TIME.find(&lower).and_then(|m| time_read(&lower[m.start()..])))
+        .unwrap_or((DEFAULT_HOUR, 0));
     Some(Found { at: stamp(tz, date, h, mi)?, span })
 }
 
@@ -1022,6 +1041,42 @@ mod tests {
             assert_eq!(f.map(|x| local(x.at)).as_deref(), Some(want), "{text}");
         }
         assert!(relative_date("nothing here", captured(), berlin()).is_none());
+    }
+
+    /// The reported shape: a weekday, then a bare time. `AT_TIME` demands a
+    /// joining word and could not see it, so the sentence a person actually
+    /// types came back at nine in the morning with nothing saying why.
+    #[test]
+    fn a_time_beside_the_day_needs_no_joining_word() {
+        for (text, want) in [
+            ("erinnere mich an den termin, Freitag 13:45 uhr.", "2026-09-04 13:45"),
+            ("Freitag um 13:45", "2026-09-04 13:45"),
+            ("tomorrow 8:30", "2026-08-31 08:30"),
+            ("tomorrow 5pm", "2026-08-31 17:00"),
+            ("übermorgen 18 Uhr", "2026-09-01 18:00"),
+            // Not adjacent to the day: `AT_TIME` is the second look and still
+            // finds it.
+            ("am Freitag den Termin um 14 Uhr", "2026-09-04 14:00"),
+            // A bare number with no colon and no suffix is not a time, which
+            // is the whole reason the marker rule exists.
+            ("in 3 days 5 apples", "2026-09-02 09:00"),
+        ] {
+            let f = relative_date(text, captured(), berlin());
+            assert_eq!(f.map(|x| local(x.at)).as_deref(), Some(want), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_date_takes_a_bare_time_beside_it_too() {
+        for (text, want) in [
+            ("Termin 12. September 13:45 Uhr", "2026-09-12 13:45"),
+            ("Termin 12. September, 14:00", "2026-09-12 14:00"),
+            ("meeting 12 September 2026 at 3pm", "2026-09-12 15:00"),
+            ("01.03.2027 5 apples", "2027-03-01 09:00"),
+        ] {
+            let f = absolute_dates(text, captured(), berlin(), false);
+            assert_eq!(f.first().map(|x| local(x.at)).as_deref(), Some(want), "{text}");
+        }
     }
 
     #[test]

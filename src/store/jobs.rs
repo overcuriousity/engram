@@ -753,6 +753,32 @@ impl Store {
         let oldest: Option<i64> = row.get("oldest");
         Ok(oldest.map(|t| (now() - t).max(0)))
     }
+
+    /// Is a capture of this tenant's still moving through the pipeline?
+    ///
+    /// Not `oldest_pending_age().is_some()`, which is what the due band asked
+    /// and is true on every live install forever: `rearm_periodic` parks each
+    /// periodic sweep as a `pending` row with `run_after` months out, so a base
+    /// that has finished every capture it ever took still reports a pending
+    /// job. A caller asking "is the operator waiting for something" got "yes",
+    /// always, and polled at the two-second rate meant for a capture in flight.
+    ///
+    /// `class = 0` is the column that already draws this line — the capture
+    /// pipeline the operator is watching, against work nobody stands in front
+    /// of — and `run_after` excludes a unit whose turn has not come.
+    pub async fn foreground_work_in_flight(&self) -> Result<bool> {
+        let r: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM jobs
+              WHERE subject = ? AND class = 0
+                AND (state = 'running' OR (state = 'pending' AND run_after <= ?))
+              LIMIT 1",
+        )
+        .bind(&self.subject)
+        .bind(now())
+        .fetch_optional(&self.control.pool)
+        .await?;
+        Ok(r.is_some())
+    }
 }
 
 /// The instance-wide half of the queue.
@@ -1633,6 +1659,31 @@ mod tests {
             s.claim_job().await.unwrap().is_some(),
             "the sweep left a closed unit's unfinished work unarmed"
         );
+    }
+
+    #[tokio::test]
+    async fn a_parked_sweep_is_not_a_capture_in_flight() {
+        let s = Store::memory().await.unwrap();
+        assert!(!s.foreground_work_in_flight().await.unwrap(), "an idle base");
+
+        // What every live install looks like: the periodic units sit `pending`
+        // with their turn months away. `oldest_pending_age` says yes to this
+        // forever, which is why the due band polled at two seconds on a base
+        // that had finished every capture it ever took.
+        s.arm_at(Stage::Consolidate, "sweep", "consolidate", crate::store::now() + 86_400)
+            .await
+            .unwrap();
+        assert!(s.oldest_pending_age().await.unwrap().is_some(), "the old question says yes");
+        assert!(!s.foreground_work_in_flight().await.unwrap(), "and it is nobody's capture");
+
+        // A capture actually moving.
+        s.enqueue(Stage::Synthesize, "corpus", "src-1").await.unwrap();
+        assert!(s.foreground_work_in_flight().await.unwrap());
+        // Still true once claimed: it is in flight, not waiting to be.
+        let j = s.claim_job().await.unwrap().unwrap();
+        assert!(s.foreground_work_in_flight().await.unwrap(), "running counts");
+        s.control.complete_job(j.id).await.unwrap();
+        assert!(!s.foreground_work_in_flight().await.unwrap(), "and it is over when it is done");
     }
 
     #[tokio::test]

@@ -111,7 +111,9 @@ const POLL_CAP: i64 = 300;
 /// seconds is the gap between "you pressed Capture" and "the band holds it".
 const POLL_QUEUE: i64 = 2;
 
-/// `queue_active` — anything of this tenant's still waiting to be read.
+/// `queue_active` — a capture of this tenant's still moving through the
+/// pipeline. Foreground work only: see `foreground_work_in_flight` for why
+/// "any pending job" was true forever and pinned the band at two seconds.
 /// `next_at` — the next second at which the band's contents change, if any.
 pub(crate) fn refresh_in(queue_active: bool, next_at: Option<i64>, now: i64) -> Option<i64> {
     if queue_active {
@@ -250,7 +252,7 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64) 
         .collect();
     // What the band is waiting for: a capture still being read, or the next
     // change to what is due — whichever is sooner.
-    let queue_active = tenant.core.store.oldest_pending_age().await.unwrap_or(None).is_some();
+    let queue_active = tenant.core.store.foreground_work_in_flight().await.unwrap_or(false);
     let next_at = tenant
         .core
         .store
