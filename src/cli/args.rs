@@ -12,9 +12,11 @@ use crate::error::{Error, Result};
 /// `--help` lists both.
 #[derive(clap::Args, Debug, Default, Clone)]
 pub struct CliArgs {
-    /// Capture a file, a link, or `-` for standard input. Repeatable:
-    /// `engram -c *.pdf` is one invocation and several corpora.
-    #[arg(short = 'c', value_name = "PATH|URL|-", num_args = 1.., conflicts_with_all = ["search", "ask", "remind", "journal"])]
+    /// Capture a file, a link, a sentence, or `-` for standard input.
+    /// Repeatable: `engram -c *.pdf` is one invocation and several corpora.
+    /// An argument that names no file and looks like no path is the note
+    /// itself — see `cli::capture::read_target`.
+    #[arg(short = 'c', value_name = "PATH|URL|TEXT|-", num_args = 1.., conflicts_with_all = ["search", "ask", "remind", "journal"])]
     pub capture: Vec<String>,
     /// Search. A leading bare integer is how many hits are wanted.
     #[arg(short = 's', value_name = "[N] QUERY", num_args = 1.., conflicts_with_all = ["capture", "ask", "remind", "journal"])]

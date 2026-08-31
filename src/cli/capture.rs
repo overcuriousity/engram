@@ -24,10 +24,10 @@ pub async fn run(
     let http = client()?;
     let mut ids = Vec::new();
     for target in targets {
-        let (bytes, content_type) = read_target(target)?;
+        let read = read_target(target)?;
         let tz = local_zone();
         let meta = Meta { title, note, tz: tz.as_deref(), origin: None, intent: None };
-        ids.push(post(&http, e, bytes, &content_type, target, meta, face).await?);
+        ids.push(post(&http, e, read.bytes, &read.content_type, read.label, meta, face).await?);
     }
     Ok(ids)
 }
@@ -120,11 +120,11 @@ async fn post(
     e: &Endpoint,
     bytes: Vec<u8>,
     content_type: &str,
-    label: &str,
+    label: impl AsRef<str>,
     meta: Meta<'_>,
     face: &crate::cli::face::Face,
 ) -> Result<String> {
-    let target = label;
+    let target = label.as_ref();
     {
         let mut url = format!("{}?", e.api("/capture"));
         if let Some(t) = meta.title {
@@ -300,24 +300,62 @@ pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Res
 const WATCH_POLLS: usize = 600;
 const WATCH_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// What one `-c` target turned out to be: the bytes to send, what to call
+/// them to the server, and what to call it back to the operator when something
+/// goes wrong. The label is the path for a file and `text` for a sentence —
+/// putting a whole paragraph in front of every error message it can produce is
+/// no way to report one.
+struct Read {
+    bytes: Vec<u8>,
+    content_type: String,
+    label: String,
+}
+
+/// Does this argument look like an attempt at a path? A slash or a `~` says so
+/// outright, and so does a lone word carrying an extension. Prose does not:
+/// it has spaces in it, and a sentence's final full stop is not a suffix.
+///
+/// This is only ever asked about something that is *not* on disk, and only to
+/// choose between two answers: refuse it as a missing file, or store it as a
+/// note. `notes.pdf` typed with the file in the other directory should be the
+/// error it is, and `engram -c "buy milk"` should be the note it is.
+fn looks_like_a_path(target: &str) -> bool {
+    target.contains(std::path::MAIN_SEPARATOR)
+        || target.contains('/')
+        || target.starts_with('~')
+        || (!target.chars().any(char::is_whitespace)
+            && std::path::Path::new(target).extension().is_some_and(|e| !e.is_empty()))
+}
+
 /// The bytes to send and what to call them.
 ///
 /// A link is sent as `text/plain` and the server decides it is a link, which is
 /// the same decision a share sheet's body gets: one rule about what a bare URL
 /// means, in one place, rather than one per client.
-fn read_target(target: &str) -> Result<(Vec<u8>, String)> {
+///
+/// And what is not a file is what a person typed. `engram -c "PUID steht bei
+/// Microsoft für…"` is the same gesture as piping that paragraph in, and
+/// answering it with `Filename too long` is the client insisting on a reading
+/// of the argument that nothing about the argument supports.
+fn read_target(target: &str) -> Result<Read> {
+    let text = |bytes: Vec<u8>, label: &str| Read { bytes, content_type: "text/plain".into(), label: label.into() };
     if target == "-" {
-        use std::io::Read;
+        use std::io::Read as _;
         let mut buf = Vec::new();
         std::io::stdin()
             .read_to_end(&mut buf)
             .map_err(|e| Error::Validation(format!("stdin: {e}")))?;
-        return Ok((buf, "text/plain".into()));
+        return Ok(text(buf, "stdin"));
     }
     if target.starts_with("http://") || target.starts_with("https://") {
-        return Ok((target.as_bytes().to_vec(), "text/plain".into()));
+        return Ok(text(target.as_bytes().to_vec(), target));
     }
-    let bytes = std::fs::read(target).map_err(|e| Error::Validation(format!("{target}: {e}")))?;
+    let bytes = match std::fs::read(target) {
+        Ok(b) => b,
+        // A path that misses is an error; a sentence was never a path.
+        Err(e) if looks_like_a_path(target) => return Err(Error::Validation(format!("{target}: {e}"))),
+        Err(_) => return Ok(text(target.as_bytes().to_vec(), "text")),
+    };
     // The extension is what this end knows; the server sniffs the bytes anyway.
     // Guessing wrong here costs nothing, and guessing at all saves the common
     // case of a PDF arriving labelled as text.
@@ -325,7 +363,7 @@ fn read_target(target: &str) -> Result<(Vec<u8>, String)> {
         .first_raw()
         .unwrap_or("text/plain")
         .to_string();
-    Ok((bytes, mime))
+    Ok(Read { bytes, content_type: mime, label: target.into() })
 }
 
 #[cfg(test)]
@@ -393,6 +431,40 @@ mod tests {
             body.len(),
             "the streamed body arrived a different length than it left"
         );
+    }
+
+    #[test]
+    fn a_sentence_is_not_a_path_and_a_missing_file_is_not_a_sentence() {
+        for prose in [
+            "PUID steht bei Microsoft für „Personal User ID“.\nEine zweite Zeile.",
+            "buy milk",
+            "erinnere mich",
+        ] {
+            assert!(!looks_like_a_path(prose), "{prose}");
+        }
+        for path in ["notes.pdf", "./missing", "/etc/hosts", "~/notes.md", "dir/file"] {
+            assert!(looks_like_a_path(path), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sentence_nobody_could_open_is_captured_as_the_note_it_is() {
+        // `engram -c "PUID steht bei Microsoft für…"` is the same gesture as
+        // piping that paragraph in; `Filename too long` was the client
+        // insisting on a reading nothing about the argument supports.
+        let (e, core) = endpoint().await;
+        let text = "PUID steht bei Microsoft für „Personal User ID“ (Persönliche Benutzer-ID).\n\
+                    Es handelt sich um einen eindeutigen alphanumerischen Code.";
+        let ids = run(&e, &[text.to_string()], None, None, &off()).await.unwrap();
+        let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
+        assert_eq!(stored.raw_text, text);
+    }
+
+    #[tokio::test]
+    async fn a_path_that_misses_is_still_an_error() {
+        let (e, _core) = endpoint().await;
+        let err = run(&e, &["notes.pdf".into()], None, None, &off()).await.unwrap_err();
+        assert!(format!("{err}").contains("notes.pdf"), "the file it could not find, not the text: {err}");
     }
 
     #[tokio::test]

@@ -594,10 +594,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_reminder_landing_soon_is_polled_for_at_its_second() {
-        let core = test_core().await;
+        // A fixed clock, or the assertion is off by one whenever the wall
+        // second turns between the row being written and the band reading it.
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = crate::core::context::Clock::Fixed(now);
         // Inside the horizon already, so what the band is waiting for is the
         // turn from coming to overdue.
-        artifact_with_due(&core, Some(crate::store::now() + 90)).await;
+        artifact_with_due(&core, Some(now + 90)).await;
         let (app, cookie) = app_with_cookie(core).await;
         let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
         assert!(html.contains("every 90s"), "polled when it lands, not on a fixed tick: {html}");
@@ -605,8 +609,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_reminder_further_out_is_polled_for_at_the_cap() {
-        let core = test_core().await;
-        artifact_with_due(&core, Some(crate::store::now() + 30 * 86_400)).await;
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = crate::core::context::Clock::Fixed(now);
+        artifact_with_due(&core, Some(now + 30 * 86_400)).await;
         let (app, cookie) = app_with_cookie(core).await;
         let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
         assert!(html.contains("every 300s"), "five-minute cap: {html}");
