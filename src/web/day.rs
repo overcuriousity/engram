@@ -108,10 +108,25 @@ fn hm(at: i64, tz: Tz) -> String {
     tz.timestamp_opt(at, 0).single().map(|d| d.format("%H:%M").to_string()).unwrap_or_default()
 }
 
+
+/// The day page's own URL, with the zone encoded rather than pasted in.
+///
+/// Both callers built this with `format!`, and a zone is not URL-safe text:
+/// `Etc/GMT+5` and `Etc/GMT-3` are real IANA names, and a bare `+` in a query
+/// string *is* a space — the value came back as `Etc/GMT 5`, `zone()` failed
+/// to parse it and the page silently fell back to UTC. A non-ASCII value was
+/// worse: `Redirect::into_response` cannot put it in a header and answered
+/// 500 instead of redirecting.
+fn day_url(date: &str, tz: &str) -> String {
+    let q = url::form_urlencoded::Serializer::new(String::new()).append_pair("tz", tz).finish();
+    let path = url::form_urlencoded::byte_serialize(date.as_bytes()).collect::<String>();
+    format!("/ui/day/{path}?{q}")
+}
+
 async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> Result<Response> {
     let tz = zone(Some(&q.tz));
     let d = tz.timestamp_opt(tenant.core.clock.now(), 0).single().map(|d| d.date_naive()).unwrap_or_default();
-    Ok(Redirect::to(&format!("/ui/day/{}?tz={}", d.format("%Y-%m-%d"), q.tz)).into_response())
+    Ok(Redirect::to(&day_url(&d.format("%Y-%m-%d").to_string(), &q.tz)).into_response())
 }
 
 async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>) -> Result<Response> {
@@ -208,7 +223,13 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
 }
 
 async fn entry(tenant: Tenant, Path(date): Path<String>, Form(f): Form<EntryForm>) -> Result<Response> {
-    let back = format!("/ui/day/{date}?tz={}", f.tz);
+    // Parsed, not merely echoed. `page` refuses a date it cannot read, and
+    // this route wrote whatever arrived into a corpus's `day` metadata and
+    // into the redirect it answered with — so an entry could be filed under a
+    // day no page will ever show.
+    let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else { return Err(Error::NotFound) };
+    let date = day.format("%Y-%m-%d").to_string();
+    let back = day_url(&date, &f.tz);
     if f.text.trim().is_empty() {
         return Ok(Redirect::to(&back).into_response());
     }
@@ -248,6 +269,37 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// A zone is not URL-safe text. `Etc/GMT+5` and `Etc/GMT-3` are real
+    /// IANA names, and a bare `+` in a query string is a space — so the
+    /// redirect handed back a zone `zone()` could not parse and the day page
+    /// silently fell back to UTC. A non-ASCII one was a 500, because
+    /// `Redirect` cannot put it in a header at all.
+    #[test]
+    fn the_day_url_encodes_the_zone_it_carries() {
+        assert_eq!(day_url("2026-08-31", "Etc/GMT+5"), "/ui/day/2026-08-31?tz=Etc%2FGMT%2B5");
+        assert_eq!(day_url("2026-08-31", "Europe/Berlin"), "/ui/day/2026-08-31?tz=Europe%2FBerlin");
+        let url = day_url("2026-08-31", "Europe/Zürich");
+        assert!(url.is_ascii(), "a header value has to be: {url}");
+    }
+
+    #[tokio::test]
+    async fn a_zone_with_a_plus_survives_the_redirect_to_today() {
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app.oneshot(get("/ui/day/today?tz=Etc%2FGMT%2B5", &cookie)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let to = res.headers()["location"].to_str().unwrap().to_string();
+        assert!(to.contains("tz=Etc%2FGMT%2B5"), "the zone came back as a space: {to}");
+    }
+
+    #[tokio::test]
+    async fn an_entry_under_a_day_no_page_can_show_is_refused() {
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app.oneshot(form("/ui/day/not-a-day/entry", &cookie, "text=hello&tz=UTC")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
 
     fn get(uri: &str, cookie: &str) -> Request<Body> {
         Request::builder().uri(uri).header("cookie", cookie).body(Body::empty()).unwrap()

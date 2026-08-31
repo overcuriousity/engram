@@ -829,9 +829,19 @@ impl Store {
 
     /// Chunks of a source still waiting for a vector. The embed job batches
     /// these into one inference call, so it needs them as rows, not a count.
+    ///
+    /// A reaped row is never one of them, whatever `embed_state` says. Its
+    /// text is gone and its point was deleted on purpose; embedding the stub
+    /// spends a call on an empty body and upserts back the very point the
+    /// sweep destroyed. `bury` leaves `embed_state` alone — the column
+    /// answers "does this text have a vector", and the answer for a row with
+    /// no text is neither yes nor no — so the rule is stated here, on the one
+    /// query that turns the column into work.
     pub async fn pending_artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
         let rows = sqlx::query(
-            "SELECT * FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending' ORDER BY ordinal",
+            "SELECT * FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending'
+               AND reaped_at IS NULL
+             ORDER BY ordinal",
         )
         .bind(corpus_id)
         .fetch_all(&self.pool)
@@ -876,11 +886,18 @@ impl Store {
     /// a model change or a `--reindex` would otherwise stamp every artifact in
     /// the corpus as edited today, which is the one thing the column is there
     /// to deny.
+    ///
+    /// A reaped row is not put back in the path. Marking it pending is how a
+    /// `--reindex` or an embed-model switch resurrected every point the sweep
+    /// had deleted — one embed call each, spent on an empty body, to break the
+    /// one invariant `reap_one` and `repair_lifecycle_drift` are written
+    /// around. `pending_artifacts_for_corpus` states the same rule again for
+    /// rows that were already pending when they were buried.
     pub async fn reset_embed_state(&self, corpus_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE artifacts
              SET embed_state = 'pending', embed_model = NULL, embed_rev = embed_rev + 1
-             WHERE corpus_id = ?",
+             WHERE corpus_id = ? AND reaped_at IS NULL",
         )
         .bind(corpus_id)
         .execute(&self.pool)
@@ -1876,6 +1893,36 @@ mod tests {
         s.insert_artifacts(&src.id, &[nc(0, "x")]).await.unwrap();
         s.delete_corpus(&src.id).await.unwrap();
         assert!(s.artifacts_for_corpus(&src.id).await.unwrap().is_empty());
+    }
+
+    /// A reap deletes the point on purpose and empties the text. Putting the
+    /// stub back in the embed path spends a call on an empty body and upserts
+    /// the very point the sweep destroyed — the invariant `reap_one` and
+    /// `repair_lifecycle_drift` are written around, broken by an ordinary
+    /// `--reindex` or a change of embed model.
+    #[tokio::test]
+    async fn a_reindex_does_not_resurrect_a_reaped_row() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let ids = s.insert_artifacts(&src.id, &[nc(0, "kept"), nc(1, "reaped")]).await.unwrap();
+        let (kept, gone) = (ids[0].id.clone(), ids[1].id.clone());
+        s.bury(&gone, "{}").await.unwrap();
+
+        s.reset_embed_state(&src.id).await.unwrap();
+        let pending: Vec<String> =
+            s.pending_artifacts_for_corpus(&src.id).await.unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(pending, vec![kept.clone()], "only the row that still has text");
+
+        // And the same rule again for a row that was already pending when it
+        // was buried, which `reset_embed_state`'s guard cannot reach.
+        sqlx::query("UPDATE artifacts SET embed_state = 'pending' WHERE id = ?")
+            .bind(&gone)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        let pending: Vec<String> =
+            s.pending_artifacts_for_corpus(&src.id).await.unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(pending, vec![kept], "still only the row that has text");
     }
 
     #[tokio::test]

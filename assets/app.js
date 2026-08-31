@@ -535,6 +535,13 @@
       e.preventDefault();
       var q = box.value;
       if (!q.trim()) return;
+      // The ask *is* the transition out of idle, and until here nothing had
+      // made it. The only other caller of `hideIdle` is the box's `input`
+      // listener, and the ask and capture doors arrive with the box filled by
+      // the server — no keystroke, no `input`, so `/ui/ask?q=…` (the "ask
+      // again" link on a gap, among others) rendered its pane hidden and
+      // streamed the whole answer into it: spinner, Stop, then nothing.
+      hideIdle();
       // A second ask supersedes the first at every stage, which `stop()` on its
       // own does not achieve: it closes a stream that is already open, and two
       // submits made before the first POST resolves open two streams, the
@@ -878,6 +885,17 @@
     if (idle) idle.hidden = true;
     var area = document.getElementById('context-offer');
     if (area) area.remove();
+    // Set here rather than at the keystroke that used to be the only way in.
+    // An ask started from a door dismisses the offer just as finally, and a
+    // slow offer landing afterwards would otherwise swap itself back into the
+    // hidden column and be *counted* as an impression nobody could see —
+    // which is the one number this area is measured by.
+    offerDismissed = true;
+    // The receipt belongs to the capture that is over. `showIdle` keeps the
+    // pane open for it, so without this the line — and the "not an entry"
+    // control on it — came back over the next act, describing a note stored
+    // several keystrokes ago.
+    clearReceipts();
     show('rail', true);
     show('pane', true);
     show('kind-row', true);
@@ -890,7 +908,13 @@
     var idle = document.getElementById('idle');
     if (idle) idle.hidden = false;
     show('rail', false);
-    show('pane', false);
+    // Not unconditionally hidden, because the pane is where a capture
+    // answers. Capture empties the box, which makes the idle column correct
+    // again, and hiding the pane in the same breath as the receipt was
+    // swapped into it meant every capture from the workspace stored the note
+    // and showed nothing — with the receipt's own "not an entry" control in
+    // the document and unreachable. `hideIdle` clears it again.
+    show('pane', hasReceipt());
     show('kind-row', false);
     var due = document.getElementById('due');
     if (due) htmx.trigger(due, 'refresh');
@@ -899,6 +923,18 @@
   function show(id, on) {
     var el = document.getElementById(id);
     if (el) el.hidden = !on;
+  }
+
+  // Where a capture answers, and the one thing in the pane that survives the
+  // return to idle. Module scope rather than `captureVerb`'s, because the
+  // idle transition on both sides now depends on it.
+  function clearReceipts() {
+    var host = document.getElementById('capture-result');
+    if (host) host.textContent = '';
+  }
+  function hasReceipt() {
+    var host = document.getElementById('capture-result');
+    return !!(host && host.firstChild);
   }
 
   // The offer alone, for the fetch that lands after the keystroke that
@@ -944,7 +980,6 @@
     // records.
     box.addEventListener('input', function () {
       if (box.value.trim()) {
-        offerDismissed = true;
         hideIdle();
       } else {
         showIdle();
@@ -1269,11 +1304,14 @@
       var host = document.getElementById('capture-result');
       var slot = document.createElement('p');
       if (host) host.appendChild(slot);
+      // Writing here is the pane having something to say, so this is where it
+      // is revealed. `showIdle` keeps it open afterwards, but never opens it:
+      // an upload that fails — a closed image door, the wrong encoding — is
+      // answered without emptying the box and so without a return to idle, and
+      // from a page that was idle when the file was dropped the whole reason
+      // was written into a hidden pane.
+      show('pane', true);
       return slot;
-    }
-    function clearReceipts() {
-      var host = document.getElementById('capture-result');
-      if (host) host.textContent = '';
     }
 
     function stage(file, restore) {

@@ -290,19 +290,28 @@ async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u
     }
     let ids: Vec<String> = cands.iter().map(|c| c.id.clone()).collect();
     let payloads = core.vectors.payloads_of(&ids).await?;
-    cands.retain(|c| {
-        // A candidate always has a stamp — the SQL requires it — so a missing
-        // one can only defend the row, never expose it.
-        let retired_at = c.retired_at.unwrap_or(i64::MAX);
-        !payloads
-            .get(&c.id)
-            .and_then(|p| p.last_seen_at)
-            .is_some_and(|t| t >= retired_at)
-    });
+    cands.retain(|c| still_nominated(c.retired_at, payloads.get(&c.id).and_then(|p| p.last_seen_at)));
     // The cap is the sweep's, not the query's: what is over it is still oldest
     // -first and comes back on the next run.
     cands.truncate(want.max(0) as usize);
     Ok((cands, stamped))
+}
+
+/// Has this candidate earned its keep since it was retired? A retrieval on a
+/// long-retired artifact says a searcher still reaches it, and the stamp for
+/// that lives on the vector point rather than in SQLite — which is why the
+/// rule is applied here and not in `reap_candidates`.
+///
+/// A candidate always has a stamp: the SQL requires it. So a missing one can
+/// only defend the row, never expose it — it is dropped rather than judged.
+/// `unwrap_or(i64::MAX)` said the opposite of the sentence above it and kept
+/// the unstamped row in the nomination, and this is the one direction the
+/// fallback must never fail in: what follows a verdict is the only path in
+/// the system that destroys text. Unreachable through `reap_candidates`
+/// today; the invariant is enforced where it is claimed all the same.
+fn still_nominated(retired_at: Option<i64>, last_seen_at: Option<i64>) -> bool {
+    let Some(retired_at) = retired_at else { return false };
+    !last_seen_at.is_some_and(|t| t >= retired_at)
 }
 
 /// One nominee, one call. The judge is `core.reaper` — the judges' endpoint
@@ -494,6 +503,25 @@ mod tests {
             "the judge must see both sides: {}",
             prompts[0]
         );
+    }
+
+    /// The one path in the system that destroys text, and the fallback in
+    /// front of it. A row whose `retired_at` is missing is dropped from the
+    /// nomination rather than judged: "we do not know when this was retired"
+    /// must never read as "nothing has touched it since".
+    #[tokio::test]
+    async fn a_candidate_with_no_retirement_stamp_is_never_nominated() {
+        let core = test_core().await;
+        let ids = seed(&core, &["a fact with no clock"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        assert_eq!(nominees(&core).await.unwrap().0.len(), 1, "stamped, so it is a nominee");
+
+        assert!(!still_nominated(None, None), "no stamp, no verdict");
+        assert!(!still_nominated(None, Some(1)), "no stamp, no verdict, whatever the point says");
+        assert!(still_nominated(Some(10), None), "never seen since it was retired");
+        assert!(still_nominated(Some(10), Some(9)), "last seen before it was retired");
+        assert!(!still_nominated(Some(10), Some(10)), "seen since — it earns its keep");
     }
 
     #[tokio::test]

@@ -18,6 +18,15 @@ pub const ORIGIN_PDF: &str = "pdf";
 pub const ORIGIN_WEB: &str = "web";
 /// Written as a diary entry: the day page shows it in full, oldest first.
 pub const ORIGIN_JOURNAL: &str = "journal";
+/// Corpus metadata: the operator took this note *out* of the journal.
+///
+/// Un-filing restores the original origin, which puts the corpus back among
+/// the ones the moments stage is allowed to file — and that stage runs again
+/// on every embed, over text whose journal cue has not changed. Without a
+/// record of the refusal the note was silently re-filed, so "not an entry"
+/// held only until the next reindex. The stage reads this and declines; only
+/// the operator filing it again clears it.
+pub const ENTRY_DECLINED: &str = "entry_declined";
 /// A page read from a pasted link, by this server, as a stranger.
 pub const ORIGIN_FETCH: &str = "fetch";
 /// A share from a phone's share sheet — the Android share target, the iOS
@@ -1389,6 +1398,13 @@ impl Core {
             if src.origin == ORIGIN_JOURNAL {
                 return Ok(());
             }
+            // Filing it again is the operator overruling their own undo, so
+            // the refusal goes with it. Only this route ever reaches here
+            // with `on = true` besides the moments stage, and the stage
+            // reads the flag and does not call. See `ENTRY_DECLINED`.
+            if let Some(m) = meta.as_object_mut() {
+                m.remove(ENTRY_DECLINED);
+            }
             meta["origin_was"] = serde_json::Value::String(src.origin.clone());
             ORIGIN_JOURNAL.to_string()
         } else {
@@ -1407,6 +1423,13 @@ impl Core {
             if let Some(m) = meta.as_object_mut() {
                 m.remove("origin_was");
             }
+            // The undo has to outlive the reading that filed it. Restoring
+            // the origin puts the corpus back in `JOURNALABLE`, and the
+            // moments stage runs again on every embed — a reindex, an
+            // embed-model switch — where the same journal cue is still in
+            // the same text and filed it a second time. Neither the day
+            // page's "not an entry" nor the receipt's undo was durable.
+            meta[ENTRY_DECLINED] = serde_json::Value::Bool(true);
             was
         };
         self.store.set_corpus_metadata(corpus_id, &meta).await?;

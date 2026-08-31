@@ -1791,7 +1791,12 @@ async fn list_moments(tenant: Tenant, Query(q): Query<MomentsQuery>) -> Result<J
     let from = q.from.unwrap_or(now);
     let to = q.to.unwrap_or(now + tenant.core.time.horizon_hours as i64 * 3_600);
     let rows = match q.kind.as_deref().unwrap_or("due") {
-        "due" => tenant.core.store.open_due(from, to).await?,
+        // `now`, not `from`: `open_due`'s first argument is only ever
+        // compared against `snoozed_until`, and a caller asking for a past or
+        // wide window — `?from=0` — had every snoozed reminder judged against
+        // the start of the window instead of the clock, so all of them fell
+        // out of the answer.
+        "due" => tenant.core.store.open_due(now, to).await?,
         "event" => tenant.core.store.event_moments_between(from, to).await?,
         other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
     };
@@ -4628,6 +4633,43 @@ mod patch_tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         assert!(core.store.moment(&next).await.unwrap().unwrap().snoozed_until.is_some());
+    }
+
+    /// `open_due`'s first argument is compared against `snoozed_until` and
+    /// nothing else — it is the clock, not the window. Passing `from` meant a
+    /// caller asking for a wide or past window had every snoozed reminder
+    /// judged against the start of that window, and all of them vanished from
+    /// the answer.
+    #[tokio::test]
+    async fn a_wide_window_does_not_hide_the_snoozed() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let now = core.clock.now();
+        let id = core
+            .store
+            .insert_moment(&crate::store::moments::NewMoment {
+                artifact_id: aid,
+                kind: crate::store::moments::Kind::Due,
+                at: Some(now + 3_600),
+                tz: "UTC".into(),
+                rule: None,
+                source: crate::store::moments::Source::Set,
+                span: None,
+            })
+            .await
+            .unwrap();
+        // Snoozed until an hour ago: the snooze has elapsed, so the row is open.
+        core.store.snooze(&id, now - 3_600).await.unwrap();
+
+        let list = json_of(app.clone().oneshot(bearer_get("/api/v1/moments", &token)).await.unwrap()).await;
+        assert_eq!(list.as_array().unwrap().len(), 1, "the default window sees it");
+        let list = json_of(app.oneshot(bearer_get("/api/v1/moments?from=0", &token)).await.unwrap()).await;
+        assert_eq!(list.as_array().unwrap().len(), 1, "and so does a window that starts before the snooze");
     }
 
     #[tokio::test]

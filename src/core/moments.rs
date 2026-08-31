@@ -572,6 +572,12 @@ pub fn rule_count(rule: &str) -> Option<u32> {
     parse_rule(rule).ok()?.count
 }
 
+/// The Monday on or before `d`. WKST is outside the accepted subset, so the
+/// default the standard names is the only one there is.
+fn week_start(d: NaiveDate) -> NaiveDate {
+    d - chrono::Duration::days(d.weekday().num_days_from_monday() as i64)
+}
+
 /// The next occurrence strictly after `at`, keeping `at`'s wall-clock time in
 /// `tz`. None when the rule is exhausted or invalid. COUNT is enforced by
 /// `complete_moment`, which counts the occurrences already on the artifact.
@@ -590,7 +596,16 @@ pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
             Freq::Weekly => {
                 let own = [origin.weekday()];
                 let days: &[Weekday] = if r.by_day.is_empty() { &own } else { &r.by_day };
-                let weeks = (date - origin).num_days().div_euclid(7);
+                // Counted between week *starts*, not as whole 7-day spans
+                // from the origin date. RFC 5545 numbers weeks from the
+                // week containing DTSTART, and WKST — which this subset does
+                // not accept — defaults to Monday. Measured from the date
+                // itself, `FREQ=WEEKLY;INTERVAL=2;BYDAY=MO` on a Wednesday
+                // origin put the Monday five days later in week 0 and
+                // accepted it, where the standard has it in week 1 and skips
+                // it: the series was a week out from the moment it was made,
+                // and stayed out.
+                let weeks = (week_start(date) - week_start(origin)).num_days().div_euclid(7);
                 days.contains(&date.weekday()) && weeks % r.interval as i64 == 0
             }
             Freq::Monthly => {
@@ -970,6 +985,22 @@ mod tests {
         let next = next_after("FREQ=WEEKLY;BYDAY=MO", at, berlin()).unwrap();
         assert_eq!(local(next), "2026-10-26 09:00");
         assert_eq!(next - at, 7 * 86_400 + 3_600, "one week and the hour DST gave back");
+    }
+
+    /// The week an occurrence falls in is counted from week starts, not from
+    /// the origin date. Wednesday 2026-09-02 is in the week of Monday
+    /// 2026-08-31; `INTERVAL=2` therefore skips 2026-09-07 (week 1) and lands
+    /// on 2026-09-14 (week 2). Measured as 7-day spans from the origin, the
+    /// Monday five days out counted as week 0 and was accepted — a series a
+    /// week ahead of the standard from its first occurrence onwards.
+    #[test]
+    fn a_fortnightly_rule_counts_weeks_from_the_week_start() {
+        let wed = berlin().with_ymd_and_hms(2026, 9, 2, 9, 0, 0).unwrap().timestamp();
+        assert_eq!(local(next_after("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO", wed, berlin()).unwrap()), "2026-09-14 09:00");
+        // And from a Monday origin the two agree, which is why this went
+        // unnoticed: the origin is its own week's start.
+        let mon = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
+        assert_eq!(local(next_after("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO", mon, berlin()).unwrap()), "2026-09-14 09:00");
     }
 
     #[test]

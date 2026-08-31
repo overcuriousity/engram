@@ -4,7 +4,7 @@
 
 use crate::core::moments::{zone, DEFAULT_HOUR};
 use crate::error::Result;
-use crate::store::moments::{DueRow, Kind, NewMoment, Source};
+use crate::store::moments::DueRow;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
@@ -253,21 +253,15 @@ async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
         .ok()
         .and_then(|dt| tz.from_local_datetime(&dt).single())
         .map(|d| d.timestamp());
-    if let (Some(at), Some(m)) = (at, tenant.core.store.moment(&id).await?) {
-        tenant.core.store.mark_done(&id, tenant.core.clock.now()).await?;
-        tenant
-            .core
-            .store
-            .insert_moment(&NewMoment {
-                artifact_id: m.artifact_id,
-                kind: Kind::Due,
-                at: Some(at),
-                tz: tz.name().to_string(),
-                rule: m.rule,
-                source: Source::Set,
-                span: None,
-            })
-            .await?;
+    // Moved in place rather than completed-and-replaced. A reschedule is not
+    // an occurrence: `occurrences_of_rule` counts every row carrying the rule,
+    // done ones included, so the abandoned row and its replacement both
+    // counted and one date change exhausted a `FREQ=DAILY;COUNT=2` reminder —
+    // two of two, with `complete_moment` arming nothing after it.
+    if let Some(at) = at
+        && tenant.core.store.moment(&id).await?.is_some()
+    {
+        tenant.core.store.set_moment_at(&id, at, tz.name()).await?;
         tenant.core.store.rearm_remind().await?;
     }
     render(&tenant, &f.tz, None, f.since).await
@@ -277,6 +271,7 @@ async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
 mod tests {
     use super::*;
     use crate::core::ingest::Capture;
+    use crate::store::moments::{Kind, NewMoment, Source};
     use crate::core::test_support::test_core;
     use crate::core::Core;
     use crate::web::test_support::{app_with_cookie, body_of};
@@ -487,20 +482,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setting_a_date_writes_a_new_set_row_and_closes_the_old() {
+    async fn setting_a_date_moves_the_row_it_was_given() {
         let core = test_core().await;
         let id = artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
         app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2027-01-05T10:30&tz=Europe/Berlin"))
             .await
             .unwrap();
-        let old = core.store.moment(&id).await.unwrap().unwrap();
-        assert!(old.done_at.is_some());
+        let moved = core.store.moment(&id).await.unwrap().unwrap();
+        assert!(moved.done_at.is_none(), "a reschedule is not a completion");
         let rows = core.store.open_due(0, i64::MAX).await.unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 1, "one row, not the old one and its replacement");
+        assert_eq!(rows[0].moment.id, id);
         assert_eq!(rows[0].moment.source, Source::Set);
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(rows[0].moment.at.unwrap(), 0).unwrap();
         assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2027-01-05 10:30");
+    }
+
+    /// The reason the row is moved rather than closed and replaced: both rows
+    /// carried the rule, and `occurrences_of_rule` counts done ones.
+    #[tokio::test]
+    async fn moving_a_bounded_recurrence_does_not_spend_an_occurrence() {
+        let core = test_core().await;
+        let out = core.ingest_capture(Capture::new("Send the invoice", "ui")).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let rule = "FREQ=DAILY;COUNT=2";
+        let id = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(1_000),
+                tz: "UTC".into(),
+                rule: Some(rule.into()),
+                source: Source::Cue,
+                span: None,
+            })
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2027-01-05T10:30&tz=UTC"))
+            .await
+            .unwrap();
+        assert_eq!(core.store.occurrences_of_rule(&aid, rule).await.unwrap(), 1, "still the first of two");
+        core.complete_moment(&id).await.unwrap();
+        assert_eq!(core.store.occurrences_of_rule(&aid, rule).await.unwrap(), 2, "the second is armed");
     }
 
     #[tokio::test]

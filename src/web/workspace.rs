@@ -1715,6 +1715,53 @@ mod tests {
         );
     }
 
+    /// The pane is where a capture answers, and capture is also what makes
+    /// the page idle again: it empties the box. Hiding the pane in the same
+    /// breath as the receipt was swapped into it meant every capture from the
+    /// workspace stored the note and showed nothing — with the receipt's own
+    /// "not an entry" undo in the document and unreachable.
+    #[tokio::test]
+    async fn the_return_to_idle_keeps_the_pane_the_receipt_landed_in() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("show('pane', hasReceipt());"),
+            "the receipt keeps the pane open through the return to idle"
+        );
+        assert!(
+            !js.contains("show('pane', false);"),
+            "and the pane is never hidden unconditionally while going idle"
+        );
+        assert!(
+            js.contains("function hasReceipt()"),
+            "asked of the document, so a receipt that failed to land hides the pane as before"
+        );
+        let slot = js.split("function receipt()").nth(1).expect("the receipt slot");
+        assert!(
+            slot[..slot.find("return slot;").expect("its return")].contains("show('pane', true);"),
+            "and writing a receipt opens the pane, for the upload failure that never              empties the box and so never reaches the return to idle"
+        );
+    }
+
+    /// `hideIdle` is the transition out of the idle column, and until the ask
+    /// called it the only caller was the box's own `input` listener. The ask
+    /// and capture doors arrive with the box filled *by the server*, so no
+    /// keystroke and no `input` — and `/ui/ask?q=…`, the "ask again" link on
+    /// a gap among others, rendered its pane hidden and then streamed the
+    /// whole answer into it.
+    #[tokio::test]
+    async fn an_ask_from_a_prefilled_door_reveals_the_pane_it_streams_into() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        let press = js.split("var askBtn = e.target.closest").nth(1).expect("the ask press");
+        let press = &press[..press.find("fetch('/ui/ask'").expect("the ask POST")];
+        assert!(press.contains("hideIdle();"), "the ask is itself the transition out of idle");
+        assert!(
+            js.contains("offerDismissed = true;") && js.split("offerDismissed = true;").count() == 2,
+            "and dismissal is recorded in hideIdle itself, so a slow offer landing after              an ask is not counted as an impression nobody could see"
+        );
+    }
+
     /// An answer is not swapped into `#pane-content`, so it gained none of the
     /// room a result click does: wide, the rail kept the 40rem it is allowed
     /// while nothing is open and the answer streamed into the remainder;

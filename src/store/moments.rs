@@ -324,6 +324,30 @@ impl Store {
         Ok(())
     }
 
+    /// Move one occurrence to another instant, in place.
+    ///
+    /// Rescheduling is not completing. It used to be written as `mark_done`
+    /// plus an insert carrying the same rule, and `occurrences_of_rule`
+    /// counts every row with that rule, done included — so moving a
+    /// `COUNT=2` reminder once left it at two of two and `complete_moment`
+    /// armed nothing further. One row, one occurrence.
+    ///
+    /// The notification mark and any snooze go with the old date: both are
+    /// statements about an instant that is no longer this row's.
+    pub async fn set_moment_at(&self, id: &str, at: i64, tz: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE moments
+                SET at = ?, tz = ?, source = 'set', notified_at = NULL, snoozed_until = NULL
+              WHERE id = ?",
+        )
+        .bind(at)
+        .bind(tz)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn undo_done(&self, id: &str) -> Result<()> {
         sqlx::query("UPDATE moments SET done_at = NULL WHERE id = ?").bind(id).execute(&self.pool).await?;
         Ok(())

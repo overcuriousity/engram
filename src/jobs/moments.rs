@@ -75,7 +75,16 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     };
 
     match intent {
-        Some(Intent::Journal) if JOURNALABLE.contains(&src.origin.as_str()) => {
+        // The operator's undo outranks the cue. Un-filing restores an origin
+        // that is in `JOURNALABLE` again, and this stage re-runs on every
+        // embed over text that still carries the same journal cue — so
+        // without this the day page's "not an entry" and the capture
+        // receipt's undo held only until the next reindex or embed-model
+        // switch. See `ingest::ENTRY_DECLINED`.
+        Some(Intent::Journal)
+            if JOURNALABLE.contains(&src.origin.as_str())
+                && src.metadata[crate::core::ingest::ENTRY_DECLINED] != serde_json::Value::Bool(true) =>
+        {
             core.set_entry(cid, true).await?;
         }
         Some(Intent::Remind) => {
@@ -132,8 +141,17 @@ async fn date_reminder(
                         false
                     }
                 });
+                // The rule survives a model that would not commit to a
+                // date. Returning only on `at` dropped it on the way to the
+                // table below — "remind me every Friday to send the
+                // invoice", answered `{"when": null, "rule":
+                // "FREQ=WEEKLY;BYDAY=FR"}`, was stored as a one-off that
+                // fired once and never came back.
                 if at.is_some() {
                     return (at, rule);
+                }
+                if rule.is_some() {
+                    return (at_by_rule(text, captured_at, tz, found), rule);
                 }
             }
             Err(e) => {
@@ -141,11 +159,18 @@ async fn date_reminder(
             }
         }
     }
+    (at_by_rule(text, captured_at, tz, found), None)
+}
+
+/// The date without a model: the relative table, else what step 3 found; the
+/// nearest future date wins. Also the anchor for a recurrence the model
+/// described but would not date.
+fn at_by_rule(text: &str, captured_at: i64, tz: chrono_tz::Tz, found: &[Found]) -> Option<i64> {
     let mut candidates: Vec<i64> = found.iter().map(|f| f.at).filter(|a| *a > captured_at).collect();
     if let Some(r) = relative_date(text, captured_at, tz) {
         candidates.push(r.at);
     }
-    (candidates.into_iter().min(), None)
+    candidates.into_iter().min()
 }
 
 /// `2026-09-04T09:00` or `2026-09-04` in the reader's zone.
@@ -244,6 +269,40 @@ mod tests {
         assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-09-04 09:00");
     }
 
+    /// A model that describes the recurrence but will not commit to a first
+    /// date. The rule used to fall out on the way to the relative table, so
+    /// "remind me every Friday to send the invoice" was stored as a one-off:
+    /// it fired once and never came back.
+    #[tokio::test]
+    async fn a_rule_survives_a_model_that_would_not_name_the_date() {
+        let mut core = test_core().await;
+        core.reminder = Some(std::sync::Arc::new(FakeCompleter {
+            reply: Some(r#"{"when":null,"rule":"FREQ=WEEKLY;BYDAY=FR","what":"send the invoice"}"#.into()),
+        }));
+        let (_, aid) =
+            first_passage(&core, "Remind me every friday to send the invoice tomorrow", "ui", Some("Europe/Berlin"))
+                .await;
+        run(&core, &aid).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows[0].moment.rule.as_deref(), Some("FREQ=WEEKLY;BYDAY=FR"), "the recurrence is not the date");
+        assert!(rows[0].moment.at.is_some(), "and the table anchored it");
+    }
+
+    /// The same, with nothing to anchor it: the rule is still what the note
+    /// says, and is there for whoever sets the date.
+    #[tokio::test]
+    async fn an_undated_recurrence_still_carries_its_rule() {
+        let mut core = test_core().await;
+        core.reminder = Some(std::sync::Arc::new(FakeCompleter {
+            reply: Some(r#"{"when":null,"rule":"FREQ=WEEKLY;BYDAY=FR","what":"send the invoice"}"#.into()),
+        }));
+        let (_, aid) = first_passage(&core, "Remind me to send the invoice regularly", "ui", None).await;
+        run(&core, &aid).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows[0].moment.rule.as_deref(), Some("FREQ=WEEKLY;BYDAY=FR"));
+        assert!(rows[0].moment.at.is_none(), "nothing in the text to anchor it");
+    }
+
     #[tokio::test]
     async fn a_rule_outside_the_subset_is_dropped_and_the_moment_is_single() {
         let mut core = test_core().await;
@@ -324,6 +383,36 @@ mod tests {
         core.store.set_corpus_origin(&out.id, "cli").await.unwrap();
         drain(&core).await;
         let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        run(&core, &aid).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+    }
+
+    /// "Not an entry" on the day page, and the undo on the capture receipt,
+    /// have to outlive the reading that filed it. Un-filing restores an origin
+    /// that is in `JOURNALABLE` again, and this stage runs on every embed —
+    /// so a reindex or a change of embed model used to file the note straight
+    /// back under the same cue that filed it the first time.
+    #[tokio::test]
+    async fn a_note_the_operator_took_out_of_the_journal_stays_out() {
+        let core = test_core().await;
+        let out = core.ingest_capture(Capture::new("Vandaag eindelijk de tuin gedaan.", "cli")).await.unwrap();
+        core.store.set_corpus_origin(&out.id, "cli").await.unwrap();
+        drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        run(&core, &aid).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+
+        core.set_entry(&out.id, false).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "cli");
+        run(&core, &aid).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "cli", "re-read, re-filed");
+
+        // Filing it again by hand is the operator overruling their own undo,
+        // and the refusal goes with it.
+        core.set_entry(&out.id, true).await.unwrap();
+        core.set_entry(&out.id, false).await.unwrap();
+        core.set_entry(&out.id, true).await.unwrap();
+        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
         run(&core, &aid).await.unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
     }
