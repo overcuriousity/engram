@@ -118,12 +118,14 @@ fn row_of(r: &sqlx::sqlite::SqliteRow) -> DueRow {
     DueRow { moment: moment_of(r), title: title.filter(|t| !t.is_empty()).unwrap_or_else(|| opening.clone()), opening }
 }
 
-const JOINED: &str = "SELECT m.*, a.title, a.text FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
+/// What a row is due *at* from the reader's point of view: an elapsed snooze
+/// is the row's time from the moment it is set, which is why every ladder read
+/// coalesces it over `at`.
+fn eff_at(r: &DueRow) -> i64 {
+    r.moment.snoozed_until.or(r.moment.at).unwrap_or(0)
+}
 
-/// What a push is owed: due, dated, undone, unnotified. A snoozed row is owed
-/// once its snooze has elapsed — `snoozed_until` is what it is due *at* from
-/// then on, which is why the reads below coalesce it over `at`.
-const OWED: &str = "m.kind = 'due' AND m.done_at IS NULL AND m.notified_at IS NULL AND m.at IS NOT NULL";
+const JOINED: &str = "SELECT m.*, a.title, a.text FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
 
 impl Store {
     /// A moment hangs off an artifact; the note is the artifact's corpus.
@@ -400,11 +402,32 @@ impl Store {
         Ok(())
     }
 
-    pub async fn due_unnotified(&self, now: i64) -> Result<Vec<DueRow>> {
+    /// What owes a push at `now`: every row standing on a rung of the ladder
+    /// it has not been pushed on yet.
+    ///
+    /// The read is deliberately loose and the ladder is applied in Rust, over
+    /// [`crate::jobs::remind::owed_lead`]. The rungs are one list in one
+    /// place; spelling them a second time as a SQL `UNION` would be two
+    /// definitions of when a reminder is due to be said out loud, and the
+    /// number of open reminders in a base is small enough that the difference
+    /// is not measurable.
+    pub async fn due_owed(&self, now: i64) -> Result<Vec<DueRow>> {
+        let rows: Vec<DueRow> = self.uncovered().await?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| crate::jobs::remind::owed_lead(eff_at(r), r.moment.notified_at, now).is_some())
+            .collect())
+    }
+
+    /// Every dated, undone, live due row whose last push does not already
+    /// cover the whole ladder — the candidates both ladder reads work from.
+    async fn uncovered(&self) -> Result<Vec<DueRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{JOINED} WHERE {OWED} AND a.status = 'active' AND COALESCE(m.snoozed_until, m.at) <= ? ORDER BY m.at"
+            "{JOINED} WHERE m.kind = 'due' AND m.done_at IS NULL AND m.at IS NOT NULL
+               AND a.status = 'active'
+               AND (m.notified_at IS NULL OR m.notified_at < COALESCE(m.snoozed_until, m.at))
+             ORDER BY COALESCE(m.snoozed_until, m.at)"
         )))
-        .bind(now)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_of).collect())
@@ -457,20 +480,22 @@ impl Store {
         Ok(r.flatten())
     }
 
+    /// The Remind unit's next wake: the earliest rung any row still owes, at
+    /// any time. A rung already behind us is returned as it is, so a unit
+    /// armed at it fires at once.
     pub async fn next_notify_at(&self) -> Result<Option<i64>> {
-        // The same join and the same status filter as `due_unnotified`: what
-        // the unit sleeps until must be something the unit will then find. A
-        // moment on an artifact that dedupe or a merge has since deprecated is
-        // invisible to the read but would still be the minimum here, and the
-        // job would wake, find nothing owed, and re-arm itself at that same
-        // past instant — forever.
-        let r = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT MIN(COALESCE(m.snoozed_until, m.at)) AS at FROM moments m
-             JOIN artifacts a ON a.id = m.artifact_id WHERE {OWED} AND a.status = 'active'"
-        )))
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(r.get("at"))
+        // The same read as `due_owed`, for the same reason it has always been
+        // the same read: what the unit sleeps until must be something the unit
+        // will then find. A moment on an artifact that dedupe or a merge has
+        // since deprecated would otherwise be the minimum here, and the job
+        // would wake, find nothing owed, and re-arm itself at that same past
+        // instant — forever.
+        Ok(self
+            .uncovered()
+            .await?
+            .iter()
+            .filter_map(|r| crate::jobs::remind::next_lead_at(eff_at(r), r.moment.notified_at))
+            .min())
     }
 }
 
@@ -560,20 +585,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_next_wake_is_the_earliest_unnotified_and_snooze_renotifies() {
+    async fn the_next_wake_is_the_earliest_rung_owed_and_snooze_renotifies() {
+        use crate::jobs::remind::LEADS;
         let (s, aid) = store_with_artifact().await;
-        let a = s.insert_moment(&due(&aid, Some(3_000))).await.unwrap();
-        let b = s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        let a = s.insert_moment(&due(&aid, Some(10_000_000))).await.unwrap();
+        let b = s.insert_moment(&due(&aid, Some(9_000_000))).await.unwrap();
         s.insert_moment(&due(&aid, None)).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), Some(1_000));
-        s.mark_notified(std::slice::from_ref(&b), 1_001).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), Some(3_000));
-        let owed = s.due_unnotified(3_500).await.unwrap();
+        assert_eq!(s.next_notify_at().await.unwrap(), Some(9_000_000 - LEADS[0]), "the nearer moment's first rung");
+        s.mark_notified(std::slice::from_ref(&b), 9_000_000).await.unwrap();
+        assert_eq!(s.next_notify_at().await.unwrap(), Some(10_000_000 - LEADS[0]), "b is said and done");
+        let owed = s.due_owed(10_000_000 - LEADS[0]).await.unwrap();
         assert_eq!(owed.len(), 1);
         assert_eq!(owed[0].moment.id, a);
-        s.snooze(&b, 4_000).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), Some(3_000), "b is owed again, after a");
-        assert_eq!(s.due_unnotified(4_500).await.unwrap().len(), 2);
+        s.snooze(&b, 11_000_000).await.unwrap();
+        assert_eq!(s.next_notify_at().await.unwrap(), Some(10_000_000 - LEADS[0]), "b is owed again, after a");
+        assert_eq!(s.due_owed(11_000_000).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_row_is_owed_a_push_at_each_rung_of_the_ladder_and_not_between_them() {
+        use crate::jobs::remind::LEADS;
+        let (s, aid) = store_with_artifact().await;
+        let at = 10_000_000;
+        let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
+        assert!(s.due_owed(at - LEADS[0] - 1).await.unwrap().is_empty(), "not yet in the band");
+
+        let owed = s.due_owed(at - LEADS[0]).await.unwrap();
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].moment.id, id);
+        s.mark_notified(std::slice::from_ref(&id), at - LEADS[0]).await.unwrap();
+
+        assert!(s.due_owed(at - LEADS[1] - 1).await.unwrap().is_empty(), "the rung is taken");
+        assert_eq!(s.due_owed(at - LEADS[1]).await.unwrap().len(), 1, "the next one comes round");
+    }
+
+    #[tokio::test]
+    async fn the_unit_sleeps_until_the_next_rung_not_until_the_moment() {
+        use crate::jobs::remind::LEADS;
+        let (s, aid) = store_with_artifact().await;
+        let at = 10_000_000;
+        let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
+        assert_eq!(s.next_notify_at().await.unwrap(), Some(at - LEADS[0]));
+        s.mark_notified(std::slice::from_ref(&id), at - LEADS[0]).await.unwrap();
+        assert_eq!(s.next_notify_at().await.unwrap(), Some(at - LEADS[1]));
+        s.mark_notified(std::slice::from_ref(&id), at).await.unwrap();
+        assert_eq!(s.next_notify_at().await.unwrap(), None, "the last rung was the moment itself");
+    }
+
+    #[tokio::test]
+    async fn a_snooze_puts_the_row_back_on_the_ladder_from_where_it_lands() {
+        use crate::jobs::remind::LEADS;
+        let (s, aid) = store_with_artifact().await;
+        let at = 10_000_000;
+        let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&id), at).await.unwrap();
+        assert_eq!(s.next_notify_at().await.unwrap(), None);
+        let until = at + 86_400;
+        s.snooze(&id, until).await.unwrap();
+        let first = Some(until - LEADS[0]);
+        assert_eq!(s.next_notify_at().await.unwrap(), first, "the ladder is re-run from the new time");
+        assert_eq!(s.due_owed(at + 1).await.unwrap().len(), 1, "and a short snooze is owed the moment it lands");
     }
 
     #[tokio::test]
@@ -604,9 +675,9 @@ mod tests {
         // same past instant, and spins.
         let (s, aid) = store_with_artifact().await;
         s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), Some(1_000));
+        assert!(s.next_notify_at().await.unwrap().is_some());
         s.set_artifact_status(&aid, crate::store::artifacts::ArtifactStatus::Deprecated).await.unwrap();
-        assert!(s.due_unnotified(9_000).await.unwrap().is_empty());
+        assert!(s.due_owed(9_000).await.unwrap().is_empty());
         assert_eq!(s.next_notify_at().await.unwrap(), None, "nothing to find, so nothing to wait for");
     }
 

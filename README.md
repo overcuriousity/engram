@@ -60,8 +60,10 @@ positions those searches really gave. Not a proxy score.
   open reminder still names.
 - **Time** — *remind me Friday to send the invoice* is a reminder, dated at
   capture and shown under the box when it comes due, with done, snooze and
-  push to Gotify or UnifiedPush. The band fills itself while you watch, and a
-  reminder that is done retires the note it came from: still searchable, no
+  push to Gotify or UnifiedPush — two days out, then twelve hours, three hours,
+  half an hour, and the moment itself, one message a wake however many are
+  owed. The band fills itself while you watch, and a reminder that is done
+  retires the note it came from: still searchable, no
   longer one of the last things you kept. Dates a note refers to are read out
   of it with no model. Every *today* is a link to the day: what you wrote,
   what you looked for, what was due.

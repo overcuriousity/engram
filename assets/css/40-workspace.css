@@ -850,6 +850,11 @@ body { overflow-x: hidden; }
 .due-date { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .due-date .input { flex: 1 1 9rem; min-width: 0; }
 .due-coming { margin: 0.25rem 0 0; }
+/* The fold, under the last row it kept: a count, and the way back to the rest.
+   Quiet on purpose — it is the least urgent thing on the band. */
+.due-fold { margin: 0.15rem 0 0; font-size: var(--text-xs); }
+.due-fold .btn { color: var(--color-fg-muted); padding-left: 0; }
+.due-fold .btn:hover { color: var(--color-fg-secondary); }
 
 /* A phone. The card gives back its side padding, the countdown shrinks, and
    the row keeps its one line. */

@@ -22,7 +22,7 @@
 <div id="due" class="due{% if !rows.is_empty() || just.is_some() %} due-filled{% endif %}"
      hx-post="/ui/due" hx-swap="outerHTML"
      hx-trigger="refresh{% if let Some(s) = refresh_in %}, every {{ s }}s{% endif %}"
-     hx-vals='{"tz": "{{ tz }}", "since": "{{ since }}"}'>
+     hx-vals='{"tz": "{{ tz }}", "since": "{{ since }}", "all": "{% if all %}1{% else %}0{% endif %}"}'>
 {% if let Some(j) = just %}
   <p class="due-row due-done muted"><span class="due-title">{{ j.verb }}</span>
     <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ j.id }}/{{ j.undo }}" hx-target="#due" hx-swap="outerHTML">undo</button></p>
@@ -76,6 +76,18 @@
     </span>
   </div>
 {% endfor %}
+{# The fold. A button and not a `<details>`: the band swaps itself out on
+   every poll, and a disclosure's open state lives in the DOM node that gets
+   replaced — it would shut under the reader, on the five, while they were
+   reading it. The state rides in `hx-vals` instead, like the zone, and the
+   button's own value overrides the container's for the request it sends. #}
+{% if hidden > 0 %}
+  <p class="due-fold"><button class="btn btn-ghost btn-sm" hx-post="/ui/due" hx-vals='{"all": "1"}'
+       hx-target="#due" hx-swap="outerHTML">{{ hidden }} more · show all</button></p>
+{% else if all %}
+  <p class="due-fold"><button class="btn btn-ghost btn-sm" hx-post="/ui/due" hx-vals='{"all": "0"}'
+       hx-target="#due" hx-swap="outerHTML">show less</button></p>
+{% endif %}
 {% if !events.is_empty() %}
   <p class="muted due-coming">Coming up:
     {% for e in events %}<a href="/ui/artifacts/{{ e.artifact_id }}" title="{{ e.span }}">{{ e.title }}</a> <span class="due-when">{{ e.when }}</span>{% if !loop.last %} · {% endif %}{% endfor %}

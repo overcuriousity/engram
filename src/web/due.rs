@@ -40,6 +40,12 @@ struct TzForm {
     /// every row fresh — and that is right: they have all just appeared.
     #[serde(default)]
     since: i64,
+    /// Whether the viewer has opened the fold. Rides on the fragment the same
+    /// way `tz` and `since` do, because the band replaces itself on every
+    /// poll and anything it does not send back it forgets — a `<details>`
+    /// here would snap shut under the reader every five minutes.
+    #[serde(default)]
+    all: String,
 }
 
 pub(crate) struct DueView {
@@ -95,6 +101,11 @@ pub(crate) struct DueTemplate {
     /// arrived while they were looking elsewhere. The band is stateless; this
     /// is the whole of the state, and it lives on the fragment.
     pub since: i64,
+    /// How many rows are behind the fold, or `0` when the band shows them all.
+    pub hidden: usize,
+    /// Whether the fold is open. Echoed into the fragment's `hx-vals` so the
+    /// next poll comes back the same shape the viewer left it in.
+    pub all: bool,
     /// Seconds until this fragment should ask again, or `None` for "never".
     ///
     /// The fragment carries its own trigger, so the swap that reports the last
@@ -103,6 +114,13 @@ pub(crate) struct DueTemplate {
     /// in a background tab costs nothing at all.
     pub refresh_in: Option<i64>,
 }
+
+/// How many rows the band draws before it starts counting instead. Twenty
+/// reminders inside the horizon is a wall of text where the front page wants
+/// a glance, and the rows past the cap are the ones furthest away — the least
+/// urgent thing on a band that exists to show the most urgent. The fold opens
+/// on a click and nothing is lost.
+pub(crate) const BAND_ROWS: usize = 8;
 
 /// The cap. Further out than this and there is nothing to watch for yet: the
 /// band re-reads on the five and whatever is coming is still minutes away.
@@ -205,7 +223,7 @@ pub(crate) fn due_words(at: i64, now: i64, tz: Tz) -> String {
     when_words(at, now, tz)
 }
 
-async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64) -> Result<Response> {
+async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64, all: bool) -> Result<Response> {
     let tz = zone(Some(tz_name));
     // The zone as the zone table spells it, never as the form spelled it. It
     // is echoed back into the fragment's `hx-vals` JSON, and Askama's escaping
@@ -215,12 +233,14 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64) 
     let tz_name = tz.name();
     let now = tenant.core.clock.now();
     let horizon = now + tenant.core.time.horizon_hours as i64 * 3_600;
-    let rows = tenant
-        .core
-        .store
-        .open_due(now, horizon)
-        .await?
+    let open = tenant.core.store.open_due(now, horizon).await?;
+    // The cap is applied to the read, not to the drawing: what is folded away
+    // is rows, and the ones kept are the ones the read already put first —
+    // overdue, then nearest, then the undated.
+    let hidden = if all { 0 } else { open.len().saturating_sub(BAND_ROWS) };
+    let rows = open
         .into_iter()
+        .take(if all { usize::MAX } else { BAND_ROWS })
         .map(|r: DueRow| DueView {
             id: r.moment.id.clone(),
             artifact_id: r.moment.artifact_id.clone(),
@@ -266,23 +286,25 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64) 
         tz: tz_name.to_string(),
         just,
         since: now,
+        hidden,
+        all,
         refresh_in,
     })
     .into_response())
 }
 
 async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
-    render(&tenant, &f.tz, None, f.since).await
+    render(&tenant, &f.tz, None, f.since, f.all == "1").await
 }
 
 async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.complete_moment(&id).await?;
-    render(&tenant, &f.tz, Some(Just { id, verb: "Done", undo: "undone" }), f.since).await
+    render(&tenant, &f.tz, Some(Just { id, verb: "Done", undo: "undone" }), f.since, f.all == "1").await
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.uncomplete_moment(&id).await?;
-    render(&tenant, &f.tz, None, f.since).await
+    render(&tenant, &f.tz, None, f.since, f.all == "1").await
 }
 
 /// `hour` = now + 1h; `tomorrow` = 09:00 tomorrow; `monday` = 09:00 next
@@ -331,13 +353,13 @@ async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -
         tenant.core.store.rearm_remind().await?;
         just = Some(Just { id, verb: "Snoozed", undo: "unsnooze" });
     }
-    render(&tenant, &f.tz, just, f.since).await
+    render(&tenant, &f.tz, just, f.since, f.all == "1").await
 }
 
 async fn unsnooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.store.unsnooze(&id).await?;
     tenant.core.store.rearm_remind().await?;
-    render(&tenant, &f.tz, None, f.since).await
+    render(&tenant, &f.tz, None, f.since, f.all == "1").await
 }
 
 /// Move a reminder to a date the operator typed.
@@ -354,7 +376,7 @@ async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
         tenant.core.store.move_moment(&id, at, tz.name()).await?;
         tenant.core.store.rearm_remind().await?;
     }
-    render(&tenant, &f.tz, None, f.since).await
+    render(&tenant, &f.tz, None, f.since, f.all == "1").await
 }
 
 #[cfg(test)]
@@ -738,6 +760,49 @@ mod tests {
                 "{body} left the row on the band"
             );
         }
+    }
+
+    /// How many rows the band drew, counted the way a reader counts them.
+    fn rows_in(html: &str) -> usize {
+        html.matches("class=\"due-row").count()
+    }
+
+    #[tokio::test]
+    async fn a_band_longer_than_it_can_be_read_folds_the_rest_into_a_count() {
+        let core = test_core().await;
+        let now = crate::store::now();
+        for i in 0..(BAND_ROWS + 4) {
+            artifact_with_due(&core, Some(now + 3_600 + i as i64)).await;
+        }
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert_eq!(rows_in(&html), BAND_ROWS, "the band stops at its cap: {html}");
+        assert!(html.contains("4 more"), "and says what it is holding back: {html}");
+        assert!(html.contains("show all"));
+    }
+
+    #[tokio::test]
+    async fn the_fold_opens_and_stays_open_across_the_bands_own_poll() {
+        let core = test_core().await;
+        let now = crate::store::now();
+        for i in 0..(BAND_ROWS + 4) {
+            artifact_with_due(&core, Some(now + 3_600 + i as i64)).await;
+        }
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&all=1")).await.unwrap()).await;
+        assert_eq!(rows_in(&html), BAND_ROWS + 4, "everything, once asked: {html}");
+        assert!(html.contains("show less"));
+        assert!(html.contains(r#""all": "1""#), "the poll asks the same question again: {html}");
+    }
+
+    #[tokio::test]
+    async fn a_band_inside_the_cap_says_nothing_about_folding() {
+        let core = test_core().await;
+        artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert!(!html.contains("show all"), "nothing is being held back: {html}");
+        assert!(!html.contains("show less"));
     }
 
     #[tokio::test]

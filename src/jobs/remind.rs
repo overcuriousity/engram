@@ -7,6 +7,41 @@ use crate::error::Result;
 /// The one Remind row per tenant.
 pub const REMIND_TARGET: &str = "due";
 
+/// How long before a due moment each push goes out, longest lead first, the
+/// last rung being the moment itself.
+///
+/// The first rung is the hour a moment enters the band the front page draws
+/// (`time.horizon_hours`, 48 by default), so what the phone says and what the
+/// screen shows appear together. The rest close in, because a reminder two
+/// days out is news and a reminder half an hour out is a nudge, and the two
+/// want different spacing.
+pub const LEADS: &[i64] = &[48 * 3_600, 12 * 3_600, 3 * 3_600, 30 * 60, 0];
+
+/// The rung a moment owes at `now`: the nearest one already reached that the
+/// last push did not cover, or `None` when nothing is owed.
+///
+/// The *nearest* rung and not every passed one, which is what keeps a
+/// reminder set ten minutes out from firing four pushes at once: the rungs
+/// above it are behind us, one push covers them all, and `notified_at` moving
+/// to now retires them.
+pub fn owed_lead(eff_at: i64, notified_at: Option<i64>, now: i64) -> Option<i64> {
+    LEADS
+        .iter()
+        .copied()
+        .filter(|lead| eff_at - lead <= now)
+        .filter(|lead| notified_at.is_none_or(|n| n < eff_at - lead))
+        .next_back()
+}
+
+/// The next second at which this moment owes a push: the earliest rung the
+/// last push did not cover, at any time, past or future.
+pub fn next_lead_at(eff_at: i64, notified_at: Option<i64>) -> Option<i64> {
+    LEADS
+        .iter()
+        .map(|lead| eff_at - lead)
+        .find(|at| notified_at.is_none_or(|n| n < *at))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Gotify { url: String, token: String },
@@ -51,54 +86,90 @@ pub async fn push(http: &reqwest::Client, target: &Target, title: &str, message:
     Ok(())
 }
 
-/// Post what is owed, one message per moment, record it, and sleep until the
-/// next.
+/// How many reminders one collapsed push spells out before it starts
+/// counting. A body is read on a lock screen, and past a handful of lines
+/// nobody reads it — the rest is a number, and the band has them all.
+pub const BODY_LINES: usize = 8;
+
+/// The one message a wake sends: what the notification is titled, and what it
+/// says.
 ///
-/// A moment is marked notified once any channel has taken it, and the error
-/// is returned only when every channel refused. Retrying a moment that
+/// One row keeps the shape it has always had — its own title, its opening,
+/// when it is due. Several rows collapse into one message, because a rung of
+/// the ladder is a buzz in a pocket and twenty of them at once is twenty
+/// reasons to turn the channel off.
+pub fn compose(rows: &[crate::store::moments::DueRow], now: i64) -> (String, String) {
+    if let [row] = rows {
+        let when = crate::web::due::when_words(
+            row.moment.at.unwrap_or(now),
+            now,
+            crate::core::moments::zone(Some(&row.moment.tz)),
+        );
+        return (row.title.clone(), format!("{}\n{}", row.opening, when));
+    }
+    let mut body: Vec<String> = rows
+        .iter()
+        .take(BODY_LINES)
+        .map(|row| {
+            let when = crate::web::due::due_words(
+                row.moment.at.unwrap_or(now),
+                now,
+                crate::core::moments::zone(Some(&row.moment.tz)),
+            );
+            format!("{} — {when}", row.title)
+        })
+        .collect();
+    if let Some(rest) = rows.len().checked_sub(BODY_LINES).filter(|n| *n > 0) {
+        body.push(format!("…and {rest} more"));
+    }
+    (format!("{} reminders", rows.len()), body.join("\n"))
+}
+
+/// Post what this wake owes as one message, record every moment it covered,
+/// and let the queue re-arm for the next rung.
+///
+/// The moments are marked once any channel has taken the message, and the
+/// error is returned only when every channel refused. Retrying a wake that
 /// reached one of two channels would deliver it twice there, and a duplicate
-/// push is worse than a missing one on the flakier channel — the row itself
-/// is still on the band either way.
+/// push is worse than a missing one on the flakier channel — the rows are
+/// still on the band either way.
 pub async fn run(core: &Core) -> Result<()> {
     let targets = notify_targets(&core.store.control.notify(&core.store.subject).await?);
     if targets.is_empty() {
+        return Ok(());
+    }
+    let now = core.clock.now();
+    let owed = core.store.due_owed(now).await?;
+    if owed.is_empty() {
         return Ok(());
     }
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
-    let now = core.clock.now();
-    for row in core.store.due_unnotified(now).await? {
-        let when = crate::web::due::when_words(
-            row.moment.at.unwrap_or(now),
-            now,
-            crate::core::moments::zone(Some(&row.moment.tz)),
-        );
-        let message = format!("{}\n{}", row.opening, when);
-        let mut delivered = false;
-        let mut failure = None;
-        for t in &targets {
-            match push(&http, t, &row.title, &message).await {
-                Ok(()) => delivered = true,
-                Err(e) => {
-                    tracing::warn!(moment_id = %row.moment.id, error = %e, "a push channel refused");
-                    failure = Some(e);
-                }
+    let (title, message) = compose(&owed, now);
+    let mut delivered = false;
+    let mut failure = None;
+    for t in &targets {
+        match push(&http, t, &title, &message).await {
+            Ok(()) => delivered = true,
+            Err(e) => {
+                tracing::warn!(error = %e, "a push channel refused");
+                failure = Some(e);
             }
         }
-        if !delivered {
-            return Err(failure.expect("targets is non-empty, so a run with no delivery has an error"));
-        }
-        core.store.mark_notified(std::slice::from_ref(&row.moment.id), now).await?;
     }
+    if !delivered {
+        return Err(failure.expect("targets is non-empty, so a wake with no delivery has an error"));
+    }
+    let ids: Vec<String> = owed.iter().map(|r| r.moment.id.clone()).collect();
+    core.store.mark_notified(&ids, now).await?;
     // The re-arm is NOT here. `arm_at` only moves a row in `pending`, `done`
     // or `failed`, and while this runs the row is `running` — so an arming
     // from inside the run is a no-op, `complete_job` then closes the row with
     // `run_after` at the instant that just passed, and the unit never wakes
-    // for the second reminder. `jobs::run_claimed` re-arms after the row is
-    // closed, the same order `embed::rearm_if_more` follows and for the same
-    // reason.
+    // for the next rung. `jobs::run_claimed` re-arms after the row is closed,
+    // the same order `embed::rearm_if_more` follows and for the same reason.
     Ok(())
 }
 
@@ -181,6 +252,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn everything_owed_at_one_wake_is_one_push() {
+        // Twenty reminders due this afternoon is twenty rows on the band and
+        // one buzz in the pocket. A rung is a message, not a moment.
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_string_contains("2 reminders"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = Clock::Fixed(now);
+        let a = due_at(&core, now - 10).await;
+        let b = due_at(&core, now - 5).await;
+        core.store
+            .control
+            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}))
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        for id in [&a, &b] {
+            assert!(core.store.moment(id).await.unwrap().unwrap().notified_at.is_some(), "both are said");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wake_with_more_than_the_body_holds_says_how_many_it_left_out() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_string_contains("and 2 more"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = Clock::Fixed(now);
+        let mut ids = vec![];
+        for i in 0..(BODY_LINES + 2) {
+            ids.push(due_at(&core, now - 100 + i as i64).await);
+        }
+        core.store
+            .control
+            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}))
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        for id in &ids {
+            let m = core.store.moment(id).await.unwrap().unwrap();
+            assert!(m.notified_at.is_some(), "left out of the body, not off the ladder");
+        }
+    }
+
+    #[tokio::test]
     async fn nothing_delivered_anywhere_is_still_an_error() {
         let bad = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -215,14 +345,16 @@ mod tests {
             .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": "http://127.0.0.1:9/x"}}))
             .await
             .unwrap();
+        // Far enough out that the moments are still climbing the ladder: what
+        // the unit waits for is the first rung of the nearer one.
         let now = crate::store::now();
-        let a = due_at(&core, now + 3_000).await;
-        assert_eq!(run_after_of(&core).await, Some(now + 3_000));
-        due_at(&core, now + 1_000).await;
-        assert_eq!(run_after_of(&core).await, Some(now + 1_000));
+        let a = due_at(&core, now + 30 * 86_400).await;
+        assert_eq!(run_after_of(&core).await, Some(now + 30 * 86_400 - LEADS[0]));
+        due_at(&core, now + 10 * 86_400).await;
+        assert_eq!(run_after_of(&core).await, Some(now + 10 * 86_400 - LEADS[0]));
         core.store.mark_done(&a, now).await.unwrap();
         core.store.rearm_remind().await.unwrap();
-        assert_eq!(run_after_of(&core).await, Some(now + 1_000));
+        assert_eq!(run_after_of(&core).await, Some(now + 10 * 86_400 - LEADS[0]));
     }
 
     #[tokio::test]
@@ -285,10 +417,11 @@ mod tests {
         let now = crate::store::now();
         core.clock = Clock::Fixed(now);
         // The later one first: `due_at` drains the queue, and a unit already
-        // armed at a past second would be claimed by that drain.
-        let later = due_at(&core, now + 3_000).await;
+        // armed at a past second would be claimed by that drain. Ten days out,
+        // so it is not standing on a rung of its own yet.
+        let later = due_at(&core, now + 10 * 86_400).await;
         let owed = due_at(&core, now - 10).await;
-        assert_eq!(run_after_of(&core).await, Some(now - 10));
+        assert_eq!(run_after_of(&core).await, Some(now - 10 - LEADS[0]), "a rung already behind us");
 
         let job = core.store.claim_job().await.unwrap().unwrap();
         assert_eq!(job.stage, Stage::Remind);
@@ -298,7 +431,7 @@ mod tests {
         assert!(core.store.moment(&later).await.unwrap().unwrap().notified_at.is_none());
         assert_eq!(
             run_after_of(&core).await,
-            Some(now + 3_000),
+            Some(now + 10 * 86_400 - LEADS[0]),
             "the unit slept through the second reminder"
         );
     }
@@ -335,5 +468,48 @@ mod tests {
             notify_targets(&serde_json::json!({"unifiedpush": {"endpoint": "e"}})),
             vec![Target::UnifiedPush { endpoint: "e".into() }]
         );
+    }
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+
+    #[test]
+    fn a_far_out_moment_is_owed_its_first_rung_when_it_enters_the_band() {
+        let due = 1_000_000;
+        assert_eq!(owed_lead(due, None, due - LEADS[0] - 1), None, "still outside the band");
+        assert_eq!(owed_lead(due, None, due - LEADS[0]), Some(LEADS[0]));
+    }
+
+    #[test]
+    fn a_rung_already_pushed_is_not_owed_again_but_the_next_one_is() {
+        let due = 1_000_000;
+        let sent = due - LEADS[0];
+        assert_eq!(owed_lead(due, Some(sent), sent + 1), None);
+        assert_eq!(owed_lead(due, Some(sent), due - LEADS[1]), Some(LEADS[1]));
+    }
+
+    #[test]
+    fn a_moment_set_inside_the_ladder_owes_one_rung_not_every_passed_one() {
+        let due = 1_000_000;
+        let now = due - 600; // ten minutes out: every rung above 30m is behind us
+        assert_eq!(owed_lead(due, None, now), Some(30 * 60), "the nearest passed rung, once");
+        // And then the moment itself, which is the only rung still ahead.
+        assert_eq!(owed_lead(due, Some(now), due), Some(0));
+    }
+
+    #[test]
+    fn nothing_is_owed_once_the_moment_itself_has_been_pushed() {
+        let due = 1_000_000;
+        assert_eq!(owed_lead(due, Some(due), due + 10_000), None);
+    }
+
+    #[test]
+    fn the_next_boundary_is_the_earliest_rung_not_yet_covered() {
+        let due = 1_000_000;
+        assert_eq!(next_lead_at(due, None), Some(due - LEADS[0]));
+        assert_eq!(next_lead_at(due, Some(due - LEADS[0])), Some(due - LEADS[1]));
+        assert_eq!(next_lead_at(due, Some(due)), None);
     }
 }
