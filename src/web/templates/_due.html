@@ -33,9 +33,16 @@
      somewhere else, and "fills itself while you watch" is a claim nothing on
      screen supports. It drives one short animation and means nothing after
      it. #}
-  <div class="due-row{% if r.overdue %} due-overdue{% endif %}{% if r.undated %} due-undated{% endif %}{% if r.fresh %} due-new{% endif %}">
-    <a class="due-title" href="/ui/artifacts/{{ r.artifact_id }}">{{ r.title }}</a>
-    <span class="due-when">{{ r.when }}{% if r.recurring %} <span title="repeats">↻</span>{% endif %}</span>
+  {# `--heat` is the whole of the colour: 0 six hours out or further, 1 once
+     due. The stylesheet mixes against it and nothing else, and app.js keeps it
+     moving between polls — the band re-reads at most every five minutes, and a
+     gradient that only steps five times an hour is not a gradient. #}
+  <div class="due-row{% if r.overdue %} due-overdue{% endif %}{% if r.undated %} due-undated{% endif %}{% if r.fresh %} due-new{% endif %}"
+       {% if !r.undated %}style="--heat: {{ r.heat }}" data-due-at="{{ r.at }}"{% endif %}>
+    <a class="due-title" href="/ui/artifacts/{{ r.artifact_id }}" title="{{ r.title }}">{{ r.title }}</a>
+    {# The date lives in the title because `when` gives it up as soon as it
+       turns into a countdown, and which day a thing is due is not losable. #}
+    <span class="due-when"{% if !r.undated %} title="{{ r.full }}"{% endif %}><span class="due-count">{{ r.when }}</span>{% if r.recurring %} <span title="repeats">↻</span>{% endif %}</span>
     {% if r.source != "set" %}<span class="muted due-source" title="read from the note, not set by you">read</span>{% endif %}
     <span class="due-acts">
       <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/done" hx-target="#due" hx-swap="outerHTML">done</button>

@@ -57,40 +57,117 @@ pub const CUES: &[(Intent, &str)] = &[
 
 /// Sentence-shaped on purpose: the embedder places "remind me to X" near other
 /// requests for future action, and a bare cue word near a dictionary entry.
-pub const PROTOTYPES: &[(Intent, &str)] = &[
-    (Intent::Remind, "remind me to send the invoice on friday"),
-    (Intent::Remind, "remind me next week to call the bank"),
-    (Intent::Remind, "erinnere mich morgen an den zahnarzttermin"),
-    (Intent::Remind, "erinnere mich nächste woche an die steuererklärung"),
-    (Intent::Remind, "rappelle-moi d'appeler la banque lundi"),
-    (Intent::Remind, "recuérdame pagar el alquiler el día uno"),
-    (Intent::Remind, "lembre-me de renovar o passaporte em setembro"),
-    (Intent::Remind, "ricordami di comprare i biglietti domani"),
-    (Intent::Remind, "herinner me eraan om de huur te betalen"),
-    (Intent::Remind, "przypomnij mi jutro o spotkaniu z lekarzem"),
-    (Intent::Remind, "yarın bana faturayı ödemeyi hatırlat"),
-    (Intent::Remind, "напомни мне завтра позвонить маме"),
-    (Intent::Journal, "today i finally got the migration working"),
-    (Intent::Journal, "long day, nothing got done, but the walk helped"),
-    (Intent::Journal, "heute war ein langer tag und ich bin müde"),
-    (Intent::Journal, "heute morgen endlich den fehler gefunden"),
-    (Intent::Journal, "aujourd'hui j'ai enfin terminé le rapport"),
-    (Intent::Journal, "hoy fue un día tranquilo, leí mucho"),
-    (Intent::Journal, "hoje acordei cedo e fui correr"),
-    (Intent::Journal, "oggi è stata una giornata pesante"),
-    (Intent::Journal, "vandaag eindelijk de tuin gedaan"),
-    (Intent::Journal, "dzisiaj byłem u dentysty, poszło dobrze"),
-    (Intent::Journal, "bugün çok yorucu bir gündü"),
-    (Intent::Journal, "сегодня наконец закончил проект"),
-];
-
-/// The language each prototype is written in, in the order `PROTOTYPES` lists
-/// them. Kept beside that table rather than derived from it: a language tag is
-/// not recoverable from a sentence, and the two lists are read together or not
-/// at all.
-const PROTOTYPE_LANGS: &[&str] = &[
-    "en", "en", "de", "de", "fr", "es", "pt", "it", "nl", "pl", "tr", "ru", "en", "en", "de", "de",
-    "fr", "es", "pt", "it", "nl", "pl", "tr", "ru",
+///
+/// Four phrasings per intent per language, and the last two of each four carry
+/// no cue word at all. That is where this table earns its keep: `CUES` already
+/// catches *erinnere mich* by string match, and nothing catches *nicht
+/// vergessen: am Freitag die Rechnung abschicken* except a vector near one of
+/// these. `classify` takes the maximum over the table, so a phrasing added
+/// here can only widen what is recognised — it cannot pull an existing match
+/// off its prototype. What it does move is `intent_line`, which is measured
+/// against this same table over the base's own vectors and so re-fits itself.
+///
+/// The language tag is carried in the row rather than in a parallel array: a
+/// tag is not recoverable from a sentence, and at eighty rows two lists kept
+/// in step by counting is a defect waiting for its first careless insert.
+///
+/// The **first** row of each (intent, language) pair is the one a reader sees
+/// under the box — see `examples_for` — so it is written to be read, not only
+/// to be embedded.
+///
+/// Adding a row invalidates the cached vectors on its own: `Core::prototypes`
+/// re-embeds whenever the cache length and this length disagree.
+pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
+    // ── en ──
+    (Intent::Remind, "en", "remind me to send the invoice on friday"),
+    (Intent::Remind, "en", "remind me next week to call the bank"),
+    (Intent::Remind, "en", "don't forget to book the train tickets tomorrow"),
+    (Intent::Remind, "en", "i need to renew my passport before the end of the month"),
+    (Intent::Journal, "en", "today i finally got the migration working"),
+    (Intent::Journal, "en", "long day, nothing got done, but the walk helped"),
+    (Intent::Journal, "en", "slept badly again, the whole afternoon was a write-off"),
+    (Intent::Journal, "en", "quiet evening, cooked properly for once and felt better for it"),
+    // ── de ──
+    (Intent::Remind, "de", "erinnere mich morgen an den zahnarzttermin"),
+    (Intent::Remind, "de", "erinnere mich nächste woche an die steuererklärung"),
+    (Intent::Remind, "de", "nicht vergessen: am freitag die rechnung abschicken"),
+    (Intent::Remind, "de", "ich muss bis ende des monats den pass verlängern"),
+    (Intent::Journal, "de", "heute war ein langer tag und ich bin müde"),
+    (Intent::Journal, "de", "heute morgen endlich den fehler gefunden"),
+    (Intent::Journal, "de", "wieder schlecht geschlafen, der ganze nachmittag war für die katz"),
+    (Intent::Journal, "de", "ruhiger abend, endlich mal richtig gekocht und es ging mir besser"),
+    // ── fr ──
+    (Intent::Remind, "fr", "rappelle-moi d'appeler la banque lundi"),
+    (Intent::Remind, "fr", "rappelle-moi la semaine prochaine de renouveler l'assurance"),
+    (Intent::Remind, "fr", "ne pas oublier d'envoyer la facture vendredi"),
+    (Intent::Remind, "fr", "je dois refaire mon passeport avant la fin du mois"),
+    (Intent::Journal, "fr", "aujourd'hui j'ai enfin terminé le rapport"),
+    (Intent::Journal, "fr", "longue journée, rien d'avancé, mais la promenade m'a fait du bien"),
+    (Intent::Journal, "fr", "encore mal dormi, tout l'après-midi est passé à côté"),
+    (Intent::Journal, "fr", "soirée tranquille, j'ai enfin cuisiné correctement"),
+    // ── es ──
+    (Intent::Remind, "es", "recuérdame pagar el alquiler el día uno"),
+    (Intent::Remind, "es", "recuérdame la semana que viene llamar al banco"),
+    (Intent::Remind, "es", "no olvidar enviar la factura el viernes"),
+    (Intent::Remind, "es", "tengo que renovar el pasaporte antes de fin de mes"),
+    (Intent::Journal, "es", "hoy fue un día tranquilo, leí mucho"),
+    (Intent::Journal, "es", "día largo, no avancé nada, pero el paseo ayudó"),
+    (Intent::Journal, "es", "otra vez dormí mal, se me fue la tarde entera"),
+    (Intent::Journal, "es", "por fin cociné bien esta noche y me sentó bien"),
+    // ── pt ──
+    (Intent::Remind, "pt", "lembre-me de renovar o passaporte em setembro"),
+    (Intent::Remind, "pt", "lembre-me na próxima semana de ligar para o banco"),
+    (Intent::Remind, "pt", "não esquecer de enviar a fatura na sexta"),
+    (Intent::Remind, "pt", "preciso pagar o aluguel até o dia primeiro"),
+    (Intent::Journal, "pt", "hoje acordei cedo e fui correr"),
+    (Intent::Journal, "pt", "dia longo, não rendi nada, mas a caminhada ajudou"),
+    (Intent::Journal, "pt", "dormi mal de novo, perdi a tarde inteira"),
+    (Intent::Journal, "pt", "noite tranquila, cozinhei direito pela primeira vez em semanas"),
+    // ── it ──
+    (Intent::Remind, "it", "ricordami di comprare i biglietti domani"),
+    (Intent::Remind, "it", "ricordami la settimana prossima di chiamare la banca"),
+    (Intent::Remind, "it", "non dimenticare di mandare la fattura venerdì"),
+    (Intent::Remind, "it", "devo rinnovare il passaporto entro fine mese"),
+    (Intent::Journal, "it", "oggi è stata una giornata pesante"),
+    (Intent::Journal, "it", "giornata lunga, non ho concluso niente, ma la passeggiata è servita"),
+    (Intent::Journal, "it", "ho dormito male di nuovo, pomeriggio buttato"),
+    (Intent::Journal, "it", "serata tranquilla, finalmente ho cucinato come si deve"),
+    // ── nl ──
+    (Intent::Remind, "nl", "herinner me eraan om de huur te betalen"),
+    (Intent::Remind, "nl", "herinner me volgende week aan het gesprek met de bank"),
+    (Intent::Remind, "nl", "niet vergeten om vrijdag de factuur te versturen"),
+    (Intent::Remind, "nl", "ik moet mijn paspoort verlengen voor het eind van de maand"),
+    (Intent::Journal, "nl", "vandaag eindelijk de tuin gedaan"),
+    (Intent::Journal, "nl", "lange dag, niets afgekregen, maar die wandeling hielp"),
+    (Intent::Journal, "nl", "weer slecht geslapen, de hele middag was verloren"),
+    (Intent::Journal, "nl", "rustige avond, eindelijk weer eens goed gekookt"),
+    // ── pl ──
+    (Intent::Remind, "pl", "przypomnij mi jutro o spotkaniu z lekarzem"),
+    (Intent::Remind, "pl", "przypomnij mi w przyszłym tygodniu zadzwonić do banku"),
+    (Intent::Remind, "pl", "nie zapomnieć wysłać faktury w piątek"),
+    (Intent::Remind, "pl", "muszę wyrobić paszport do końca miesiąca"),
+    (Intent::Journal, "pl", "dzisiaj byłem u dentysty, poszło dobrze"),
+    (Intent::Journal, "pl", "długi dzień, nic nie zrobiłem, ale spacer pomógł"),
+    (Intent::Journal, "pl", "znowu źle spałem, całe popołudnie zmarnowane"),
+    (Intent::Journal, "pl", "spokojny wieczór, w końcu porządnie ugotowałem"),
+    // ── tr ──
+    (Intent::Remind, "tr", "yarın bana faturayı ödemeyi hatırlat"),
+    (Intent::Remind, "tr", "gelecek hafta bankayı aramayı hatırlat"),
+    (Intent::Remind, "tr", "cuma günü faturayı göndermeyi unutma"),
+    (Intent::Remind, "tr", "ay sonuna kadar pasaportu yenilemem lazım"),
+    (Intent::Journal, "tr", "bugün çok yorucu bir gündü"),
+    (Intent::Journal, "tr", "uzun bir gündü, hiçbir şey ilerlemedi ama yürüyüş iyi geldi"),
+    (Intent::Journal, "tr", "yine kötü uyudum, bütün öğleden sonra boşa gitti"),
+    (Intent::Journal, "tr", "sakin bir akşam, uzun zamandır ilk kez doğru düzgün yemek yaptım"),
+    // ── ru ──
+    (Intent::Remind, "ru", "напомни мне завтра позвонить маме"),
+    (Intent::Remind, "ru", "напомни мне на следующей неделе про страховку"),
+    (Intent::Remind, "ru", "не забыть отправить счёт в пятницу"),
+    (Intent::Remind, "ru", "нужно продлить паспорт до конца месяца"),
+    (Intent::Journal, "ru", "сегодня наконец закончил проект"),
+    (Intent::Journal, "ru", "длинный день, ничего не сделал, но прогулка помогла"),
+    (Intent::Journal, "ru", "опять плохо спал, весь день насмарку"),
+    (Intent::Journal, "ru", "тихий вечер, наконец нормально приготовил ужин"),
 ];
 
 /// One reminder and one journal example, in the reader's language where the
@@ -105,7 +182,6 @@ const PROTOTYPE_LANGS: &[&str] = &[
 /// entry is read: `de-DE,de;q=0.9,en;q=0.8` is a reader who wants German, and
 /// weighing the rest to discover that is arithmetic for nothing.
 pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
-    debug_assert_eq!(PROTOTYPE_LANGS.len(), PROTOTYPES.len(), "one language per prototype");
     let want = accept_language
         .split(',')
         .next()
@@ -120,11 +196,7 @@ pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
         .to_ascii_lowercase();
     let pick = |intent: Intent| -> &'static str {
         let of = |lang: &str| {
-            PROTOTYPES
-                .iter()
-                .zip(PROTOTYPE_LANGS)
-                .find(|((i, _), l)| *i == intent && **l == lang)
-                .map(|((_, p), _)| *p)
+            PROTOTYPES.iter().find(|(i, l, _)| *i == intent && *l == lang).map(|(_, _, p)| *p)
         };
         of(&want).or_else(|| of("en")).unwrap_or("")
     };
@@ -689,13 +761,13 @@ impl crate::core::Core {
                 } else {
                     let docs: Vec<crate::infer::EmbedDoc> = PROTOTYPES
                         .iter()
-                        .map(|(_, p)| crate::infer::EmbedDoc { title: None, text: p.to_string() })
+                        .map(|(_, _, p)| crate::infer::EmbedDoc { title: None, text: p.to_string() })
                         .collect();
                     let permit = self.gate.background_light().await;
                     let embedded = self.embedder.embed_documents(&docs).await;
                     permit.finished();
                     let vectors: Vec<(Intent, Vec<f32>)> =
-                        PROTOTYPES.iter().map(|(i, _)| *i).zip(embedded?).collect();
+                        PROTOTYPES.iter().map(|(i, _, _)| *i).zip(embedded?).collect();
                     self.store.meta_set(&key, &serde_json::to_string(&vectors).unwrap_or_default()).await?;
                     vectors
                 };
@@ -761,6 +833,31 @@ mod tests {
 
         let (remind, _) = examples_for("xx-YY");
         assert!(remind.starts_with("remind me"), "an unknown language falls back too");
+    }
+
+    /// The table is read by index in two places and by language in a third, so
+    /// its shape is a contract rather than a convention: every language carries
+    /// both intents, no sentence is written twice, and nothing is left in a
+    /// language `examples_for` cannot reach.
+    #[test]
+    fn every_language_carries_both_intents_and_no_sentence_twice() {
+        let langs: std::collections::BTreeSet<&str> =
+            PROTOTYPES.iter().map(|(_, l, _)| *l).collect();
+        assert!(langs.contains("en"), "English is the fallback and must exist");
+        for l in &langs {
+            for intent in [Intent::Remind, Intent::Journal] {
+                let n = PROTOTYPES.iter().filter(|(i, x, _)| i == &intent && x == l).count();
+                assert!(n >= 2, "{l} has {n} {} prototypes", intent.as_str());
+            }
+            // The hint under the box reads the first row of the pair. If a
+            // language is in the table at all, both of its examples resolve.
+            let (r, j) = examples_for(l);
+            assert!(!r.is_empty() && !j.is_empty(), "{l} resolves to examples");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, _, p) in PROTOTYPES {
+            assert!(seen.insert(*p), "duplicate prototype: {p}");
+        }
     }
 
     #[test]
@@ -835,9 +932,9 @@ mod tests {
     fn every_language_has_a_cue_and_prototypes_for_both_intents() {
         for intent in [Intent::Remind, Intent::Journal] {
             assert!(CUES.iter().filter(|(i, _)| *i == intent).count() >= 10);
-            assert!(PROTOTYPES.iter().filter(|(i, _)| *i == intent).count() >= 10);
+            assert!(PROTOTYPES.iter().filter(|(i, _, _)| *i == intent).count() >= 10);
         }
-        for (_, p) in PROTOTYPES {
+        for (_, _, p) in PROTOTYPES {
             assert!(p.split_whitespace().count() >= 3, "a prototype is a sentence, not a word: {p}");
         }
     }

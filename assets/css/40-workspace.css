@@ -798,15 +798,44 @@ body { overflow-x: hidden; }
   background: color-mix(in oklab, var(--color-due) 6%, transparent);
   padding: 0.5rem 0.75rem;
 }
-.due-row { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline; padding: 0.25rem 0; }
-.due-title { font-weight: 500; }
-/* Full strength overdue, faint upcoming. The colour is the whole signal, so a
-   row that is merely coming must not shout in the voice of one already late. */
-.due-when { color: color-mix(in oklab, var(--color-due) 55%, var(--color-fg-secondary)); }
-.due-overdue .due-when { color: var(--color-due); font-weight: 600; }
-.due-undated .due-when { font-style: italic; }
+/* One line: title, when, and the two buttons. The title takes what is left and
+   is cut rather than wrapped — a reminder is recognised from its first few
+   words, and three lines per row was most of a phone screen for four of them.
+   Nothing is lost: the full text is the link's title, and one tap opens it. */
+.due-row {
+  --heat: 0;
+  display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem;
+  align-items: baseline; padding: 0.25rem 0.4rem;
+  border-left: 2px solid transparent; border-radius: 2px;
+}
+.due-title {
+  font-weight: 500;
+  flex: 1 1 8rem; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The ramp. Neutral beyond six hours out, red at the moment it is due — one
+   colour mixed against `--heat` and nothing else, so the row, its edge and its
+   time all move together and cannot disagree about how urgent this is.
+   `--heat` is set on the row by the server and kept moving by app.js. */
+.due-row[data-due-at] {
+  background: color-mix(in oklab, var(--color-danger) calc(var(--heat) * 12%), transparent);
+  border-left-color: color-mix(in oklab, var(--color-danger) calc(var(--heat) * 85%), transparent);
+}
+.due-when {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, var(--color-danger) calc(var(--heat) * 100%), var(--color-fg-secondary));
+}
+.due-overdue .due-when { font-weight: 600; }
+.due-undated .due-when { font-style: italic; color: var(--color-due); }
 .due-done .due-title { text-decoration: line-through; }
-.due-acts { display: inline-flex; gap: 0.5rem; align-items: baseline; margin-left: auto; flex-wrap: wrap; }
+.due-acts {
+  display: inline-flex; gap: 0.5rem; align-items: baseline;
+  margin-left: auto; flex-wrap: wrap; justify-content: flex-end;
+}
+/* Opened, the second thoughts get their own line rather than squeezing the
+   title off the row that was the reason to open them. */
+.due-later[open] { flex-basis: 100%; justify-content: flex-end; }
 /* Everything that is not `done`. Closed, it is one quiet word. */
 .due-later > summary {
   cursor: pointer;
@@ -818,8 +847,18 @@ body { overflow-x: hidden; }
 .due-later > summary:hover { color: var(--color-fg-secondary); }
 .due-later[open] { display: inline-flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
 .due-snooze { display: inline-flex; gap: 0.25rem; align-items: baseline; font-size: var(--text-xs); }
-.due-date { display: inline-flex; gap: 0.25rem; }
+.due-date { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.due-date .input { flex: 1 1 9rem; min-width: 0; }
 .due-coming { margin: 0.25rem 0 0; }
+
+/* A phone. The card gives back its side padding, the countdown shrinks, and
+   the row keeps its one line. */
+@media (width <= 30rem) {
+  .due-filled { padding: 0.4rem 0.5rem; }
+  .due-row { gap: 0.25rem 0.4rem; padding: 0.25rem 0.3rem; }
+  .due-when { font-size: var(--text-xs); }
+  .due-acts { gap: 0.4rem; }
+}
 
 /* A row that was not here a moment ago. One pass, then it is an ordinary row:
    a mark that persisted would be furniture inside a day. */

@@ -2089,8 +2089,60 @@
     });
   }
 
+  // ── The countdown on the due band ─────────────────────────────────────────
+  //
+  // The band re-reads at most every five minutes (`due::POLL_CAP`), so a
+  // gradient left to the server would step five times an hour and a countdown
+  // would be wrong by up to five minutes — which is the whole of what a
+  // countdown is for. Both are recomputed here from `data-due-at`, off one
+  // timer, using the same rules as `due::due_words` and `due::heat`; the
+  // server's render is what a reader with no JS sees, and it is correct at the
+  // instant it is sent.
+  var HEAT_WINDOW = 6 * 3600;
+
+  function spanWords(secs) {
+    var s = Math.max(0, secs);
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + 'm';
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+    var d = Math.floor(h / 24);
+    if (d < 7) return d + 'd ' + (h % 24) + 'h';
+    return d + 'd';
+  }
+
+  function dueTick() {
+    var now = Date.now() / 1000;
+    document.querySelectorAll('.due-row[data-due-at]').forEach(function (row) {
+      var at = Number(row.getAttribute('data-due-at'));
+      if (!at) return;
+      var ahead = at - now;
+      row.style.setProperty(
+        '--heat',
+        (ahead <= 0 ? 1 : ahead >= HEAT_WINDOW ? 0 : 1 - ahead / HEAT_WINDOW).toFixed(3)
+      );
+      // Outside the window the row shows a wall-clock time the server wrote,
+      // and there is nothing to count. Left alone rather than reformatted:
+      // the date words are the server's, in the viewer's zone, and rebuilding
+      // them here would be a second implementation of the same sentence.
+      if (ahead >= HEAT_WINDOW) return;
+      var count = row.querySelector('.due-count');
+      if (!count) return;
+      var text = ahead <= 0 ? spanWords(-ahead) + ' overdue' : 'in ' + spanWords(ahead);
+      if (count.textContent !== text) count.textContent = text;
+      // It crossed while the page was open: the row is late now, and the
+      // weight the stylesheet gives a late row has to follow.
+      if (ahead <= 0) row.classList.add('due-overdue');
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     enhance(document.body);
+    dueTick();
+    // A second is the resolution of the last minute of a countdown, and the
+    // work is a handful of rows: cheaper than the poll it replaces.
+    setInterval(dueTick, 1000);
     themeToggle();
     vectorBg();
     keyHint();
@@ -2156,6 +2208,9 @@
       }
       zoneDayLinks(e.target);
       enhance(e.target);
+      // A swapped-in band renders at the instant the server answered; by the
+      // time it lands the numbers have moved.
+      if (e.target.id === 'due') dueTick();
       trackDwell();
       // The pane now holds something, so a narrow screen can hide the rail.
       var ws = document.querySelector('.regions');

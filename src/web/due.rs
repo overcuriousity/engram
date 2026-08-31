@@ -47,6 +47,16 @@ pub(crate) struct DueView {
     pub artifact_id: String,
     pub title: String,
     pub when: String,
+    /// The absolute time, always, for the row's tooltip. `when` is the short
+    /// form and drops the date the moment it turns into a countdown; the day
+    /// something is due is not information the band may lose.
+    pub full: String,
+    /// The instant, as the client needs it to keep counting between polls.
+    /// `0` on an undated row, which carries no countdown and no heat.
+    pub at: i64,
+    /// How close, as a number between 0 and 1 — see `heat`. Written into the
+    /// row as a custom property and read only by the stylesheet.
+    pub heat: String,
     pub overdue: bool,
     pub undated: bool,
     pub recurring: bool,
@@ -132,6 +142,67 @@ pub(crate) fn when_words(at: i64, now: i64, tz: Tz) -> String {
     }
 }
 
+/// Where the ramp starts. Further out than six hours and a row is neutral: it
+/// is on the list because it exists, not because anything is about to happen.
+pub(crate) const HEAT_HOURS: i64 = 6;
+
+/// 0 at the far edge of the window, 1 at the moment it is due and every moment
+/// after. The stylesheet mixes one colour against this and nothing else, so
+/// the whole of "how urgent is this" lives in this one number.
+pub(crate) fn heat(at: i64, now: i64) -> f32 {
+    let ahead = at - now;
+    let window = HEAT_HOURS * 3_600;
+    if ahead <= 0 {
+        return 1.0;
+    }
+    if ahead >= window {
+        return 0.0;
+    }
+    1.0 - ahead as f32 / window as f32
+}
+
+/// A length of time in the coarsest unit that still says something: *45s*,
+/// *12m*, *3h 05m*, *2d 4h*, *9d*. The minutes are zero-padded so a counter
+/// ticking down does not shift the text either side of it.
+pub(crate) fn span_words(secs: i64) -> String {
+    let s = secs.max(0);
+    if s < 60 {
+        return format!("{s}s");
+    }
+    let m = s / 60;
+    if m < 60 {
+        return format!("{m}m");
+    }
+    let h = m / 60;
+    if h < 24 {
+        return format!("{h}h {:02}m", m % 60);
+    }
+    let d = h / 24;
+    if d < 7 {
+        return format!("{d}d {}h", h % 24);
+    }
+    format!("{d}d")
+}
+
+/// What a due row says. Inside the heat window it counts down, because that is
+/// the number a person acts on; outside it, a wall-clock time, because *in 4
+/// days 3h* is not something anyone can plan around. Once past, how late —
+/// *overdue since Mon 31 Aug 11:00* was the longest string on the band and the
+/// one carrying the least, since the row is on screen precisely because it is
+/// late and the interesting part is by how much.
+///
+/// The absolute time is never lost: `DueView::full` carries it into the title.
+pub(crate) fn due_words(at: i64, now: i64, tz: Tz) -> String {
+    let ahead = at - now;
+    if ahead <= 0 {
+        return format!("{} overdue", span_words(-ahead));
+    }
+    if ahead < HEAT_HOURS * 3_600 {
+        return format!("in {}", span_words(ahead));
+    }
+    when_words(at, now, tz)
+}
+
 async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64) -> Result<Response> {
     let tz = zone(Some(tz_name));
     // The zone as the zone table spells it, never as the form spelled it. It
@@ -152,7 +223,10 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64) 
             id: r.moment.id.clone(),
             artifact_id: r.moment.artifact_id.clone(),
             title: r.title,
-            when: r.moment.at.map(|a| when_words(a, now, tz)).unwrap_or_else(|| "when?".into()),
+            when: r.moment.at.map(|a| due_words(a, now, tz)).unwrap_or_else(|| "when?".into()),
+            full: r.moment.at.map(|a| when_words(a, now, tz)).unwrap_or_default(),
+            at: r.moment.at.unwrap_or(0),
+            heat: r.moment.at.map_or_else(String::new, |a| format!("{:.3}", heat(a, now))),
             overdue: r.moment.at.is_some_and(|a| a < now),
             undated: r.moment.at.is_none(),
             recurring: r.moment.rule.is_some(),
@@ -626,5 +700,46 @@ mod tests {
         assert_eq!(when_words(now + 21 * 3_600, now, tz), "tomorrow 09:00");
         assert_eq!(when_words(now + 5 * 86_400, now, tz), "Fri 4 Sep 12:00");
         assert_eq!(when_words(now - 3 * 86_400, now, tz), "overdue since Thu 27 Aug 12:00");
+    }
+
+    #[test]
+    fn a_row_counts_down_inside_the_window_and_names_the_day_outside_it() {
+        let tz = chrono_tz::Tz::Europe__Berlin;
+        let now = tz.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap().timestamp();
+        assert_eq!(due_words(now + 45, now, tz), "in 45s");
+        assert_eq!(due_words(now + 12 * 60, now, tz), "in 12m");
+        assert_eq!(due_words(now + 3 * 3_600 + 300, now, tz), "in 3h 05m");
+        // The edge of the heat window: at six hours it is a time of day again,
+        // because *in 6h 00m* is not a thing anyone plans around.
+        assert_eq!(due_words(now + HEAT_HOURS * 3_600, now, tz), "today 18:00");
+        assert_eq!(due_words(now + 5 * 86_400, now, tz), "Fri 4 Sep 12:00");
+        assert_eq!(due_words(now - 90 * 60, now, tz), "1h 30m overdue");
+        assert_eq!(due_words(now - 3 * 86_400, now, tz), "3d 0h overdue");
+        assert_eq!(due_words(now - 30 * 86_400, now, tz), "30d overdue");
+    }
+
+    #[test]
+    fn heat_is_nothing_at_the_window_and_everything_once_due() {
+        let now = 1_000_000;
+        assert_eq!(heat(now + HEAT_HOURS * 3_600, now), 0.0);
+        assert_eq!(heat(now + 30 * 86_400, now), 0.0);
+        assert_eq!(heat(now, now), 1.0);
+        assert_eq!(heat(now - 86_400, now), 1.0);
+        let half = heat(now + HEAT_HOURS * 1_800, now);
+        assert!((half - 0.5).abs() < 0.001, "halfway through the window: {half}");
+    }
+
+    #[tokio::test]
+    async fn a_dated_row_carries_its_heat_and_its_instant() {
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = crate::core::context::Clock::Fixed(now);
+        let at = now + 3 * 3_600;
+        artifact_with_due(&core, Some(at)).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert!(html.contains(&format!(r#"data-due-at="{at}""#)), "the instant: {html}");
+        assert!(html.contains("--heat: 0.500"), "halfway up the ramp: {html}");
+        assert!(html.contains("in 3h 00m"), "and it counts down: {html}");
     }
 }

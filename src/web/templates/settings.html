@@ -79,8 +79,16 @@ reading, and search from a panel beside it.</p>
   <label>Gotify app token
     <input class="input" name="gotify_token" type="password" autocomplete="off"
            placeholder="{% if gotify_token_set %}•••••••• (kept unless you type a new one){% else %}token{% endif %}"></label>
+  {# engram is a server, not an Android app: it cannot register with a
+     distributor itself, so it needs an endpoint someone else made for it. On
+     NextPush that is a *notification channel* — an app registration the
+     distributor holds in its own name, whose pushes it shows as a plain
+     notification. Made in the NextPush app, not here. #}
   <label>UnifiedPush endpoint
     <input class="input" name="up_endpoint" value="{{ up_endpoint }}" placeholder="https://nextcloud.example/index.php/apps/uppush/push/…"></label>
+  <p class="muted" style="margin:0">Any URL that takes the message as the request body. With
+    NextPush: open the app, add a notification channel, long-press it to copy its endpoint,
+    and paste it here.</p>
   <div class="row">
     <button class="btn btn-accent" type="submit">Save</button>
     <button class="btn btn-ghost" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"gotify"}' hx-target="#notify-result">Test Gotify</button>
