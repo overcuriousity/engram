@@ -294,7 +294,20 @@
 .exif-all { margin-top: 0.75rem; font-size: var(--text-sm); }
 .exif-all summary { cursor: pointer; }
 .exif-all table { margin-top: 0.5rem; }
-.judge-assign .input { max-width: 32rem; }
+/* ── The assignment screen ───────────────────────────────────────────────────
+   Its header is the card's header (`.judge-head`), so the query, the hint and
+   the box carry the card's padding instead of sitting flush against its
+   border — which is what they did for as long as this screen wrote them
+   straight into `.judge-card`, while the outs bar below kept the padding of
+   the card it was copied from. */
+.judge-assign .input { max-width: 32rem; margin-top: 0.5rem; }
+/* The pool's geometry without the pool's box: bounded and scrolling, so the
+   query above and the two ways out below are on screen whatever the list is
+   doing, and no border around a container that is empty until something has
+   been typed. Aligned to the header's padding. */
+.judge-assign-results { margin: 0 1.1rem; }
+.judge-assign .judge-options { max-height: 44vh; overflow: auto; margin-top: 0.5rem; }
+.judge-assign-empty { margin: 0.75rem 0 0; }
 
 /* Every rule above is one-shot and cheap, and all of it is skipped for anyone
    who asked not to be moved. Each thing still shows where it stands; it simply

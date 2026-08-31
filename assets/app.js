@@ -2471,4 +2471,46 @@
       if (out) { e.preventDefault(); out.click(); }
     }
   });
+
+  // ── The assignment search's refining pass ─────────────────────────────────
+  //
+  // The same two passes the workspace box makes, for the same reason: typing
+  // is answered in vector order at embedding speed, and the reranker — a model
+  // call — is asked once, after the box has been quiet long enough for the
+  // query to be settled. It used to run on every keystroke.
+  //
+  // Delegated from the document because the box arrives and leaves with card
+  // swaps, and armed off `data-rerank`, which the server renders only where a
+  // reranker actually serves this door.
+  (function () {
+    var QUIET_MS = 500;
+    var timer = null;
+    document.addEventListener('input', function (e) {
+      var box = e.target;
+      if (!box || box.id !== 'judge-assign-q') return;
+      if (timer) clearTimeout(timer);
+      if (box.getAttribute('data-rerank') !== 'true') return;
+      timer = setTimeout(function () {
+        timer = null;
+        // Still the same box, still on screen: a verdict or a Back between the
+        // last letter and now has replaced the card, and the refine would be
+        // asking about a screen nobody is on.
+        if (!document.body.contains(box)) return;
+        var q = box.value.trim();
+        // The endpoint's own guard: an empty box searches nothing, so the
+        // request could only buy back the empty list already shown.
+        if (!q) return;
+        // `source: box` puts this in the box's own sync queue, so a keystroke
+        // landing now replaces the refine exactly as it replaces an older
+        // keystroke's search — the list is always the answer to the last thing
+        // typed.
+        htmx.ajax('GET', box.getAttribute('hx-get'), {
+          source: box,
+          target: '#judge-assign-results',
+          swap: 'innerHTML',
+          values: { q: q, rerank: 'true' }
+        });
+      }, QUIET_MS);
+    });
+  })();
 })();

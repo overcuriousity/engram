@@ -687,13 +687,27 @@ struct AssignTemplate {
     /// life of the screen: it is the operator's reference for what they are
     /// looking for, so typing must not overwrite it.
     event_query: String,
-    /// What is in the search box. Separate from `event_query` because the swap
-    /// rebuilds the input, and a box that renders empty loses whatever was
-    /// being typed.
-    typed: String,
     results: Vec<Choice>,
     /// Whether a search has been run yet, so an empty list can say "nothing
     /// matched" instead of appearing before anything was asked.
+    searched: bool,
+    /// Whether a reranker serves this door. The refining pass is armed off
+    /// this and nothing else, the same predicate the workspace box uses: a box
+    /// that advertised a refine no search would run would be promising an
+    /// order nobody confirmed.
+    reranks: bool,
+}
+
+/// The candidates alone — everything the search box swaps. The box is outside
+/// it and stays in the document across every keystroke, which is the whole
+/// point of the split: it used to swap the card it lives in, so each letter
+/// destroyed the focused input, restored it from a value rendered before that
+/// letter existed, and played the card's exit animation on the way.
+#[derive(Template)]
+#[template(path = "_judge_assign_results.html")]
+struct AssignResultsTemplate {
+    event_id: String,
+    results: Vec<Choice>,
     searched: bool,
 }
 
@@ -711,9 +725,9 @@ async fn assign(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Res
     Ok(HtmlTemplate(AssignTemplate {
         event_id,
         event_query,
-        typed: String::new(),
         results: vec![],
         searched: false,
+        reranks: tenant.core.reranks_search(),
     })
     .into_response())
 }
@@ -722,6 +736,12 @@ async fn assign(CanJudge(tenant): CanJudge, Path(event_id): Path<String>) -> Res
 pub struct AssignQuery {
     #[serde(default)]
     pub q: String,
+    /// Off unless asked for. Typing gets vector order at embedding speed; the
+    /// reranker is a model call, and one per keystroke is the budget spent on
+    /// answers nobody read. app.js fires the one reranked pass once the box
+    /// has been quiet — the same two passes the workspace search makes.
+    #[serde(default)]
+    pub rerank: bool,
 }
 
 async fn assign_results(
@@ -730,12 +750,6 @@ async fn assign_results(
     axum::extract::Query(p): axum::extract::Query<AssignQuery>,
 ) -> Result<Response> {
     use axum::response::IntoResponse;
-    let event_query = tenant
-        .core
-        .store
-        .event_query(&event_id)
-        .await?
-        .unwrap_or_default();
     let mut results = vec![];
     if !p.q.trim().is_empty() {
         let query = crate::core::search::SearchQuery {
@@ -748,8 +762,9 @@ async fn assign_results(
             mark: false,
             include_deprecated: false,
             include_superseded: false,
-            // One deliberate lookup; the scope decides whether it reranks.
-            rerank: true,
+            // Asked for by the refining pass and by nothing else; the scope
+            // still decides whether it reranks.
+            rerank: p.rerank,
             explain: false,
         };
         // The one search in the application that must never be captured: it is
@@ -781,10 +796,8 @@ async fn assign_results(
             })
             .collect();
     }
-    Ok(HtmlTemplate(AssignTemplate {
+    Ok(HtmlTemplate(AssignResultsTemplate {
         event_id,
-        event_query,
-        typed: p.q,
         results,
         searched: true,
     })
@@ -1992,6 +2005,46 @@ mod tests {
         assert!(
             body.contains(r#"hx-target="next .judge-full""#),
             "the full text is not fetched into the row it belongs to: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn typing_in_the_assign_box_never_swaps_the_box() {
+        // The screen swaps its list and nothing else. When the input was inside
+        // the swapped region every keystroke destroyed the focused element and
+        // rebuilt it from a value the server had rendered before that letter
+        // was typed: the caret jumped, a fast word lost its tail, and the
+        // card's exit animation played the whole thing as a reload.
+        let (app, cookie, core, ids) = judge_app(2, &[]).await;
+        for id in &ids {
+            crate::jobs::embed::run(&core, id).await.unwrap();
+        }
+        let event = core.store.next_pending(0.0).await.unwrap().unwrap();
+
+        let screen = get(&app, &format!("/ui/judge/{}/assign", event.id), &cookie).await;
+        assert!(
+            screen.contains(r#"id="judge-assign-q""#)
+                && screen.contains(r##"hx-target="#judge-assign-results""##),
+            "the box does not aim at the list alone: {screen}"
+        );
+        assert!(
+            screen.contains(r#"id="judge-assign-results""#),
+            "the swap target is missing before the first search: {screen}"
+        );
+
+        let fragment = get(
+            &app,
+            &format!("/ui/judge/{}/assign/results?q=mounting", event.id),
+            &cookie,
+        )
+        .await;
+        assert!(
+            !fragment.contains("judge-assign-q"),
+            "the answer carries the box back with it: {fragment}"
+        );
+        assert!(
+            fragment.contains("judge-option"),
+            "the search found nothing to read: {fragment}"
         );
     }
 
