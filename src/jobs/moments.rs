@@ -40,7 +40,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     // put a second copy of it on the page.
     let found = absolute_dates(&art.text, src.created_at, tz, month_first);
     for f in &found {
-        if core.store.has_moment_at(artifact_id, Kind::Event, f.at).await? {
+        if core.store.has_moment_at(artifact_id, Kind::Event, Some(f.at)).await? {
             continue;
         }
         core.store
@@ -80,9 +80,10 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         }
         Some(Intent::Remind) => {
             let (at, rule) = date_reminder(core, &art.text, src.created_at, tz, &tz_name, &found).await;
-            if let Some(at) = at
-                && core.store.has_moment_at(artifact_id, Kind::Due, at).await?
-            {
+            // Undated included: `None` is an instant the guard understands, and
+            // an undated reminder that was finished is exactly the row
+            // `delete_read_moments` keeps and this must not read back fresh.
+            if core.store.has_moment_at(artifact_id, Kind::Due, at).await? {
                 return Ok(());
             }
             core.store
@@ -209,6 +210,30 @@ mod tests {
         let id = rows[0].moment.id.clone();
         core.store.mark_done(&id, crate::store::now()).await.unwrap();
 
+        run(&core, &aid).await.unwrap();
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "it stays done");
+        assert!(core.store.moment(&id).await.unwrap().unwrap().done_at.is_some(), "and it is the same row");
+    }
+
+    #[tokio::test]
+    async fn a_re_read_does_not_resurrect_a_finished_undated_reminder() {
+        // The dated case above was covered; the undated one was not, and it
+        // was the one that broke. `delete_read_moments` keeps a finished row
+        // whether or not it has a date, but the guard against reading it back
+        // was only consulted when there was a date to compare — so "remind me
+        // to call the bank", finished, returned to the band on the next embed
+        // and gained another copy of itself on every one after that.
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (_, aid) = first_passage(&core, "Remind me to call the bank", "ui", Some("Europe/Berlin")).await;
+        run(&core, &aid).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].moment.at.is_none(), "undated: there is no date in the prose");
+        let id = rows[0].moment.id.clone();
+        core.store.mark_done(&id, crate::store::now()).await.unwrap();
+
+        run(&core, &aid).await.unwrap();
         run(&core, &aid).await.unwrap();
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "it stays done");
         assert!(core.store.moment(&id).await.unwrap().unwrap().done_at.is_some(), "and it is the same row");

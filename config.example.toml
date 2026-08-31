@@ -707,8 +707,12 @@ prime = false
 horizon_hours = 48
 # Dates a note refers to inside this many days are listed under "Coming up".
 coming_up_days = 7
-# The cosine at which an intent prototype fires. Stands only until the base
-# holds thirty artifacts; from then on the line is measured from them.
+# The cosine at which an intent prototype fires: a floor, at every base size.
+# Under thirty artifacts it is the line outright. From thirty on, the line is
+# measured from the base's own vectors and this is the lowest it may sit —
+# raise it to keep ordinary notes from becoming reminders, and the measurement
+# cannot undercut you. The measured line is otherwise capped at 0.92, a cap a
+# floor set above it carries up with it.
 intent_at = 0.80
 # An open due reminder lifts a hit, bounded, and the row says so. Extracted
 # dates never lift.

@@ -254,9 +254,11 @@ const MIN_CALIBRATION: usize = 30;
 const UNRELATED_PERCENTILE: f64 = 0.99;
 
 /// Where "an ordinary note against a prototype" stops: the 99th percentile of
-/// the sampled scores, rounded up to a hundredth, clamped. Below thirty
-/// samples the configured `floor` stands. `gaps::link_threshold`, applied to a
-/// different question.
+/// the sampled scores, rounded up to a hundredth, clamped to `floor` below and
+/// `INTENT_LINE_CEILING` above — `floor` wins when it is the higher of the
+/// two, at every base size. Below thirty samples it stands on its own, with
+/// nothing measured to clamp. `gaps::link_threshold`, applied to a different
+/// question.
 pub fn intent_line(protos: &[(Intent, Vec<f32>)], sample: &[Vec<f32>], floor: f32) -> f32 {
     if sample.len() < MIN_CALIBRATION || protos.is_empty() {
         return floor;
@@ -268,7 +270,17 @@ pub fn intent_line(protos: &[(Intent, Vec<f32>)], sample: &[Vec<f32>], floor: f3
     scores.sort_by(f32::total_cmp);
     let at = ((scores.len() - 1) as f64 * UNRELATED_PERCENTILE).round() as usize;
     let measured = (scores[at] * 100.0).ceil() / 100.0;
-    measured.clamp(INTENT_LINE_FLOOR, INTENT_LINE_CEILING)
+    // The configured floor is a floor at every base size, not only below the
+    // calibration threshold. Clamping the measurement to the constants alone
+    // meant an operator who raised `time.intent_at` to stop ordinary notes
+    // becoming reminders had that value honoured for thirty artifacts and
+    // silently discarded from the thirty-first — the line could then fall back
+    // to 0.70, below what they asked for, with the parameter documented as a
+    // floor. The ceiling caps a *measurement*; it does not overrule a setting,
+    // so it rises with a floor set above it.
+    let lo = floor.max(INTENT_LINE_FLOOR);
+    let hi = INTENT_LINE_CEILING.max(lo);
+    measured.clamp(lo, hi)
 }
 
 use chrono::{Datelike, NaiveDate, TimeZone, Weekday};
@@ -763,6 +775,37 @@ impl crate::core::Core {
         Ok(())
     }
 
+    /// The exact inverse of `complete_moment`, and the only way to undo one.
+    ///
+    /// Undoing has to put back everything completing changed, or the undo the
+    /// band offers a second after "Done" leaves the base in a state neither
+    /// press asked for: the successor occurrence a recurrence armed would stay
+    /// on the band beside the row that came back — two open rows for one rule,
+    /// and one occurrence of a `COUNT=n` burned — and the note the completion
+    /// retired would stay out of `recent_captures` and below the search cliff
+    /// with nothing left to clear it.
+    ///
+    /// The successor is deleted rather than marked: it never happened.
+    pub async fn uncomplete_moment(&self, id: &str) -> crate::error::Result<()> {
+        let Some(m) = self.store.moment(id).await? else { return Ok(()) };
+        // Before the row is reopened: while it is still done, it is the row
+        // whose completion armed the successor, and `next_after` from its own
+        // `at` is the instant that successor was given.
+        if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
+            && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
+        {
+            self.store.delete_armed_occurrence(&m.artifact_id, rule, next).await?;
+        }
+        self.store.undo_done(id).await?;
+        // The row comes back, so the note comes back with it. Unconditional: a
+        // corpus that was never retired is already NULL here.
+        if let Some(cid) = self.store.corpus_of_moment(id).await? {
+            self.store.unretire_corpus(&cid).await?;
+        }
+        self.store.rearm_remind().await?;
+        Ok(())
+    }
+
     /// Embeds the prototypes once per embed model and measures the line from
     /// the base's own vectors. Cached in `meta` so a restart pays nothing, and
     /// held in `protos` so a process reads `meta` once. Keyed by model, so a
@@ -934,10 +977,28 @@ mod tests {
     #[test]
     fn the_line_is_measured_from_the_sample_and_clamped() {
         let protos = vec![(Intent::Remind, unit(0, 4))];
+        // Unrelated sample: the measurement is far below both bounds, so the
+        // configured floor is what stands.
         let sample: Vec<Vec<f32>> = (0..30).map(|_| unit(1, 4)).collect();
-        assert_eq!(intent_line(&protos, &sample, 0.80), INTENT_LINE_FLOOR);
+        assert_eq!(intent_line(&protos, &sample, 0.80), 0.80);
+        assert_eq!(intent_line(&protos, &sample, 0.0), INTENT_LINE_FLOOR, "and never below the constant");
         let close: Vec<Vec<f32>> = (0..30).map(|_| vec![0.95, 0.312, 0.0, 0.0]).collect();
         assert_eq!(intent_line(&protos, &close, 0.80), INTENT_LINE_CEILING);
+    }
+
+    #[test]
+    fn the_configured_line_is_a_floor_at_every_base_size() {
+        // The bug this covers: past thirty artifacts the measurement replaced
+        // the setting outright, so an operator who raised `time.intent_at` to
+        // keep ordinary notes from becoming reminders got 0.70 instead of the
+        // 0.95 they asked for — and `test_core` itself sets 0.99, which the
+        // 0.92 ceiling would have quietly cut down the moment a test base grew.
+        let protos = vec![(Intent::Remind, unit(0, 4))];
+        let sample: Vec<Vec<f32>> = (0..30).map(|_| unit(1, 4)).collect();
+        assert_eq!(intent_line(&protos, &sample, 0.95), 0.95, "a floor above the ceiling carries it up");
+        assert_eq!(intent_line(&protos, &sample, 0.99), 0.99);
+        let close: Vec<Vec<f32>> = (0..30).map(|_| vec![0.95, 0.312, 0.0, 0.0]).collect();
+        assert_eq!(intent_line(&protos, &close, 0.95), 0.95, "a measurement never drops below it either");
     }
 
     #[test]

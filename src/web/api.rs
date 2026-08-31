@@ -1804,8 +1804,11 @@ async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCod
 }
 
 async fn moment_undone(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
-    tenant.core.store.undo_done(&id).await?;
-    tenant.core.store.rearm_remind().await?;
+    // `Core::uncomplete_moment`, exactly as the band does it. Clearing
+    // `done_at` alone left this route unable to undo its own `done`: the
+    // recurrence's successor stayed armed, and the note the completion retired
+    // stayed retired, with no API route that could bring it back.
+    tenant.core.uncomplete_moment(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2095,6 +2098,78 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A capture with one due moment on it, `cue`-sourced — which is what
+    /// makes the note a reminder's note, and so what makes completing the last
+    /// open reminder retire the corpus.
+    async fn corpus_with_due(
+        core: &crate::core::Core,
+        rule: Option<&str>,
+    ) -> (String, String) {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        use chrono::TimeZone;
+        let out = core.ingest_capture(crate::core::ingest::Capture::new("Pay rent", "ui")).await.unwrap();
+        crate::jobs::test_support::drain(core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
+        let id = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid,
+                kind: Kind::Due,
+                at: Some(at),
+                tz: "Europe/Berlin".into(),
+                rule: rule.map(str::to_string),
+                source: Source::Cue,
+                span: None,
+            })
+            .await
+            .unwrap();
+        (out.id, id)
+    }
+
+    #[tokio::test]
+    async fn undo_through_the_api_brings_the_note_back_with_the_row() {
+        // The band's undo and this one have to leave the same state behind.
+        // Clearing `done_at` alone left the note retired — out of
+        // `recent_captures`, demoted below the cliff in every search — with no
+        // API route anywhere that could bring it back.
+        let (app, token, core) = app_token_and_core().await;
+        let (cid, id) = corpus_with_due(&core, None).await;
+
+        let done = app
+            .clone()
+            .oneshot(post_json(&format!("/api/v1/moments/{id}/done"), &token, serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(done.status(), StatusCode::NO_CONTENT);
+        assert!(core.store.is_retired(&cid).await.unwrap(), "completing the last reminder retires the note");
+
+        let undone = app
+            .oneshot(post_json(&format!("/api/v1/moments/{id}/undone"), &token, serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(undone.status(), StatusCode::NO_CONTENT);
+        assert!(!core.store.is_retired(&cid).await.unwrap(), "and undoing brings it back");
+    }
+
+    #[tokio::test]
+    async fn undo_through_the_api_takes_the_next_occurrence_back_too() {
+        let (app, token, core) = app_token_and_core().await;
+        let (_, id) = corpus_with_due(&core, Some("FREQ=MONTHLY;BYMONTHDAY=1")).await;
+        app.clone()
+            .oneshot(post_json(&format!("/api/v1/moments/{id}/done"), &token, serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1, "the successor is armed");
+
+        app.oneshot(post_json(&format!("/api/v1/moments/{id}/undone"), &token, serde_json::json!({})))
+            .await
+            .unwrap();
+        let open = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(open.len(), 1, "one open row, not the reopened one plus its successor");
+        assert_eq!(open[0].moment.id, id, "and it is the row that was undone");
     }
 
     fn get(uri: &str, token: Option<&str>) -> Request<Body> {

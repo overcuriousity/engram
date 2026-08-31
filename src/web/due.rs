@@ -4,7 +4,7 @@
 
 use crate::core::moments::{zone, DEFAULT_HOUR};
 use crate::error::Result;
-use crate::store::moments::{DueRow, Kind, NewMoment, Source};
+use crate::store::moments::DueRow;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
@@ -281,21 +281,23 @@ async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> 
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
-    tenant.core.store.undo_done(&id).await?;
-    // The row comes back, so the note comes back with it. Unconditional: a
-    // corpus that was never retired is already NULL here.
-    if let Some(cid) = tenant.core.store.corpus_of_moment(&id).await? {
-        tenant.core.store.unretire_corpus(&cid).await?;
-    }
-    tenant.core.store.rearm_remind().await?;
+    tenant.core.uncomplete_moment(&id).await?;
     render(&tenant, &f.tz, None, f.since).await
 }
 
 /// `hour` = now + 1h; `tomorrow` = 09:00 tomorrow; `monday` = 09:00 next
-/// Monday — in the viewer's zone.
+/// Monday — in the viewer's zone. Anything else is `None` and hides nothing.
+///
+/// The three words are exhaustive on purpose. `tomorrow` used to be the
+/// fall-through rather than a case, so a typo — or the empty string
+/// `TzForm`'s `#[serde(default)]` supplies when the field is missing at all —
+/// took the row off the band for a day and reported "Snoozed" for it.
 fn snooze_until(word: &str, now: i64, tz: Tz) -> Option<i64> {
     if word == "hour" {
         return Some(now + 3_600);
+    }
+    if word != "tomorrow" && word != "monday" {
+        return None;
     }
     let today = tz.timestamp_opt(now, 0).single()?.date_naive();
     let mut d = today + chrono::Duration::days(1);
@@ -304,7 +306,22 @@ fn snooze_until(word: &str, now: i64, tz: Tz) -> Option<i64> {
             d += chrono::Duration::days(1);
         }
     }
-    tz.from_local_datetime(&d.and_hms_opt(DEFAULT_HOUR, 0, 0)?).single().map(|x| x.timestamp())
+    let at = d.and_hms_opt(DEFAULT_HOUR, 0, 0)?;
+    local(at, tz)
+}
+
+/// A local wall-clock time as an instant, choosing for the operator on the two
+/// days a year when the zone cannot. `single()` is `None` twice: on the hour a
+/// fall-back repeats, where either answer is a defensible reading of what they
+/// typed, and in the gap a spring-forward skips, where no answer is. `earliest`
+/// takes the first of an ambiguous pair and the instant the gap closes at, so a
+/// date the operator set is a date that gets set. Every other date path in the
+/// crate already reads a local time this way; these two were the exceptions.
+fn local(at: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
+    tz.from_local_datetime(&at)
+        .single()
+        .or_else(|| tz.from_local_datetime(&at).earliest())
+        .map(|d| d.timestamp())
 }
 
 async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -323,27 +340,18 @@ async fn unsnooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
     render(&tenant, &f.tz, None, f.since).await
 }
 
+/// Move a reminder to a date the operator typed.
+///
+/// One row, updated in place. It used to be a completion plus a fresh row,
+/// which put two rows on a recurrence for one real firing: `occurrences_of_rule`
+/// counts rows, so a `FREQ=DAILY;COUNT=3` whose first occurrence was moved once
+/// stopped after two actual reminders. Moving is not completing — the moved row
+/// keeps its identity, and leaves no `done` behind on the day it has left.
 async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     let tz = zone(Some(&f.tz));
-    let at = chrono::NaiveDateTime::parse_from_str(&f.when, "%Y-%m-%dT%H:%M")
-        .ok()
-        .and_then(|dt| tz.from_local_datetime(&dt).single())
-        .map(|d| d.timestamp());
-    if let (Some(at), Some(m)) = (at, tenant.core.store.moment(&id).await?) {
-        tenant.core.store.mark_done(&id, tenant.core.clock.now()).await?;
-        tenant
-            .core
-            .store
-            .insert_moment(&NewMoment {
-                artifact_id: m.artifact_id,
-                kind: Kind::Due,
-                at: Some(at),
-                tz: tz.name().to_string(),
-                rule: m.rule,
-                source: Source::Set,
-                span: None,
-            })
-            .await?;
+    let at = chrono::NaiveDateTime::parse_from_str(&f.when, "%Y-%m-%dT%H:%M").ok().and_then(|dt| local(dt, tz));
+    if let (Some(at), Some(_)) = (at, tenant.core.store.moment(&id).await?) {
+        tenant.core.store.move_moment(&id, at, tz.name()).await?;
         tenant.core.store.rearm_remind().await?;
     }
     render(&tenant, &f.tz, None, f.since).await
@@ -353,6 +361,7 @@ async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
 mod tests {
     use super::*;
     use crate::core::ingest::Capture;
+    use crate::store::moments::{Kind, NewMoment, Source};
     use crate::core::test_support::test_core;
     use crate::core::Core;
     use crate::web::test_support::{app_with_cookie, body_of};
@@ -563,18 +572,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setting_a_date_writes_a_new_set_row_and_closes_the_old() {
+    async fn setting_a_date_moves_the_row_it_was_given() {
         let core = test_core().await;
         let id = artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
         app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2027-01-05T10:30&tz=Europe/Berlin"))
             .await
             .unwrap();
-        let old = core.store.moment(&id).await.unwrap().unwrap();
-        assert!(old.done_at.is_some());
+        // One row, still the one that was moved: moving is not completing, so
+        // it leaves no `done` behind on the day it has left.
+        let moved = core.store.moment(&id).await.unwrap().unwrap();
+        assert!(moved.done_at.is_none(), "a move does not close anything");
+        assert_eq!(moved.source, Source::Set, "and it is a row somebody set");
         let rows = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].moment.source, Source::Set);
+        assert_eq!(rows[0].moment.id, id);
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(rows[0].moment.at.unwrap(), 0).unwrap();
         assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2027-01-05 10:30");
     }
@@ -606,6 +618,126 @@ mod tests {
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(open[0].moment.at.unwrap(), 0).unwrap();
         assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-10-01 09:00");
         assert_eq!(open[0].moment.rule.as_deref(), Some("FREQ=MONTHLY;BYMONTHDAY=1"));
+    }
+
+    /// A recurring reminder on the 1st of each month, 09:00 Berlin.
+    async fn artifact_with_rule(core: &Core, rule: &str) -> String {
+        let out = core.ingest_capture(Capture::new("Pay rent", "ui")).await.unwrap();
+        crate::jobs::test_support::drain(core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
+        core.store
+            .insert_moment(&NewMoment {
+                artifact_id: aid,
+                kind: Kind::Due,
+                at: Some(at),
+                tz: "Europe/Berlin".into(),
+                rule: Some(rule.into()),
+                source: Source::Set,
+                span: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn undoing_a_recurring_done_takes_the_next_occurrence_back_with_it() {
+        // Undo is offered on the band a second after Done, and it has to undo
+        // the whole of it. Clearing `done_at` alone left the successor that
+        // completing armed sitting beside the reopened row: two open rows for
+        // one rule, and — since `occurrences_of_rule` counts rows — one firing
+        // of a bounded recurrence spent on a press that was taken back.
+        let core = test_core().await;
+        let id = artifact_with_rule(&core, "FREQ=MONTHLY;BYMONTHDAY=1").await;
+        let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        app.clone().oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        assert_eq!(core.store.occurrences_of_rule(&aid, "FREQ=MONTHLY;BYMONTHDAY=1").await.unwrap(), 2);
+
+        app.oneshot(form(&format!("/ui/moments/{id}/undone"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        let open = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(open.len(), 1, "one open row, not the reopened one plus its successor");
+        assert_eq!(open[0].moment.id, id, "and it is the row that was undone");
+        assert_eq!(
+            core.store.occurrences_of_rule(&aid, "FREQ=MONTHLY;BYMONTHDAY=1").await.unwrap(),
+            1,
+            "the occurrence is given back to the count"
+        );
+    }
+
+    #[tokio::test]
+    async fn undoing_does_not_discard_a_successor_that_has_a_history_of_its_own() {
+        // The successor is deleted because it never happened — unless it has
+        // since been acted on in its own right, in which case an undo two
+        // steps back does not get to throw it away.
+        let core = test_core().await;
+        let id = artifact_with_rule(&core, "FREQ=MONTHLY;BYMONTHDAY=1").await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        app.clone().oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        let next = core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.id.clone();
+        core.store.snooze(&next, crate::store::now() + 86_400).await.unwrap();
+
+        app.oneshot(form(&format!("/ui/moments/{id}/undone"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        assert!(core.store.moment(&next).await.unwrap().is_some(), "the snoozed occurrence stays");
+    }
+
+    #[tokio::test]
+    async fn moving_a_recurring_reminder_does_not_spend_an_occurrence() {
+        // `occurrences_of_rule` counts rows, so the done-plus-insert this
+        // handler used to do put two rows on the artifact for one real firing:
+        // a COUNT=3 whose first occurrence was moved once stopped after two.
+        let core = test_core().await;
+        let id = artifact_with_rule(&core, "FREQ=DAILY;COUNT=3").await;
+        let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2026-09-02T10:30&tz=Europe/Berlin"))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.occurrences_of_rule(&aid, "FREQ=DAILY;COUNT=3").await.unwrap(),
+            1,
+            "moving is not a firing"
+        );
+        assert!(!core.store.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=3").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_date_in_the_hour_the_clocks_go_back_is_still_set() {
+        // 02:30 on 25 October 2026 happens twice in Berlin, so `single()` is
+        // None and the move was silently dropped: the operator pressed the
+        // button and the band came back unchanged, every time, with nothing
+        // said. Either instant is a defensible reading; the earlier one is
+        // taken, as every other date path in the crate already does.
+        let core = test_core().await;
+        let id = artifact_with_due(&core, None).await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2026-10-25T02:30&tz=Europe/Berlin"))
+            .await
+            .unwrap();
+        let at = core.store.moment(&id).await.unwrap().unwrap().at.expect("the date is set");
+        let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(at, 0).earliest().unwrap();
+        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-10-25 02:30");
+    }
+
+    #[tokio::test]
+    async fn a_snooze_word_nobody_recognises_hides_nothing() {
+        // `tomorrow` was the fall-through rather than a case of its own, so a
+        // typo — or the empty string `#[serde(default)]` supplies when the
+        // field is missing altogether — took the row off the band for a day
+        // and reported "Snoozed" for it.
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        for body in ["tz=Europe/Berlin", "until=tomorow&tz=Europe/Berlin"] {
+            let html =
+                body_of(app.clone().oneshot(form(&format!("/ui/moments/{id}/snooze"), &cookie, body)).await.unwrap())
+                    .await;
+            assert!(!html.contains("Snoozed"), "{body} is not a snooze: {html}");
+            assert!(
+                core.store.moment(&id).await.unwrap().unwrap().snoozed_until.is_none(),
+                "{body} left the row on the band"
+            );
+        }
     }
 
     #[tokio::test]

@@ -766,10 +766,21 @@ impl Store {
     /// `class = 0` is the column that already draws this line — the capture
     /// pipeline the operator is watching, against work nobody stands in front
     /// of — and `run_after` excludes a unit whose turn has not come.
+    ///
+    /// Plus `moments` by name, which is class 1 and belongs here anyway. It is
+    /// not a sweep: `embed` arms it for one artifact, and it is the stage that
+    /// writes the reminder the band exists to show. Asking about class alone,
+    /// the poll that landed just after the last embed saw an empty queue and
+    /// swapped the fragment in with no trigger on it — and the due row was
+    /// written seconds later, an LLM call away with `core.reminder` configured,
+    /// with nothing left to re-fetch the band. "A reminder appears while you
+    /// watch" quietly became "invisible until a reload". Naming the one stage
+    /// rather than widening to class 1 is deliberate: the rest of that class is
+    /// the parked periodic sweeps this query was narrowed to escape.
     pub async fn foreground_work_in_flight(&self) -> Result<bool> {
         let r: Option<i64> = sqlx::query_scalar(
             "SELECT 1 FROM jobs
-              WHERE subject = ? AND class = 0
+              WHERE subject = ? AND (class = 0 OR stage = 'moments')
                 AND (state = 'running' OR (state = 'pending' AND run_after <= ?))
               LIMIT 1",
         )
@@ -1684,6 +1695,27 @@ mod tests {
         assert!(s.foreground_work_in_flight().await.unwrap(), "running counts");
         s.control.complete_job(j.id).await.unwrap();
         assert!(!s.foreground_work_in_flight().await.unwrap(), "and it is over when it is done");
+    }
+
+    #[tokio::test]
+    async fn the_stage_that_writes_the_reminder_is_a_capture_in_flight() {
+        // `moments` is class 1, but `embed` arms it for one artifact and it is
+        // the stage that writes the due row the band exists to show. Judged by
+        // class alone, the poll landing just after the last embed saw an empty
+        // queue and swapped the fragment in with no trigger on it — and the
+        // row was written seconds later, an LLM call away, with nothing left
+        // to re-fetch the band.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Moments, "artifact", "a-1").await.unwrap();
+        assert!(s.foreground_work_in_flight().await.unwrap(), "the operator is waiting for this one");
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.control.complete_job(j.id).await.unwrap();
+        assert!(!s.foreground_work_in_flight().await.unwrap());
+
+        // And the rest of class 1 is still what the query was narrowed to
+        // escape: `remind` is the periodic notifier, parked months out.
+        s.arm_at(Stage::Remind, "sweep", "remind", crate::store::now() + 86_400).await.unwrap();
+        assert!(!s.foreground_work_in_flight().await.unwrap(), "a parked sweep is nobody's capture");
     }
 
     #[tokio::test]

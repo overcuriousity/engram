@@ -197,9 +197,16 @@ impl Store {
     /// instant? The moments stage asks before it re-inserts what it just read,
     /// so a row `delete_read_moments` kept — one already done, pushed or
     /// snoozed — is not doubled by the reading that would have made it again.
-    pub async fn has_moment_at(&self, artifact_id: &str, kind: Kind, at: i64) -> Result<bool> {
+    ///
+    /// `None` is an instant like any other here, and the comparison is `IS`
+    /// rather than `=` so that it matches: an *undated* reminder is the one
+    /// case where the stage has nothing to compare but still must not make a
+    /// second copy. Read the finished "call the bank" back with `= ?` and NULL
+    /// never equals NULL, so every re-read — every reindex, every switched
+    /// embed model — put another undated row on the band.
+    pub async fn has_moment_at(&self, artifact_id: &str, kind: Kind, at: Option<i64>) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = ? AND at = ?",
+            "SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = ? AND at IS ?",
         )
         .bind(artifact_id)
         .bind(kind.as_str())
@@ -327,6 +334,48 @@ impl Store {
     pub async fn undo_done(&self, id: &str) -> Result<()> {
         sqlx::query("UPDATE moments SET done_at = NULL WHERE id = ?").bind(id).execute(&self.pool).await?;
         Ok(())
+    }
+
+    /// Move a reminder to another instant. The row keeps its identity: moving
+    /// is not completing, so it leaves no `done` row behind on the day it used
+    /// to fall on, and — the reason this is an UPDATE and not the done-plus-
+    /// insert it once was — a recurrence still has exactly one row per real
+    /// firing, which is what `occurrences_of_rule` counts. A moved row is a
+    /// row somebody set, so `source` says so and the stage will not touch it.
+    ///
+    /// The snooze and the notification go with the old date: both were about
+    /// an instant that is no longer this row's.
+    pub async fn move_moment(&self, id: &str, at: i64, tz: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE moments SET at = ?, tz = ?, source = 'set', snoozed_until = NULL, notified_at = NULL
+              WHERE id = ?",
+        )
+        .bind(at)
+        .bind(tz)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Delete the occurrence `complete_moment` armed, so that undoing the
+    /// completion undoes the whole of it. Untouched rows only: once the next
+    /// occurrence has been done, pushed or snoozed in its own right it has a
+    /// history of its own, and an undo two steps back does not get to discard
+    /// it. Returns whether anything went.
+    pub async fn delete_armed_occurrence(&self, artifact_id: &str, rule: &str, at: i64) -> Result<bool> {
+        let n = sqlx::query(
+            "DELETE FROM moments
+              WHERE artifact_id = ? AND kind = 'due' AND rule = ? AND at = ?
+                AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL",
+        )
+        .bind(artifact_id)
+        .bind(rule)
+        .bind(at)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
     }
 
     /// A snooze that ends re-notifies, so the mark is cleared with it.
@@ -580,8 +629,8 @@ mod tests {
         for kept in [&done, &pushed, &put_off] {
             assert!(s.moment(kept).await.unwrap().is_some(), "a row with a history outlives the reading");
         }
-        assert!(s.has_moment_at(&aid, Kind::Due, 2_000).await.unwrap(), "and the stage knows not to make it twice");
-        assert!(!s.has_moment_at(&aid, Kind::Due, 1_000).await.unwrap());
+        assert!(s.has_moment_at(&aid, Kind::Due, Some(2_000)).await.unwrap(), "and the stage knows not to make it twice");
+        assert!(!s.has_moment_at(&aid, Kind::Due, Some(1_000)).await.unwrap());
     }
 
     #[tokio::test]

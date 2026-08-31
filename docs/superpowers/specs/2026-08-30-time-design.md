@@ -190,8 +190,12 @@ The line is measured, not set: the prototypes are scored against the sample of
 the tenant's own artifact vectors that `vector.sample` already draws, the 99th
 percentile of that "ordinary note against a prototype" distribution is where
 *unrelated* ends, and the line is that value rounded up to a hundredth and
-clamped to `[0.70, 0.92]` — `gaps::link_threshold`, applied to a different
-question. Below thirty sampled vectors `time.intent_at` (config, 0.80) stands.
+clamped to `[max(time.intent_at, 0.70), 0.92]` — `gaps::link_threshold`,
+applied to a different question. The configured value is a floor at every base
+size, not only below the calibration threshold: it is what an operator raises
+to stop ordinary notes becoming reminders, so a measurement may not undercut
+it, and a floor set above the ceiling carries the ceiling up with it. Below
+thirty sampled vectors `time.intent_at` (config, 0.80) stands on its own.
 This is what stops a base written in German from firing `journal` on every
 second note because German prose sits nearer the German prototypes than English
 prose does. `bge-m3` is multilingual, so the ten languages are the training set

@@ -111,12 +111,16 @@ fn hm(at: i64, tz: Tz) -> String {
 async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> Result<Response> {
     let tz = zone(Some(&q.tz));
     let d = tz.timestamp_opt(tenant.core.clock.now(), 0).single().map(|d| d.date_naive()).unwrap_or_default();
-    Ok(Redirect::to(&format!("/ui/day/{}?tz={}", d.format("%Y-%m-%d"), q.tz)).into_response())
+    Ok(Redirect::to(&format!("/ui/day/{}?tz={}", d.format("%Y-%m-%d"), tz.name())).into_response())
 }
 
 async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>) -> Result<Response> {
     let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else { return Err(Error::NotFound) };
     let tz = zone(Some(&q.tz));
+    // The zone as the zone table spells it, never as the query string spelled
+    // it: it goes back out on every `prev`/`next` href and in the entry form's
+    // hidden field, and `due.rs::render` normalises for the same reason.
+    let tz_name = tz.name().to_string();
     let Some((from, to)) = bounds(day, tz) else { return Err(Error::NotFound) };
     let store = &tenant.core.store;
 
@@ -196,7 +200,7 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
         next: (day + chrono::Duration::days(1)).format("%Y-%m-%d").to_string(),
         heading: day.format("%A, %-d %B %Y").to_string(),
         date,
-        tz: q.tz,
+        tz: tz_name,
         entries,
         captured,
         was_due,
@@ -208,11 +212,16 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
 }
 
 async fn entry(tenant: Tenant, Path(date): Path<String>, Form(f): Form<EntryForm>) -> Result<Response> {
-    let back = format!("/ui/day/{date}?tz={}", f.tz);
+    // Through the zone table before it reaches a `Location` header. A raw form
+    // value is not header-safe — `tz=Ü`, or anything carrying a control
+    // character, made `Redirect::to` build a header axum then refused to send,
+    // and the day page answered 500 instead of redirecting.
+    let tz_name = zone(Some(&f.tz)).name().to_string();
+    let back = format!("/ui/day/{date}?tz={tz_name}");
     if f.text.trim().is_empty() {
         return Ok(Redirect::to(&back).into_response());
     }
-    let mut c = Capture::new(&f.text, ORIGIN_JOURNAL).with_tz(Some(f.tz.clone()));
+    let mut c = Capture::new(&f.text, ORIGIN_JOURNAL).with_tz(Some(tz_name));
     c.metadata["day"] = serde_json::Value::String(date.clone());
     tenant.core.ingest_capture(c).await?;
     Ok(Redirect::to(&back).into_response())
@@ -304,6 +313,30 @@ mod tests {
         let res = app.oneshot(get("/ui/day/today", &cookie)).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert!(res.headers()["location"].to_str().unwrap().starts_with("/ui/day/20"));
+    }
+
+    #[tokio::test]
+    async fn a_zone_the_table_cannot_spell_never_reaches_a_location_header() {
+        // The raw query value went straight into `Redirect::to`. A `tz` with a
+        // character no header may carry built a `Location` axum then refused
+        // to send, and the day page answered 500 instead of redirecting — on
+        // the `today` link, which is how the page is reached at all.
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        for tz in ["%C3%9C", "Europe%2FBerlin%0D%0AX:+1", "Not/AZone"] {
+            let res = app.clone().oneshot(get(&format!("/ui/day/today?tz={tz}"), &cookie)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::SEE_OTHER, "tz={tz} did not redirect");
+            let loc = res.headers()["location"].to_str().unwrap();
+            assert!(loc.ends_with("?tz=UTC"), "an unreadable zone is UTC, not echoed back: {loc}");
+        }
+        // And on the entry form, which redirects back to the page it posted from.
+        let (app, cookie) = app_with_cookie(test_core().await).await;
+        let res = app
+            .oneshot(form("/ui/day/2026-08-28/entry", &cookie, "text=Long+day.&tz=%C3%9C"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers()["location"], "/ui/day/2026-08-28?tz=UTC");
     }
 
     #[tokio::test]

@@ -290,19 +290,26 @@ async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u
     }
     let ids: Vec<String> = cands.iter().map(|c| c.id.clone()).collect();
     let payloads = core.vectors.payloads_of(&ids).await?;
-    cands.retain(|c| {
-        // A candidate always has a stamp — the SQL requires it — so a missing
-        // one can only defend the row, never expose it.
-        let retired_at = c.retired_at.unwrap_or(i64::MAX);
-        !payloads
-            .get(&c.id)
-            .and_then(|p| p.last_seen_at)
-            .is_some_and(|t| t >= retired_at)
-    });
+    cands.retain(|c| goes_before_the_judge(c.retired_at, payloads.get(&c.id).and_then(|p| p.last_seen_at)));
     // The cap is the sweep's, not the query's: what is over it is still oldest
     // -first and comes back on the next run.
     cands.truncate(want.max(0) as usize);
     Ok((cands, stamped))
+}
+
+/// Does this candidate still go in front of the judge? Only if nothing has
+/// reached it since it was retired: a retrieval after that is the row earning
+/// its keep, and the sweep leaves it alone.
+///
+/// Both stamps may be missing, and each absence has its own answer. No
+/// `last_seen_at` means the point was never reached — nothing defends the row,
+/// and it goes. No `retired_at` is the one the SQL rules out, so it is the one
+/// the fail-safe is for: an unknown retirement is treated as the beginning of
+/// time, which every real `last_seen_at` clears, so the row is held back. It
+/// used to be `i64::MAX`, which no stamp can clear — the exact inverse, and a
+/// missing stamp fed the row to a destructive sweep rather than defending it.
+fn goes_before_the_judge(retired_at: Option<i64>, last_seen_at: Option<i64>) -> bool {
+    !last_seen_at.is_some_and(|t| t >= retired_at.unwrap_or(0))
 }
 
 /// One nominee, one call. The judge is `core.reaper` — the judges' endpoint
@@ -348,6 +355,23 @@ async fn judge_one(
 mod tests {
     use super::*;
     use crate::core::test_support::test_core;
+
+    #[test]
+    fn a_missing_retirement_stamp_defends_the_row() {
+        // Nothing has reached it: it goes, stamp or no stamp.
+        assert!(goes_before_the_judge(Some(100), None));
+        assert!(goes_before_the_judge(None, None));
+        // Reached since it was retired: kept back, which is the whole rule.
+        assert!(!goes_before_the_judge(Some(100), Some(100)));
+        assert!(!goes_before_the_judge(Some(100), Some(200)));
+        // Reached, but before it was retired: that read is spent.
+        assert!(goes_before_the_judge(Some(100), Some(99)));
+        // The fail-safe. With no retirement stamp any retrieval at all holds
+        // the row back, rather than none of them being able to.
+        assert!(!goes_before_the_judge(None, Some(1)));
+        assert!(!goes_before_the_judge(None, Some(i64::MAX)));
+    }
+
     use crate::store::artifacts::{ArtifactStatus, NewArtifact, NewMerged};
 
     async fn seed(core: &Core, texts: &[&str]) -> Vec<String> {
