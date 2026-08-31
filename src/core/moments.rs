@@ -687,6 +687,36 @@ impl crate::core::Core {
         Ok(())
     }
 
+    /// The exact undo of `complete_moment`, and the only door to it: the row
+    /// reopens, the occurrence the completion armed is taken back, and the
+    /// note the completion retired comes back with it.
+    ///
+    /// All three, or the undo is a half-undo. Clearing `done_at` alone left an
+    /// API client's note retired forever — no route cleared it again — and
+    /// left a recurring reminder showing both the reopened row and the next
+    /// occurrence, with one of a `COUNT=n` budget spent on a completion that
+    /// had been taken back.
+    pub async fn undo_moment(&self, id: &str) -> crate::error::Result<()> {
+        let m = self.store.moment(id).await?;
+        self.store.undo_done(id).await?;
+        // Only a row that really was done armed anything: an undo of an open
+        // row is a no-op, not licence to delete its neighbour.
+        if let Some(m) = &m
+            && m.done_at.is_some()
+            && let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
+            && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
+        {
+            self.store.delete_armed_occurrence(&m.artifact_id, rule, next).await?;
+        }
+        // The row comes back, so the note comes back with it. Unconditional: a
+        // corpus that was never retired is already NULL here.
+        if let Some(cid) = self.store.corpus_of_moment(id).await? {
+            self.store.unretire_corpus(&cid).await?;
+        }
+        self.store.rearm_remind().await?;
+        Ok(())
+    }
+
     /// Embeds the prototypes once per embed model and measures the line from
     /// the base's own vectors. Cached in `meta` so a restart pays nothing, and
     /// held in `protos` so a process reads `meta` once. Keyed by model, so a
@@ -762,6 +792,61 @@ mod tests {
         core.complete_moment(&second[0].moment.id).await.unwrap();
         assert_eq!(core.store.occurrences_of_rule(&aid, rule).await.unwrap(), 2, "two of two, and no third");
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn undoing_a_recurring_done_takes_back_the_occurrence_it_armed() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let out = core.ingest_capture(crate::core::ingest::Capture::new("Pay rent", "ui")).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let rule = "FREQ=MONTHLY;BYMONTHDAY=1;COUNT=3";
+        let id = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(berlin().with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp()),
+                tz: "Europe/Berlin".into(),
+                rule: Some(rule.into()),
+                source: Source::Cue,
+                span: None,
+            })
+            .await
+            .unwrap();
+
+        core.complete_moment(&id).await.unwrap();
+        assert_eq!(core.store.occurrences_of_rule(&aid, rule).await.unwrap(), 2);
+        core.undo_moment(&id).await.unwrap();
+
+        let open = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(open.len(), 1, "the reopened row alone, not it and next month");
+        assert_eq!(open[0].moment.id, id);
+        assert_eq!(
+            core.store.occurrences_of_rule(&aid, rule).await.unwrap(),
+            1,
+            "and the COUNT budget is given back with it"
+        );
+    }
+
+    #[tokio::test]
+    async fn undoing_a_done_brings_the_note_back_out_of_retirement() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Remind me to send the invoice", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let id = core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.id.clone();
+
+        core.complete_moment(&id).await.unwrap();
+        assert!(core.store.is_retired(&out.id).await.unwrap(), "done retires the note");
+        core.undo_moment(&id).await.unwrap();
+        assert!(
+            !core.store.is_retired(&out.id).await.unwrap(),
+            "and the undo brings it back — the half every door used to skip"
+        );
     }
 
     #[test]

@@ -1809,8 +1809,7 @@ async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCod
 }
 
 async fn moment_undone(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
-    tenant.core.store.undo_done(&id).await?;
-    tenant.core.store.rearm_remind().await?;
+    tenant.core.undo_moment(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

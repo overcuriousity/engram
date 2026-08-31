@@ -197,9 +197,14 @@ impl Store {
     /// instant? The moments stage asks before it re-inserts what it just read,
     /// so a row `delete_read_moments` kept — one already done, pushed or
     /// snoozed — is not doubled by the reading that would have made it again.
-    pub async fn has_moment_at(&self, artifact_id: &str, kind: Kind, at: i64) -> Result<bool> {
+    ///
+    /// `None` is an instant too: an undated reminder. `IS`, not `=`, because
+    /// `at = NULL` is never true, and a guard that cannot see the undated row
+    /// let every re-embed resurrect a finished undated reminder — the same
+    /// failure the dated half is here to prevent.
+    pub async fn has_moment_at(&self, artifact_id: &str, kind: Kind, at: Option<i64>) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = ? AND at = ?",
+            "SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = ? AND at IS ?",
         )
         .bind(artifact_id)
         .bind(kind.as_str())
@@ -346,6 +351,33 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Take back the occurrence a completion armed: the one due row on this
+    /// artifact carrying this rule at this instant that nothing has since
+    /// touched. Newest first, and one row only — a rule can legitimately have
+    /// two rows at one instant, and an undo takes back one completion.
+    ///
+    /// Untouched is the whole guard. A row somebody has since done, been
+    /// pushed for or snoozed has a history of its own, and an undo two steps
+    /// back is not licence to delete it; a row somebody has *moved* is no
+    /// longer at this instant and is out of reach here by consequence.
+    /// `source` is not part of the guard: the armed occurrence inherits the
+    /// source of the row that armed it, `set` included.
+    pub async fn delete_armed_occurrence(&self, artifact_id: &str, rule: &str, at: i64) -> Result<u64> {
+        Ok(sqlx::query(
+            "DELETE FROM moments WHERE id = (
+               SELECT id FROM moments
+                WHERE artifact_id = ? AND kind = 'due' AND rule = ? AND at = ?
+                  AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL
+                ORDER BY created_at DESC LIMIT 1)",
+        )
+        .bind(artifact_id)
+        .bind(rule)
+        .bind(at)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     pub async fn undo_done(&self, id: &str) -> Result<()> {
@@ -604,8 +636,8 @@ mod tests {
         for kept in [&done, &pushed, &put_off] {
             assert!(s.moment(kept).await.unwrap().is_some(), "a row with a history outlives the reading");
         }
-        assert!(s.has_moment_at(&aid, Kind::Due, 2_000).await.unwrap(), "and the stage knows not to make it twice");
-        assert!(!s.has_moment_at(&aid, Kind::Due, 1_000).await.unwrap());
+        assert!(s.has_moment_at(&aid, Kind::Due, Some(2_000)).await.unwrap(), "and the stage knows not to make it twice");
+        assert!(!s.has_moment_at(&aid, Kind::Due, Some(1_000)).await.unwrap());
     }
 
     #[tokio::test]

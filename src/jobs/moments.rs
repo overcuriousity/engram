@@ -40,7 +40,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     // put a second copy of it on the page.
     let found = absolute_dates(&art.text, src.created_at, tz, month_first);
     for f in &found {
-        if core.store.has_moment_at(artifact_id, Kind::Event, f.at).await? {
+        if core.store.has_moment_at(artifact_id, Kind::Event, Some(f.at)).await? {
             continue;
         }
         core.store
@@ -89,9 +89,9 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         }
         Some(Intent::Remind) => {
             let (at, rule) = date_reminder(core, &art.text, src.created_at, tz, &tz_name, &found).await;
-            if let Some(at) = at
-                && core.store.has_moment_at(artifact_id, Kind::Due, at).await?
-            {
+            // Undated included: an undated reminder that was finished is
+            // kept by `delete_read_moments` and must not be read back open.
+            if core.store.has_moment_at(artifact_id, Kind::Due, at).await? {
                 return Ok(());
             }
             core.store
@@ -231,6 +231,26 @@ mod tests {
         run(&core, &aid).await.unwrap();
         let rows = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(rows.len(), 1);
+        let id = rows[0].moment.id.clone();
+        core.store.mark_done(&id, crate::store::now()).await.unwrap();
+
+        run(&core, &aid).await.unwrap();
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "it stays done");
+        assert!(core.store.moment(&id).await.unwrap().unwrap().done_at.is_some(), "and it is the same row");
+    }
+
+    #[tokio::test]
+    async fn a_re_read_does_not_resurrect_a_finished_undated_reminder() {
+        // The same rule, on the row that has no date. The guard used to run
+        // only when the reading produced one, so an undated reminder finished
+        // months ago came back open on the next reindex.
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (_, aid) = first_passage(&core, "Remind me to send the invoice", "ui", None).await;
+        run(&core, &aid).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].moment.at.is_none(), "undated, which is the case under test");
         let id = rows[0].moment.id.clone();
         core.store.mark_done(&id, crate::store::now()).await.unwrap();
 

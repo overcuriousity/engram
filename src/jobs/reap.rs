@@ -211,6 +211,13 @@ async fn rescue_one(
             .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
             .await?;
     }
+    // Outside the branch above, because a candidate that already had a winner
+    // takes neither of that branch's writes and would otherwise leave this
+    // sweep exactly as it entered it — nominated, oldest-first, and rescued
+    // again on the next run into a second orphaned rewrite. The fresh stamp is
+    // the whole of the bookkeeping a rescue needs: `min_age_days` has to pass
+    // before the candidate is judged against the rewrite it just got.
+    core.store.restamp_retired(&c.id).await?;
     Ok(made.id)
 }
 
@@ -745,6 +752,34 @@ mod tests {
         }
         let report = run(&core).await.unwrap();
         assert_eq!((report.judged, report.rescued), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn a_rescue_is_not_judged_again_on_the_very_next_sweep() {
+        // The other half of the loop: the rewrite is the candidate's answer,
+        // and the candidate waits an age before it is judged against it.
+        // Without a fresh clock the next sweep nominated it unchanged, spent a
+        // second model call on it and left a second rewrite nothing points at.
+        let mut core = test_core().await;
+        core.reaper = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"valuable","reason":"names the port"}"#.into(),
+                r#"{"verdict":"valuable","reason":"names the port"}"#.into(),
+            ]),
+        ));
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![RESCUE_REPLY.into(), RESCUE_REPLY.into()]),
+        ));
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let first = run(&core).await.unwrap();
+        assert_eq!((first.judged, first.rescued), (1, 1));
+        let second = run(&core).await.unwrap();
+        assert_eq!((second.judged, second.rescued), (0, 0), "the fresh clock puts it back behind min_age_days");
+        let winner = core.store.get_artifact(&ids[0]).await.unwrap().superseded_by;
+        assert!(winner.is_some(), "still pointed at the one rewrite it got");
     }
 
     #[tokio::test]

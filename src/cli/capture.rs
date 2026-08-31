@@ -327,6 +327,22 @@ fn looks_like_a_path(target: &str) -> bool {
             && std::path::Path::new(target).extension().is_some_and(|e| !e.is_empty()))
 }
 
+/// Is a failed `read` an error, or was the argument prose all along?
+///
+/// A path that misses is an error. And so is a target that is *there* and
+/// could not be opened, whatever it looks like: a directory, or a file the
+/// user may not read, names something real, and answering `engram -c notes` —
+/// where `notes` is a directory — with the word "notes" stored as a note is
+/// the client inventing a capture nobody asked for.
+///
+/// Those two kinds only. Every other failure is still a sentence, which is
+/// what keeps a long paragraph's `ENAMETOOLONG` — the failure that made this
+/// fallback necessary in the first place — from becoming an error again.
+fn unopenable(target: &str, kind: std::io::ErrorKind) -> bool {
+    looks_like_a_path(target)
+        || matches!(kind, std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory)
+}
+
 /// The bytes to send and what to call them.
 ///
 /// A link is sent as `text/plain` and the server decides it is a link, which is
@@ -352,8 +368,7 @@ fn read_target(target: &str) -> Result<Read> {
     }
     let bytes = match std::fs::read(target) {
         Ok(b) => b,
-        // A path that misses is an error; a sentence was never a path.
-        Err(e) if looks_like_a_path(target) => return Err(Error::Validation(format!("{target}: {e}"))),
+        Err(e) if unopenable(target, e.kind()) => return Err(Error::Validation(format!("{target}: {e}"))),
         Err(_) => return Ok(text(target.as_bytes().to_vec(), "text")),
     };
     // The extension is what this end knows; the server sniffs the bytes anyway.
@@ -444,6 +459,22 @@ mod tests {
         }
         for path in ["notes.pdf", "./missing", "/etc/hosts", "~/notes.md", "dir/file"] {
             assert!(looks_like_a_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_target_that_exists_and_will_not_open_is_an_error_even_when_it_reads_as_prose() {
+        use std::io::ErrorKind::*;
+        assert!(unopenable("notes", IsADirectory), "a directory named like a word is not a note");
+        assert!(unopenable("secrets", PermissionDenied), "and neither is a file we may not read");
+        assert!(!unopenable("notes", NotFound), "nothing of that name: it is what the person typed");
+        // The regression this fallback exists for: a long paragraph fails with
+        // ENAMETOOLONG, whose kind is neither of the two above — asked of the
+        // platform rather than named, because Rust does not name it.
+        #[cfg(target_os = "linux")]
+        {
+            let too_long = std::io::Error::from_raw_os_error(36).kind();
+            assert!(!unopenable("PUID steht bei Microsoft für die User-ID", too_long));
         }
     }
 

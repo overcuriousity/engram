@@ -1511,6 +1511,28 @@ impl Store {
         Ok(rows.iter().map(row_to_artifact).collect())
     }
 
+    /// Restart one retired row's clock. What a rescue owes the sweep: the
+    /// rewrite is the candidate's answer, and the candidate has to wait
+    /// another `min_age_days` before it is judged against it. Without this the
+    /// row keeps the stamp of its first retirement — `set_superseded_by`
+    /// COALESCEs it deliberately, so a re-pointed loser keeps its original
+    /// clock — and the very next sweep nominates it again, rewrites it again,
+    /// and leaves the second rewrite orphaned.
+    ///
+    /// Only a retired row: a reactivated one has no clock to restart, and
+    /// giving it one would walk it into the reaper.
+    pub async fn restamp_retired(&self, artifact_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE artifacts SET retired_at = ?
+              WHERE id = ? AND (status != 'active' OR superseded_by IS NOT NULL)",
+        )
+        .bind(now())
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Give every retired row that predates `retired_at` a clock starting now.
     /// The migration-free backfill: a fresh stamp is merely slow, where an
     /// invented historical one would hand the reaper rows it was never told

@@ -205,21 +205,21 @@ async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> 
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
-    tenant.core.store.undo_done(&id).await?;
-    // The row comes back, so the note comes back with it. Unconditional: a
-    // corpus that was never retired is already NULL here.
-    if let Some(cid) = tenant.core.store.corpus_of_moment(&id).await? {
-        tenant.core.store.unretire_corpus(&cid).await?;
-    }
-    tenant.core.store.rearm_remind().await?;
+    tenant.core.undo_moment(&id).await?;
     render(&tenant, &f.tz, None, f.since).await
 }
 
 /// `hour` = now + 1h; `tomorrow` = 09:00 tomorrow; `monday` = 09:00 next
-/// Monday — in the viewer's zone.
+/// Monday — in the viewer's zone. Anything else is nothing: three words is
+/// the whole vocabulary the band's buttons speak, and a fourth — empty,
+/// misspelled, or posted by a stale fragment — used to fall through to
+/// tomorrow and hide a reminder for a day the person never asked for.
 fn snooze_until(word: &str, now: i64, tz: Tz) -> Option<i64> {
     if word == "hour" {
         return Some(now + 3_600);
+    }
+    if word != "tomorrow" && word != "monday" {
+        return None;
     }
     let today = tz.timestamp_opt(now, 0).single()?.date_naive();
     let mut d = today + chrono::Duration::days(1);
@@ -232,12 +232,13 @@ fn snooze_until(word: &str, now: i64, tz: Tz) -> Option<i64> {
 }
 
 async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
-    let mut just = None;
-    if let Some(until) = snooze_until(&f.until, tenant.core.clock.now(), zone(Some(&f.tz))) {
-        tenant.core.store.snooze(&id, until).await?;
-        tenant.core.store.rearm_remind().await?;
-        just = Some(Just { id, verb: "Snoozed", undo: "unsnooze" });
-    }
+    // Refused, not ignored: a request this handler cannot read is a bug at the
+    // other end, and a 200 with an unchanged band says nothing about it.
+    let until = snooze_until(&f.until, tenant.core.clock.now(), zone(Some(&f.tz)))
+        .ok_or_else(|| crate::error::Error::Validation(format!("until={}: `hour`, `tomorrow` or `monday`", f.until)))?;
+    tenant.core.store.snooze(&id, until).await?;
+    tenant.core.store.rearm_remind().await?;
+    let just = Some(Just { id, verb: "Snoozed", undo: "unsnooze" });
     render(&tenant, &f.tz, just, f.since).await
 }
 
@@ -444,6 +445,24 @@ mod tests {
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(until, 0).unwrap();
         assert_eq!(local.format("%H:%M").to_string(), "09:00");
         assert!(until > crate::store::now());
+    }
+
+    #[tokio::test]
+    async fn a_snooze_nobody_can_read_is_refused_rather_than_rounded_to_tomorrow() {
+        // Three words is the whole vocabulary. A fourth used to fall through
+        // to tomorrow 09:00 and hide the reminder for a day.
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() - 60)).await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        for body in ["until=&tz=Europe/Berlin", "until=nextweek&tz=Europe/Berlin"] {
+            let res = app
+                .clone()
+                .oneshot(form(&format!("/ui/moments/{id}/snooze"), &cookie, body))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST, "{body}");
+        }
+        assert!(core.store.moment(&id).await.unwrap().unwrap().snoozed_until.is_none(), "and it stays on the band");
     }
 
     #[tokio::test]
