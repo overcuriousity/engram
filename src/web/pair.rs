@@ -90,7 +90,6 @@ fn is_loopback(host: &str) -> bool {
 #[derive(Template)]
 #[template(path = "pair.html")]
 struct PairTemplate {
-    judge_pending: Option<i64>,
     origin: String,
     redirect_uri: String,
     state: String,
@@ -133,10 +132,6 @@ async fn pair_page(
         ));
     }
     Ok(HtmlTemplate(PairTemplate {
-        judge_pending: match &tenant {
-            Some(t) => crate::web::state::judge_pending(t).await,
-            None => None,
-        },
         origin: request_origin(&headers).unwrap_or_default(),
         redirect_uri: p.redirect_uri,
         state: p.state,

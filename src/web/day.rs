@@ -72,7 +72,6 @@ pub(crate) struct DayTemplate {
     pub was_due: Vec<Line>,
     pub refers: Vec<Line>,
     pub sittings: Vec<Sitting>,
-    pub judge_pending: Option<i64>,
 }
 
 impl DayTemplate {
@@ -214,7 +213,6 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
         was_due,
         refers,
         sittings,
-        judge_pending: crate::web::state::judge_pending(&tenant).await,
     };
     Ok(HtmlTemplate(t).into_response())
 }

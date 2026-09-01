@@ -6,7 +6,6 @@ pub mod day;
 pub mod due;
 pub mod extension;
 pub mod insights;
-pub mod judge;
 pub mod lineage_view;
 pub mod markdown;
 pub mod pair;
@@ -98,7 +97,6 @@ pub fn router(state: AppState) -> Router {
             state.config.capture.image_max_bytes,
             state.config.capture.pdf_max_bytes,
         ))
-        .merge(judge::judge_router())
         .merge(insights::routes())
         .merge(due::routes())
         .merge(day::routes())
@@ -280,8 +278,8 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_path_is_behind_a_session_like_every_other_page() {
         // The fallback took no `Identity`, so the one path nobody had routed
-        // was the one path that rendered the whole nav — `judge_pending`, a
-        // live count out of the base, included — to a visitor with no session.
+        // was the one path that rendered the whole nav to a visitor with no
+        // session.
         let core = crate::core::test_support::test_core().await;
         let app = crate::web::test_support::router(core, None).await;
         let res = app

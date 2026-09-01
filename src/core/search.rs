@@ -1597,7 +1597,7 @@ impl Core {
         };
         for r in &mut results {
             r.due_at = due_map.get(&r.artifact_id).copied();
-            r.due_in = r.due_at.map(crate::web::judge::ago_or_ahead);
+            r.due_in = r.due_at.map(crate::web::ui::ago_or_ahead);
         }
         // Retirement, read for the whole page in one query beside the due map.
         {

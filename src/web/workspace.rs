@@ -62,8 +62,6 @@ pub fn routes() -> Router<AppState> {
 #[derive(Template)]
 #[template(path = "workspace.html")]
 struct WorkspaceTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
     /// Whether the ask door is open. See `state::ask_enabled`. The `Ask`
     /// button is absent where it is false — the door is simply not there,
     /// rather than greyed out over a page that says so.
@@ -279,7 +277,6 @@ async fn base_template(
     let (corpora, _) = tenant.core.store.held_brief().await?;
     let (example_remind, example_journal) = examples(headers);
     Ok(WorkspaceTemplate {
-        judge_pending: crate::web::state::judge_pending(tenant).await,
         ask_enabled: crate::web::state::ask_enabled(tenant),
         q,
         facets,
@@ -817,21 +814,22 @@ async fn search_verdict(
     }
     let state = match f.verdict.as_str() {
         "hit" => {
-            // The same guard `judge::hit` states in full: `eval::export` drops
-            // any pair naming an artifact search will not return, so recording
-            // one here would raise the recall on the judging page while
-            // contributing nothing to `pairs.json`. The bar is not drawn over
-            // such an artifact at all — see `ui::artifact_detail` — so this is
-            // the write refusing what the page already refuses to offer.
+            // `eval::export` drops any pair naming an artifact search will
+            // not return, so recording one here would raise the recall on
+            // Insights while contributing nothing to `pairs.json`. The bar is
+            // not drawn over such an artifact at all — see
+            // `ui::artifact_detail` — so this is the write refusing what the
+            // page already refuses to offer.
             if !store.get_artifact(&f.artifact_id).await?.in_results() {
                 return Err(Error::Validation(
                     "that one is deprecated or superseded, so the benchmark can't hold it".into(),
                 ));
             }
-            // `NotFound` here is the store's guard, not a missing route: the
-            // deck can answer this search while the tab holding the bar is
-            // open, and `judge_hit` refuses to write over a verdict rather
-            // than replace it. The same line "no" gets, for the same reason.
+            // `NotFound` here is the store's guard, not a missing route:
+            // another tab can answer this search while the one holding this
+            // bar is open, and `judge_hit` refuses to write over a verdict
+            // rather than replace it. The same line "no" gets, for the same
+            // reason.
             match store
                 .judge_hit(&id, &f.artifact_id, Labeller::Confirm)
                 .await
@@ -843,8 +841,8 @@ async fn search_verdict(
         }
         "no" => {
             // The one answer that clears columns rather than filling them, so
-            // the one that can undo somebody else's work: the deck can judge
-            // this search while the tab holding the bar is open. Refused
+            // the one that can undo somebody else's work: another tab can
+            // judge this search while the one holding this bar is open. Refused
             // rather than applied, and said in the same words the rail's gap
             // button uses for the same situation.
             if !store.decline(&id).await? {
@@ -852,13 +850,12 @@ async fn search_verdict(
             }
             "no"
         }
-        // Not `Verdict::Discard`, which the deck's own key means and which says
-        // something else entirely: that the search was never real. A discard is
-        // dropped from the eval pairs, gone from the deck for good, and — alone
-        // among the verdicts — not exempt from the retention purge. Somebody
-        // unsure whether the result in front of them was the one has not said
-        // any of that. The deck's skip is what the label promises: the search
-        // stays a question and only sinks in the judging order.
+        // Not `Verdict::Discard`, which says something else entirely: that
+        // the search was never real. A discard is dropped from the eval pairs
+        // for good, and — alone among the verdicts — not exempt from the
+        // retention purge. Somebody unsure whether the result in front of them
+        // was the one has not said any of that. Skip is what the label
+        // promises: the search stays a question.
         "skip" => {
             // Not a verdict, so nothing can have got here first, and a search
             // already gone was refused by the ownership check above. What is
@@ -875,8 +872,8 @@ async fn search_verdict(
         }
         "none" => {
             // Only back over what this bar wrote — `Labeller::Confirm`. The
-            // undo appears after "no", which leaves the search pending, so the
-            // deck can deal it and record a hit while the tab is still open;
+            // undo appears after "no", which leaves the search pending, so
+            // another tab can record a hit on it while this one is still open;
             // unguarded, this button then erased a confirmed pair. The store
             // says so by matching nothing.
             match store.unjudge(&id, Labeller::Confirm).await {
@@ -887,6 +884,11 @@ async fn search_verdict(
         }
         v => return Err(Error::Validation(format!("unknown verdict {v}"))),
     };
+    // A verdict is what buys the next measurement. The deck used to spawn the
+    // sweep after each of its verdicts; the bar and the rail are the labellers
+    // now, so the check rides here — off the request path, and cheap when the
+    // thresholds say no.
+    crate::eval::sweep::maybe_spawn(&tenant.core);
     Ok(HtmlTemplate(SearchVerdictTemplate {
         event_id: id,
         artifact_id: f.artifact_id,
@@ -929,6 +931,8 @@ async fn search_gap(
         true => "recorded as a gap: your base doesn't know this yet.",
         false => "nothing to record — that search was already judged.",
     };
+    // A gap is a verdict too, and counts towards the sweep's floor.
+    crate::eval::sweep::maybe_spawn(&tenant.core);
     Ok(axum::response::Html(format!(r#"<span class="muted">{line}</span>"#)).into_response())
 }
 

@@ -47,8 +47,8 @@ struct Args {
     /// List the users this instance knows, with their slug and judge grant.
     #[arg(long)]
     list_users: bool,
-    /// Let SUBJECT reach /ui/judge, which is also the only route that writes
-    /// config.toml.
+    /// Let SUBJECT apply tuning recommendations on /ui/insights — the only
+    /// route that writes config.toml.
     #[arg(long, value_name = "SUBJECT")]
     grant_judge: Option<String>,
     /// Take that grant back.
@@ -235,7 +235,10 @@ async fn run_account_command(
         // No restart, and no wait for a cache to turn over: the judge gate
         // reads this column on every request rather than the copy of the row
         // the registry is holding. See `web::tenant::CanJudge`.
-        println!("{subject} may now judge, and write config.toml through /ui/judge");
+        println!(
+            "{subject} may now apply tuning recommendations, and write config.toml \
+             through /ui/insights"
+        );
         return Ok(true);
     }
     if let Some(subject) = &args.revoke_judge {
@@ -394,8 +397,8 @@ async fn main() -> anyhow::Result<()> {
         );
         if pairs == 0 {
             println!(
-                "no judged searches yet — set learn.enabled, use the base, \
-                 then judge what it recorded at /ui/judge"
+                "no judged searches yet — set learn.enabled, use the base, then \
+                 answer 'Was this what you were looking for?' under the results"
             );
         }
         return Ok(());

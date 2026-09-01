@@ -172,8 +172,9 @@ async fn evaluate_ask() {
             let why = a.err().map(|e| e.to_string()).unwrap_or_default()
                 + &q.err().map(|e| format!(" {e}")).unwrap_or_default();
             eprintln!(
-                "no judged questions at {} ({}). Ask on /ui/ask with feedback.enabled, judge the \
-                 answers, run `engram --export-eval <dir>` and set ENGRAM_EVAL_DIR to it.",
+                "no judged questions at {} ({}). Ask with feedback.enabled, give a verdict \
+                 under each answer, run `engram --export-eval <dir>` and set \
+                 ENGRAM_EVAL_DIR to it.",
                 dir.display(),
                 why.trim()
             );

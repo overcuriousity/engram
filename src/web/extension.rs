@@ -9,7 +9,7 @@ use crate::tenants::Tenant;
 use crate::web::assets::Assets;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::pair::request_origin;
-use crate::web::state::{AppState, judge_pending};
+use crate::web::state::AppState;
 use askama::Template;
 use axum::Router;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -19,7 +19,6 @@ use axum::routing::{get, post};
 #[derive(Template)]
 #[template(path = "extension.html")]
 struct InstallTemplate {
-    judge_pending: Option<i64>,
     origin: String,
     /// Whether the XPI on offer has been through AMO.
     ///
@@ -42,9 +41,8 @@ struct InstallTemplate {
 /// The download page. Authenticated like everything else, and it carries this
 /// deployment's origin into the pairing link — the static, signed manifest
 /// cannot know it, so the page is where it is learned.
-async fn install_page(tenant: Tenant, headers: HeaderMap) -> Response {
+async fn install_page(_tenant: Tenant, headers: HeaderMap) -> Response {
     HtmlTemplate(InstallTemplate {
-        judge_pending: judge_pending(&tenant).await,
         origin: request_origin(&headers).unwrap_or_default(),
         xpi_signed: Assets::get("extension/firefox.signed").is_some(),
         device_token: None,
@@ -78,7 +76,6 @@ async fn phone_token(tenant: Tenant, headers: HeaderMap) -> Response {
         }
     };
     HtmlTemplate(InstallTemplate {
-        judge_pending: judge_pending(&tenant).await,
         origin: request_origin(&headers).unwrap_or_default(),
         xpi_signed: Assets::get("extension/firefox.signed").is_some(),
         device_token,

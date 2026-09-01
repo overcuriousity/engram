@@ -250,11 +250,6 @@
   <input type="hidden" name="from_ask" value="{{ prefill_ask }}">
 </div>
 {% endif %}
-{# Rough stand-in for the tokeniser, filled by app.js: enough to warn, never to
-   block. At `earned` and `off` capture makes no synthesis call, so the hint
-   must not price one. #}
-<p id="size-hint" class="muted" hidden></p>
-
 {# The idle column: everything the page shows when nobody has typed. One
    element, because app.js hides and reveals it as a unit, and because the
    three things in it are one statement — here is something you might want,

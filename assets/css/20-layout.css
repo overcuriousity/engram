@@ -90,13 +90,6 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    anchor: the inner grid is never centred, only the shell is. */
 .regions-focus { grid-template-columns: minmax(0, 68rem); }
 .regions-focus > * { grid-column: 1 / -1; }
-/* The judge card is a working surface, not prose. Every line in it is bounded
-   by something other than the measure — the query is one line, each candidate
-   is clamped to two — so a reading column leaves half a wide window empty and
-   buys nothing for it, while the full table width would set snippet lines too
-   long to track back to their own left edge. Between the two. */
-.regions-judge { grid-template-columns: minmax(0, 86rem); }
-.regions-judge > * { grid-column: 1 / -1; }
 .regions-table { grid-template-columns: minmax(0, 1fr); }
 /* One column, centred in the window rather than anchored to its left edge.
    For the pages that are not part of the workspace and have nothing to line

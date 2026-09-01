@@ -98,41 +98,7 @@ impl AppState {
 }
 
 /// Whether the ask door is open: `[infer.ask]` is configured. The nav reads
-/// it through every page's template, the same way it reads `judge_pending`.
+/// it through every page's template.
 pub fn ask_enabled(t: &crate::tenants::Tenant) -> bool {
     t.core.asks()
-}
-
-/// What the nav needs to know about judging: how many searches are waiting, or
-/// `None` when nothing is being captured and the entry does not belong there.
-///
-/// Every full page carries this, because judging is a habit and a habit needs a
-/// door you pass rather than a page you remember. The count is one indexed
-/// `count(*)`; a failure returns `None`, since a broken badge is not a reason to
-/// fail the page it sits on.
-pub async fn judge_pending(t: &crate::tenants::Tenant) -> Option<i64> {
-    if !t.core.learn.enabled {
-        return None;
-    }
-    // The column, not `t.user.can_judge`, for the reason `web::tenant::CanJudge`
-    // gives at length: the snapshot is the row as it read at open time, and an
-    // open tenant outlives a grant. Left on it, `engram --grant-judge` — which
-    // prints that the user may now judge — put no Judge link in anybody's nav
-    // until their core fell out of the LRU, which on an instance under its cap
-    // is never. The door and the sign on it have to read the same value.
-    match t.core.store.control.user(&t.user.subject).await {
-        Ok(Some(u)) if u.can_judge => {}
-        Ok(_) => return None,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not read the judge grant for the nav");
-            return None;
-        }
-    }
-    match t.core.store.pending_count(t.core.weak_below).await {
-        Ok(n) => Some(n),
-        Err(e) => {
-            tracing::warn!(error = %e, "could not count searches waiting to be judged");
-            None
-        }
-    }
 }

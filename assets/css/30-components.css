@@ -230,9 +230,9 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
 }
 
 /* ── The bottom of a box that scrolls ────────────────────────────────────────
-   Five boxes in this app scroll inside a page that also scrolls: the results
-   rail, the source table, the artifact pane beside it, the ask reasoning and
-   the judge's full text. Every one of them ended at a hard border drawn
+   Four boxes in this app scroll inside a page that also scrolls: the results
+   rail, the source table, the artifact pane beside it and the ask reasoning.
+   Every one of them ended at a hard border drawn
    straight through a line of type — glyphs sliced across the middle, with
    nothing to say whether that was the end of the text or only the end of the
    box. Three of them are visible at once on the search page, so the screen read
@@ -262,7 +262,6 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
   .rail,
   .raw,
   .reasoning,
-  .judge-full,
   .split > :first-child,
   .split > :first-child > .card {
     mask-image: linear-gradient(to bottom, #000 calc(100% - var(--edge)), transparent);

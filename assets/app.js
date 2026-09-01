@@ -1202,21 +1202,8 @@
     var form = document.getElementById('box-form');
     if (!form) return;
     var box = form.querySelector('textarea[name="q"]');
-    var hint = document.getElementById('size-hint');
     var verb = form.querySelector('[data-verb="capture"]');
-    if (!box || !hint || !verb) return;
-    // Rough stand-in for the tokeniser: enough to warn, never to block.
-    var CHARS_PER_SEGMENT = 12000;
-    function sizeHint() {
-      var segments = Math.ceil(box.value.length / CHARS_PER_SEGMENT);
-      hint.hidden = segments < 2;
-      hint.textContent =
-        'About ' + segments + ' segments — searchable as written, once embedded.';
-    }
-    box.addEventListener('input', sizeHint);
-    // The box is emptied by a capture that stored, and the hint must not go on
-    // pricing text that is no longer in it.
-    box.addEventListener(VERB_SYNC, sizeHint);
+    if (!box || !verb) return;
 
     var drop = document.getElementById('drop');
     var picker = drop && drop.querySelector('input[type=file]');

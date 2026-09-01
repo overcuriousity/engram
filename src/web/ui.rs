@@ -614,7 +614,7 @@ pub(crate) struct IdleFootTemplate {
 pub(crate) struct IdleRecentRow {
     pub(crate) id: String,
     pub(crate) label: String,
-    /// "today", "3 days ago" — a jog, not a timestamp. See `judge::ago`.
+    /// "today", "3 days ago" — a jog, not a timestamp. See `ago`.
     pub(crate) when: String,
     /// The day, as a link target, in UTC — the no-JS fallback and nothing
     /// more. The day page builds its window in the *viewer's* zone, so east of
@@ -665,7 +665,7 @@ pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemp
                     .map(|d| d.format("%Y-%m-%d").to_string())
                     .unwrap_or_default(),
                 at: created_at,
-                when: crate::web::judge::ago(created_at),
+                when: ago(created_at),
                 label: corpus_label(title_hint, &opening, &origin),
                 id,
             },
@@ -684,6 +684,34 @@ pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemp
     })
 }
 
+/// Roughly how long ago, in the words someone would use out loud. Precision
+/// past "days" would suggest the timestamp matters; it is here to jog a memory.
+pub(crate) fn ago(then: i64) -> String {
+    let days = (crate::store::now() - then).max(0) / 86_400;
+    match days {
+        0 => "today".into(),
+        1 => "yesterday".into(),
+        n if n < 30 => format!("{n} days ago"),
+        n => format!("{} months ago", n / 30),
+    }
+}
+
+/// A due time relative to now, either way: "in 2 h", "in 3 days", "1 h ago".
+/// Hours under a day, days from there; a reminder's precision.
+pub(crate) fn ago_or_ahead(at: i64) -> String {
+    let delta = at - crate::store::now();
+    let (ahead, span) = (delta >= 0, delta.abs());
+    let words = match span {
+        s if s < 3_600 => "under an hour".to_string(),
+        s if s < 86_400 => format!("{} h", s / 3_600),
+        s => format!("{} day{}", s / 86_400, if s / 86_400 == 1 { "" } else { "s" }),
+    };
+    match ahead {
+        true => format!("in {words}"),
+        false => format!("{words} ago"),
+    }
+}
+
 #[derive(Template)]
 #[template(path = "_queue.html")]
 struct QueueTemplate {
@@ -696,8 +724,6 @@ struct QueueTemplate {
 #[derive(Template)]
 #[template(path = "corpus.html")]
 struct CorpusTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
     id: String,
     status: String,
     badge: &'static str,
@@ -799,8 +825,6 @@ struct ArtifactDetailFragment {
 #[derive(Template)]
 #[template(path = "artifact_detail.html")]
 struct ArtifactDetailPage {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
     d: ArtifactDetail,
 }
 
@@ -849,8 +873,6 @@ pub(crate) fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i
 #[derive(Template)]
 #[template(path = "settings.html")]
 struct SettingsTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
     /// Where due reminders are pushed. The token is never rendered; only
     /// whether one is stored.
     gotify_url: String,
@@ -1998,7 +2020,6 @@ async fn corpus_detail(
         })
         .collect();
     Ok(HtmlTemplate(CorpusTemplate {
-        judge_pending: crate::web::state::judge_pending(&tenant).await,
         id: s.id,
         badge: status_badge(&s.status),
         status: s.status.as_str().to_string(),
@@ -2184,7 +2205,7 @@ async fn reprocess_ui(
 /// characters of raw body was that fallback, and it is where the sitting's
 /// "…darin vo" and the dedupe queue's `Keep "- schneller Schreibzugriff …"`
 /// both came from. The rule lives in one place now — see
-/// `markdown::stand_in_title` — so the sitting, the pair cards and the judge
+/// `markdown::stand_in_title` — so the sitting and the pair cards
 /// cannot drift apart again.
 pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
     // The stored title goes through the same rule, because synthesis writes it
@@ -2469,7 +2490,6 @@ async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
 async fn settings(tenant: Tenant) -> Result<Response> {
     let notify = tenant.core.store.control.notify(&tenant.user.subject).await?;
     Ok(HtmlTemplate(SettingsTemplate {
-        judge_pending: crate::web::state::judge_pending(&tenant).await,
         gotify_url: notify["gotify"]["url"].as_str().unwrap_or_default().to_string(),
         gotify_token_set: notify["gotify"]["token"].as_str().is_some_and(|t| !t.is_empty()),
         up_endpoint: notify["unifiedpush"]["endpoint"].as_str().unwrap_or_default().to_string(),
@@ -3082,7 +3102,7 @@ pub(crate) async fn build_artifact_detail(
             None
         })
         .and_then(|m| m.at)
-        .map(crate::web::judge::ago_or_ahead);
+        .map(ago_or_ahead);
     Ok(ArtifactDetail {
         due_in,
         continues_at,
@@ -3160,9 +3180,9 @@ async fn artifact_detail(
     //
     // Not for an artifact search will no longer return. `eval::export` freezes
     // only active, un-superseded artifacts and drops any pair naming something
-    // else, so a hit recorded here would raise the recall and MRR on the
-    // judging page while contributing nothing to `pairs.json`. `judge::hit`
-    // refuses one for that reason; so does this. Without `search_event` the bar
+    // else, so a hit recorded here would raise the recall and MRR on Insights
+    // while contributing nothing to `pairs.json`. The verdict write refuses
+    // one for that reason; so does this. Without `search_event` the bar
     // is not drawn, which is the only way a verdict can be given at all.
     // And only the searcher's own event: the id arrives on a link, so it is
     // whatever the caller sent. See `Store::event_is_mine`.
@@ -3223,7 +3243,6 @@ async fn artifact_detail(
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(HtmlTemplate(ArtifactDetailPage {
-        judge_pending: crate::web::state::judge_pending(&tenant).await,
         d,
     })
     .into_response())
@@ -3265,8 +3284,6 @@ async fn mark_artifact_reviewed(tenant: Tenant, Path(cid): Path<String>) -> Resu
 #[derive(Template)]
 #[template(path = "not_found.html")]
 struct NotFoundTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
 }
 
 /// The app's own answer to a path it does not have.
@@ -3286,8 +3303,8 @@ struct NotFoundTemplate {
 /// for a caller with no credentials, but a browser with no session gets the
 /// same 401 the rest of the app gives it — which
 /// `redirect_unauthenticated_browsers` turns into the login. Without that, the
-/// one path nobody routed was the one path that rendered the whole nav,
-/// `judge_pending` — a live count out of the base — included.
+/// one path nobody routed was the one path that rendered the whole nav to a
+/// visitor with no session.
 pub async fn not_found(
     tenant: Option<Tenant>,
     method: axum::http::Method,
@@ -3301,11 +3318,10 @@ pub async fn not_found(
     if machine || method != axum::http::Method::GET {
         return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
     }
-    let Some(tenant) = tenant else {
+    let Some(_tenant) = tenant else {
         return crate::error::Error::Unauthorized.into_response();
     };
     let page = NotFoundTemplate {
-        judge_pending: crate::web::state::judge_pending(&tenant).await,
     };
     match askama::Template::render(&page) {
         Ok(html) => (
@@ -3510,7 +3526,6 @@ mod tests {
     fn settings_fixture(tokens: Vec<TokenRow>) -> String {
         askama::Template::render(&SettingsTemplate {
             account: crate::store::TEST_SUBJECT.into(),
-            judge_pending: None,
             gotify_url: String::new(),
             gotify_token_set: false,
             up_endpoint: String::new(),
@@ -6024,7 +6039,7 @@ mod tests {
     #[tokio::test]
     async fn every_link_to_the_review_screen_calls_it_what_it_calls_itself() {
         let (app, cookie) = app_recording_searches(3).await;
-        for page in ["/ui/insights", "/ui/settings", "/ui/judge"] {
+        for page in ["/ui/insights", "/ui/settings"] {
             let html = flat(&get(&app, page, &cookie).await);
             for stale in ["Judge some", "Judge them", ">Judge<"] {
                 assert!(
@@ -6036,45 +6051,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn judging_is_a_destination_in_the_nav_with_what_is_waiting_on_it() {
-        // It used to be reachable only from one conditional sentence on Ops —
-        // the page you open when something is wrong, which is the wrong place
-        // for the screen that has to be visited often for the dataset to grow.
+    async fn the_nav_offers_no_judge_entry_even_while_searches_are_recorded() {
+        // The deck is gone: a verdict is given under the result it is about,
+        // at the moment of the search, and the nav has nothing to advertise.
         let (app, cookie) = app_recording_searches(3).await;
-        for page in ["/ui/search", "/ui/capture", "/ui/ask", "/ui/insights"] {
+        for page in ["/ui/search", "/ui/insights"] {
             let html = flat(&get(&app, page, &cookie).await);
-            assert!(
-                html.contains(r#"<a href="/ui/judge">Review searches"#),
-                "{page} offers no way to review searches"
-            );
-            assert!(
-                html.contains(r#"<span class="badge badge-accent">3</span>"#),
-                "{page} does not say how many are waiting"
-            );
+            assert!(!html.contains("/ui/judge"), "{page} still links the deck");
         }
-    }
-
-    #[tokio::test]
-    async fn an_empty_queue_asks_for_nothing() {
-        // The entry stays — judging is where the metrics live, and they are
-        // worth reading with nothing pending — but a badge reading zero is an
-        // invitation to a screen that has no work on it.
-        let (app, cookie) = app_recording_searches(0).await;
-        let html = flat(&get(&app, "/ui/search", &cookie).await);
-        assert!(html.contains(r#"<a href="/ui/judge">Review searches"#));
-        assert!(
-            !html.contains(r#"badge-accent">0<"#),
-            "an empty queue was badged"
-        );
-    }
-
-    #[tokio::test]
-    async fn nothing_about_judging_appears_where_nothing_is_captured() {
-        // Capture is off by default. A door to a queue that can never fill is
-        // an offer the installation cannot keep.
-        let (app, cookie) = app_with_session().await;
-        let html = flat(&get(&app, "/ui/search", &cookie).await);
-        assert!(!html.contains("/ui/judge"), "judging was advertised anyway");
     }
 
     #[tokio::test]
@@ -11698,8 +11682,20 @@ mod tests {
     /// A recording session, one artifact, and one captured search of this
     /// user's whose pool holds it.
     async fn searched_app() -> (axum::Router, String, crate::core::Core, String, String) {
+        searched_app_tuned(None).await
+    }
+
+    /// `searched_app`, with the judgement floor low enough that a verdict on
+    /// the bar can cross it — the bar is the labeller now, so the bar is what
+    /// pays for a sweep.
+    async fn searched_app_tuned(
+        floor: Option<i64>,
+    ) -> (axum::Router, String, crate::core::Core, String, String) {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
+        if let Some(n) = floor {
+            core.feedback.tune.min_judgements = n;
+        }
         let handle = core.clone();
         let (app, cookie) = app_with_cookie(core).await;
         let src = handle
@@ -11750,6 +11746,49 @@ mod tests {
             .await
             .unwrap();
         (app, cookie, handle, a, event)
+    }
+
+    #[tokio::test]
+    async fn a_verdict_on_the_bar_past_the_floor_pays_for_a_sweep() {
+        // The loop the whole feature is: a verdict is what buys the next
+        // measurement, so the check rides on the verdict rather than a timer.
+        // It used to ride the deck's verdicts; the bar is the labeller now.
+        let (app, cookie, handle, a, event) = searched_app_tuned(Some(1)).await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/search/{event}/verdict"),
+                &cookie,
+                &format!("verdict=hit&artifact_id={a}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        handle.background.wait_idle().await;
+
+        let run = handle.store.latest_eval_run().await.unwrap();
+        assert!(run.is_some(), "the floor was crossed and no sweep ran");
+        assert_eq!(run.unwrap().pairs_used, 1);
+    }
+
+    #[tokio::test]
+    async fn under_the_floor_a_verdict_buys_nothing() {
+        // Below it a sweep would recommend the quirks of a handful of queries
+        // as confidently as a real improvement.
+        let (app, cookie, handle, a, event) = searched_app_tuned(Some(50)).await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/search/{event}/verdict"),
+                &cookie,
+                &format!("verdict=hit&artifact_id={a}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        handle.background.wait_idle().await;
+
+        assert!(handle.store.latest_eval_run().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -11860,7 +11899,7 @@ mod tests {
         // result and put a hit back onto searches a person had just marked
         // "not sure" or undone. The timer still feeds the pursuit sweep; it no
         // longer labels anything.
-        let (app, cookie, handle, a, event) = searched_app().await;
+        let (app, cookie, handle, a, _event) = searched_app().await;
         let res = app
             .clone()
             .oneshot(form(
@@ -11873,11 +11912,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.hits, s.judged), (0, 0), "{s:?}");
-        assert_eq!(
-            handle.store.next_pending(0.0).await.unwrap().map(|e| e.id),
-            Some(event),
-            "the search is still a question for the deck"
-        );
+        assert_eq!(s.pending, 1, "the search is still an open question");
     }
 
     #[tokio::test]
@@ -12124,9 +12159,9 @@ mod tests {
     #[tokio::test]
     async fn a_deprecated_result_is_never_asked_about() {
         // `eval::export` drops any pair naming an artifact search will not
-        // return, so a hit recorded against one raises the recall on the
-        // judging page and contributes nothing to `pairs.json`. `judge::hit`
-        // refuses one, and the bar under a result must not be a way around it.
+        // return, so a hit recorded against one raises the recall on Insights
+        // and contributes nothing to `pairs.json`. The verdict write refuses
+        // one, and the bar under a result must not be a way around it.
         let (app, cookie, handle, a, event) = searched_app().await;
         handle
             .store
@@ -12154,10 +12189,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stale_bar_says_so_rather_than_writing_over_the_deck() {
+    async fn a_stale_bar_says_so_rather_than_writing_over_a_verdict() {
         // The bar is drawn against an unjudged search and the tab holding it
         // can be left open for as long as anyone likes, so both of its writing
-        // answers can arrive after the deck has answered the same search.
+        // answers can arrive after another tab has answered the same search.
         // Neither replaces what is there; both come back saying why.
         let (app, cookie, handle, a, event) = searched_app().await;
         handle
@@ -12182,7 +12217,7 @@ mod tests {
             assert_eq!(res.status(), StatusCode::OK);
             assert!(
                 body_of(res).await.contains("already judged"),
-                "the bar wrote over the deck instead of saying it could not"
+                "the bar wrote over the verdict instead of saying it could not"
             );
         }
         let s = handle.store.feedback_stats(0.0).await.unwrap();
