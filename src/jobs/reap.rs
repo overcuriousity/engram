@@ -211,6 +211,15 @@ async fn rescue_one(
             .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
             .await?;
     }
+    // And the clock starts over, on both branches. `set_superseded_by` keeps
+    // the first retirement's stamp on purpose, and an already-superseded
+    // candidate never reaches it at all — so without this the row the sweep
+    // just acted on is still the oldest retirement in the base and comes back
+    // as the first nominee on the very next interval, for another judge call
+    // and, on a second `valuable` verdict, a second rewrite of the same
+    // content. The second visit is meant to be an age later, when the rewrite
+    // is what the candidate is judged against.
+    core.store.restamp_retired(&c.id).await?;
     Ok(made.id)
 }
 
@@ -763,13 +772,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_rescue_is_reaped_against_its_own_rewrite_on_the_second_pass() {
-        // The loop the design closes: rescue writes a live rewrite and
-        // supersedes the candidate, which stamps a *new* retired_at — so the
-        // second visit, an age later, judges the candidate against its own
-        // living rewrite and the likely verdict is worthless. The seam this
-        // test exists for: a rescue that failed to stamp a fresh clock would
-        // never be nominated again, and one that wiped anything would have
-        // destroyed text on a "valuable" verdict.
+        // The loop the design closes: rescue writes a live rewrite, supersedes
+        // the candidate and stamps it a *new* retired_at — so the second
+        // visit, an age later, judges the candidate against its own living
+        // rewrite and the likely verdict is worthless. The seam this test
+        // exists for: a rescue that failed to stamp a fresh clock would put
+        // the candidate back in front of the judge on the very next interval,
+        // and one that wiped anything would have destroyed text on a
+        // "valuable" verdict.
         let mut core = test_core().await;
         core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
@@ -796,7 +806,11 @@ mod tests {
             .expect("superseded by the rewrite");
         crate::jobs::embed::run(&core, &new_id).await.unwrap();
 
-        // An age passes.
+        // The rescue restamped the candidate, so it is not a nominee now.
+        let (none_yet, _) = nominees(&core).await.unwrap();
+        assert!(none_yet.is_empty(), "a rescued candidate waits out a fresh age");
+
+        // An age passes — off the clock the rescue itself set.
         backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
 
         // Pass 2: the candidate is judged against its living rewrite and

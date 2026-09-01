@@ -145,9 +145,19 @@ pub fn format_search_results(
     format!("{head}{body}")
 }
 
-/// One hit's stages, in the order they ran. Named rather than counted: an
-/// agent gets this string and nothing else, so a number it cannot attribute
-/// to a stage is worse than no line at all.
+/// How far ahead the `due` tool looks, from a number that came off the wire.
+///
+/// Clamped before the cast, and that is the whole point of the function. A
+/// `u64` past `i64::MAX` casts to a negative — `u64::MAX` becomes -1, for a
+/// horizon an hour *behind* now and a window that can never hold anything —
+/// and anything past `i64::MAX / 3_600` overflows the multiply, which in a
+/// debug build is a panic raised inside the tool handler. A century is
+/// further ahead than any due list means.
+pub(crate) fn due_horizon(now: i64, hours: u64) -> i64 {
+    const MAX_HORIZON_HOURS: u64 = 100 * 365 * 24;
+    now.saturating_add(hours.min(MAX_HORIZON_HOURS) as i64 * 3_600)
+}
+
 /// The `due` tool's answer: three sections, each row in its own zone, and one
 /// line when there is nothing.
 pub(crate) fn format_due(rows: &[crate::store::moments::DueRow], now: i64) -> String {
@@ -186,6 +196,9 @@ pub(crate) fn format_due(rows: &[crate::store::moments::DueRow], now: i64) -> St
     out.trim_end().to_string()
 }
 
+/// One hit's stages, in the order they ran. Named rather than counted: an
+/// agent gets this string and nothing else, so a number it cannot attribute
+/// to a stage is worse than no line at all.
 fn why_line(e: &crate::core::explain::HitExplanation) -> String {
     if let Some(via) = &e.recalled_via {
         return format!("\n_why it is here: recalled beside `{via}`; never ranked._");
@@ -585,7 +598,7 @@ impl PkdbTools {
             Err(e) => return format!("Due failed: {e}"),
         };
         let now = core.clock.now();
-        let horizon = now + p.horizon_hours.unwrap_or(core.time.horizon_hours) as i64 * 3_600;
+        let horizon = due_horizon(now, p.horizon_hours.unwrap_or(core.time.horizon_hours));
         match core.store.open_due(now, horizon).await {
             Ok(rows) => format_due(&rows, now),
             Err(e) => format!("Due failed: {e}"),
@@ -1078,6 +1091,19 @@ mod tests {
             ..Default::default()
         });
         r
+    }
+
+    #[test]
+    fn a_horizon_off_the_wire_is_clamped_before_it_is_cast() {
+        let now = 1_000_000;
+        assert_eq!(due_horizon(now, 48), now + 48 * 3_600, "the ordinary case is untouched");
+        assert_eq!(due_horizon(now, 0), now, "and so is asking for nothing ahead");
+        // Both of the shapes an unclamped `as i64 * 3_600` got wrong: a
+        // negative horizon, and an overflowing multiply.
+        let century = 100 * 365 * 24 * 3_600;
+        assert_eq!(due_horizon(now, u64::MAX), now + century);
+        assert_eq!(due_horizon(now, i64::MAX as u64 / 3_600 + 1), now + century);
+        assert!(due_horizon(now, u64::MAX) > now, "never behind the caller");
     }
 
     #[test]

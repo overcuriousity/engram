@@ -17,6 +17,21 @@ pub const REMIND_TARGET: &str = "due";
 /// want different spacing.
 pub const LEADS: &[i64] = &[48 * 3_600, 12 * 3_600, 3 * 3_600, 30 * 60, 0];
 
+/// The ladder a row actually climbs. A snoozed row climbs one rung, the last
+/// one — the moment itself, which for a snoozed row is the second the snooze
+/// ends.
+///
+/// Because a snooze re-keys the ladder: `eff_at` becomes `snoozed_until`, and
+/// the leads are measured back from it. Snoozing for an hour therefore put
+/// every rung above 30m *behind* the new time, so `owed_lead` found one owed
+/// at once and the operator got a push for the reminder they had just put
+/// aside — while the band, reading `snoozed_until` directly, correctly hid the
+/// row. A snooze is a time the operator named; the only thing to say at it is
+/// the reminder, once.
+fn ladder(snoozed: bool) -> &'static [i64] {
+    if snoozed { &LEADS[LEADS.len() - 1..] } else { LEADS }
+}
+
 /// The rung a moment owes at `now`: the nearest one already reached that the
 /// last push did not cover, or `None` when nothing is owed.
 ///
@@ -24,8 +39,8 @@ pub const LEADS: &[i64] = &[48 * 3_600, 12 * 3_600, 3 * 3_600, 30 * 60, 0];
 /// reminder set ten minutes out from firing four pushes at once: the rungs
 /// above it are behind us, one push covers them all, and `notified_at` moving
 /// to now retires them.
-pub fn owed_lead(eff_at: i64, notified_at: Option<i64>, now: i64) -> Option<i64> {
-    LEADS
+pub fn owed_lead(eff_at: i64, snoozed: bool, notified_at: Option<i64>, now: i64) -> Option<i64> {
+    ladder(snoozed)
         .iter()
         .copied()
         .filter(|lead| eff_at - lead <= now)
@@ -35,8 +50,8 @@ pub fn owed_lead(eff_at: i64, notified_at: Option<i64>, now: i64) -> Option<i64>
 
 /// The next second at which this moment owes a push: the earliest rung the
 /// last push did not cover, at any time, past or future.
-pub fn next_lead_at(eff_at: i64, notified_at: Option<i64>) -> Option<i64> {
-    LEADS
+pub fn next_lead_at(eff_at: i64, snoozed: bool, notified_at: Option<i64>) -> Option<i64> {
+    ladder(snoozed)
         .iter()
         .map(|lead| eff_at - lead)
         .find(|at| notified_at.is_none_or(|n| n < *at))
@@ -503,38 +518,38 @@ mod ladder_tests {
     #[test]
     fn a_far_out_moment_is_owed_its_first_rung_when_it_enters_the_band() {
         let due = 1_000_000;
-        assert_eq!(owed_lead(due, None, due - LEADS[0] - 1), None, "still outside the band");
-        assert_eq!(owed_lead(due, None, due - LEADS[0]), Some(LEADS[0]));
+        assert_eq!(owed_lead(due, false, None, due - LEADS[0] - 1), None, "still outside the band");
+        assert_eq!(owed_lead(due, false, None, due - LEADS[0]), Some(LEADS[0]));
     }
 
     #[test]
     fn a_rung_already_pushed_is_not_owed_again_but_the_next_one_is() {
         let due = 1_000_000;
         let sent = due - LEADS[0];
-        assert_eq!(owed_lead(due, Some(sent), sent + 1), None);
-        assert_eq!(owed_lead(due, Some(sent), due - LEADS[1]), Some(LEADS[1]));
+        assert_eq!(owed_lead(due, false, Some(sent), sent + 1), None);
+        assert_eq!(owed_lead(due, false, Some(sent), due - LEADS[1]), Some(LEADS[1]));
     }
 
     #[test]
     fn a_moment_set_inside_the_ladder_owes_one_rung_not_every_passed_one() {
         let due = 1_000_000;
         let now = due - 600; // ten minutes out: every rung above 30m is behind us
-        assert_eq!(owed_lead(due, None, now), Some(30 * 60), "the nearest passed rung, once");
+        assert_eq!(owed_lead(due, false, None, now), Some(30 * 60), "the nearest passed rung, once");
         // And then the moment itself, which is the only rung still ahead.
-        assert_eq!(owed_lead(due, Some(now), due), Some(0));
+        assert_eq!(owed_lead(due, false, Some(now), due), Some(0));
     }
 
     #[test]
     fn nothing_is_owed_once_the_moment_itself_has_been_pushed() {
         let due = 1_000_000;
-        assert_eq!(owed_lead(due, Some(due), due + 10_000), None);
+        assert_eq!(owed_lead(due, false, Some(due), due + 10_000), None);
     }
 
     #[test]
     fn the_next_boundary_is_the_earliest_rung_not_yet_covered() {
         let due = 1_000_000;
-        assert_eq!(next_lead_at(due, None), Some(due - LEADS[0]));
-        assert_eq!(next_lead_at(due, Some(due - LEADS[0])), Some(due - LEADS[1]));
-        assert_eq!(next_lead_at(due, Some(due)), None);
+        assert_eq!(next_lead_at(due, false, None), Some(due - LEADS[0]));
+        assert_eq!(next_lead_at(due, false, Some(due - LEADS[0])), Some(due - LEADS[1]));
+        assert_eq!(next_lead_at(due, false, Some(due)), None);
     }
 }

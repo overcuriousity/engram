@@ -347,11 +347,6 @@ impl Store {
         Ok(rows.iter().map(row_to_pursuit).collect())
     }
 
-    /// How many pursuits are in one state, with no page over it.
-    ///
-    /// `recent_pursuits` answers a page for a list to be drawn from. Counting
-    /// that page reported the page size as a total the moment a base held more
-    /// pursuits than the page held rows.
     /// A day's sittings, oldest first — the day page's read.
     pub async fn pursuits_between(&self, from: i64, to: i64) -> Result<Vec<Pursuit>> {
         let rows = sqlx::query("SELECT * FROM pursuits WHERE opened_at >= ? AND opened_at < ? ORDER BY opened_at")
@@ -362,6 +357,11 @@ impl Store {
         Ok(rows.iter().map(row_to_pursuit).collect())
     }
 
+    /// How many pursuits are in one state, with no page over it.
+    ///
+    /// `recent_pursuits` answers a page for a list to be drawn from. Counting
+    /// that page reported the page size as a total the moment a base held more
+    /// pursuits than the page held rows.
     pub async fn count_pursuits(&self, state: &str) -> Result<i64> {
         use sqlx::Row;
         Ok(

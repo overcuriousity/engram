@@ -669,17 +669,39 @@ static AT_TIME: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// A bare four-digit clock, no colon and no marker: `Mittwoch 0900`. Unsafe as
 /// a general rule — `TIME_AFTER` exists precisely to keep an unmarked number
 /// from being read as an hour — but exactly four digits sitting right after
-/// the day name is not an amount or a house number, and demanding a colon
-/// silently returned nine in the morning for the one shape a phone keypad
-/// naturally produces. Anchored to exactly four digits so a five-digit run
-/// (an ID, a partial date) fails the trailing `\b` and is left alone.
+/// the day name is not a house number, and demanding a colon silently
+/// returned nine in the morning for the one shape a phone keypad naturally
+/// produces. Anchored to exactly four digits so a five-digit run (an ID, a
+/// partial date) fails the trailing `\b` and is left alone.
 static TIME_BARE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)^\s*(\d{2})(\d{2})\b").unwrap());
+
+/// What may follow a bare clock and leave it a clock: the end of the note,
+/// a mark of punctuation, or the word that names the hour outright. A letter
+/// or a digit after it means the run was counting something.
+static TIME_BARE_TAIL: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)^(?:\s*$|[^\p{L}\p{N}\s]|\s*(?:uhr|h)\b)").unwrap());
 
 fn time_bare(rest: &str) -> Option<(u32, u32)> {
     let c = TIME_BARE.captures(rest)?;
     let hour: u32 = c[1].parse().ok()?;
     let minute: u32 = c[2].parse().ok()?;
-    (hour <= 23 && minute <= 59).then_some((hour, minute))
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    // A four-digit run in this position is a clock only when something says
+    // so. The keypad's own shape says it with a padded hour — `Mittwoch 0900`,
+    // which is what this rule was written for; every other run has to be
+    // followed by an ending, a punctuation mark, or `Uhr`. Left unguarded the
+    // hour and minute bounds were the only test, so `Montag 1000 Euro
+    // überweisen` was dated 10:00 and `Freitag 2026 Steuererklärung` 20:26 —
+    // amounts and years sit in exactly this position, and often enough to
+    // outnumber the shape being read for. What this sends back to the 09:00
+    // default instead — `Mittwoch 1430 Meeting` — is wording the model path
+    // reads better than any rule here could.
+    if !c[1].starts_with('0') && !TIME_BARE_TAIL.is_match(&rest[c.get(0)?.end()..]) {
+        return None;
+    }
+    Some((hour, minute))
 }
 
 /// The second an offset inside the day names, counted off the second the note
@@ -1485,6 +1507,28 @@ mod tests {
             ("Freitag 14305", "2026-09-04 09:00"),
             // An out-of-range hour is not a clock either.
             ("Freitag 2500", "2026-09-04 09:00"),
+            // The padded hour is the keypad's own shape, so it needs nothing
+            // after it; the marker and the sentence's end say it outright.
+            ("Mittwoch 0030 Nachtschicht", "2026-09-02 00:30"),
+            ("Mittwoch 1430 Uhr", "2026-09-02 14:30"),
+            ("Freitag 1745.", "2026-09-04 17:45"),
+        ] {
+            let f = relative_date(text, captured(), berlin());
+            assert_eq!(f.map(|x| local(x.at)).as_deref(), Some(want), "{text}");
+        }
+    }
+
+    /// The other half of that rule: an unpadded run with a word after it is
+    /// something being counted, and reading it as an hour dated a note the
+    /// operator never dated.
+    #[test]
+    fn an_amount_or_a_year_beside_the_day_is_not_a_clock() {
+        for (text, want) in [
+            ("Erinnere mich Montag 1000 Euro zu überweisen", "2026-08-31 09:00"),
+            ("Freitag 2026 Steuererklärung abgeben", "2026-09-04 09:00"),
+            ("Montag 5000 Schritte laufen", "2026-08-31 09:00"),
+            // The cost of the rule, and the wording the model path reads.
+            ("Mittwoch 1430 Meeting", "2026-09-02 09:00"),
         ] {
             let f = relative_date(text, captured(), berlin());
             assert_eq!(f.map(|x| local(x.at)).as_deref(), Some(want), "{text}");

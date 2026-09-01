@@ -465,9 +465,6 @@ impl Store {
         Ok(())
     }
 
-    /// Names a corpus after the fact. Capture makes no inference call by
-    /// design, so the name arrives later — once synthesis has read the document
-    /// and knows what it is about.
     /// The one write to `origin` outside insert: a capture becoming, or
     /// ceasing to be, a journal entry. A channel label, never content.
     pub async fn set_corpus_origin(&self, id: &str, origin: &str) -> Result<()> {
@@ -484,6 +481,9 @@ impl Store {
         Ok(())
     }
 
+    /// Names a corpus after the fact. Capture makes no inference call by
+    /// design, so the name arrives later — once synthesis has read the document
+    /// and knows what it is about.
     pub async fn set_title_hint(&self, id: &str, title: &str) -> Result<()> {
         sqlx::query("UPDATE corpora SET title_hint = ?, updated_at = ? WHERE id = ?")
             .bind(title)
@@ -579,12 +579,6 @@ impl Store {
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
-    /// The newest few captures, by the columns a list row shows. This is the
-    /// idle rail's read, and the idle rail renders on every box-clear:
-    /// `list_corpora` is `SELECT *`, and `raw_text` there is the whole
-    /// document, pulled to render a 60-character label. The prefix is chars,
-    /// not bytes — SQLite's `substr` on text counts characters — and 400 of
-    /// them is more than any label survives `markdown::snippet` with.
     /// The last reminder read out of this note is done, so the note stops
     /// being *recent*. Not a delete and not a hide: see `schema.sql`.
     pub async fn retire_corpus(&self, corpus_id: &str, at: i64) -> Result<()> {
@@ -636,6 +630,13 @@ impl Store {
         Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
     }
 
+    /// The newest few captures, by the columns a list row shows. This is the
+    /// idle rail's read, and the idle rail renders on every box-clear:
+    /// `list_corpora` is `SELECT *`, and `raw_text` there is the whole
+    /// document, pulled to render a 60-character label. The prefix is chars,
+    /// not bytes — SQLite's `substr` on text counts characters — and 400 of
+    /// them is more than any label survives `markdown::snippet` with.
+    ///
     /// Newest first, retired notes excluded — a reminder that is done is not
     /// one of the last things you kept. The day page is where it stays
     /// visible, because a day is a record of what actually happened.

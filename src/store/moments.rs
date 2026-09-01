@@ -460,6 +460,13 @@ impl Store {
     }
 
     /// A snooze that ends re-notifies, so the mark is cleared with it.
+    ///
+    /// Clearing it is only safe because a snoozed row climbs a one-rung
+    /// ladder — see [`crate::jobs::remind::owed_lead`]. `eff_at` becomes
+    /// `snoozed_until`, so with the full ladder every lead above the snooze's
+    /// own length sat *behind* the new time and the cleared mark owed one of
+    /// them at once: the operator put a reminder aside for an hour and the
+    /// phone said it again on the next queue tick.
     pub async fn snooze(&self, id: &str, until: i64) -> Result<()> {
         sqlx::query("UPDATE moments SET snoozed_until = ?, notified_at = NULL WHERE id = ?")
             .bind(until)
@@ -494,7 +501,15 @@ impl Store {
         let rows: Vec<DueRow> = self.uncovered().await?;
         Ok(rows
             .into_iter()
-            .filter(|r| crate::jobs::remind::owed_lead(eff_at(r), r.moment.notified_at, now).is_some())
+            .filter(|r| {
+                crate::jobs::remind::owed_lead(
+                    eff_at(r),
+                    r.moment.snoozed_until.is_some(),
+                    r.moment.notified_at,
+                    now,
+                )
+                .is_some()
+            })
             .collect())
     }
 
@@ -573,7 +588,13 @@ impl Store {
             .uncovered()
             .await?
             .iter()
-            .filter_map(|r| crate::jobs::remind::next_lead_at(eff_at(r), r.moment.notified_at))
+            .filter_map(|r| {
+                crate::jobs::remind::next_lead_at(
+                    eff_at(r),
+                    r.moment.snoozed_until.is_some(),
+                    r.moment.notified_at,
+                )
+            })
             .min())
     }
 }
@@ -712,18 +733,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_snooze_puts_the_row_back_on_the_ladder_from_where_it_lands() {
-        use crate::jobs::remind::LEADS;
+    async fn a_snooze_is_said_once_when_it_ends_and_not_before() {
         let (s, aid) = store_with_artifact().await;
         let at = 10_000_000;
         let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
         s.mark_notified(std::slice::from_ref(&id), at).await.unwrap();
         assert_eq!(s.next_notify_at().await.unwrap(), None);
-        let until = at + 86_400;
+
+        // An hour, which is shorter than every lead above the last one. On the
+        // full ladder the cleared `notified_at` owed one of those rungs at
+        // once, and the operator was pushed the reminder they had just put
+        // aside, on the next queue tick.
+        let until = at + 3_600;
         s.snooze(&id, until).await.unwrap();
-        let first = Some(until - LEADS[0]);
-        assert_eq!(s.next_notify_at().await.unwrap(), first, "the ladder is re-run from the new time");
-        assert_eq!(s.due_owed(at + 1).await.unwrap().len(), 1, "and a short snooze is owed the moment it lands");
+        assert_eq!(s.next_notify_at().await.unwrap(), Some(until), "the snooze's own end, and nothing sooner");
+        assert!(s.due_owed(at + 1).await.unwrap().is_empty(), "not the second it was put aside");
+        assert!(s.due_owed(until - 1).await.unwrap().is_empty(), "nor at any lead inside it");
+
+        let owed = s.due_owed(until).await.unwrap();
+        assert_eq!(owed.len(), 1, "and then it comes back, once");
+        assert_eq!(owed[0].moment.id, id);
+        s.mark_notified(std::slice::from_ref(&id), until).await.unwrap();
+        assert!(s.due_owed(until + 10_000).await.unwrap().is_empty(), "one rung, said");
+        assert_eq!(s.next_notify_at().await.unwrap(), None);
     }
 
     #[tokio::test]

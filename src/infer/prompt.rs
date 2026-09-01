@@ -885,8 +885,6 @@ pub fn gap_label_schema() -> serde_json::Value {
     })
 }
 
-/// The label out of the reply, trimmed of quotes and trailing punctuation;
-/// an empty label is an error, because a cluster must be called something.
 pub const REMIND_SYSTEM: &str = "You read one note somebody wrote to themselves and say when they \
 want to be reminded. Answer with JSON only. `when` is the local wall-clock date and time as \
 ISO-8601 without a zone (e.g. 2026-09-04T09:00), or null if the note names no time at all. \
@@ -931,6 +929,8 @@ pub fn parse_remind(reply: &str) -> Result<Remind> {
         .map_err(|e| Error::MalformedLlmOutput(format!("remind reply was not the schema: {e}")))
 }
 
+/// The label out of the reply, trimmed of quotes and trailing punctuation;
+/// an empty label is an error, because a cluster must be called something.
 pub fn parse_gap_label(reply: &str) -> Result<String> {
     let v: serde_json::Value = serde_json::from_str(extract_json(reply))
         .map_err(|e| Error::MalformedLlmOutput(format!("gap label was not JSON: {e}")))?;

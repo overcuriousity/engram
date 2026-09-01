@@ -116,6 +116,14 @@ async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> Result<Response> {
 
 async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>) -> Result<Response> {
     let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else { return Err(Error::NotFound) };
+    // Round-tripped through the parse, the way `entry` does it and for the
+    // same reason: chrono reads `%Y-%m-%d` leniently, so `/ui/day/2026-8-30`
+    // parses. Left as it was spelled, that string is what `corpora_by_day`
+    // matches on and what the `metadata["day"]` skip below compares against —
+    // neither of which any entry ever wrote — and the page answered "nothing
+    // on this day" for a day that has entries, over a form that then posted
+    // the non-canonical segment back.
+    let date = day.format("%Y-%m-%d").to_string();
     let tz = zone(Some(&q.tz));
     // The zone as the zone table spells it, never as the query string spelled
     // it: it goes back out on every `prev`/`next` href and in the entry form's
@@ -383,6 +391,25 @@ mod tests {
         assert!(html.contains("Entries"));
         let c = core.store.recent_captures(1).await.unwrap();
         assert_eq!(c[0].2, "journal");
+    }
+
+    #[tokio::test]
+    async fn a_leniently_spelled_day_still_shows_the_day_it_names() {
+        // chrono reads `%Y-%m-%d` leniently, so `2026-8-28` parses and the page
+        // answered 200 — but on the string as it was spelled, which is what
+        // `corpora_by_day` matches and what the `metadata["day"]` skip
+        // compares against. Neither ever matched, so a day holding entries
+        // reported nothing on it, over a form that posted the same spelling
+        // back. `entry` canonicalised; `page` did not.
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        app.clone()
+            .oneshot(form("/ui/day/2026-08-28/entry", &cookie, "text=Long+day.&tz=Europe/Berlin"))
+            .await
+            .unwrap();
+        let html = body_of(app.oneshot(get("/ui/day/2026-8-28?tz=Europe/Berlin", &cookie)).await.unwrap()).await;
+        assert!(html.contains("Long day."), "the day's own entry: {html}");
+        assert!(html.contains(r#"action="/ui/day/2026-08-28/entry""#), "and the form posts the canonical day");
     }
 
     #[tokio::test]

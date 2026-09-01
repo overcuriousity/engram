@@ -1527,6 +1527,27 @@ impl Store {
         Ok(res.rows_affected())
     }
 
+    /// Start a retired row's clock over from now.
+    ///
+    /// `set_superseded_by` deliberately will not do this: a loser re-pointed
+    /// at a new winner keeps the clock of its first retirement, so a chain of
+    /// supersessions cannot keep a row out of the sweep forever. A rescue is
+    /// the one event that has to, because it is the sweep acting *on* the row:
+    /// the candidate now has a living rewrite, and the next sweep should judge
+    /// it against that rewrite an age later, not on the very next interval.
+    /// Without this the rescued row stayed older than `min_age_days`, sorted
+    /// first by `ORDER BY retired_at ASC`, and bought one judge call — and on
+    /// a second `valuable` verdict one more synthesized rewrite of the same
+    /// content — every run.
+    pub async fn restamp_retired(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL")
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Copy a row's text into the graveyard, then wipe it — one transaction,
     /// copy first, so no failure order can destroy text that was not saved.
     /// The stub keeps every column other rows hold threads into (`id`,

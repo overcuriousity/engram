@@ -287,8 +287,6 @@ impl Control {
             .collect())
     }
 
-    /// `false` when there is no such subject, so the grant CLI can say so
-    /// rather than report success on a typo nobody will ever log in as.
     /// Where this user's due reminders go. `{}` when nothing is configured.
     pub async fn notify(&self, subject: &str) -> Result<serde_json::Value> {
         let raw: Option<String> = sqlx::query_scalar("SELECT notify FROM users WHERE subject = ?")
@@ -310,6 +308,8 @@ impl Control {
         Ok(())
     }
 
+    /// `false` when there is no such subject, so the grant CLI can say so
+    /// rather than report success on a typo nobody will ever log in as.
     pub async fn set_can_judge(&self, subject: &str, on: bool) -> Result<bool> {
         Ok(
             sqlx::query("UPDATE users SET can_judge = ? WHERE subject = ?")
