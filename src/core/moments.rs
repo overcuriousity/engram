@@ -58,14 +58,15 @@ pub const CUES: &[(Intent, &str)] = &[
 /// Sentence-shaped on purpose: the embedder places "remind me to X" near other
 /// requests for future action, and a bare cue word near a dictionary entry.
 ///
-/// Four phrasings per intent per language, and the last two of each four carry
-/// no cue word at all. That is where this table earns its keep: `CUES` already
-/// catches *erinnere mich* by string match, and nothing catches *nicht
-/// vergessen: am Freitag die Rechnung abschicken* except a vector near one of
-/// these. `classify` takes the maximum over the table, so a phrasing added
-/// here can only widen what is recognised — it cannot pull an existing match
-/// off its prototype. What it does move is `intent_line`, which is measured
-/// against this same table over the base's own vectors and so re-fits itself.
+/// Four phrasings per intent per language at minimum, and the last two of the
+/// first four carry no cue word at all. That is where this table earns its
+/// keep: `CUES` already catches *erinnere mich* by string match, and nothing
+/// catches *nicht vergessen: am Freitag die Rechnung abschicken* except a
+/// vector near one of these. `classify` takes the maximum over the table, so
+/// a phrasing added here can only widen what is recognised — it cannot pull
+/// an existing match off its prototype. What it does move is `intent_line`,
+/// which is measured against this same table over the base's own vectors and
+/// so re-fits itself.
 ///
 /// The language tag is carried in the row rather than in a parallel array: a
 /// tag is not recoverable from a sentence, and at eighty rows two lists kept
@@ -92,6 +93,10 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
     (Intent::Remind, "de", "erinnere mich nächste woche an die steuererklärung"),
     (Intent::Remind, "de", "nicht vergessen: am freitag die rechnung abschicken"),
     (Intent::Remind, "de", "ich muss bis ende des monats den pass verlängern"),
+    // Keyword-fragment style, the way a quick capture is actually typed:
+    // trigger word, then noun phrases, then a day and time, with no verb
+    // and no sentence structure tying them together.
+    (Intent::Remind, "de", "erinnerung termin foto ausweis mittwoch 0900 zimmer a323"),
     (Intent::Journal, "de", "heute war ein langer tag und ich bin müde"),
     (Intent::Journal, "de", "heute morgen endlich den fehler gefunden"),
     (Intent::Journal, "de", "wieder schlecht geschlafen, der ganze nachmittag war für die katz"),
@@ -661,6 +666,22 @@ static AT_TIME: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)\b(?:at|um|à|a las|alle|om|o|saat|в)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|uhr|h)?\b").unwrap()
 });
 
+/// A bare four-digit clock, no colon and no marker: `Mittwoch 0900`. Unsafe as
+/// a general rule — `TIME_AFTER` exists precisely to keep an unmarked number
+/// from being read as an hour — but exactly four digits sitting right after
+/// the day name is not an amount or a house number, and demanding a colon
+/// silently returned nine in the morning for the one shape a phone keypad
+/// naturally produces. Anchored to exactly four digits so a five-digit run
+/// (an ID, a partial date) fails the trailing `\b` and is left alone.
+static TIME_BARE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)^\s*(\d{2})(\d{2})\b").unwrap());
+
+fn time_bare(rest: &str) -> Option<(u32, u32)> {
+    let c = TIME_BARE.captures(rest)?;
+    let hour: u32 = c[1].parse().ok()?;
+    let minute: u32 = c[2].parse().ok()?;
+    (hour <= 23 && minute <= 59).then_some((hour, minute))
+}
+
 /// The second an offset inside the day names, counted off the second the note
 /// was captured — `in 10 minuten`, `in einer halben stunde`, `in 2 Std.`.
 ///
@@ -738,10 +759,11 @@ pub fn relative_date(text: &str, captured_at: i64, tz: Tz) -> Option<Found> {
     // because it demands a joining word and so cannot see that form at all;
     // it still covers *am Freitag den Termin um 14 Uhr*, where the time is not
     // adjacent to the day.
-    let (h, mi) = lower
-        .find(span.as_str())
-        .and_then(|i| time_read(&lower[i + span.len()..]))
+    let after_day = lower.find(span.as_str()).map(|i| &lower[i + span.len()..]);
+    let (h, mi) = after_day
+        .and_then(time_read)
         .or_else(|| AT_TIME.find(&lower).and_then(|m| time_read(&lower[m.start()..])))
+        .or_else(|| after_day.and_then(time_bare))
         .unwrap_or((DEFAULT_HOUR, 0));
     Some(Found { at: stamp(tz, date, h, mi)?, span })
 }
@@ -1446,6 +1468,23 @@ mod tests {
             // A bare number with no colon and no suffix is not a time, which
             // is the whole reason the marker rule exists.
             ("in 3 days 5 apples", "2026-09-02 09:00"),
+        ] {
+            let f = relative_date(text, captured(), berlin());
+            assert_eq!(f.map(|x| local(x.at)).as_deref(), Some(want), "{text}");
+        }
+    }
+
+    /// The one shape `TIME_AFTER` refuses on purpose — no colon, no marker —
+    /// is still a time when it is exactly four digits beside the day.
+    #[test]
+    fn a_bare_four_digit_clock_beside_the_day_is_still_a_time() {
+        for (text, want) in [
+            ("Mittwoch 0900 Zimmer A323", "2026-09-02 09:00"),
+            ("Freitag 1430", "2026-09-04 14:30"),
+            // Five digits is not a clock and falls back to the default hour.
+            ("Freitag 14305", "2026-09-04 09:00"),
+            // An out-of-range hour is not a clock either.
+            ("Freitag 2500", "2026-09-04 09:00"),
         ] {
             let f = relative_date(text, captured(), berlin());
             assert_eq!(f.map(|x| local(x.at)).as_deref(), Some(want), "{text}");

@@ -113,6 +113,13 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
                 })
                 .await?;
             core.store.rearm_remind().await?;
+            if let Err(e) = confirm_created(core, &art, at, tz).await {
+                // Best-effort: a note that failed to say "reminder set" is
+                // still a reminder that was set, and the badge on the
+                // artifact says so regardless of whether a push channel is
+                // configured or reachable.
+                tracing::warn!(error = %e, "could not push the capture-time confirmation");
+            }
         }
         Some(Intent::Journal) | None => {}
     }
@@ -170,6 +177,20 @@ async fn date_reminder(
         candidates.push(o.at);
     }
     (candidates.into_iter().min(), None)
+}
+
+/// The push that says a reminder was just set, at capture time and
+/// independent of the due-time ladder — the only feedback a note gets today
+/// is the ladder itself, which can be days away from the moment somebody
+/// typed it.
+async fn confirm_created(core: &Core, art: &crate::store::artifacts::Chunk, at: Option<i64>, tz: chrono_tz::Tz) -> Result<()> {
+    let opening = art.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(120).collect::<String>();
+    let title = art.title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| opening.clone());
+    let message = match at {
+        Some(at) => format!("{opening}\n{}", crate::web::due::when_words(at, core.clock.now(), tz)),
+        None => opening,
+    };
+    crate::jobs::remind::notify_now(core, &format!("Reminder set: {title}"), &message).await
 }
 
 /// `2026-09-04T09:00` or `2026-09-04` in the reader's zone.
@@ -484,6 +505,36 @@ mod tests {
         let rows = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].moment.source, Source::Cue);
+    }
+
+    /// The reported gap: capture returns before the stage has even run, and
+    /// the only feedback that ever followed was the due-time ladder — days
+    /// away for a reminder set well ahead. This is the second signal, right
+    /// when the intent is resolved, independent of that ladder entirely.
+    ///
+    /// Dated ten days out on purpose: inside the ladder's 48-hour band a
+    /// wake would be armed and due immediately, and `drain` would run it
+    /// too, leaving this test unable to tell the confirmation apart from
+    /// the first rung. Ten days out, only the confirmation fires.
+    #[tokio::test]
+    async fn a_new_reminder_is_confirmed_right_away_not_only_on_the_ladder() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_string_contains("send the invoice"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut core = test_core().await;
+        core.reminder = None;
+        core.store
+            .control
+            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}))
+            .await
+            .unwrap();
+        first_passage(&core, "Remind me in 10 days to send the invoice", "ui", Some("Europe/Berlin")).await;
+        // `expect(1)` on the server verifies on drop: exactly one push, from
+        // the stage itself, while the ladder job it armed stays asleep.
     }
 
     #[tokio::test]

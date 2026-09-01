@@ -283,6 +283,21 @@ impl Store {
             .map(|r| moment_of(&r)))
     }
 
+    /// The open due moment on exactly this artifact, dated or not. Unlike
+    /// `due_for`, not bounded to a horizon: the pane's own "yes, a reminder
+    /// exists here" is a fact about the artifact, not a claim about how soon
+    /// it deserves a place on a list.
+    pub async fn open_due_for_artifact(&self, artifact_id: &str) -> Result<Option<Moment>> {
+        Ok(sqlx::query(
+            "SELECT * FROM moments WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL
+             ORDER BY at IS NULL, at LIMIT 1",
+        )
+        .bind(artifact_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| moment_of(&r)))
+    }
+
     /// What the stage read last time, so a re-read replaces rather than
     /// duplicates. A row somebody set is not the stage's to delete — and
     /// neither is one that has since been acted on. Every embed re-arms this
@@ -730,6 +745,26 @@ mod tests {
         s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
         let hit = s.due_for(std::slice::from_ref(&aid), 5_000, 9_000).await.unwrap();
         assert_eq!(hit.get(&aid), Some(&1_000), "overdue still lifts");
+    }
+
+    /// Unlike `due_for`, no horizon: an artifact's own pane asks whether it
+    /// carries a reminder at all, not whether one is close enough to belong
+    /// on a list.
+    #[tokio::test]
+    async fn open_due_for_artifact_ignores_the_horizon_but_not_done_or_undated() {
+        let (s, aid) = store_with_artifact().await;
+        assert!(s.open_due_for_artifact(&aid).await.unwrap().is_none(), "nothing set yet");
+
+        let far = s.insert_moment(&due(&aid, Some(50_000_000))).await.unwrap();
+        let hit = s.open_due_for_artifact(&aid).await.unwrap().unwrap();
+        assert_eq!(hit.id, far, "far outside any horizon, still the pane's own reminder");
+
+        s.mark_done(&far, 900).await.unwrap();
+        assert!(s.open_due_for_artifact(&aid).await.unwrap().is_none(), "done is not open");
+
+        s.insert_moment(&due(&aid, None)).await.unwrap();
+        let undated = s.open_due_for_artifact(&aid).await.unwrap().unwrap();
+        assert!(undated.at.is_none(), "an undated reminder is still open, just not lifted by ago_or_ahead");
     }
 
     #[tokio::test]

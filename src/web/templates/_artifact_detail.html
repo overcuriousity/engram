@@ -201,6 +201,9 @@
              model, so a chip row here would show whatever a caller set on this
              one artifact and nothing on the rest. #}
           {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
+          {% if let Some(due) = d.due_in %}
+          <span class="badge badge-due" title="A reminder you set on this is due">due {{ due }}</span>
+          {% endif %}
         </div>
         {# `view=detail`: the same PUT answers the corpus page with a card and
            this pane with a pane. Without it the save would swap this whole

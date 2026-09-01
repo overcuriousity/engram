@@ -225,6 +225,12 @@ pub struct ArtifactDetail {
     /// is what this resembles, the other is what it has been reached for
     /// together with, and they answer different questions.
     pub seen_together: Vec<SeenTogether>,
+    /// "in 2 h", "3 d ago", … when this artifact carries an open reminder —
+    /// regardless of `time.horizon_hours`, unlike the same badge on a result
+    /// row: opening the artifact itself is the one place a reminder set for
+    /// next week still deserves to be seen immediately, not only once it
+    /// enters the band a list shows.
+    pub due_in: Option<String>,
 }
 
 impl ArtifactDetail {
@@ -3078,7 +3084,21 @@ pub(crate) async fn build_artifact_detail(
     // The same rule as `artifact_title`, and for the same reason: an ordinal in
     // the ingest is not a name. Taken before the struct, which moves `c`.
     let title = artifact_title(&c);
+    // A missing due moment is not a missing pane: most artifacts carry none.
+    // Undated reminders are left out, the same as `due_for` leaves them out of
+    // the list badge — there is no "in 2 h" to say about one.
+    let due_in = core
+        .store
+        .open_due_for_artifact(artifact_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(artifact_id, error = %e, "no due state for this pane");
+            None
+        })
+        .and_then(|m| m.at)
+        .map(crate::web::judge::ago_or_ahead);
     Ok(ArtifactDetail {
+        due_in,
         continues_at,
         related,
         seen_together,
@@ -6267,6 +6287,50 @@ mod tests {
 
         assert!(page.contains("Source"), "{page}");
         assert!(!page.contains(r#"class="lineage""#), "{page}");
+    }
+
+    /// The reported gap: a reminder was captured and nothing on the artifact
+    /// itself ever said so. Unlike the same badge in the result list, this
+    /// one is not bounded to `time.horizon_hours` — the pane is where an
+    /// operator checks one specific note, and a reminder set for next week
+    /// is exactly the kind `due_for`'s horizon leaves out of that list.
+    #[tokio::test]
+    async fn the_pane_badges_an_open_reminder_however_far_out_it_is() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("water the plants", "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let c = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        core.store
+            .insert_moment(&crate::store::moments::NewMoment {
+                artifact_id: c.clone(),
+                kind: crate::store::moments::Kind::Due,
+                at: Some(crate::store::now() + 30 * 86_400),
+                tz: "UTC".into(),
+                rule: None,
+                source: crate::store::moments::Source::Set,
+                span: None,
+            })
+            .await
+            .unwrap();
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
+        assert!(page.contains("badge-due"), "{page}");
+        assert!(page.contains("30 days"), "far outside the 48h horizon, still shown: {page}");
+    }
+
+    #[tokio::test]
+    async fn the_pane_of_an_artifact_with_no_reminder_carries_no_due_badge() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core.ingest("just a note", "web", None).await.unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let c = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
+        assert!(!page.contains("badge-due"), "{page}");
     }
 
     /// The corpus page could edit an artifact and the pane could not, on the

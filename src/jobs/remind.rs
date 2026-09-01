@@ -125,6 +125,48 @@ pub fn compose(rows: &[crate::store::moments::DueRow], now: i64) -> (String, Str
     (format!("{} reminders", rows.len()), body.join("\n"))
 }
 
+/// One title and message, to every configured channel. `Ok` once any channel
+/// has taken it; the error is returned only when every channel refused.
+/// Shared by the due-time ladder and by an immediate, ad-hoc confirmation
+/// that is not on the ladder at all — neither reads or writes `notified_at`,
+/// so the two can never step on each other's delivery state.
+async fn deliver(http: &reqwest::Client, targets: &[Target], title: &str, message: &str) -> Result<()> {
+    let mut delivered = false;
+    let mut failure = None;
+    for t in targets {
+        match push(http, t, title, message).await {
+            Ok(()) => delivered = true,
+            Err(e) => {
+                tracing::warn!(error = %e, "a push channel refused");
+                failure = Some(e);
+            }
+        }
+    }
+    if !delivered {
+        return Err(failure.expect("targets is non-empty, so a wake with no delivery has an error"));
+    }
+    Ok(())
+}
+
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))
+}
+
+/// A push right now, to whatever channels the user has configured, entirely
+/// outside the due-time ladder — no row is read or marked. For a confirmation
+/// that something just happened rather than that something is owed: silent
+/// when nobody has configured a channel, same as the ladder itself.
+pub async fn notify_now(core: &Core, title: &str, message: &str) -> Result<()> {
+    let targets = notify_targets(&core.store.control.notify(&core.store.subject).await?);
+    if targets.is_empty() {
+        return Ok(());
+    }
+    deliver(&http_client()?, &targets, title, message).await
+}
+
 /// Post what this wake owes as one message, record every moment it covered,
 /// and let the queue re-arm for the next rung.
 ///
@@ -143,25 +185,8 @@ pub async fn run(core: &Core) -> Result<()> {
     if owed.is_empty() {
         return Ok(());
     }
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
     let (title, message) = compose(&owed, now);
-    let mut delivered = false;
-    let mut failure = None;
-    for t in &targets {
-        match push(&http, t, &title, &message).await {
-            Ok(()) => delivered = true,
-            Err(e) => {
-                tracing::warn!(error = %e, "a push channel refused");
-                failure = Some(e);
-            }
-        }
-    }
-    if !delivered {
-        return Err(failure.expect("targets is non-empty, so a wake with no delivery has an error"));
-    }
+    deliver(&http_client()?, &targets, &title, &message).await?;
     let ids: Vec<String> = owed.iter().map(|r| r.moment.id.clone()).collect();
     core.store.mark_notified(&ids, now).await?;
     // The re-arm is NOT here. `arm_at` only moves a row in `pending`, `done`
