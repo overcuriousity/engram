@@ -1651,7 +1651,7 @@ mod tests {
 
     #[test]
     fn splitting_by_lines_always_returns_something_smaller() {
-        let counter = crate::infer::budget::TokenCounter;
+        let counter = crate::infer::budget::TokenCounter::default();
         // A single line far over the limit, with no whitespace to cut on.
         let blob = "x".repeat(4000);
         let parts = split_by_lines(&blob, 100, &counter);

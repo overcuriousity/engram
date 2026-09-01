@@ -955,6 +955,10 @@ fn default_chunk_tokens() -> usize {
 pub struct InferConfig {
     pub synthesis: SynthesisMode,
     pub segment_tokens: usize,
+    /// Path or http(s) URL of a HF-format tokenizer.json. A URL is fetched
+    /// once and cached beside the store. Unset: the bundled default (Qwen
+    /// family). See `TokenCounter::load` — never a startup failure.
+    pub tokenizer: Option<String>,
     /// `None` is allowed only at `synthesis = "off"`.
     pub synthesize: Option<SynthesizeRole>,
     pub embed: EmbedRole,
@@ -975,6 +979,8 @@ pub struct RawInferConfig {
     synthesis: SynthesisMode,
     #[serde(default = "default_segment_tokens")]
     segment_tokens: usize,
+    #[serde(default)]
+    tokenizer: Option<String>,
     #[serde(default)]
     synthesize: Option<RawSynthesizeRole>,
     embed: EmbedRole,
@@ -1192,6 +1198,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
         Ok(InferConfig {
             synthesis: raw.synthesis,
             segment_tokens: raw.segment_tokens,
+            tokenizer: raw.tokenizer,
             synthesize,
             embed: raw.embed,
             ask,
@@ -2515,6 +2522,7 @@ impl Config {
             infer: InferConfig {
                 synthesis: SynthesisMode::Eager,
                 segment_tokens: DEFAULT_SEGMENT_TOKENS,
+                tokenizer: None,
                 synthesize: Some(SynthesizeRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),

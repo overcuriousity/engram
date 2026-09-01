@@ -456,7 +456,7 @@ pub struct HttpSynthesizer {
 /// What a chat message list costs as a prompt: the text of every `content`,
 /// which is everything an endpoint counts that this side controls.
 fn message_tokens(messages: &serde_json::Value) -> usize {
-    let counter = crate::infer::budget::TokenCounter;
+    let counter = crate::infer::budget::TokenCounter::default();
     messages
         .as_array()
         .map(|ms| {
@@ -1108,7 +1108,7 @@ impl Completer for HttpCompleter {
     /// same structurally impossible request forever. `InferenceRejected` is
     /// permanent, which is what a prompt too large for its window is.
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        let counter = crate::infer::budget::TokenCounter;
+        let counter = crate::infer::budget::TokenCounter::default();
         let spent = counter.count(system) + counter.count(user);
         let Some(ceiling) = crate::infer::budget::checked_ceiling_for_prompt(
             self.context_tokens,
@@ -2105,7 +2105,7 @@ mod tests {
 
         let body = sent_body(&server).await;
         let sent = body["max_tokens"].as_u64().unwrap() as usize;
-        let counter = crate::infer::budget::TokenCounter;
+        let counter = crate::infer::budget::TokenCounter::default();
         let prompt = counter.count("s") + counter.count(&user);
         assert!(
             sent < cfg.max_output_tokens,

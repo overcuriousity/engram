@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn short_text_is_a_single_window() {
-        let w = split_into_segments("just a line", &TokenCounter, 1000);
+        let w = split_into_segments("just a line", &TokenCounter::default(), 1000);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].text, "just a line");
         assert_eq!(w[0].start_line, 1);
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn splits_on_headings_before_blank_lines() {
         let text = "## A\nalpha content here\n\n## B\nbeta content here\n\n## C\ngamma content";
-        let w = split_into_segments(text, &TokenCounter, 12);
+        let w = split_into_segments(text, &TokenCounter::default(), 12);
         assert!(w.len() >= 2);
         assert!(
             w[1].text.starts_with("## "),
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn windows_carry_one_heading_of_overlap() {
         let text = "## A\n".to_string() + &"alpha ".repeat(50) + "\n\n## B\n" + &"beta ".repeat(50);
-        let w = split_into_segments(&text, &TokenCounter, 40);
+        let w = split_into_segments(&text, &TokenCounter::default(), 40);
         assert!(w.len() >= 2);
         for win in &w[1..] {
             assert!(
@@ -265,7 +265,7 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_segments(&text, &TokenCounter, 30);
+        let w = split_into_segments(&text, &TokenCounter::default(), 30);
         assert_eq!(w[0].start_line, 1);
         assert_eq!(w.last().unwrap().end_line, 100);
         for pair in w.windows(2) {
@@ -282,13 +282,13 @@ mod tests {
             .map(|i| format!("prose line number {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_segments(&text, &TokenCounter, 50);
+        let w = split_into_segments(&text, &TokenCounter::default(), 50);
         assert!(w.len() > 1, "unstructured text must still be windowed");
         for win in &w {
             assert!(
-                TokenCounter.count(&win.text) <= 50 * 2,
+                TokenCounter::default().count(&win.text) <= 50 * 2,
                 "window badly over budget: {} tokens",
-                TokenCounter.count(&win.text)
+                TokenCounter::default().count(&win.text)
             );
         }
     }
@@ -299,7 +299,7 @@ mod tests {
         // line. Returning it as a single window sent it to the model whole,
         // where it overflowed the context and retried with growing backoff
         // forever, because a job has no terminal state.
-        let counter = TokenCounter;
+        let counter = TokenCounter::default();
         let blob = "word ".repeat(4000);
         assert!(!blob.contains('\n'), "the point is that there are no lines");
 
@@ -326,7 +326,7 @@ mod tests {
         // numbers from, so every window after the blob claimed lines the
         // document does not have — and those numbers are what an artifact's
         // corpus_span is clamped into and rendered from.
-        let counter = TokenCounter;
+        let counter = TokenCounter::default();
         let mut lines = vec!["word ".repeat(2000)];
         for i in 1..=40 {
             lines.push(format!("ordinary line {i} with a few words on it"));
@@ -366,7 +366,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let w = split_into_segments(&text, &TokenCounter, 60);
+        let w = split_into_segments(&text, &TokenCounter::default(), 60);
         let joined = w
             .iter()
             .map(|x| x.text.clone())
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn empty_input_produces_nothing() {
-        assert!(split_into_segments("   \n  ", &TokenCounter, 100).is_empty());
+        assert!(split_into_segments("   \n  ", &TokenCounter::default(), 100).is_empty());
     }
 
     #[test]
@@ -405,7 +405,7 @@ mod tests {
         // exists to cut at.
         let body = "word ".repeat(40); // ~57 tokens
         let text = format!("## A\n\n{body}\n\n## B\n\n{body}\n\n## C\n\n{body}\n\n## D\n\n{body}");
-        let ws = split_into_segments(&text, &TokenCounter, 100);
+        let ws = split_into_segments(&text, &TokenCounter::default(), 100);
         assert!(ws.len() >= 3, "{}", ws.len());
         for w in &ws {
             let own: String = w
@@ -415,9 +415,9 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(
-                TokenCounter.count(&own) <= 100,
+                TokenCounter::default().count(&own) <= 100,
                 "window over budget ({} tokens): {:?}",
-                TokenCounter.count(&own),
+                TokenCounter::default().count(&own),
                 own
             );
         }

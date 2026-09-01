@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn a_window_that_fits_is_one_passage_whose_span_is_the_window() {
         let w = window("para one\n\npara two", 10, 0);
-        let p = split_passages(&w, &TokenCounter, 1000);
+        let p = split_passages(&w, &TokenCounter::default(), 1000);
         assert_eq!(p.len(), 1);
         assert_eq!((p[0].start_line, p[0].end_line), (10, 12));
         assert_eq!(p[0].text, "para one\n\npara two");
@@ -327,7 +327,7 @@ mod tests {
             .collect();
         let text = paras.join("\n\n");
         let w = window(&text, 1, 0);
-        let p = split_passages(&w, &TokenCounter, 40);
+        let p = split_passages(&w, &TokenCounter::default(), 40);
         assert!(p.len() > 1, "{}", p.len());
         assert_eq!(p[0].start_line, 1);
         assert_eq!(p.last().unwrap().end_line, w.end_line);
@@ -345,7 +345,7 @@ mod tests {
         // A continuation window: the splitter carried "## Recovery" in from
         // the previous window as line 1 of its text.
         let w = window("## Recovery\nstep three\nstep four", 40, 1);
-        let p = split_passages(&w, &TokenCounter, 1000);
+        let p = split_passages(&w, &TokenCounter::default(), 1000);
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].title.as_deref(), Some("Recovery"));
         assert_eq!(p[0].text, "step three\nstep four");
@@ -360,7 +360,7 @@ mod tests {
             "more mount words ".repeat(12)
         );
         let w = window(&body, 1, 0);
-        let p = split_passages(&w, &TokenCounter, 40);
+        let p = split_passages(&w, &TokenCounter::default(), 40);
         assert!(p.len() >= 3, "{}", p.len());
         // The heading opens its own passage, which holds the heading line
         // verbatim and is titled by it; the intro line before it stands alone
@@ -391,7 +391,7 @@ mod tests {
             "second part words ".repeat(12)
         );
         let w = window(&body, 20, 1);
-        let p = split_passages(&w, &TokenCounter, 40);
+        let p = split_passages(&w, &TokenCounter::default(), 40);
         assert!(p.len() >= 2);
         assert!(
             p.iter().all(|x| x.title.as_deref() == Some("Outer")),

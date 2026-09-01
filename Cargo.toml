@@ -38,7 +38,9 @@ async-stream = "0.3"
 # Already in the tree by way of axum and sqlx; named here because this uses it
 # directly.
 tokio-stream = "0.1"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream"] }
+# `blocking` is for exactly one call: the one-time tokenizer download at boot,
+# which runs on its own OS thread — see `infer::budget::fetch_blocking`.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream", "blocking"] }
 pulldown-cmark = "0.13.4"
 ammonia = "4.1.4"
 argon2 = { version = "0.5.3", features = ["std", "password-hash"] }
@@ -100,6 +102,7 @@ regex = "1"
 iana-time-zone = "0.1"
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 crossterm = "0.29.0"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 [dev-dependencies]
 # `test-util` is not part of tokio's `full`. It carries the pausable clock the

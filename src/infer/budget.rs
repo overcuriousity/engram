@@ -5,15 +5,98 @@ use super::SynthesisBudget;
 /// rather than producing single-word chunks.
 pub const MIN_SEGMENT_TOKENS: usize = 256;
 
-/// Token counts for budgets. A character estimate, deliberately pessimistic:
-/// 3.5 characters per token undercounts nothing for English prose and code,
-/// so budgets stay conservative.
-pub struct TokenCounter;
+/// Token counts for budgets. A real tokenizer where one is loadable —
+/// bundled, from a configured path, or from a once-downloaded URL — and the
+/// pessimistic chars/3.5 estimate where none is. `Default` is the estimator
+/// alone, which is what every test runs on so size-sensitive assertions keep
+/// their arithmetic.
+#[derive(Default)]
+pub struct TokenCounter {
+    tok: Option<tokenizers::Tokenizer>,
+}
+
+/// The tokenizer of the model family the example config serves (Qwen, shared
+/// across the family). An accuracy default, not a requirement: `infer.tokenizer`
+/// points at any HF-format tokenizer.json, and every failure below falls back
+/// to the estimate rather than refusing startup.
+const BUNDLED: &[u8] = include_bytes!("../../assets/tokenizer.json");
 
 impl TokenCounter {
     pub fn count(&self, text: &str) -> usize {
-        estimate(text)
+        match &self.tok {
+            Some(t) => t
+                .encode_fast(text, false)
+                .map(|e| e.len())
+                .unwrap_or_else(|_| estimate(text)),
+            None => estimate(text),
+        }
     }
+
+    /// Where a URL's one-time download lands: keyed by a hash of the URL so a
+    /// changed link re-fetches, beside the store so it survives restarts.
+    pub fn cache_path(cache_dir: &std::path::Path, url: &str) -> std::path::PathBuf {
+        use sha2::{Digest, Sha256};
+        let h = hex::encode(&Sha256::digest(url.as_bytes())[..8]);
+        cache_dir.join(format!("tokenizer-{h}.json"))
+    }
+
+    /// Never an error: a tokenizer is an accuracy upgrade, not a reason to
+    /// refuse startup. Each fallback logs what it fell back from.
+    ///
+    /// A URL is fetched on its own OS thread — `reqwest::blocking` builds a
+    /// private runtime there, so this is safe whether or not the caller sits
+    /// inside tokio — written to the cache, and read from the cache on every
+    /// later boot. No cache and no network: the estimator, until next boot.
+    pub fn load(spec: Option<&str>, cache_dir: &std::path::Path) -> TokenCounter {
+        let from_bytes = |b: &[u8], what: &str| {
+            tokenizers::Tokenizer::from_bytes(b)
+                .map_err(|e| tracing::warn!(error = %e, what, "tokenizer did not parse; falling back"))
+                .ok()
+        };
+        let tok = match spec {
+            Some(s) if s.starts_with("http://") || s.starts_with("https://") => {
+                let cache = Self::cache_path(cache_dir, s);
+                let bytes = match std::fs::read(&cache) {
+                    Ok(b) => Some(b),
+                    Err(_) => fetch_blocking(s).map(|b| {
+                        let _ = std::fs::create_dir_all(cache_dir);
+                        if let Err(e) = std::fs::write(&cache, &b) {
+                            tracing::warn!(error = %e, "could not cache the tokenizer; it will re-download next boot");
+                        }
+                        b
+                    }),
+                };
+                bytes
+                    .and_then(|b| from_bytes(&b, "downloaded"))
+                    .or_else(|| from_bytes(BUNDLED, "bundled"))
+            }
+            Some(p) => std::fs::read(p)
+                .map_err(|e| tracing::warn!(error = %e, path = p, "tokenizer path unreadable; using the bundled default"))
+                .ok()
+                .and_then(|b| from_bytes(&b, "configured"))
+                .or_else(|| from_bytes(BUNDLED, "bundled")),
+            None => from_bytes(BUNDLED, "bundled"),
+        };
+        TokenCounter { tok }
+    }
+}
+
+/// One GET on its own thread, so the private runtime `reqwest::blocking`
+/// spins up cannot collide with a tokio runtime the caller may be on.
+fn fetch_blocking(url: &str) -> Option<Vec<u8>> {
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        reqwest::blocking::get(&url)
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.bytes())
+            .map(|b| b.to_vec())
+    })
+    .join()
+    .ok()
+    .and_then(|r| {
+        r.map_err(|e| tracing::warn!(error = %e, "tokenizer download failed; estimator in use until next boot"))
+            .ok()
+    })
 }
 
 /// `chars * 2 / 7` is `chars / 3.5` in integer arithmetic.
@@ -152,6 +235,41 @@ mod tests {
     use super::*;
     use crate::infer::SynthesisBudget;
 
+    #[test]
+    fn the_bundled_tokenizer_counts_and_differs_from_the_estimator() {
+        let real = TokenCounter::load(None, std::path::Path::new("/nonexistent-cache"));
+        let est = TokenCounter::default();
+        let text = "Der Bericht muss bis Freitag um 16:00 abgegeben werden.";
+        assert!(real.count(text) > 0);
+        // The estimator is chars*2/7; a real BPE count differs on this input.
+        assert_ne!(real.count(text), est.count(text));
+    }
+
+    #[test]
+    fn a_bad_path_falls_back_to_the_bundled_tokenizer_not_a_failure() {
+        let c = TokenCounter::load(Some("/no/such/file.json"), std::path::Path::new("/tmp"));
+        let bundled = TokenCounter::load(None, std::path::Path::new("/tmp"));
+        assert_eq!(c.count("hello world"), bundled.count("hello world"));
+    }
+
+    #[test]
+    fn a_cached_url_download_is_read_from_the_cache_file() {
+        // Seed the cache the way a first boot's download would, then "load"
+        // the URL with no network: the cache hit is the behavior under test.
+        let dir = std::env::temp_dir().join(format!("tok-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = "https://example.invalid/tokenizer.json";
+        let cache = TokenCounter::cache_path(&dir, url);
+        std::fs::write(&cache, BUNDLED).unwrap();
+        let c = TokenCounter::load(Some(url), &dir);
+        assert_ne!(
+            c.count("hello world"),
+            TokenCounter::default().count("hello world"),
+            "the cached real tokenizer must be in use"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn budget(ctx: usize, max_out: usize, ratio: f32) -> SynthesisBudget {
         SynthesisBudget {
             context_tokens: ctx,
@@ -286,7 +404,7 @@ mod tests {
 
     #[test]
     fn estimate_counter_is_conservative() {
-        let c = TokenCounter;
+        let c = TokenCounter::default();
         // 35 characters / 3.5 = 10 tokens.
         assert_eq!(c.count(&"a".repeat(35)), 10);
         assert_eq!(c.count(""), 0);
@@ -296,13 +414,13 @@ mod tests {
     fn estimate_counts_characters_not_bytes() {
         // Multi-byte text must not be counted as if every byte were a char,
         // or every German or Japanese source would be split far too small.
-        let c = TokenCounter;
+        let c = TokenCounter::default();
         assert_eq!(c.count(&"ä".repeat(35)), 10);
     }
 
     #[test]
     fn pack_stops_at_the_budget() {
-        let c = TokenCounter;
+        let c = TokenCounter::default();
         let items: Vec<String> = (0..5).map(|_| "x".repeat(35)).collect(); // 10 tokens each
         assert_eq!(pack_by_budget(&items, &c, 25), 2);
         assert_eq!(pack_by_budget(&items, &c, 1000), 5);

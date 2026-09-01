@@ -519,7 +519,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         synthesis: engram::config::SynthesisMode::Eager,
         segment_tokens: engram::config::DEFAULT_SEGMENT_TOKENS,
         chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
-        counter: Arc::new(engram::infer::budget::TokenCounter),
+        counter: Arc::new(engram::infer::budget::TokenCounter::default()),
         background: Arc::new(engram::core::background::Background::default()),
         recommend: Default::default(),
         ui: Default::default(),

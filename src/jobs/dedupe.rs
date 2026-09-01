@@ -190,7 +190,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         // before it gets here when there is no synthesize role at all.
         return Ok(());
     };
-    let counter = crate::infer::budget::TokenCounter;
+    let counter = crate::infer::budget::TokenCounter::default();
     let window = judge.context_tokens();
     let ceiling = judge.max_output_tokens();
     let system = counter.count(crate::infer::prompt::DEDUPE_SYSTEM);

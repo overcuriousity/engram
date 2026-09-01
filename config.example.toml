@@ -140,6 +140,13 @@ synthesis = "earned"
 # Window size when there is no [infer.synthesize] to derive one from, in
 # engram's estimator tokens. Ignored when a synthesizer is configured.
 # segment_tokens = 4096
+# How tokens are counted for every budget: threshold, windows, prompts. A
+# HF-format tokenizer.json, as a path or an http(s) link. A link is fetched
+# once and cached beside the store; a changed link re-fetches. Unset, the
+# bundled Qwen-family tokenizer counts, and if nothing loads a pessimistic
+# character estimate does — a tokenizer here is an accuracy upgrade, never a
+# startup requirement. Gated HF repos: download by hand and use a path.
+# tokenizer = "https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json"
 
 # The working tier: everything that runs unattended, in bulk, and is paid for
 # by the corpus rather than by a person waiting.

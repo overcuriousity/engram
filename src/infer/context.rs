@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn the_first_window_gets_no_opening_and_no_preceding_context() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 0, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 0, budget(), &TokenCounter::default());
         assert_eq!(c.opening, None, "window 0 already contains the opening");
         assert_eq!(c.before, None, "window 0 has nothing before it");
         assert!(c.after.is_some(), "window 0 has a window after it");
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn the_last_window_gets_no_following_context() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter::default());
         assert_eq!(c.after, None);
         assert!(c.before.is_some());
         assert!(c.opening.is_some());
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn a_middle_window_gets_all_three_blocks_from_the_right_places() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default());
 
         assert!(
             c.opening
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn every_block_stays_inside_its_budget() {
-        let counter = TokenCounter;
+        let counter = TokenCounter::default();
         let w = windows();
         let c = WindowContext::build(&refs(&w), 1, budget(), &counter);
         assert!(counter.count(c.opening.as_deref().unwrap()) <= 30);
@@ -251,7 +251,7 @@ mod tests {
         // newlines used to re-derive as the whole document for window 0 and as
         // nothing at all for every window after it.
         let w: Vec<String> = (0..4).map(|i| format!("part{i} ").repeat(40)).collect();
-        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter::default());
         assert!(
             c.before.as_deref().unwrap().contains("part1"),
             "got {:?}",
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn a_zero_budget_produces_nothing() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 1, ContextBudget::default(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 1, ContextBudget::default(), &TokenCounter::default());
         assert_eq!(c, WindowContext::default());
         assert!(c.is_empty());
         assert_eq!(c.blocks().count(), 0);
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn an_index_past_the_end_produces_nothing() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 9, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 9, budget(), &TokenCounter::default());
         assert_eq!(c, WindowContext::default());
     }
 
@@ -286,8 +286,8 @@ mod tests {
         // A retry rebuilds context from the stored windows alone, so the same
         // rows must always give the same bytes.
         let w = windows();
-        let a = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter);
-        let b = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter);
+        let a = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default());
+        let b = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default());
         assert_eq!(a, b);
     }
 
@@ -295,13 +295,13 @@ mod tests {
     fn blocks_yields_every_populated_block() {
         let w = windows();
         assert_eq!(
-            WindowContext::build(&refs(&w), 1, budget(), &TokenCounter)
+            WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default())
                 .blocks()
                 .count(),
             3
         );
         assert_eq!(
-            WindowContext::build(&refs(&w), 0, budget(), &TokenCounter)
+            WindowContext::build(&refs(&w), 0, budget(), &TokenCounter::default())
                 .blocks()
                 .count(),
             1

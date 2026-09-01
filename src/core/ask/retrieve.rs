@@ -519,11 +519,11 @@ mod tests {
             .chain(first.reached.iter())
             .map(block)
             .collect();
-        let kept_one = pack_by_budget(&one, &TokenCounter, budget);
+        let kept_one = pack_by_budget(&one, &TokenCounter::default(), budget);
 
         let merged = merge(vec![first, part(&["big"], &[])]);
         let two: Vec<String> = merged.hits.iter().map(block).collect();
-        let kept_two = pack_by_budget(&two, &TokenCounter, budget);
+        let kept_two = pack_by_budget(&two, &TokenCounter::default(), budget);
 
         assert_eq!(merged.hits[1].artifact_id, "big", "the hit packs second");
         assert!(
@@ -620,7 +620,7 @@ mod tests {
         let above = cut(&[0.9, 0.88, 0.86, 0.20, 0.19]);
         // Ten-token blocks against a budget that holds two.
         let blocks: Vec<String> = (0..above).map(|_| "x".repeat(35)).collect();
-        let kept = pack_by_budget(&blocks, &TokenCounter, 25);
+        let kept = pack_by_budget(&blocks, &TokenCounter::default(), 25);
         assert!(kept < above, "the window must cut below the cliff: {kept}");
     }
 
