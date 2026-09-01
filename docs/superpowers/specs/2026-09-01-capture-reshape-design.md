@@ -7,9 +7,14 @@ journal entry, or plain note), replaces the hand-rolled chunker and the
 character estimator with the industry pieces, and removes the judge deck page
 whose work the inline eval buttons already do.
 
-Decided with the operator on 2026-09-01. The mode key dies, the no-model
-product state dies with it, promotion survives, the moments store survives,
-the prototype classifier and every date rule do not.
+Decided with the operator on 2026-09-01, and strengthened the same day: the
+mode key dies, the no-model product state dies with it, promotion survives,
+the moments store survives, the prototype classifier and every date rule do
+not. Every capture is verbatim-first — a small one is synthesized
+immediately and its artifacts supersede the passages they cover; the
+synthesis call sees the base's nearest artifacts and answers with judgement,
+events, links and tags in one pass; and the capture box says which fate a
+paste will meet before it is captured.
 
 ## 1. One mode
 
@@ -31,22 +36,33 @@ and the startup error says exactly how.
 
 ## 2. The size fork
 
-After dedup/parking, one decision per corpus, derived from arithmetic — no
-new config key:
+Every capture runs **one pipeline**: store the corpus → verbatim passages
+via the chunker → embed. The fork decides only *when* synthesis happens,
+from arithmetic — no new config key:
 
 - **Small** — the whole text fits one synthesis call's input budget, the
   number `infer::budget::segment_tokens(budget, prompt_overhead)` already
-  computes. One synthesis call at capture. The artifacts it writes are the
-  index; the verbatim corpus is stored and served back as always.
-- **Large** — everything above the line. Verbatim passages via the chunker,
-  embedded, zero capture-time inference. Promotion is unchanged: `promote.rs`
-  still watches decayed activation against `[promote].activation_above`, and
-  a window whose passages earn it is synthesized then. `segments` rows remain
-  the promotion unit.
+  computes. The synthesis job is armed **immediately at capture** instead of
+  waiting for activation. Its artifacts supersede the covered verbatim
+  passages through the existing `supersede_covered` mechanics — the same
+  code promotion runs, activation first, links second, supersede last.
+- **Large** — everything above the line. Zero capture-time inference;
+  promotion is unchanged: `promote.rs` still watches decayed activation
+  against `[promote].activation_above`, and a window whose passages earn it
+  is synthesized then. `segments` rows remain the promotion unit.
 
-This is the `earned` path with one carve-out: a capture small enough to
-synthesize in one call is synthesized now instead of waiting to earn it. A
-capture near the line lands fine on either side; the threshold needs no
+This is the `earned` path with the earning waived where one call covers the
+whole capture — not a second pipeline. What the ordering buys:
+
+- a capture is **searchable the instant its passages embed**, before the
+  model answers;
+- a failed synthesis call leaves a fully functional verbatim capture and a
+  retryable job, never a lost note;
+- the superseded passages stay reachable through lineage, which is the
+  "original in front of you" promise kept by mechanics rather than by
+  prompt discipline.
+
+A capture near the line lands fine on either side; the threshold needs no
 precision beyond what the tokenizer gives it.
 
 ## 3. A real tokenizer, with a generic loading path
@@ -114,23 +130,69 @@ generic reader:
   harness, as the config comment reserves it. This reshape does not move the
   number.
 
-On the **small path only**, the reply gains one top-level field:
+### Neighbor context
+
+The small path's call sees the base. The capture's passages embed before
+synthesis runs (§2), so the job retrieves top-k artifacts from *other*
+corpora with the just-stored dense vectors — no extra embedding call — and
+injects them as a context-only block. `ContextBudget` gains a `neighbors`
+allowance beside `opening` and `overlap`. The prompt directs the model to:
+
+- structure the operator's unstructured paste into a high-quality, readable
+  artifact — markdown, the literal-verbatim rule unchanged;
+- write what is **not yet in the base**: use neighbors to resolve references
+  ("the migration issue" → which one) and for continuity, never to restate
+  their content — the same rule the existing context-only blocks enforce;
+- name the artifacts this capture relates to.
+
+### The reply
+
+On the **small path only**, the reply grows around the artifact list:
 
 ```json
-{"moment": {"intent": "remind" | "journal" | "none",
-            "when": "2026-09-04T09:00",
-            "rule": "FREQ=WEEKLY;BYDAY=MO"},
- "artifacts": [ ... ]}
+{"moment":   {"intent": "remind" | "journal" | "none",
+              "when": "2026-09-04T09:00",
+              "rule": "FREQ=WEEKLY;BYDAY=MO"},
+ "events":   [{"when": "2026-09-12T00:00"}],
+ "links":    [{"artifact_id": "...", "reason": "..."}],
+ "artifacts": [{..., "tags": ["..."], "pinned": false}]}
 ```
 
-`when` and `rule` optional; `rule` still passes `validate_rule` before it is
-stored. A door that forces intent (`metadata.intent = "remind"` from the API
-or MCP) becomes a hint line in the prompt rather than a bypass. This one call
-replaces the separate `REMIND_SYSTEM` call: reading, splitting and judging
-are the same pass over the same text. Promotion's synthesis of a large
-corpus's window does not request the field — a manual's window is not a
-reminder. Salvage behavior on a malformed reply is kept; a missing or
-malformed `moment` never fails artifacts that are otherwise fine.
+- **`moment`** — `when` and `rule` optional; `rule` still passes
+  `validate_rule` before it is stored. A door that forces intent
+  (`metadata.intent = "remind"` from the API or MCP) becomes a hint line in
+  the prompt rather than a bypass. This replaces the separate
+  `REMIND_SYSTEM` call: reading, splitting and judging are one pass over one
+  text.
+- **`events`** — dates the note mentions without being a reminder become
+  `Kind::Event` rows on the first artifact, `Source::Classified`: the
+  day-page presence that dropping `absolute_dates` removed, LLM-read, small
+  captures only.
+- **`links`** — validated against the artifact ids actually shown in the
+  neighbor block (the model can only link to what it saw), then written as
+  `LinkState::Related` with the model's reason through one small store fn.
+  Dedup and supersession of neighbors stay with the existing relate/dedupe
+  machinery — the model proposes no merges.
+- **`tags` / `pinned`** — `ProposedArtifact.tags` already exists; `pinned`
+  maps to the existing `pinned` tag that `pinned_boost` reads, prompted
+  cautiously: only for decision-shaped notes, never as a default.
+
+Promotion's synthesis of a large corpus's window requests none of the new
+fields — a manual's window is not a reminder, and its links wait for the
+sweeps. Salvage behavior on a malformed reply is kept; a missing or
+malformed `moment`, `events`, or `links` never fails artifacts that are
+otherwise fine.
+
+### The operator knows before pressing capture
+
+A debounced probe from the capture box (`POST /ui/capture/probe`) runs the
+real `TokenCounter` against the same `segment_tokens` budget the fork uses —
+exact, not a client-side guess — and swaps a one-line hint into the slot the
+old intent echo used: this paste **will be synthesized** into structured
+artifacts, or it is **large — stored verbatim** in N windows. The hint is
+the nudge: it says, before the fact, that a smaller paste becomes a
+higher-quality retrievable piece, and it makes the fork legible instead of
+silent.
 
 ## 6. Moments: the classifier dies, the store survives
 
@@ -161,7 +223,13 @@ model-free "reminder set" echo (`web/ui.rs` reads dates rule-based today)
 goes async. The judgement now arrives when the synthesis job lands —
 seconds to minutes on local hardware — through the existing confirmation
 badge and push. The alternative was keeping a date-rule kernel alive for one
-echo, which is the machinery this reshape deletes.
+echo, which is the machinery this reshape deletes. The capture-fate probe
+(§5) partially compensates: the *fate* echo is instant; only the *intent*
+echo waits for the model.
+
+`_box_hint.html`'s example chips lose their source with the prototypes
+(`moments::examples_for` reads the classifier's own table); they become
+static strings, same UX.
 
 `Source::Classified` rows now mean "the synthesis call judged it". A
 classified reminder with no date keeps the current guard: it stays an
@@ -189,7 +257,14 @@ Old config fails at startup with a message that says what to change.
 **Testing, per module:**
 
 - the size fork on both sides of the threshold, including the empty-text and
-  parked cases;
+  parked cases; a small capture searchable before its synthesis job lands; a
+  failed synthesis call leaving the verbatim passages live and the job
+  retryable; capture-time supersession through `supersede_covered`;
+- the probe endpoint agreeing with the fork's own arithmetic on both sides
+  of the line;
+- `links` validation: an id not shown in the neighbor block is dropped; a
+  shown id lands as `Related` with its reason; `events` rows appear on the
+  first artifact; a `pinned` proposal becomes the tag;
 - tokenizer loading: path, URL-with-cache, cache hit on second boot, fetch
   failure falling back to the estimator without refusing startup;
 - line-number derivation from text-splitter byte offsets against multi-line
