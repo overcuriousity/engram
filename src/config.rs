@@ -1959,6 +1959,7 @@ impl Config {
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         cfg.warn_on_defaulted_store(&raw);
+        cfg.warn_on_undeclared_reap(&raw);
         cfg.warn_on_inert_settings();
         cfg.warn_on_inferred_ceiling_param();
         cfg.warn_on_unplaced_plan_cost();
@@ -2269,6 +2270,36 @@ impl Config {
     /// the process's working directory rather than the base the operator has.
     /// An empty base and a refusal are both survivable; an empty base that
     /// says nothing is not. Say which paths are in force, once, at startup.
+    /// The one sweep that destroys captured text, running because nobody said
+    /// otherwise.
+    ///
+    /// `ReapConfig::default().enabled` is `true` and `config.example.toml`
+    /// spells every field out, so a new install that starts from the example
+    /// has made the choice. A base that predates the sweep has not: it upgrades
+    /// with no `[reap]` section at all and, ninety days later, begins moving
+    /// artifact text into the graveyard and deleting vector points, with the
+    /// only other gate being whether a judge model happens to be configured.
+    /// Nothing is lost — the graveyard keeps the text and the reason — but a
+    /// stage an operator cannot find is one they cannot turn off, and the block
+    /// is documented precisely so it is not a surprise.
+    ///
+    /// A warning and not a changed default: turning it off for an existing base
+    /// would as quietly stop a sweep another operator is relying on.
+    fn warn_on_undeclared_reap(&self, raw: &config::Config) {
+        if !self.reap.enabled || raw.get::<config::Value>("reap").is_ok() {
+            return;
+        }
+        tracing::warn!(
+            min_age_days = self.reap.min_age_days,
+            interval_mins = self.reap.interval_mins,
+            "no [reap] section: the reap sweep is on by default and will judge artifacts \
+             retired longer than min_age_days, burying what the live base already states. \
+             It runs only where [infer.synthesize] gives it a judge model. Write \
+             `[reap] enabled = false` to turn it off, or the block from config.example.toml \
+             to say so on purpose."
+        );
+    }
+
     fn warn_on_defaulted_store(&self, raw: &config::Config) {
         if raw.get::<config::Value>("store").is_ok() {
             return;

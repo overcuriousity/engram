@@ -2589,6 +2589,27 @@ struct NotifyForm {
     up_endpoint: String,
 }
 
+/// A push destination, checked before it is stored.
+///
+/// Both fields were taken on `trim()` alone, while the URL capture path
+/// (`api.rs`) has always refused anything that is not `http(s)` in as many
+/// words. That mattered more here, not less: nothing fetches a captured URL on
+/// a schedule, and `jobs::remind::run` POSTs to whatever is saved here on a
+/// timer, from the server, for as long as it stands.
+fn push_url(field: &str, raw: &str) -> Result<()> {
+    let u = url::Url::parse(raw).map_err(|e| Error::Validation(format!("{field}: {e}")))?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err(Error::Validation(format!(
+            "{field}: `{}` is not a scheme a push is sent over",
+            u.scheme()
+        )));
+    }
+    if u.host().is_none() {
+        return Err(Error::Validation(format!("{field}: that URL names no host")));
+    }
+    Ok(())
+}
+
 /// Save the channels. A blank token keeps the stored one while the url stays;
 /// a blank url or endpoint switches that channel off. Saving re-arms the
 /// Remind unit, because a channel just configured is what makes it worth arming.
@@ -2598,6 +2619,7 @@ async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> Result<Respon
     let mut notify = serde_json::json!({});
     let url = f.gotify_url.trim();
     if !url.is_empty() {
+        push_url("gotify_url", url)?;
         let token = match f.gotify_token.trim() {
             "" => stored["gotify"]["token"]
                 .as_str()
@@ -2609,6 +2631,7 @@ async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> Result<Respon
     }
     let endpoint = f.up_endpoint.trim();
     if !endpoint.is_empty() {
+        push_url("up_endpoint", endpoint)?;
         notify["unifiedpush"] = serde_json::json!({ "endpoint": endpoint });
     }
     control.set_notify(&tenant.user.subject, &notify).await?;
@@ -12000,19 +12023,19 @@ mod tests {
             .unwrap();
         assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
 
-        // Not sure: no verdict at all. The search stays a question for the deck
-        // — it is not a discard, which says the search was never real and would
-        // drop it from the pairs, from the deck and out of the purge's
-        // exemption on the strength of somebody not remembering.
+        // Not sure: no verdict at all — not a discard, which says the search
+        // was never real and would drop it from the pairs and out of the
+        // purge's exemption on the strength of somebody not remembering. It
+        // leaves the waiting figure all the same: nothing asks it again.
         let res = app.clone().oneshot(verdict("skip")).await.unwrap();
         let bar = body_of(res).await;
-        assert!(bar.contains("left for the deck"), "{bar}");
+        assert!(bar.contains("left unanswered"), "{bar}");
         assert!(
             !bar.contains("undo"),
             "a skip is not a verdict to take back"
         );
         let s = handle.store.feedback_stats(0.0).await.unwrap();
-        assert_eq!((s.discards, s.judged, s.pending), (0, 0, 1), "{s:?}");
+        assert_eq!((s.discards, s.judged, s.pending), (0, 0, 0), "{s:?}");
     }
 
     /// The search just recorded, read off the table rather than off the deck.

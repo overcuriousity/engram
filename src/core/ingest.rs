@@ -181,6 +181,24 @@ impl Capture {
 
     /// A door that already knows this is a reminder (`engram -r`, `?intent=`)
     /// says so, and the stage skips the classifier.
+    /// The channel a capture arrived through, for a door that also asked for
+    /// `journal`.
+    ///
+    /// `origin` then carries the filing and not the channel, and the channel is
+    /// otherwise simply gone: `set_entry(false)` reads `origin_was` to put the
+    /// note back where it came from, finds nothing, and falls through to `web`.
+    /// A journal entry an MCP client filed came back claiming it was typed into
+    /// the web box, permanently, on the one path whose whole job is provenance.
+    /// `ingest_capture` writes the same key for the door that declares its
+    /// intent instead of its origin; this is that path for the doors that
+    /// declare the origin.
+    pub fn from_channel(mut self, channel: &str) -> Self {
+        if self.origin == ORIGIN_JOURNAL && channel != ORIGIN_JOURNAL {
+            self.metadata["origin_was"] = serde_json::Value::String(channel.to_string());
+        }
+        self
+    }
+
     pub fn with_intent(mut self, intent: Option<crate::core::moments::Intent>) -> Self {
         if let Some(i) = intent {
             self.metadata["intent"] = serde_json::Value::String(i.as_str().into());
@@ -1433,14 +1451,18 @@ impl Core {
     /// re-embed was to mark it *done*, which is the wrong verb for a thing
     /// that was never a task and the wrong record to leave in the base.
     ///
-    /// `off` deletes the row only if the stage is what wrote it and nobody has
-    /// acted on it since; `on` withdraws the refusal and hands the artifact
-    /// back to the stage, which reads the note again exactly as it did the
-    /// first time. Nothing here rewrites text.
-    pub async fn set_reminder(&self, artifact_id: &str, on: bool) -> Result<()> {
+    /// `off` deletes every row on the artifact the stage is responsible for —
+    /// see `delete_refused_due` for why the re-read's guards must not apply to
+    /// a person; `on` withdraws the refusal and hands the artifact back to the
+    /// stage, which reads the note again exactly as it did the first time.
+    /// Nothing here rewrites text.
+    ///
+    /// Returns whether the refusal actually removed anything, so a caller can
+    /// tell the difference between a row that went and a row that stayed.
+    pub async fn set_reminder(&self, artifact_id: &str, on: bool) -> Result<bool> {
         let art = self.store.get_artifact(artifact_id).await?;
         let Some(cid) = art.corpus_id.as_deref() else {
-            return Ok(());
+            return Ok(false);
         };
         let src = self.store.get_corpus(cid).await?;
         let mut meta = src.metadata.clone();
@@ -1461,12 +1483,13 @@ impl Core {
                     )
                     .await?;
             }
-            return Ok(());
+            return Ok(true);
         }
         crate::core::moments::refuse_intent(&mut meta, intent);
         self.store.set_corpus_metadata(cid, &meta).await?;
-        self.store.delete_read_due(artifact_id).await?;
-        self.store.rearm_remind().await
+        let gone = self.store.delete_refused_due(artifact_id).await?;
+        self.store.rearm_remind().await?;
+        Ok(gone > 0)
     }
 
     pub async fn reprocess(&self, id: &str, stage: Stage) -> Result<()> {

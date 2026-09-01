@@ -12,8 +12,19 @@ pub const MIN_SEGMENT_TOKENS: usize = 256;
 /// their arithmetic.
 #[derive(Default)]
 pub struct TokenCounter {
-    tok: Option<tokenizers::Tokenizer>,
+    tok: Option<std::sync::Arc<tokenizers::Tokenizer>>,
 }
+
+/// Parsed tokenizers, by what was asked for. The bundled `tokenizer.json` is
+/// 11 MB and `Tokenizer::from_bytes` parses all of it; `Core::from_config_with`
+/// called `load` unconditionally and `Tenants::open` builds a fresh `Core` on
+/// every registry cache miss, so a 32-slot registry could hold 32 unshared
+/// copies and re-parse 11 MB of JSON — synchronously, inside an `async fn`, on
+/// a request path — every time a tenant was reopened. Keyed by the spec and the
+/// cache directory together, because a URL spec's download lands beside the
+/// store and two tenants need not share one.
+type Loaded = std::collections::HashMap<String, Option<std::sync::Arc<tokenizers::Tokenizer>>>;
+static LOADED: std::sync::OnceLock<std::sync::Mutex<Loaded>> = std::sync::OnceLock::new();
 
 /// The tokenizer of the model family the example config serves (Qwen, shared
 /// across the family). An accuracy default, not a requirement: `infer.tokenizer`
@@ -48,27 +59,62 @@ impl TokenCounter {
     /// inside tokio — written to the cache, and read from the cache on every
     /// later boot. No cache and no network: the estimator, until next boot.
     pub fn load(spec: Option<&str>, cache_dir: &std::path::Path) -> TokenCounter {
+        let key = format!("{}\u{0}{}", cache_dir.display(), spec.unwrap_or(""));
+        let loaded = LOADED.get_or_init(Default::default);
+        // Poisoning is not a reason to re-parse 11 MB: nothing here is an
+        // invariant another thread can leave half-written.
+        if let Some(hit) = loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return TokenCounter { tok: hit };
+        }
+        let tok = Self::parse(spec, cache_dir);
+        loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, tok.clone());
+        TokenCounter { tok }
+    }
+
+    fn parse(
+        spec: Option<&str>,
+        cache_dir: &std::path::Path,
+    ) -> Option<std::sync::Arc<tokenizers::Tokenizer>> {
         let from_bytes = |b: &[u8], what: &str| {
             tokenizers::Tokenizer::from_bytes(b)
                 .map_err(
                     |e| tracing::warn!(error = %e, what, "tokenizer did not parse; falling back"),
                 )
                 .ok()
+                .map(std::sync::Arc::new)
         };
-        let tok = match spec {
+        match spec {
             Some(s) if s.starts_with("http://") || s.starts_with("https://") => {
                 let cache = Self::cache_path(cache_dir, s);
-                let bytes = match std::fs::read(&cache) {
-                    Ok(b) => Some(b),
-                    Err(_) => fetch_blocking(s).inspect(|b| {
-                        let _ = std::fs::create_dir_all(cache_dir);
-                        if let Err(e) = std::fs::write(&cache, b) {
-                            tracing::warn!(error = %e, "could not cache the tokenizer; it will re-download next boot");
-                        }
-                    }),
-                };
-                bytes
-                    .and_then(|b| from_bytes(&b, "downloaded"))
+                std::fs::read(&cache)
+                    .ok()
+                    .and_then(|b| from_bytes(&b, "cached"))
+                    .or_else(|| {
+                        fetch_blocking(s).and_then(|b| {
+                            // Parsed before it is cached, and cached only if it
+                            // parsed. The other order wrote whatever came back
+                            // — a captive portal's sign-in page answers 200
+                            // with HTML — and every later boot then read that
+                            // file, failed to parse it, and fell silently back
+                            // to the bundled default for the life of the
+                            // install. A cached file that no longer parses is
+                            // re-fetched by the same reasoning.
+                            let t = from_bytes(&b, "downloaded")?;
+                            let _ = std::fs::create_dir_all(cache_dir);
+                            if let Err(e) = std::fs::write(&cache, &b) {
+                                tracing::warn!(error = %e, "could not cache the tokenizer; it will re-download next boot");
+                            }
+                            Some(t)
+                        })
+                    })
                     .or_else(|| from_bytes(BUNDLED, "bundled"))
             }
             Some(p) => std::fs::read(p)
@@ -77,17 +123,29 @@ impl TokenCounter {
                 .and_then(|b| from_bytes(&b, "configured"))
                 .or_else(|| from_bytes(BUNDLED, "bundled")),
             None => from_bytes(BUNDLED, "bundled"),
-        };
-        TokenCounter { tok }
+        }
     }
 }
 
 /// One GET on its own thread, so the private runtime `reqwest::blocking`
 /// spins up cannot collide with a tokio runtime the caller may be on.
+///
+/// Timed out, because the calling thread `join`s this one: `reqwest::blocking`
+/// has no default timeout, so a host that completes the TCP handshake and then
+/// never answers held `Core::from_config_with` — and, on the registry, a tenant
+/// open on a request path — for as long as the peer cared to keep the socket
+/// open. A tokenizer is an accuracy upgrade; it does not get to hang a boot.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn fetch_blocking(url: &str) -> Option<Vec<u8>> {
     let url = url.to_string();
     std::thread::spawn(move || {
-        reqwest::blocking::get(&url)
+        reqwest::blocking::Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .and_then(|c| c.get(&url).send())
             .and_then(|r| r.error_for_status())
             .and_then(|r| r.bytes())
             .map(|b| b.to_vec())

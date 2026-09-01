@@ -487,6 +487,7 @@ impl PkdbTools {
         let outcome = if let Some(text) = p.text {
             core.ingest_capture(
                 Capture::new(text, time.origin)
+                    .from_channel(time.channel)
                     .with_title(p.title)
                     .with_note(p.note)
                     .with_tz(time.tz)

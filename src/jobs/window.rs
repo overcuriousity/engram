@@ -200,6 +200,12 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     let written =
         write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks)).await?;
     flag_unverified(core, &written, &text).await?;
+    // What is actually searchable afterwards. On a promotion that is what
+    // `embed_written` hands back and not what was written: an oversize artifact
+    // is replaced by siblings and its own row goes away, so anchoring the
+    // judgement to `written` could anchor it to an id that no longer exists —
+    // and `apply` would lose the reminder to a foreign key.
+    let mut live = written;
     if keep {
         // The replacements have to be searchable before the originals stop
         // being. `supersede_covered` takes the passages out of results, and the
@@ -209,48 +215,62 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         // and for all of it this window's lines are reachable from neither
         // side. Embedded here, inline, so the swap is a swap.
         //
-        // A refusal leaves the passages standing and the artifacts queued: the
-        // window is captured either way, the corpus embed job below will pick
-        // the artifacts up, and the next settle re-runs this. Hiding readable
-        // text behind text nothing can find is the one outcome not worth
-        // risking, so it is the direction this fails in.
-        let embedded = embed_written(core, &written).await;
-        if let Err(e) = &embedded {
-            tracing::warn!(
-                corpus_id,
-                window = idx,
-                error = %e,
-                "the promoted window's artifacts could not be embedded; \
-                 leaving its passages in results"
-            );
-        }
-        if let Ok(written) = &embedded {
-            // A promotion: what the window's artifacts cover, they supersede,
-            // and the passages' access comes with them. Under the corpus lock
-            // as a second locked step — `write_segment_artifacts` took and
-            // released it.
-            let _corpus = core.corpus_lock(corpus_id).await;
-            let n = crate::jobs::promote::supersede_covered(
-                core,
-                corpus_id,
-                idx,
-                written,
-                crate::store::now(),
-            )
-            .await?;
-            tracing::info!(
-                corpus_id,
-                window = idx,
-                superseded = n,
-                "promotion superseded its covered passages"
-            );
+        // A refusal leaves the passages standing and the artifacts queued, and
+        // the window goes back to `failed` so that something comes for it. It
+        // used to be marked `done` here with a comment claiming the next settle
+        // would re-run it: nothing re-runs a `done` window — `settle` and
+        // `finish` both read it as resolved and `reconcile` skips it — so one
+        // embedder outage during a promotion left the verbatim passages *and*
+        // their synthesized replacements in results, permanently, with
+        // `keep_artifacts` spent. `write_segment_artifacts` is idempotent under
+        // that flag, so the retry costs a model call and writes nothing twice.
+        match embed_written(core, &live).await {
+            Ok(embedded) => {
+                // A promotion: what the window's artifacts cover, they
+                // supersede, and the passages' access comes with them. Under
+                // the corpus lock as a second locked step —
+                // `write_segment_artifacts` took and released it.
+                {
+                    let _corpus = core.corpus_lock(corpus_id).await;
+                    let n = crate::jobs::promote::supersede_covered(
+                        core,
+                        corpus_id,
+                        idx,
+                        &embedded,
+                        crate::store::now(),
+                    )
+                    .await?;
+                    tracing::info!(
+                        corpus_id,
+                        window = idx,
+                        superseded = n,
+                        "promotion superseded its covered passages"
+                    );
+                }
+                live = embedded;
+            }
+            Err(e) => {
+                let reason = format!("the promoted window could not be embedded: {e}");
+                tracing::warn!(
+                    corpus_id,
+                    window = idx,
+                    error = %e,
+                    "the promoted window's artifacts could not be embedded; \
+                     leaving its passages in results and the window for a retry"
+                );
+                core.store
+                    .set_segment_state(corpus_id, idx, SegmentState::Failed, Some(&reason))
+                    .await?;
+                settle(core, corpus_id).await?;
+                return Err(e);
+            }
         }
     }
     // The judgement, once the artifacts it is about stand. Anchored to the
     // first live one; a judgement that cannot be applied is a warning — the
     // artifacts are already the capture.
     if let Some(j) = judgement
-        && let Some(anchor) = written.iter().find(|c| c.in_results())
+        && let Some(anchor) = live.iter().find(|c| c.in_results())
         && let Err(e) =
             crate::jobs::judgement::apply(core, corpus_id, &anchor.id, &j, &shown_ids).await
     {

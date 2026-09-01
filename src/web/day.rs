@@ -277,7 +277,9 @@ async fn entry(
     if f.text.trim().is_empty() {
         return Ok(Redirect::to(&back).into_response());
     }
-    let mut c = Capture::new(&f.text, ORIGIN_JOURNAL).with_tz(Some(tz_name));
+    let mut c = Capture::new(&f.text, ORIGIN_JOURNAL)
+        .from_channel(crate::core::ingest::ORIGIN_WEB)
+        .with_tz(Some(tz_name));
     c.metadata["day"] = serde_json::Value::String(date.clone());
     tenant.core.ingest_capture(c).await?;
     Ok(Redirect::to(&back).into_response())
@@ -535,9 +537,20 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
-            .id
-            .clone();
+        // The live one, and not simply the first: `drain` promotes this
+        // capture, so `artifacts_for_corpus` opens with the superseded
+        // verbatim passage. Hanging the day's moments off that row was the
+        // test asserting the very thing `moments_between`'s missing
+        // `status = 'active'` used to let through.
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.in_results())
+            .expect("a live artifact")
+            .id;
         for (kind, at, source, span) in [
             (Kind::Due, day + 9 * 3_600, Source::Set, None),
             (

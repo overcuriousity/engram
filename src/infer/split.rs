@@ -30,34 +30,59 @@ pub struct Window {
 
 /// Split `text` into windows that each fit `budget` counter-tokens.
 ///
-/// The returned line ranges partition `1..=lines(text)` with no gaps: the
-/// splitter trims separators between chunks, so a blank line can belong to
-/// neither chunk's *text* — but a line nothing claims is a line nothing
-/// renders, so each window's range runs to the line before its successor,
-/// and the first starts at line 1.
+/// The returned line ranges partition `1..=lines(text)` with no gaps, and —
+/// the part that took two bugs to get right — each window's `text` is exactly
+/// the source those lines hold. A window is the slice *between* two splitter
+/// boundaries, not the chunk the splitter hands back: the crate trims
+/// separators off a chunk, and a trimmed body under an untrimmed range is a
+/// window whose line *k* is not `start_line + k - 1`, which is the one thing
+/// everything downstream assumes. `"\n\n# Notes\nalpha"` used to give the first
+/// window `start_line: 1` over a body beginning at `# Notes`, so the passage
+/// holding the heading was addressed two lines above itself — and leading
+/// blank lines are routine out of HTML and PDF extraction, which nothing trims
+/// at ingest.
+///
+/// Boundaries are snapped back to the start of their line for the same reason.
+/// `text-splitter` descends to sentence level, so a chunk can end mid-paragraph
+/// and mid-line; the window then ends at the line before, and the whole of the
+/// straddled line goes to the successor that already claims it. The one case
+/// that cannot be line-aligned is a hard cut *inside* a single long line: there
+/// the fragments are kept as they are, both windows name that one line, and
+/// `split_passages`' clamp is what keeps the spans inside the document. Line
+/// alignment there would hand each fragment's window the whole line and put the
+/// same text in the base as many times as it was cut.
 pub fn split_into_segments(text: &str, counter: &TokenCounter, budget: usize) -> Vec<Window> {
     if text.trim().is_empty() {
         return vec![];
     }
     let splitter = MarkdownSplitter::new(ChunkConfig::new(budget.max(1)).with_sizer(counter));
-    let chunks: Vec<(usize, &str)> = splitter.chunk_indices(text).collect();
-    if chunks.is_empty() {
+    let offsets: Vec<usize> = splitter.chunk_indices(text).map(|(off, _)| off).collect();
+    if offsets.is_empty() {
         return vec![];
     }
     let line_of = |off: usize| text[..off].bytes().filter(|b| *b == b'\n').count() as i64 + 1;
+    // The first byte of the line `off` falls in.
+    let line_start = |off: usize| text[..off].rfind('\n').map(|p| p + 1).unwrap_or(0);
     let total_lines = text.lines().count().max(1) as i64;
-    let mut out = Vec::with_capacity(chunks.len());
-    for (i, (off, body)) in chunks.iter().enumerate() {
-        // A window's range is closed by its successor's opening line, and the
-        // first window claims the head of the document whatever whitespace
-        // the splitter trimmed off it.
-        let start = if i == 0 { 1 } else { line_of(*off) };
-        let end = match chunks.get(i + 1) {
-            Some((next, _)) => (line_of(*next) - 1).max(start),
-            None => total_lines.max(start),
+    let mut out = Vec::with_capacity(offsets.len());
+    for (i, off) in offsets.iter().enumerate() {
+        // The first window claims the head of the document, whatever the
+        // splitter trimmed off it — and now carries it, so the claim is true.
+        let from = if i == 0 { 0 } else { *off };
+        let start = line_of(from);
+        let (slice, end) = match offsets.get(i + 1) {
+            Some(next) => {
+                let snapped = line_start(*next);
+                if snapped > from {
+                    (&text[from..snapped], line_of(*next) - 1)
+                } else {
+                    (&text[from..*next], line_of(*next).max(start))
+                }
+            }
+            None => (&text[from..], total_lines.max(start)),
         };
         out.push(Window {
-            text: (*body).to_string(),
+            text: slice.to_string(),
             start_line: start,
             end_line: end,
         });

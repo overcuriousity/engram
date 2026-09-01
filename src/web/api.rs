@@ -329,6 +329,10 @@ pub struct CaptureQuery {
 pub(crate) struct CaptureTime {
     pub tz: Option<String>,
     pub origin: &'static str,
+    /// The door itself, whatever `origin` ended up saying. `origin=journal`
+    /// overwrites the channel with a filing; this keeps it, for
+    /// `Capture::from_channel`.
+    pub channel: &'static str,
     pub intent: Option<crate::core::moments::Intent>,
 }
 
@@ -373,7 +377,12 @@ pub(crate) fn capture_time(
             )));
         }
     };
-    Ok(CaptureTime { tz, origin, intent })
+    Ok(CaptureTime {
+        tz,
+        origin,
+        channel: default_origin,
+        intent,
+    })
 }
 
 /// Refuse the three time fields on a capture that is not verbatim text.
@@ -545,6 +554,7 @@ async fn capture(
                     .core
                     .ingest_capture(
                         crate::core::ingest::Capture::new(text, time.origin)
+                            .from_channel(time.channel)
                             .with_title(q.title)
                             .with_note(q.note)
                             .with_tz(time.tz)

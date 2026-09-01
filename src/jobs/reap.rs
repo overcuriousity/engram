@@ -41,7 +41,8 @@ pub async fn run(core: &Core) -> Result<Report> {
                         tracing::info!(artifact_id = %c.id, reason, "reaped a retired artifact");
                     }
                     Err(e) => {
-                        tracing::warn!(artifact_id = %c.id, error = %e, "could not bury a worthless artifact")
+                        tracing::warn!(artifact_id = %c.id, error = %e, "could not bury a worthless artifact");
+                        step_aside(core, &c.id).await;
                     }
                 }
             }
@@ -59,7 +60,8 @@ pub async fn run(core: &Core) -> Result<Report> {
                         tracing::info!(artifact_id = %c.id, new_id, reason, "rescued a retired artifact into a rewrite");
                     }
                     Err(e) => {
-                        tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact; it waits")
+                        tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact; it waits");
+                        step_aside(core, &c.id).await;
                     }
                 }
             }
@@ -72,6 +74,28 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
     Ok(report)
+}
+
+/// Move a candidate the sweep could not act on to the back of the queue.
+///
+/// `reap_candidates` orders by `retired_at ASC` and the sweep judges
+/// `max_judged_per_run` rows a run, so a candidate whose action fails the same
+/// way every time — `excerpts.is_empty()` for a merged artifact whose roots
+/// were themselves buried is the reachable one — is the oldest retirement in
+/// the base for ever. It took a slot and a model call on every sweep, kept
+/// `report.judged` non-zero so the empty-run backoff never engaged, and the
+/// candidates behind it were never reached.
+///
+/// A fresh `retired_at` is the whole of the bookkeeping: nothing is lost, the
+/// row stays retired, and it comes back for another attempt an age later —
+/// which for a failure that was merely transient is a delay, and for one that
+/// is not is the difference between a stuck sweep and a working one. Only the
+/// *action* failures restamp; a judge call that failed says nothing about the
+/// row and the sweep's own cadence is its retry.
+async fn step_aside(core: &Core, id: &str) {
+    if let Err(e) = core.store.restamp_retired(id).await {
+        tracing::warn!(artifact_id = %id, error = %e, "could not restamp a candidate the sweep could not act on");
+    }
 }
 
 /// The nearest artifacts a searcher can actually reach, `(title, text)`. Live

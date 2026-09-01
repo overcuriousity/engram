@@ -47,18 +47,29 @@ pub async fn apply(
     record_intent(core, corpus_id, &src, j.intent.as_deref()).await?;
 
     // Dates the note states without being the reminder: the day page's rows.
+    //
+    // Each of the three sections below is independent, and each one fails on
+    // its own. They used to fail on each other: `?` here aborted `apply`, and
+    // the reminder — the section this call is most often made for — sits last.
+    // `shown` comes out of vector payloads, which can name a row the reaper or
+    // a supersession has since taken away, so one foreign-key error on a link
+    // to a dead id silently cost the whole judgement. Best-effort is what the
+    // caller already assumes: it logs a failed `apply` and lets the artifacts
+    // stand.
     for e in &j.events {
         let Some(at) = parse_local(e, tz) else {
             continue;
         };
-        if core
-            .store
-            .has_moment_at(anchor_id, Kind::Event, Some(at))
-            .await?
-        {
-            continue;
+        match core.store.has_moment_at(anchor_id, Kind::Event, Some(at)).await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(corpus_id, error = %err, "could not check for an existing event");
+                continue;
+            }
         }
-        core.store
+        if let Err(err) = core
+            .store
             .insert_moment(&NewMoment {
                 artifact_id: anchor_id.into(),
                 kind: Kind::Event,
@@ -68,7 +79,10 @@ pub async fn apply(
                 source: Source::Classified,
                 span: None,
             })
-            .await?;
+            .await
+        {
+            tracing::warn!(corpus_id, error = %err, "could not record a judged event");
+        }
     }
 
     // Relations to what the model was shown. Dedup and supersession stay
@@ -77,9 +91,13 @@ pub async fn apply(
         if l.artifact_id == anchor_id || !shown.iter().any(|s| s == &l.artifact_id) {
             continue;
         }
-        core.store
+        if let Err(err) = core
+            .store
             .relate_synthesized(anchor_id, &l.artifact_id, &l.reason)
-            .await?;
+            .await
+        {
+            tracing::warn!(corpus_id, other = %l.artifact_id, error = %err, "could not record a judged link");
+        }
     }
 
     let forced = src.metadata["intent"].as_str();
@@ -207,16 +225,49 @@ async fn confirm_created(
     crate::jobs::remind::notify_now(core, &format!("Reminder set: {title}"), &message).await
 }
 
-/// `2026-09-04T09:00` or `2026-09-04` in the reader's zone.
+/// `2026-09-04T09:00` or `2026-09-04` in the reader's zone — and the same
+/// instants carrying an offset of their own.
+///
+/// The prompt asks for a local wall clock, and the schema puts no `pattern` on
+/// `when`, so it does not get one. A model that answers `2026-09-04T09:00Z` or
+/// `…+02:00` — which is what a model does the moment anything in its context
+/// looks like an ISO instant — parsed as nothing at all, and the reminder was
+/// dropped in silence. An offset that is stated is honoured rather than
+/// discarded: it says what instant was meant, and the reader's zone is then
+/// none of the answer's business.
 pub(crate) fn parse_local(s: &str, tz: chrono_tz::Tz) -> Option<i64> {
-    let dt = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
+    let s = s.trim();
+    match split_offset(s) {
+        Some((head, off)) => {
+            use chrono::TimeZone;
+            Some(off.from_local_datetime(&naive(head)?).single()?.timestamp())
+        }
+        None => crate::core::moments::resolve_local(naive(s)?, tz),
+    }
+}
+
+/// The three wall-clock spellings, with a bare date meaning `DEFAULT_HOUR`.
+fn naive(s: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
         .or_else(|_| {
             chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
                 .map(|d| d.and_hms_opt(DEFAULT_HOUR, 0, 0).unwrap())
         })
-        .ok()?;
-    crate::core::moments::resolve_local(dt, tz)
+        .ok()
+}
+
+/// A trailing `Z`, `+02:00` or `-0500`, split from the wall clock in front of
+/// it. The sign is searched for after the `T` so that the date's own dashes
+/// cannot be mistaken for one.
+fn split_offset(s: &str) -> Option<(&str, chrono::FixedOffset)> {
+    if let Some(head) = s.strip_suffix('Z').or_else(|| s.strip_suffix('z')) {
+        return Some((head, chrono::FixedOffset::east_opt(0)?));
+    }
+    let time_at = s.find(['T', 't'])?;
+    let at = s[time_at..].rfind(['+', '-'])? + time_at;
+    let (head, tail) = s.split_at(at);
+    Some((head, tail.parse().ok()?))
 }
 
 #[cfg(test)]

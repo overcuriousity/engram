@@ -731,8 +731,11 @@ impl crate::core::Core {
     /// a recurring reminder is its rows.
     pub async fn complete_moment(&self, id: &str) -> crate::error::Result<()> {
         let now = self.clock.now();
-        if let Some(m) = self.store.moment(id).await? {
-            self.store.mark_done(id, now).await?;
+        if let Some(m) = self.store.moment(id).await?
+            // The claim, and the gate: everything below arms rows and retires
+            // corpora, and none of it may run twice for one completion.
+            && self.store.mark_done(id, now).await?
+        {
             // A bounded recurrence is bounded by its rows: the done row stays,
             // so the occurrences that have existed are the ones on the
             // artifact carrying this rule — including the one just completed.
@@ -740,6 +743,15 @@ impl crate::core::Core {
             if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
                 && !self.store.rule_is_exhausted(&m.artifact_id, rule).await?
                 && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
+                // The same question every other insert on this artifact asks
+                // first. The claim above rules out this call racing itself;
+                // this rules out arming an instant the artifact already
+                // carries — a re-read that landed on the successor, or an
+                // occurrence somebody set by hand.
+                && !self
+                    .store
+                    .has_moment_at(&m.artifact_id, crate::store::moments::Kind::Due, Some(next))
+                    .await?
             {
                 self.store
                     .insert_moment(&crate::store::moments::NewMoment {

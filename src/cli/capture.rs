@@ -378,19 +378,48 @@ struct Read {
 /// choose between two answers: refuse it as a missing file, or store it as a
 /// note. `notes.pdf` typed with the file in the other directory should be the
 /// error it is, and `engram -c "buy milk"` should be the note it is.
-/// Nothing with whitespace in it is a path: a sentence that happens to carry
-/// a slash — "siehe https://example.com/x für Details", "Zahlung 12/2026
-/// überweisen" — is exactly the prose the text fallthrough exists for, and
-/// the slash branch used to claim it anyway, failing the capture with the
-/// `File name too long` this heuristic was written to remove.
+/// Whitespace argues against a path: a sentence that happens to carry a slash
+/// — "siehe https://example.com/x für Details", "Zahlung 12/2026 überweisen" —
+/// is exactly the prose the text fallthrough exists for, and the slash branch
+/// used to claim it anyway, failing the capture with the `File name too long`
+/// this heuristic was written to remove.
+///
+/// It does not settle it, though. Directories with spaces in their names are
+/// ordinary — `~/Documents/My Notes/plan.pdf` — and a quoted one that misses
+/// was stored as a note whose whole text is the path somebody typed, exit 0,
+/// with nothing said. So the whitespace veto is lifted for an argument that
+/// both looks addressed and lands in a directory that is really there: the
+/// filesystem answers the question the shape cannot. Neither prose case above
+/// has a parent directory on disk — "siehe https:/example.com", "Zahlung 12" —
+/// and both stay the notes they are.
 fn looks_like_a_path(target: &str) -> bool {
-    !target.chars().any(char::is_whitespace)
-        && (target.contains(std::path::MAIN_SEPARATOR)
-            || target.contains('/')
-            || target.starts_with('~')
+    let addressed = target.contains(std::path::MAIN_SEPARATOR)
+        || target.contains('/')
+        || target.starts_with('~');
+    if !target.chars().any(char::is_whitespace) {
+        return addressed
             || std::path::Path::new(target)
                 .extension()
-                .is_some_and(|e| !e.is_empty()))
+                .is_some_and(|e| !e.is_empty());
+    }
+    addressed
+        && expand_home(target)
+            .parent()
+            .is_some_and(|p| !p.as_os_str().is_empty() && p.is_dir())
+}
+
+/// A leading `~/` resolved, for the directory question above and nothing else:
+/// the read itself goes through the argument as typed, the way every other
+/// program that is handed an unexpanded tilde does. A shell expands it before
+/// this ever sees it; what reaches here was quoted.
+fn expand_home(target: &str) -> std::path::PathBuf {
+    match target.strip_prefix("~/") {
+        Some(rest) => match std::env::home_dir() {
+            Some(home) => home.join(rest),
+            None => std::path::PathBuf::from(target),
+        },
+        None => std::path::PathBuf::from(target),
+    }
 }
 
 /// The bytes to send and what to call them.

@@ -459,12 +459,19 @@ async fn not_a_reminder(
     let Some(m) = tenant.core.store.moment(&id).await? else {
         return render(&tenant, &f.tz, None, f.since, f.all == "1").await;
     };
-    tenant.core.set_reminder(&m.artifact_id, false).await?;
-    let just = Just {
-        verb: "Not a reminder",
-        undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id),
-    };
-    render(&tenant, &f.tz, Some(just), f.since, f.all == "1").await
+    // The banner is drawn on what happened, not on what was asked for: a
+    // `set` row is the one source this never removes, and announcing "Not a
+    // reminder — undo" over a row still sitting two lines below is the band
+    // telling the reader something they can see is untrue.
+    let just = tenant
+        .core
+        .set_reminder(&m.artifact_id, false)
+        .await?
+        .then(|| Just {
+            verb: "Not a reminder",
+            undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id),
+        });
+    render(&tenant, &f.tz, just, f.since, f.all == "1").await
 }
 
 async fn is_a_reminder(

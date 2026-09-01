@@ -384,6 +384,40 @@ impl Store {
         .rows_affected())
     }
 
+    /// "This is not a reminder", said by a person, on purpose.
+    ///
+    /// The guards on `delete_read_due` above are all defences against a
+    /// *re-read* — the stage arriving at the same instant a second time and
+    /// treating a row with a history as its own to delete. None of them
+    /// defends against the operator, and applied to them they made the button
+    /// a no-op on almost every row it was offered on: `LEADS[0]` is 48 h and
+    /// `time.horizon_hours` defaults to 48, so a dated row enters the band and
+    /// takes its first push at the same instant, and from then on
+    /// `notified_at IS NULL` matched nothing. The band said "Not a reminder"
+    /// and the row went on pushing at 12 h, 3 h, 30 min and zero.
+    ///
+    /// So: every row on this artifact the stage is responsible for, whatever
+    /// has happened to it since. `armed` goes too — a successor occurrence
+    /// exists only because of the reading now being disclaimed, and leaving it
+    /// standing would re-push tomorrow the thing that was never a reminder.
+    /// `set` stays, and is the one source the button is never offered for: a
+    /// reminder somebody typed is not a misreading. `done_at` stays too —
+    /// completed rows are history, they are not on the band, and the operator
+    /// is not reaching for them.
+    ///
+    /// Returns whether anything went, so the band can keep quiet rather than
+    /// announce an undo for a row still sitting in front of the reader.
+    pub async fn delete_refused_due(&self, artifact_id: &str) -> Result<u64> {
+        Ok(sqlx::query(
+            "DELETE FROM moments
+              WHERE artifact_id = ? AND kind = 'due' AND source <> 'set' AND done_at IS NULL",
+        )
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
     /// Open reminders: undone, on an active artifact, and either undated or
     /// due before `to` and not snoozed past `now`. Dated first, by time —
     /// the *effective* time: a row whose snooze has elapsed re-enters the
@@ -446,9 +480,16 @@ impl Store {
     }
 
     /// Both kinds, any state — the day page's "was due" shows what was done.
+    ///
+    /// "Any state" is the *moment's*: done rows belong on the day they were
+    /// due. The artifact's is filtered like every other read on this table.
+    /// Alone among them this one was not, and a moment that rode a supersession
+    /// onto the replacement artifact was then listed twice on the day page —
+    /// once against the row a reader can open and once against the retired one
+    /// behind it.
     pub async fn moments_between(&self, from: i64, to: i64) -> Result<Vec<DueRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{JOINED} WHERE m.at >= ? AND m.at < ? ORDER BY m.at"
+            "{JOINED} WHERE a.status = 'active' AND m.at >= ? AND m.at < ? ORDER BY m.at"
         )))
         .bind(from)
         .bind(to)
@@ -457,13 +498,23 @@ impl Store {
         Ok(rows.iter().map(row_of).collect())
     }
 
-    pub async fn mark_done(&self, id: &str, at: i64) -> Result<()> {
-        sqlx::query("UPDATE moments SET done_at = ? WHERE id = ?")
+    /// Claim a moment as done, once. Returns whether *this* call is the one
+    /// that completed it.
+    ///
+    /// The `done_at IS NULL` clause is the whole of the guard `complete_moment`
+    /// needs: a recurrence arms its successor after marking, and two presses of
+    /// "done" arriving together — a double-click, a retried htmx post — both
+    /// read an open row, both marked it, and both armed. Two rows for tomorrow,
+    /// and a `COUNT=5` that ends after three firings because the count is the
+    /// rows. One statement decides it instead.
+    pub async fn mark_done(&self, id: &str, at: i64) -> Result<bool> {
+        Ok(sqlx::query("UPDATE moments SET done_at = ? WHERE id = ? AND done_at IS NULL")
             .bind(at)
             .bind(id)
             .execute(&self.pool)
-            .await?;
-        Ok(())
+            .await?
+            .rows_affected()
+            > 0)
     }
 
     pub async fn undo_done(&self, id: &str) -> Result<()> {

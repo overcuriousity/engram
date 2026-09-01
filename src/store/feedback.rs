@@ -500,9 +500,18 @@ impl Labeller {
 /// — and reading those as zero withheld every such search from the deck
 /// silently, when a keyword search that found something is exactly the card a
 /// person can answer.
+/// `skips = 0` is the same rule applied to the person rather than to the data:
+/// somebody looked at this search, said "not sure", and is not going to be
+/// asked it again. While the judge deck existed, `ORDER BY skips ASC` was that
+/// second asking and the count was honest. The deck is gone, nothing reads
+/// `skips` any more, and every skipped search stayed `judged_at IS NULL` for
+/// ever — permanently inflating the "N waiting" figure on Settings and
+/// Insights with questions that had already been answered as far as anyone was
+/// ever going to answer them. The column is still written, and is still what
+/// tells a skipped search from one nobody has seen.
 macro_rules! dealable {
     () => {
-        "judged_at IS NULL AND length(query) >= 3
+        "judged_at IS NULL AND skips = 0 AND length(query) >= 3
          AND EXISTS (SELECT 1 FROM search_candidates WHERE event_id = search_events.id)
          AND COALESCE((SELECT max(COALESCE(similarity, 1.0)) FROM search_candidates
                         WHERE event_id = search_events.id), 0) >= ?"
@@ -750,9 +759,15 @@ impl Store {
         )
     }
 
-    /// Not a verdict: the event stays pending; `skips` only records that a
-    /// person passed. An honest "I don't remember" must never cost anything,
-    /// or it stops being honest.
+    /// Not a verdict: the event keeps `judged_at IS NULL`, so it is never
+    /// counted as answered, never enters the eval pairs, and never becomes a
+    /// discard — an honest "I don't remember" must not cost the search
+    /// anything, or it stops being honest.
+    ///
+    /// What it does cost is being asked again: `dealable!` excludes a skipped
+    /// event, so the row leaves the "waiting" figure. The alternative, now that
+    /// the deck that re-dealt skipped cards is gone, is a question that is
+    /// counted as outstanding for ever and put to nobody.
     pub async fn skip_event(&self, event_id: &str) -> Result<()> {
         Self::judged_one(
             sqlx::query("UPDATE search_events SET skips = skips + 1 WHERE id = ?")
@@ -1851,14 +1866,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skipping_leaves_it_pending() {
-        // Not a verdict: an honest "I don't remember" must never cost
-        // anything, or it stops being honest.
+    async fn skipping_judges_nothing_and_stops_waiting() {
+        // Not a verdict: an honest "I don't remember" must never cost the
+        // search anything, or it stops being honest — so `judged` stays 0, the
+        // event never enters the pairs and never becomes a discard.
+        //
+        // But it does stop being counted as waiting. The deck that re-dealt a
+        // skipped card is gone; nothing asks this again, and a figure every
+        // screen labels "waiting" must not include questions that have been put
+        // to somebody and are never going to be put to anybody else.
         let store = Store::memory().await.unwrap();
         let id = seed(&store, "not sure", &["a"]).await;
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 1);
         store.skip_event(&id).await.unwrap();
         let s = store.feedback_stats(0.0).await.unwrap();
-        assert_eq!((s.pending, s.judged), (1, 0), "{s:?}");
+        assert_eq!((s.pending, s.judged), (0, 0), "{s:?}");
     }
 
     #[tokio::test]

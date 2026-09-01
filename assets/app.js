@@ -2346,7 +2346,7 @@
 
   // Whether something is being typed into. Every letter shortcut below is
   // gated on this: a letter belongs to the field that has focus, and nothing
-  // else, which is the rule the judge shortcuts already follow.
+  // else.
   function typing() {
     var el = document.activeElement;
     if (!el) return false;
@@ -2413,10 +2413,9 @@
     if (typing()) return;
     var regions = document.querySelector('.regions');
     if (!regions) return;
-    // Scoped to what is actually on the page, not merely to the grid. `s` is
-    // also the judge's "skip", and every page has a `.regions` — without this,
-    // one keypress on the judge queue fired a verdict and toggled something
-    // that page does not have.
+    // Scoped to what is actually on the page, not merely to the grid: every
+    // page has a `.regions`, so without this one keypress toggled something
+    // the page in front of the reader does not have.
     //
     // The source is the second half of the `.split` inside the artifact, so
     // this hides that half and gives the prose the whole column. Off by
@@ -2441,88 +2440,4 @@
     }
   });
 
-  // Judging has to cost about five seconds, or it will not happen. Digits pick
-  // an option, N/S/X take the three ways out. Ignored while a text field has
-  // focus, so typing in the assignment search does not fire a verdict.
-  document.addEventListener('keydown', function (e) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    var tag = document.activeElement && document.activeElement.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
-    // Ahead of the card check, and not gated on one: the digit that has just
-    // been regretted is the one that judged the last event, and if it emptied
-    // the queue there is no card left to hang the shortcut off.
-    if (e.key.toLowerCase() === 'u') {
-      var undo = document.querySelector('.judge-undo');
-      if (undo) { e.preventDefault(); undo.click(); }
-      return;
-    }
-    var card = document.querySelector('.judge-card');
-    if (!card) return;
-
-    if (/^[1-9]$/.test(e.key)) {
-      // Disabled options are skipped, matching the badges: a deprecated or
-      // superseded candidate is shown at its place in the pool but carries no
-      // digit, and the numbering runs over the choosable ones without a gap.
-      // Options behind the fold are skipped too — they carry no digit, and a
-      // key that pressed what cannot be seen would be a verdict on nothing.
-      var pick = Array.prototype.filter.call(
-        card.querySelectorAll('.judge-option:not([disabled])'),
-        function (o) { return !o.closest('.judge-more'); }
-      )[Number(e.key) - 1];
-      if (pick) { e.preventDefault(); pick.click(); }
-      return;
-    }
-    // By name, never by position: the assign screen carries a judge-outs row of
-    // its own whose first button is an immediate gap verdict, and N landed on
-    // it whenever focus had left the search box — opening a "Read it in full"
-    // is enough. Only the buttons that declare a key answer to one.
-    var key = e.key.toLowerCase();
-    if (/^[nsx]$/.test(key)) {
-      var out = card.querySelector('.judge-outs button[data-key="' + key + '"]');
-      if (out) { e.preventDefault(); out.click(); }
-    }
-  });
-
-  // ── The assignment search's refining pass ─────────────────────────────────
-  //
-  // The same two passes the workspace box makes, for the same reason: typing
-  // is answered in vector order at embedding speed, and the reranker — a model
-  // call — is asked once, after the box has been quiet long enough for the
-  // query to be settled. It used to run on every keystroke.
-  //
-  // Delegated from the document because the box arrives and leaves with card
-  // swaps, and armed off `data-rerank`, which the server renders only where a
-  // reranker actually serves this door.
-  (function () {
-    var QUIET_MS = 500;
-    var timer = null;
-    document.addEventListener('input', function (e) {
-      var box = e.target;
-      if (!box || box.id !== 'judge-assign-q') return;
-      if (timer) clearTimeout(timer);
-      if (box.getAttribute('data-rerank') !== 'true') return;
-      timer = setTimeout(function () {
-        timer = null;
-        // Still the same box, still on screen: a verdict or a Back between the
-        // last letter and now has replaced the card, and the refine would be
-        // asking about a screen nobody is on.
-        if (!document.body.contains(box)) return;
-        var q = box.value.trim();
-        // The endpoint's own guard: an empty box searches nothing, so the
-        // request could only buy back the empty list already shown.
-        if (!q) return;
-        // `source: box` puts this in the box's own sync queue, so a keystroke
-        // landing now replaces the refine exactly as it replaces an older
-        // keystroke's search — the list is always the answer to the last thing
-        // typed.
-        htmx.ajax('GET', box.getAttribute('hx-get'), {
-          source: box,
-          target: '#judge-assign-results',
-          swap: 'innerHTML',
-          values: { q: q, rerank: 'true' }
-        });
-      }, QUIET_MS);
-    });
-  })();
 })();
