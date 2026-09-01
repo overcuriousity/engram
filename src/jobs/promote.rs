@@ -17,9 +17,6 @@ use crate::store::segments::SegmentState;
 ///
 /// Arms a job; calls no model. The job queue and `[pacing]` bound the load.
 pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize> {
-    if core.synthesis != crate::config::SynthesisMode::Earned || !core.synthesizes() {
-        return Ok(0);
-    }
     let activation = core.store.activation_of(ids).await?;
     let mut armed = 0;
     for id in ids {
@@ -86,59 +83,6 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
             window = idx,
             activation = earned,
             "promoting a window"
-        );
-        armed += 1;
-    }
-    Ok(armed)
-}
-
-/// The `eager` counterpart of promotion: an artifact shown
-/// `resynthesize_after_unconfirmed` times with no confirmation recorded
-/// against it is misleading, and is re-synthesised from its source segment —
-/// never from itself. `keep_artifacts = 0`: replace, because the old artifacts
-/// are the problem. `0` disables it and it ships disabled.
-///
-/// `hits` carries each artifact's retrieval count *after* this retrieval.
-pub async fn maybe_resynthesize(core: &Core, hits: &[(String, i64)]) -> Result<usize> {
-    let line = core.promote.resynthesize_after_unconfirmed;
-    if line <= 0 || core.synthesis != crate::config::SynthesisMode::Eager || !core.synthesizes() {
-        return Ok(0);
-    }
-    let mut armed = 0;
-    for (id, count) in hits {
-        if *count < line {
-            continue;
-        }
-        let Ok(c) = core.store.get_artifact(id).await else {
-            continue;
-        };
-        if c.provenance != Provenance::Captured || !c.in_results() {
-            continue;
-        }
-        let (Some(corpus_id), Some(idx)) = (c.corpus_id.as_deref(), c.segment_idx) else {
-            continue;
-        };
-        if core.store.segment_state(corpus_id, idx).await? != Some(SegmentState::Done) {
-            continue;
-        }
-        if core.store.artifact_confirmed(id).await? {
-            continue;
-        }
-        core.store.reset_segment(corpus_id, idx, false).await?;
-        core.store
-            .rearm_idle_seq(
-                Stage::SegmentWindow,
-                "segment",
-                &crate::jobs::window::unit_target(corpus_id, idx),
-                idx,
-            )
-            .await?;
-        tracing::info!(
-            artifact_id = %id,
-            corpus_id,
-            window = idx,
-            shown = count,
-            "re-synthesising an unconfirmed window"
         );
         armed += 1;
     }
@@ -300,22 +244,33 @@ pub async fn supersede_covered(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SynthesisMode;
     use crate::core::test_support::test_core;
 
     /// A core at `earned`, recording, with one verbatim corpus of one passage.
     async fn earned_with_one_passage() -> (crate::core::Core, String, String) {
         let mut core = test_core().await;
-        core.synthesis = SynthesisMode::Earned;
         core.learn.enabled = true;
-        let out = core
-            .ingest("a single verbatim passage", "web", None)
-            .await
-            .unwrap();
+        // Multi-window on purpose: a capture that fits one synthesis call is
+        // synthesized at capture now, so the corpus promotion exists for is
+        // one too large for that — verbatim windows, earning their call.
+        let body = format!(
+            "the first window speaks of one thing {}\n\nthe second window of another {}",
+            "alpha filler words for sizing ".repeat(120),
+            "beta filler words for sizing ".repeat(120)
+        );
+        let out = core.ingest(&body, "web", None).await.unwrap();
         crate::jobs::passages::capture_verbatim(&core, &out.id)
             .await
             .unwrap();
-        let p = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+        let segs = core.store.segments_for_corpus(&out.id).await.unwrap();
+        assert!(segs.len() > 1, "the fixture must be multi-window: {}", segs.len());
+        let p = core
+            .store
+            .artifacts_for_segment(&out.id, 0)
+            .await
+            .unwrap()
+            .first()
+            .expect("segment 0 owns a passage")
             .id
             .clone();
         (core, out.id, p)
@@ -478,30 +433,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_earned_with_a_synthesizer_promotes() {
-        let (mut core, _corpus, p) = earned_with_one_passage().await;
-        core.store
-            .bump_activation(std::slice::from_ref(&p), 5.0, 14.0, 1_000)
-            .await
-            .unwrap();
-        core.synthesis = SynthesisMode::Off;
-        assert_eq!(
-            maybe_promote(&core, std::slice::from_ref(&p), 1_000)
-                .await
-                .unwrap(),
-            0
-        );
-        core.synthesis = SynthesisMode::Earned;
-        core.synthesizer = None;
-        assert_eq!(
-            maybe_promote(&core, std::slice::from_ref(&p), 1_000)
-                .await
-                .unwrap(),
-            0
-        );
-    }
-
-    #[tokio::test]
     async fn twenty_listings_and_one_open_never_promote_but_a_confirmation_does() {
         // "Rewritten once you have actually used it." Exposure must not fill
         // the tank for one touch to pull the trigger: at `retrieved = 0.1`,
@@ -646,7 +577,6 @@ mod tests {
         Vec<crate::store::artifacts::Chunk>,
     ) {
         let mut core = test_core().await;
-        core.synthesis = SynthesisMode::Earned;
         core.learn.enabled = true;
         let src = core
             .store
@@ -910,90 +840,6 @@ mod tests {
                 .unwrap()
                 .len(),
             5
-        );
-    }
-
-    #[tokio::test]
-    async fn an_eager_artifact_shown_often_and_never_confirmed_is_re_read_from_its_segment_when_enabled()
-     {
-        let mut core = test_core().await;
-        core.promote.resynthesize_after_unconfirmed = 3;
-        let src = core
-            .store
-            .insert_corpus("l1\nl2", "web", None)
-            .await
-            .unwrap();
-        core.store
-            .upsert_segments(
-                &src.id,
-                &[crate::store::segments::NewSegment {
-                    start_line: 1,
-                    end_line: 2,
-                    text: "l1\nl2",
-                }],
-            )
-            .await
-            .unwrap();
-        core.store
-            .set_segment_state(&src.id, 0, SegmentState::Done, None)
-            .await
-            .unwrap();
-        let a = core
-            .store
-            .insert_artifacts(
-                &src.id,
-                &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
-                    text: "artifact".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: Some(0),
-                    caveats: vec![],
-                }],
-            )
-            .await
-            .unwrap()[0]
-            .id
-            .clone();
-        // Under the line: nothing.
-        assert_eq!(
-            maybe_resynthesize(&core, &[(a.clone(), 2)]).await.unwrap(),
-            0
-        );
-        // At the line, unconfirmed: the window is re-armed to *replace*.
-        assert_eq!(
-            maybe_resynthesize(&core, &[(a.clone(), 3)]).await.unwrap(),
-            1
-        );
-        assert_eq!(
-            core.store.segment_state(&src.id, 0).await.unwrap(),
-            Some(SegmentState::Pending)
-        );
-        assert!(
-            !core
-                .store
-                .segment_keeps_artifacts(&src.id, 0)
-                .await
-                .unwrap(),
-            "replace, not append: the old artifacts are the problem"
-        );
-        assert!(
-            core.store
-                .live_job(Stage::SegmentWindow, &unit(&src.id))
-                .await
-                .unwrap()
-        );
-        // Disabled (0) never fires.
-        core.promote.resynthesize_after_unconfirmed = 0;
-        core.store
-            .set_segment_state(&src.id, 0, SegmentState::Done, None)
-            .await
-            .unwrap();
-        assert_eq!(
-            maybe_resynthesize(&core, &[(a.clone(), 99)]).await.unwrap(),
-            0
         );
     }
 

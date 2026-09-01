@@ -118,10 +118,8 @@ pub type CorpusLocks =
 pub struct Core {
     pub store: Store,
     pub vectors: Arc<dyn VectorStore>,
-    /// `None` when `[infer.synthesize]` is not configured — `synthesis = "off"`
-    /// with no synthesizer. Every stage that would call it checks before
-    /// arming, and `run_claimed` closes a unit that slipped through.
-    pub synthesizer: Option<Arc<dyn Synthesizer>>,
+    /// Always present: `[infer.synthesize]` is required — capture synthesizes.
+    pub synthesizer: Arc<dyn Synthesizer>,
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
     /// Where the configured reranker is consulted — `[infer.rerank].apply`.
@@ -173,11 +171,7 @@ pub struct Core {
     pub planner: Option<Arc<dyn Completer>>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
-    /// How much inference capture spends. See `SynthesisMode`.
-    pub synthesis: crate::config::SynthesisMode,
-    /// The window budget when there is no synthesizer to derive one from.
-    pub segment_tokens: usize,
-    /// Passage size at `off`/`earned`, already clamped to the embedder.
+    /// Passage size, already clamped to the embedder.
     pub chunk_tokens: usize,
     pub counter: Arc<TokenCounter>,
     /// Writes that run off the request path. Shared by every clone of `Core`,
@@ -295,14 +289,13 @@ impl Core {
         // token-count estimation error.
         let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
 
-        let synth = cfg.infer.synthesize.as_ref();
+        let synth = &cfg.infer.synthesize;
         Core {
             store,
             vectors,
-            synthesizer: synth.map(|s| {
-                Arc::new(HttpSynthesizer::new(s).with_max_artifact_tokens(max_artifact_tokens))
-                    as Arc<dyn Synthesizer>
-            }),
+            synthesizer: Arc::new(
+                HttpSynthesizer::new(synth).with_max_artifact_tokens(max_artifact_tokens),
+            ),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
             reranker: cfg
                 .infer
@@ -320,17 +313,13 @@ impl Core {
                 .ask
                 .as_ref()
                 .map(|a| Arc::new(HttpCompleter::new(a)) as Arc<dyn Completer>),
-            judge: synth.map(|s| Arc::new(HttpCompleter::for_judging(s)) as Arc<dyn Completer>),
-            link_judge: synth
-                .map(|s| Arc::new(HttpCompleter::for_link_judging(s)) as Arc<dyn Completer>),
-            gap_namer: synth
-                .map(|s| Arc::new(HttpCompleter::for_gap_naming(s)) as Arc<dyn Completer>),
-            reminder: synth
-                .map(|s| Arc::new(HttpCompleter::for_reminding(s)) as Arc<dyn Completer>),
-            reaper: synth.map(|s| Arc::new(HttpCompleter::for_reaping(s)) as Arc<dyn Completer>),
+            judge: Some(Arc::new(HttpCompleter::for_judging(synth))),
+            link_judge: Some(Arc::new(HttpCompleter::for_link_judging(synth))),
+            gap_namer: Some(Arc::new(HttpCompleter::for_gap_naming(synth))),
+            reminder: Some(Arc::new(HttpCompleter::for_reminding(synth))),
+            reaper: Some(Arc::new(HttpCompleter::for_reaping(synth))),
             protos: Arc::new(tokio::sync::OnceCell::new()),
-            generator: synth
-                .map(|s| Arc::new(HttpCompleter::for_generating(s)) as Arc<dyn Completer>),
+            generator: Some(Arc::new(HttpCompleter::for_generating(synth))),
             planner: cfg.infer.ask.as_ref().and_then(|a| {
                 a.plan
                     .then(|| Arc::new(HttpCompleter::for_plan(&a.plan_on())) as Arc<dyn Completer>)
@@ -339,9 +328,7 @@ impl Core {
                 .infer
                 .vision
                 .as_ref()
-                .map(|v| Arc::new(HttpDescriber::new(v, synth)) as Arc<dyn Describer>),
-            synthesis: cfg.infer.synthesis,
-            segment_tokens: cfg.infer.segment_tokens,
+                .map(|v| Arc::new(HttpDescriber::new(v, Some(synth))) as Arc<dyn Describer>),
             chunk_tokens: cfg.infer.embed.effective_chunk_tokens(),
             counter: Arc::new(TokenCounter::load(
                 cfg.infer.tokenizer.as_deref(),
@@ -426,12 +413,6 @@ impl Core {
     /// name says which question it is.
     pub fn associating(&self) -> bool {
         self.learn.enabled
-    }
-
-    /// Is there a synthesizer to call? `false` means no `[infer.synthesize]`:
-    /// nothing that needs one is armed, offered, or run.
-    pub fn synthesizes(&self) -> bool {
-        self.synthesizer.is_some()
     }
 
     /// Is there an ask model to call? `false` means no `[infer.ask]`: no ask
@@ -545,7 +526,7 @@ pub mod test_support {
         Core {
             store,
             vectors: Arc::new(MemoryVectors::new()),
-            synthesizer: Some(synthesizer),
+            synthesizer,
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
             // The shipped default: a configured reranker serves both places.
@@ -580,8 +561,6 @@ pub mod test_support {
             // extra call to account for.
             planner: None,
             describer: Some(Arc::new(FakeDescriber::default())),
-            synthesis: crate::config::SynthesisMode::Eager,
-            segment_tokens: crate::config::DEFAULT_SEGMENT_TOKENS,
             chunk_tokens: crate::config::DEFAULT_CHUNK_TOKENS,
             counter: Arc::new(TokenCounter::default()),
             background: Arc::new(Background::default()),
@@ -817,8 +796,11 @@ mod tests {
         assert!(core.reranker.is_some());
     }
 
-    #[tokio::test]
-    async fn a_core_without_roles_says_so() {
+    #[test]
+    fn a_config_still_setting_a_mode_is_refused_naming_the_reshape() {
+        // `synthesis = "off"` was a complete product state once. Since the
+        // 2026-09 capture reshape it is a removed key, and the refusal has to
+        // say what changed rather than parse silently into something else.
         let cfg_toml = r#"
         [server]
         bind = "127.0.0.1:8080"
@@ -843,18 +825,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, cfg_toml).unwrap();
-        let cfg = crate::config::Config::load(Some(&path)).unwrap();
-        let store = Store::memory().await.unwrap();
-        let core = Core::from_config(
-            &cfg,
-            Arc::new(crate::vector::memory::MemoryVectors::new()),
-            store,
-        );
-        assert!(!core.synthesizes());
-        assert!(!core.asks());
-        assert!(core.synthesizer.is_none() && core.completer.is_none());
-        assert!(core.judge.is_none() && core.link_judge.is_none() && core.gap_namer.is_none());
-        assert!(core.reaper.is_none() && core.generator.is_none());
-        assert_eq!(core.synthesis, crate::config::SynthesisMode::Off);
+        let err = crate::config::Config::load(Some(&path)).unwrap_err().to_string();
+        assert!(err.contains("2026-09 capture reshape"), "{err}");
+        assert!(err.contains("infer.synthesis"), "{err}");
     }
 }

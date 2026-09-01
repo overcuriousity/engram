@@ -429,7 +429,7 @@ mod tests {
     async fn artifact_with_due(core: &Core, at: Option<i64>) -> String {
         let out = core.ingest_capture(Capture::new("Send the invoice", "ui")).await.unwrap();
         crate::jobs::test_support::drain(core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         core.store
             .insert_moment(&NewMoment {
                 artifact_id: aid,
@@ -526,7 +526,7 @@ mod tests {
         let core = test_core().await;
         let out = core.ingest_capture(Capture::new("Pay rent", "ui")).await.unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
         let id = core
             .store
@@ -557,7 +557,7 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let id = core
             .store
             .insert_moment(&NewMoment {
@@ -724,7 +724,7 @@ mod tests {
         let core = test_core().await;
         let out = core.ingest_capture(Capture::new("Pay rent", "ui")).await.unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
         let id = core
             .store
@@ -752,7 +752,7 @@ mod tests {
     async fn artifact_with_rule(core: &Core, rule: &str) -> String {
         let out = core.ingest_capture(Capture::new("Pay rent", "ui")).await.unwrap();
         crate::jobs::test_support::drain(core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
         core.store
             .insert_moment(&NewMoment {

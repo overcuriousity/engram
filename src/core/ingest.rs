@@ -2236,6 +2236,14 @@ mod tests {
                 break;
             }
         }
+        // Capture names locally now, so the title unit is armed by putting
+        // the corpus in the state the unit exists for: unnamed at settle.
+        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
+            .bind(&src.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::finish(&core, &src.id).await.unwrap();
         assert!(
             core.store.has_job(Stage::Title, &src.id).await.unwrap(),
             "the fixture must arm a title unit"
@@ -2459,9 +2467,9 @@ mod tests {
         // The whole point of deferred processing: a broken inference endpoint
         // must not turn into a failed capture.
         let mut core = test_core().await;
-        core.synthesizer = Some(std::sync::Arc::new(
+        core.synthesizer = std::sync::Arc::new(
             crate::infer::fake::FakeSynthesizer::failing("endpoint down"),
-        ));
+        ) ;
         let out = core.ingest("still accepted", "web", None).await.unwrap();
         assert_eq!(out.status, CorpusStatus::Raw);
     }

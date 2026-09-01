@@ -7,19 +7,17 @@ use crate::infer::budget::TokenCounter;
 use crate::infer::split::{Window, split_into_segments};
 use crate::store::artifacts::{CorpusSpan, NewArtifact, Provenance};
 use crate::store::corpora::CorpusStatus;
+use crate::store::segments::SegmentState;
 
 /// A document's name, derived locally: longer than this is a paragraph.
 pub const TITLE_MAX: usize = 80;
 
-/// One verbatim slice of a window: the retrieval unit at `off` and `earned`.
+/// One verbatim slice of a window: the retrieval unit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passage {
-    /// The heading this text sits under, as the document wrote it — the
-    /// carried heading of a continuation, or the most recent heading inside
-    /// the window above it. Never inferred.
+    /// The heading this text sits under, as the document wrote it. Never
+    /// inferred.
     pub title: Option<String>,
-    /// The slice itself. A carried heading is *not* in here: it is not one of
-    /// the lines the span names, and the embedding input would carry it twice.
     pub text: String,
     pub start_line: i64,
     pub end_line: i64,
@@ -152,10 +150,10 @@ pub fn split_passages(
     out
 }
 
-/// The whole of capture at `off` and `earned`: split into windows, write them
-/// `verbatim`, split each window into passages, write those, name the document
-/// without a model, and finish the corpus the way a synthesized one finishes.
-/// No inference call anywhere on this path.
+/// The whole of capture: split into windows, write them `verbatim`, split
+/// each window into passages, write those, name the document without a model,
+/// and finish the corpus. No inference call anywhere on this path — the one
+/// call a small capture gets is *armed* here and made by the window job.
 ///
 /// Idempotent per segment: a process that dies between two segments' inserts
 /// re-runs this, and a segment that already owns rows is left alone.
@@ -231,7 +229,31 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     // Renumbers, measures coverage (green: the passages partition the
     // document), arms the embed and moves the corpus on. The same function a
     // synthesized corpus reaches through its last window's settle.
-    super::synthesize::finish(core, corpus_id).await
+    super::synthesize::finish(core, corpus_id).await?;
+
+    // The size fork. One window = the whole capture fits one synthesis call:
+    // arm that call now instead of waiting for use to earn it. `keep_artifacts`
+    // puts the window job on its promotion path — append, embed inline,
+    // supersede the covered passages — so a failed or slow call leaves the
+    // verbatim capture searchable and the job retryable. Guarded like
+    // promotion is: a window already read, or put back by an operator's undo,
+    // is not re-armed by a re-run of capture.
+    if windows.len() == 1
+        && core.store.segment_state(corpus_id, 0).await? == Some(SegmentState::Verbatim)
+        && !core.store.segment_no_promote(corpus_id, 0).await?
+    {
+        core.store.reset_segment(corpus_id, 0, true).await?;
+        core.store
+            .rearm_idle_seq(
+                crate::store::jobs::Stage::SegmentWindow,
+                "segment",
+                &crate::jobs::window::unit_target(corpus_id, 0),
+                0,
+            )
+            .await?;
+        tracing::info!(corpus_id, "small capture: synthesis armed at capture");
+    }
+    Ok(())
 }
 
 /// A corpus title with no model: the first heading, else the first non-empty
@@ -422,17 +444,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_at_off_writes_passages_marks_segments_verbatim_and_finishes() {
-        let mut core = crate::core::test_support::test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Off;
-        core.synthesizer = None;
+    async fn capture_writes_passages_marks_segments_verbatim_and_finishes() {
+        let core = crate::core::test_support::test_core().await;
         let text = format!(
             "# Manual\n\n## Install\n{}\n\n## Recover\n{}",
-            "install words ".repeat(40),
-            "recover words ".repeat(40)
+            "install words ".repeat(600),
+            "recover words ".repeat(600)
         );
         let out = core.ingest(&text, "web", None).await.unwrap();
-        // The Synthesize job is what capture queued; run it.
+        // The Synthesize job is what capture queued; run it. Multi-window on
+        // purpose: this test is about the pure verbatim path, and a capture
+        // small enough for one call would arm its synthesis at capture.
         assert!(crate::jobs::run_one(&core).await.unwrap());
 
         let s = core.store.get_corpus(&out.id).await.unwrap();
@@ -488,8 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_at_off_is_idempotent_per_segment() {
-        let mut core = crate::core::test_support::test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Off;
+        let core = crate::core::test_support::test_core().await;
         let out = core
             .ingest("one line\n\nanother line", "web", None)
             .await
@@ -514,8 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_passage_never_gets_a_relate_unit() {
-        let mut core = crate::core::test_support::test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Off;
+        let core = crate::core::test_support::test_core().await;
         let out = core
             .ingest("some verbatim text", "web", None)
             .await

@@ -2136,7 +2136,7 @@ pub(crate) mod tests {
         use chrono::TimeZone;
         let out = core.ingest_capture(crate::core::ingest::Capture::new("Pay rent", "ui")).await.unwrap();
         crate::jobs::test_support::drain(core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
         let id = core
             .store
@@ -4684,7 +4684,7 @@ mod patch_tests {
             .await
             .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let at = crate::store::now() + 600;
         let res = app
             .clone()
@@ -4738,7 +4738,7 @@ mod patch_tests {
             .await
             .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let res = app
             .oneshot(post_json(
                 &format!("/api/v1/artifacts/{aid}/moments"),
@@ -4823,7 +4823,7 @@ mod patch_tests {
         let (app, token, core) = app_token_and_core().await;
         let out = core.ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui")).await.unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
 
         let res = app
             .clone()

@@ -225,7 +225,7 @@ mod tests {
     async fn due_at(core: &Core, at: i64) -> String {
         let out = core.ingest_capture(Capture::new("Send the invoice", "ui")).await.unwrap();
         crate::jobs::test_support::drain(core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let id = core
             .store
             .insert_moment(&NewMoment {

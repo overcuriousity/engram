@@ -789,35 +789,15 @@ impl Core {
         // priming, and an install that never opted into `feedback` must see
         // no artifact's activation move, or the ranked order could start
         // changing under a feature it never turned on.
-        // Never `maybe_promote` here: exposure is not engagement. The only
-        // thing exposure can trigger is the opposite — an eager artifact shown
-        // and shown and never confirmed is re-read — and that ships disabled.
+        // Never `maybe_promote` here: exposure is not engagement.
         if counts_as_hit && self.associating() {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            let shown: Vec<(String, i64)> = if self.promote.resynthesize_after_unconfirmed > 0 {
-                results
-                    .iter()
-                    .map(|r| {
-                        (
-                            r.artifact_id.clone(),
-                            hit_counts.get(&r.artifact_id).copied().unwrap_or(0) + 1,
-                        )
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
             let core = self.clone();
             let (delta, half_life) = (self.activation.retrieved, self.activation.half_life_days);
             let at = now_secs();
             self.background.spawn(async move {
                 if let Err(e) = core.store.bump_activation(&ids, delta, half_life, at).await {
                     tracing::warn!(error = %e, "could not raise activation for a search");
-                }
-                if !shown.is_empty()
-                    && let Err(e) = crate::jobs::promote::maybe_resynthesize(&core, &shown).await
-                {
-                    tracing::warn!(error = %e, "could not check the re-synthesis threshold");
                 }
             });
         }

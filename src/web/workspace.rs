@@ -97,14 +97,12 @@ struct WorkspaceTemplate {
     /// refining pass: without it no second request fires, ever, because it
     /// could only buy the same order back.
     search_reranks: bool,
-    /// Whether capture spends a synthesis call per segment, i.e. `eager`.
     ///
     /// At `earned` and `off` it spends none: the text is embedded as written,
     /// and at `earned` a window is rewritten later only where reading has
     /// earned it. The page has to say which of those is happening — promising
     /// "16 model calls" on a base that will make none is the page lying about
     /// what the button costs.
-    eager: bool,
     /// The ask the box was filled from, carried through the form so the
     /// capture records where the text came from. Empty on an ordinary visit.
     ///
@@ -292,7 +290,6 @@ async fn base_template(
         // The deep-link door sets it; every other door onto this page is not
         // an operator looking into a ranking.
         explain: false,
-        eager: tenant.core.synthesis == crate::config::SynthesisMode::Eager,
         prefill_ask: String::new(),
         prefill_question: String::new(),
         open_with,
@@ -962,9 +959,7 @@ async fn ask_carried(
 /// — and the same concession the capture door already made: `origin = "ask"`
 /// and the `ask` metadata, so what the base holds says a model wrote it, from
 /// which question, and from which artifacts. Nothing about it is special
-/// downstream, which is why this works whatever `synthesis` is set to: at
-/// `eager` the windows go to the synthesiser, at `off` and `earned` they are
-/// captured verbatim, and both end in artifacts with vectors.
+/// downstream: captured verbatim, ending in artifacts with vectors.
 ///
 /// The answer as the model wrote it, not as the operator retyped it: an
 /// operator who wants to edit first has `edit first` beside this, which is the

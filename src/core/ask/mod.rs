@@ -2729,7 +2729,6 @@ mod tests {
     #[tokio::test]
     async fn consecutive_passages_are_stitched_into_one_excerpt_and_every_id_is_cited() {
         let mut core = test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Off;
         // One corpus, one segment, three abutting passages, all hits.
         let src = core
             .store

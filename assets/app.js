@@ -1207,17 +1207,11 @@
     if (!box || !hint || !verb) return;
     // Rough stand-in for the tokeniser: enough to warn, never to block.
     var CHARS_PER_SEGMENT = 12000;
-    // At `earned` and `off` capture makes no synthesis call, so the hint must
-    // not price one. app.js is one file for every installation, so what used
-    // to be a template conditional rides an attribute instead.
-    var EAGER = hint.getAttribute('data-eager') === '1';
     function sizeHint() {
       var segments = Math.ceil(box.value.length / CHARS_PER_SEGMENT);
       hint.hidden = segments < 2;
-      hint.textContent = EAGER
-        ? 'About ' + segments + ' segments — roughly ' + segments +
-          ' model calls before this is searchable.'
-        : 'About ' + segments + ' segments — searchable as written, once embedded.';
+      hint.textContent =
+        'About ' + segments + ' segments — searchable as written, once embedded.';
     }
     box.addEventListener('input', sizeHint);
     // The box is emptied by a capture that stored, and the hint must not go on

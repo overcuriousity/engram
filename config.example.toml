@@ -123,23 +123,13 @@ per_source_cap = 3
 # you can raise output_ratio's window and lower timeout_secs considerably.
 
 [infer]
-# How much inference capture spends.
-#   "off"    — split the text into verbatim passages, embed them, call nothing.
-#              [infer.synthesize] and [infer.ask] may be left out entirely.
-#   "earned" — the same capture; synthesis runs later where use has shown it
-#              is worth it. Needs [infer.synthesize]. The default.
-#   "eager"  — one synthesis call per segment at capture.
-#
-# "earned" is the default because capture cannot know which paragraph will be
-# asked about. Your text goes in as you wrote it; a window is rewritten once
-# reading has shown the rewrite is worth making, and every synthesized artifact
-# in the base can name the use that earned it. Choose "eager" when you want
-# everything pre-written and are willing to pay a model call per segment for
-# text most of which is never retrieved.
-synthesis = "earned"
-# Window size when there is no [infer.synthesize] to derive one from, in
-# engram's estimator tokens. Ignored when a synthesizer is configured.
-# segment_tokens = 4096
+# Capture is verbatim-first: your text goes in as you wrote it, split into
+# passages and embedded, searchable before any model answers. A paste that
+# fits one synthesis call is then rewritten immediately — structured
+# artifacts that supersede the passages they cover, with the originals kept
+# reachable — and anything larger earns its rewrites through use, window by
+# window (see [promote]). [infer.synthesize] is required: capture
+# synthesizes, and there is no mode key any more.
 # How tokens are counted for every budget: threshold, windows, prompts. A
 # HF-format tokenizer.json, as a path or an http(s) link. A link is fetched
 # once and cached beside the store; a changed link re-fetches. Unset, the
@@ -593,11 +583,6 @@ cited = 0.5
 # artifacts inherit the access the passages earned.
 [promote]
 activation_above = 3.0
-# At synthesis = "eager": an artifact shown this many times with no
-# confirmation recorded against it is re-read from its source segment. 0
-# disables it, and it ships disabled — re-synthesising changes what an
-# existing base contains without anyone asking.
-resynthesize_after_unconfirmed = 0
 
 # ── Pursuits ─────────────────────────────────────────────────────────────────
 # A coherent run of searches, what was opened and pivoted through, and — when

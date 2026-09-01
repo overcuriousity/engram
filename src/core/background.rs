@@ -107,7 +107,7 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     use crate::store::jobs::Stage;
     let mut out = Vec::new();
     // Duplicate hygiene, and the judging that needs a model to do it with.
-    if core.consolidate.enabled && core.synthesizes() {
+    if core.consolidate.enabled {
         out.push((Stage::Consolidate, CONSOLIDATE_TARGET));
         // Zero units per tick is the off switch for the calls, not for the
         // sweep that finds the pairs.

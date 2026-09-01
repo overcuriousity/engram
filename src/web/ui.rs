@@ -4097,8 +4097,11 @@ mod tests {
     async fn a_passage_cut_mid_sentence_points_at_the_one_that_carries_the_rest() {
         // The pane ended "…der bereits vorgestellte Einsatz von" and offered
         // nothing onward, while the source column beside it showed the rest of
-        // the sentence.
-        let core = crate::core::test_support::test_core().await;
+        // the sentence. A verbatim-path property: the chunker is what cuts a
+        // sentence, so shrink the chunk budget until it does and read the
+        // passages as capture wrote them.
+        let mut core = crate::core::test_support::test_core().await;
+        core.chunk_tokens = 12;
         let out = core
             .ingest(
                 "Die erste Vorkehrung ist der bereits vorgestellte Einsatz von\n\n\
@@ -4108,8 +4111,17 @@ mod tests {
             )
             .await
             .unwrap();
-        crate::jobs::synthesize::segment_all(&core, &out.id).await;
-        let all = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        // The live rows: superseded passages stand behind the artifacts that
+        // cover them and are not what the pane walks between.
+        let all: Vec<_> = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.in_results())
+            .collect();
         assert!(all.len() > 1, "the fixture produced one passage, not two");
 
         let first = all.iter().min_by_key(|c| c.ordinal).unwrap();
@@ -5172,44 +5184,6 @@ mod tests {
         assert!(
             !html.contains("Re-segment"),
             "nothing was extracted; there is nothing to re-segment: {html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_capture_page_prices_a_capture_by_the_mode_it_will_run_in() {
-        // At `earned` — the default — capture synthesizes nothing: the text is
-        // embedded as written and a window is rewritten later only where
-        // reading earns it. Promising "16 model calls" there is the page
-        // lying about what the button costs.
-        let mut core = crate::core::test_support::test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Earned;
-        let (app, cookie) = app_for(core).await;
-        let html = get(&app, "/ui/capture", &cookie).await;
-        assert!(
-            html.contains(r#"data-eager="0""#),
-            "the page tells the hint this mode makes no model call: {html}"
-        );
-
-        let mut core = crate::core::test_support::test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Eager;
-        let (app, cookie) = app_for(core).await;
-        let html = get(&app, "/ui/capture", &cookie).await;
-        assert!(html.contains(r#"data-eager="1""#), "{html}");
-
-        // The standing sentence is gone with the page it stood on — on a
-        // workspace where capture is one verb of three, a permanent line about
-        // what pasting costs is furniture. What replaced it says the same
-        // thing only once it is true, and app.js must still price both modes
-        // rather than the one it was written against.
-        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
-        let js = String::from_utf8(js.data.into_owned()).unwrap();
-        assert!(
-            js.contains("model calls before this is searchable"),
-            "the eager branch no longer prices the calls it will make"
-        );
-        assert!(
-            js.contains("searchable as written, once embedded"),
-            "the earned branch prices a call it will not make"
         );
     }
 
@@ -8156,8 +8130,8 @@ mod tests {
 
         let body = get_body(&app, &cookie, "/ui/queue").await;
         assert!(
-            body.contains("Fake title: alpha line"),
-            "once synthesis names it, the row is called what it is"
+            body.contains("alpha line"),
+            "the row is called by the name capture derived"
         );
         assert!(
             !body.contains("every 3s"),

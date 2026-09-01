@@ -42,14 +42,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     if w.state == SegmentState::Done {
         return Ok(());
     }
-    // No synthesizer: the unit cannot run, and `run_claimed` closes it before
-    // it gets here. Said again at the call so a direct caller gets an answer
-    // and not a panic.
-    let Some(synth) = core.synthesizer.clone() else {
-        return Err(Error::Validation(
-            "[infer.synthesize] is not configured; this window cannot be synthesized".into(),
-        ));
-    };
+    let synth = core.synthesizer.clone();
 
     let all_texts: Vec<&str> = all.iter().map(|s| s.text.as_str()).collect();
     let ctx = crate::infer::context::WindowContext::build(
@@ -176,7 +169,13 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         c.corpus_lines = Some(resolve_span(&c.text, &body, &w, c.corpus_lines));
     }
 
-    let keep = core.store.segment_keeps_artifacts(corpus_id, idx).await?;
+    // A verbatim window read by the model is definitionally a promotion:
+    // its passages are the index until the artifacts land, and they are
+    // superseded rather than deleted. The stored flag covers the armed path;
+    // the state covers a window run directly, so no route through here can
+    // ever throw verbatim text away.
+    let keep = core.store.segment_keeps_artifacts(corpus_id, idx).await?
+        || w.state == SegmentState::Verbatim;
     let written =
         write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks)).await?;
     flag_unverified(core, &written, &text).await?;
@@ -631,7 +630,7 @@ mod tests {
         assert!(
             windows[1..]
                 .iter()
-                .all(|w| w.state == SegmentState::Pending),
+                .all(|w| w.state == SegmentState::Verbatim),
             "a unit segmented a window that was not its own"
         );
     }
@@ -759,26 +758,20 @@ mod tests {
             .ingest("alpha line\n\nbravo line", "web", None)
             .await
             .unwrap();
+        // Capture writes the passages and arms the window with `keep`: the
+        // one run below is already the promotion-shaped read.
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
         run(&core, &unit_target(&out.id, 0)).await.unwrap();
-        let before = core
+
+        let rows = core
             .store
-            .artifact_ids_for_segment(&out.id, 0)
+            .artifacts_for_segment(&out.id, 0)
             .await
             .unwrap();
-
-        // The keep mark is what makes the re-read a promotion.
-        core.store.reset_segment(&out.id, 0, true).await.unwrap();
-        run(&core, &unit_target(&out.id, 0)).await.unwrap();
-
-        let after = core
-            .store
-            .artifact_ids_for_segment(&out.id, 0)
-            .await
-            .unwrap();
-        let written: Vec<String> = after
-            .into_iter()
-            .filter(|id| !before.contains(id))
+        let written: Vec<String> = rows
+            .iter()
+            .filter(|c| c.provenance != crate::store::artifacts::Provenance::Passage)
+            .map(|c| c.id.clone())
             .collect();
         assert!(!written.is_empty(), "the fixture must promote something");
         for c in core.store.artifacts_by_ids(&written).await.unwrap() {
@@ -809,9 +802,9 @@ mod tests {
         let mut core = test_core().await;
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        core.synthesizer = Some(std::sync::Arc::new(
+        core.synthesizer = std::sync::Arc::new(
             crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"),
-        ));
+        );
 
         let err = run(&core, &unit_target(&out.id, 0)).await.unwrap_err();
         assert!(err.retryable(), "the window is still owed a call");

@@ -607,7 +607,7 @@ mod tests {
         let out = core.ingest_capture(Capture::new("Vandaag eindelijk de tuin gedaan.", "cli")).await.unwrap();
         core.store.set_corpus_origin(&out.id, "cli").await.unwrap();
         drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         run(&core, &aid).await.unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
 
@@ -633,7 +633,7 @@ mod tests {
         let out = core.ingest_capture(Capture::new("Vandaag eindelijk de tuin gedaan.", "cli")).await.unwrap();
         core.store.set_corpus_origin(&out.id, "cli").await.unwrap();
         drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         run(&core, &aid).await.unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
     }
@@ -647,7 +647,7 @@ mod tests {
             .await
             .unwrap();
         drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         run(&core, &aid).await.unwrap();
         let rows = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(rows.len(), 1);

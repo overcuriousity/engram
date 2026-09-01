@@ -1202,7 +1202,7 @@ mod tests {
         let core = crate::core::test_support::test_core().await;
         let out = core.ingest_capture(crate::core::ingest::Capture::new("Water the plants", "ui")).await.unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
         let rule = "FREQ=DAILY;COUNT=2";
         let first = core
             .store
