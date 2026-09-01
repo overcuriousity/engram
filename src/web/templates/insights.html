@@ -71,8 +71,8 @@
 </div>
 {% endif %}
 
-{# Work waiting on a person, first: this is the only thing on the page that
-   asks for anything. Everything below it is reference. #}
+{# Work waiting on a person: dedupe and contradiction pairs, and what is due.
+   Everything below this is reference. #}
 {% if !pairs.is_empty() %}
 <h2>Needs you</h2>
 {% include "_decide.html" %}
@@ -82,6 +82,21 @@
 {% if more_pairs > 0 %}
 <p class="muted">{{ more_pairs }} more waiting — the next comes up as you clear these.</p>
 {% endif %}
+{% endif %}
+
+{# Due reminders, the same band the workspace column shows — same fragment,
+   same route, same actions, so there is exactly one way this list behaves
+   rather than two that can drift apart. A page opened to check on the base
+   is exactly where a reminder set for a date now past deserves to be seen,
+   not only in the column beside the capture box.
+
+   Gated on `has_due`, read with the fragment's own window: a heading over a
+   band that loads in empty is a claim that something is being measured when
+   nothing is. #}
+{% if has_due %}
+<h2>Due</h2>
+<div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
+     hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
 {% endif %}
 
 {% include "_gaps.html" %}
