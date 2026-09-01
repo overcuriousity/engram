@@ -24,35 +24,57 @@ impl Intent {
 /// and "remind me" in paragraph nine is a quotation.
 const OPENING_CHARS: usize = 200;
 
+/// Whether a cue may decide on its own.
+///
+/// `remind me` and `dear diary` are unmistakable — nobody opens a note that
+/// way by accident. The day words are not. *heute*, *hoy*, *oggi*, *bugün*,
+/// *сегодня* open a diary entry and a to-do about equally often, and because
+/// a journal cue only has to sit at the head of the text, `Heute den Bericht
+/// abgeben` was filed as a diary entry on the strength of its first word.
+/// `ingest.rs` names that collision and could only resolve it for a door that
+/// had already forced `remind`, which the capture box never does.
+///
+/// So a weak cue stops overruling the vector and speaks last instead: it is
+/// consulted only where the classifier declines to fire at all. Its recall is
+/// kept — a note that resembles nothing and opens with *Heute* is still an
+/// entry — and its veto is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strength {
+    /// Decides, ahead of the classifier.
+    Strong,
+    /// Decides only where the classifier found nothing.
+    Weak,
+}
+
 /// Lowercase, whole-word. A `journal` cue must sit at the head of the text.
-pub const CUES: &[(Intent, &str)] = &[
-    (Intent::Remind, "remind me"),
-    (Intent::Remind, "erinnere mich"),
-    (Intent::Remind, "erinner mich"),
-    (Intent::Remind, "rappelle-moi"),
-    (Intent::Remind, "rappelle moi"),
-    (Intent::Remind, "recuérdame"),
-    (Intent::Remind, "recuerdame"),
-    (Intent::Remind, "lembre-me"),
-    (Intent::Remind, "lembra-me"),
-    (Intent::Remind, "ricordami"),
-    (Intent::Remind, "herinner me"),
-    (Intent::Remind, "przypomnij mi"),
-    (Intent::Remind, "hatırlat"),
-    (Intent::Remind, "напомни"),
-    (Intent::Journal, "today i"),
-    (Intent::Journal, "dear diary"),
-    (Intent::Journal, "heute"),
-    (Intent::Journal, "liebes tagebuch"),
-    (Intent::Journal, "aujourd'hui"),
-    (Intent::Journal, "hoy"),
-    (Intent::Journal, "hoje"),
-    (Intent::Journal, "oggi"),
-    (Intent::Journal, "vandaag"),
-    (Intent::Journal, "dzisiaj"),
-    (Intent::Journal, "dziś"),
-    (Intent::Journal, "bugün"),
-    (Intent::Journal, "сегодня"),
+pub const CUES: &[(Intent, &str, Strength)] = &[
+    (Intent::Remind, "remind me", Strength::Strong),
+    (Intent::Remind, "erinnere mich", Strength::Strong),
+    (Intent::Remind, "erinner mich", Strength::Strong),
+    (Intent::Remind, "rappelle-moi", Strength::Strong),
+    (Intent::Remind, "rappelle moi", Strength::Strong),
+    (Intent::Remind, "recuérdame", Strength::Strong),
+    (Intent::Remind, "recuerdame", Strength::Strong),
+    (Intent::Remind, "lembre-me", Strength::Strong),
+    (Intent::Remind, "lembra-me", Strength::Strong),
+    (Intent::Remind, "ricordami", Strength::Strong),
+    (Intent::Remind, "herinner me", Strength::Strong),
+    (Intent::Remind, "przypomnij mi", Strength::Strong),
+    (Intent::Remind, "hatırlat", Strength::Strong),
+    (Intent::Remind, "напомни", Strength::Strong),
+    (Intent::Journal, "today i", Strength::Strong),
+    (Intent::Journal, "dear diary", Strength::Strong),
+    (Intent::Journal, "heute", Strength::Weak),
+    (Intent::Journal, "liebes tagebuch", Strength::Strong),
+    (Intent::Journal, "aujourd'hui", Strength::Weak),
+    (Intent::Journal, "hoy", Strength::Weak),
+    (Intent::Journal, "hoje", Strength::Weak),
+    (Intent::Journal, "oggi", Strength::Weak),
+    (Intent::Journal, "vandaag", Strength::Weak),
+    (Intent::Journal, "dzisiaj", Strength::Weak),
+    (Intent::Journal, "dziś", Strength::Weak),
+    (Intent::Journal, "bugün", Strength::Weak),
+    (Intent::Journal, "сегодня", Strength::Weak),
 ];
 
 /// Sentence-shaped on purpose: the embedder places "remind me to X" near other
@@ -64,9 +86,8 @@ pub const CUES: &[(Intent, &str)] = &[
 /// catches *nicht vergessen: am Freitag die Rechnung abschicken* except a
 /// vector near one of these. `classify` takes the maximum over the table, so
 /// a phrasing added here can only widen what is recognised — it cannot pull
-/// an existing match off its prototype. What it does move is `intent_line`,
-/// which is measured against this same table over the base's own vectors and
-/// so re-fits itself.
+/// an existing match off its prototype. What can is `DECOYS`, which every
+/// match here has to out-score.
 ///
 /// The language tag is carried in the row rather than in a parallel array: a
 /// tag is not recoverable from a sentence, and at eighty rows two lists kept
@@ -233,60 +254,136 @@ fn contains_cue(hay: &str, cue: &str, at_start: bool) -> bool {
     false
 }
 
-pub fn cue(text: &str) -> Option<Intent> {
+fn cue_of(text: &str, want: Strength) -> Option<Intent> {
     let opening = text.chars().take(OPENING_CHARS).collect::<String>().to_lowercase();
     CUES.iter()
-        .find(|(intent, c)| contains_cue(&opening, c, *intent == Intent::Journal))
-        .map(|(intent, _)| *intent)
+        .filter(|(_, _, st)| *st == want)
+        .find(|(intent, c, _)| contains_cue(&opening, c, *intent == Intent::Journal))
+        .map(|(intent, _, _)| *intent)
 }
 
-/// Maximum over an intent's prototypes: a note matches one phrasing, not the
-/// average of ten languages.
-pub fn classify(vec: &[f32], protos: &[(Intent, Vec<f32>)], line: f32) -> Option<(Intent, f32)> {
-    let mut best: Option<(Intent, f32)> = None;
-    for (intent, p) in protos {
-        let s = cosine(vec, p);
-        if s >= line && best.is_none_or(|(_, b)| s > b) {
-            best = Some((*intent, s));
+/// A cue that decides. What the capture box echoes and what the stage reads
+/// before it looks at a vector.
+pub fn cue(text: &str) -> Option<Intent> {
+    cue_of(text, Strength::Strong)
+}
+
+/// A cue that only speaks where the classifier found nothing — see
+/// [`Strength`]. Never consulted before it.
+pub fn weak_cue(text: &str) -> Option<Intent> {
+    cue_of(text, Strength::Weak)
+}
+
+/// The nearest prototype whatever it scored — the number `classify` weighed,
+/// with none of its guards. Recorded on the corpus so a verdict, and a
+/// near-miss just under the line, are both legible afterwards; `classify`
+/// threw this away and left nothing to tune against but argument.
+pub fn nearest(vec: &[f32], p: &Protos) -> Option<(Intent, f32)> {
+    p.vectors.iter().map(|(i, v)| (*i, cosine(vec, v))).max_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// Whether the operator has already said this note is not that.
+///
+/// `metadata.intent_refused` is a list of intent names, and it has to outlive
+/// a re-embed: the moments stage derives the intent again every time an
+/// artifact is re-embedded, so without a record of the refusal a reindex or a
+/// switched embed model quietly files the note again over somebody who had
+/// said no. The journal side has worked this way for a while under
+/// `entry_refused`; that key is still read here, so a base written before this
+/// keeps its refusals.
+pub fn intent_refused(meta: &serde_json::Value, intent: Intent) -> bool {
+    if intent == Intent::Journal && meta["entry_refused"].as_bool().unwrap_or(false) {
+        return true;
+    }
+    meta["intent_refused"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(intent.as_str())))
+}
+
+/// Record a refusal. Idempotent.
+pub fn refuse_intent(meta: &mut serde_json::Value, intent: Intent) {
+    if intent_refused(meta, intent) {
+        return;
+    }
+    let mut all: Vec<serde_json::Value> =
+        meta["intent_refused"].as_array().cloned().unwrap_or_default();
+    all.push(serde_json::Value::String(intent.as_str().to_string()));
+    meta["intent_refused"] = serde_json::Value::Array(all);
+}
+
+/// Withdraw one, the legacy key included — turning a filing back on by hand is
+/// the operator saying the stage may read this note again.
+pub fn allow_intent(meta: &mut serde_json::Value, intent: Intent) {
+    if let Some(a) = meta["intent_refused"].as_array() {
+        let kept: Vec<serde_json::Value> =
+            a.iter().filter(|v| v.as_str() != Some(intent.as_str())).cloned().collect();
+        if kept.is_empty() {
+            if let Some(m) = meta.as_object_mut() {
+                m.remove("intent_refused");
+            }
+        } else {
+            meta["intent_refused"] = serde_json::Value::Array(kept);
         }
     }
-    best
-}
-
-pub const INTENT_LINE_FLOOR: f32 = 0.70;
-pub const INTENT_LINE_CEILING: f32 = 0.92;
-const MIN_CALIBRATION: usize = 30;
-const UNRELATED_PERCENTILE: f64 = 0.99;
-
-/// Where "an ordinary note against a prototype" stops: the 99th percentile of
-/// the sampled scores, rounded up to a hundredth, clamped to `floor` below and
-/// `INTENT_LINE_CEILING` above — `floor` wins when it is the higher of the
-/// two, at every base size. Below thirty samples it stands on its own, with
-/// nothing measured to clamp. `gaps::link_threshold`, applied to a different
-/// question.
-pub fn intent_line(protos: &[(Intent, Vec<f32>)], sample: &[Vec<f32>], floor: f32) -> f32 {
-    if sample.len() < MIN_CALIBRATION || protos.is_empty() {
-        return floor;
+    if intent == Intent::Journal && let Some(m) = meta.as_object_mut() {
+        m.remove("entry_refused");
     }
-    let mut scores: Vec<f32> = sample
-        .iter()
-        .map(|v| protos.iter().map(|(_, p)| cosine(v, p)).fold(f32::MIN, f32::max))
-        .collect();
-    scores.sort_by(f32::total_cmp);
-    let at = ((scores.len() - 1) as f64 * UNRELATED_PERCENTILE).round() as usize;
-    let measured = (scores[at] * 100.0).ceil() / 100.0;
-    // The configured floor is a floor at every base size, not only below the
-    // calibration threshold. Clamping the measurement to the constants alone
-    // meant an operator who raised `time.intent_at` to stop ordinary notes
-    // becoming reminders had that value honoured for thirty artifacts and
-    // silently discarded from the thirty-first — the line could then fall back
-    // to 0.70, below what they asked for, with the parameter documented as a
-    // floor. The ceiling caps a *measurement*; it does not overrule a setting,
-    // so it rises with a floor set above it.
-    let lo = floor.max(INTENT_LINE_FLOOR);
-    let hi = INTENT_LINE_CEILING.max(lo);
-    measured.clamp(lo, hi)
 }
+
+/// Ordinary notes: what a base is mostly made of, and what neither intent may
+/// claim.
+///
+/// `classify` scores the best prototype and, before these, had nothing for
+/// that best to beat — a note only had to clear an absolute line, so a
+/// technical note sitting a hair over it became a reminder with nothing
+/// arguing the other way. There was no negative class; "ordinary capture" was
+/// the residue. These are the negative class, and they cost one embed call
+/// once per model: the winner now has to out-score every one of them, which
+/// turns a threshold into a comparison.
+///
+/// Deliberately spread across the shapes a knowledge base actually holds — a
+/// fact, a command, a connection string, a link, a shortcut — rather than
+/// near-misses of the two intents. A decoy written to sit just under a
+/// prototype would be tuning, and tuning against eight sentences is how a
+/// threshold becomes a fixture nobody dares move.
+pub const DECOYS: &[&str] = &[
+    "the admin port is 8443 and the console listens on 9443",
+    "mount the image read-only with ro,loop so nothing is written back",
+    "ext4 replays its journal on mount, which writes to the device",
+    "the staging connection string lives in the vault under db/staging",
+    "the invoice template is on the shared drive under finance",
+    "vitamin d is fat soluble and is stored in the liver",
+    "https://example.org/handbook — the onboarding checklist",
+    "ctrl+shift+p opens the command palette",
+];
+
+/// The best prototype, if it clears the line and beats every decoy.
+///
+/// Maximum over an intent's prototypes rather than a mean: a note matches one
+/// phrasing, not the average of ten languages. The decoy test is the second
+/// half of the same idea — the winner is the nearest sentence of any kind,
+/// and a note nearer an ordinary one than to either intent is an ordinary
+/// note.
+pub fn classify(vec: &[f32], p: &Protos) -> Option<(Intent, f32)> {
+    let best = p
+        .vectors
+        .iter()
+        .map(|(i, v)| (*i, cosine(vec, v)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    if best.1 < p.line {
+        return None;
+    }
+    if p.decoys.iter().any(|d| cosine(vec, d) >= best.1) {
+        return None;
+    }
+    Some(best)
+}
+
+/// The lowest a configured `time.intent_at` may pull the bar, whatever the
+/// file says. A floor under the floor: `classify` already asks the winner to
+/// beat every decoy, and this only stops a base that has set the line to
+/// nothing from calling every note an intent.
+pub const INTENT_LINE_FLOOR: f32 = 0.70;
 
 use chrono::{Datelike, NaiveDate, TimeZone, Weekday};
 use chrono_tz::Tz;
@@ -943,12 +1040,49 @@ pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
 /// The intent prototypes as vectors under the running embed model, and the
 /// line measured from the base's own artifacts.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// What `classify` reads: the intent prototypes, the decoys they have to beat,
+/// and the floor under both.
+///
+/// `line` used to be measured — the 99th percentile of two hundred sampled
+/// base vectors, clamped to a ceiling. That measurement was the only thing
+/// standing between an ordinary note and an intent, and it was computed once
+/// into a `OnceCell` and never again: a base that was empty at startup kept
+/// the bare floor for the life of the process, and a base that grew never had
+/// its line move. `DECOYS` does the job the calibration was approximating —
+/// "is this nearer an ordinary note than an intent" — asked directly, per
+/// note, with nothing to go stale. What is left is the configured floor.
 pub struct Protos {
     pub vectors: Vec<(Intent, Vec<f32>)>,
+    /// `DECOYS`, embedded. Empty is legal and simply disables the test.
+    pub decoys: Vec<Vec<f32>>,
     pub line: f32,
 }
 
 impl crate::core::Core {
+    /// A fixed list of sentences as vectors, embedded once per embed model and
+    /// kept in `meta`. Re-embedded whenever the cached count and the list
+    /// disagree, which is what makes adding a row to `PROTOTYPES` or `DECOYS`
+    /// invalidate its own cache and nothing else.
+    async fn embedded_texts(&self, key: &str, texts: &[&str]) -> crate::error::Result<Vec<Vec<f32>>> {
+        let cached: Vec<Vec<f32>> = match self.store.meta_get(key).await? {
+            Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+            None => vec![],
+        };
+        if cached.len() == texts.len() {
+            return Ok(cached);
+        }
+        let docs: Vec<crate::infer::EmbedDoc> = texts
+            .iter()
+            .map(|t| crate::infer::EmbedDoc { title: None, text: (*t).to_string() })
+            .collect();
+        let permit = self.gate.background_light().await;
+        let embedded = self.embedder.embed_documents(&docs).await;
+        permit.finished();
+        let embedded = embedded?;
+        self.store.meta_set(key, &serde_json::to_string(&embedded).unwrap_or_default()).await?;
+        Ok(embedded)
+    }
+
     /// Done, and — for a recurring moment — the next occurrence as a new row
     /// carrying the same rule and source. The done row stays: the history of
     /// a recurring reminder is its rows.
@@ -1035,36 +1169,24 @@ impl crate::core::Core {
     pub async fn prototypes(&self) -> crate::error::Result<&Protos> {
         self.protos
             .get_or_try_init(|| async {
-                let key = format!("moments.prototypes.{}", self.embedder.model());
-                let cached: Vec<(Intent, Vec<f32>)> = match self.store.meta_get(&key).await? {
-                    Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-                    None => vec![],
-                };
-                let vectors = if cached.len() == PROTOTYPES.len() {
-                    cached
-                } else {
-                    let docs: Vec<crate::infer::EmbedDoc> = PROTOTYPES
-                        .iter()
-                        .map(|(_, _, p)| crate::infer::EmbedDoc { title: None, text: p.to_string() })
-                        .collect();
-                    let permit = self.gate.background_light().await;
-                    let embedded = self.embedder.embed_documents(&docs).await;
-                    permit.finished();
-                    let vectors: Vec<(Intent, Vec<f32>)> =
-                        PROTOTYPES.iter().map(|(i, _, _)| *i).zip(embedded?).collect();
-                    self.store.meta_set(&key, &serde_json::to_string(&vectors).unwrap_or_default()).await?;
-                    vectors
-                };
-                let sample: Vec<Vec<f32>> = self
-                    .vectors
-                    .sample(200)
-                    .await
-                    .unwrap_or_default()
+                let model = self.embedder.model();
+                // Two caches, two keys, each invalidating on its own length —
+                // adding a prototype must not force the decoys to be embedded
+                // again, and the reverse. Both are keyed by embed model,
+                // because a vector from one model says nothing under another.
+                let vectors: Vec<(Intent, Vec<f32>)> = self
+                    .embedded_texts(
+                        &format!("moments.prototypes.{model}"),
+                        &PROTOTYPES.iter().map(|(_, _, p)| *p).collect::<Vec<_>>(),
+                    )
+                    .await?
                     .into_iter()
-                    .map(|(_, v)| v)
+                    .enumerate()
+                    .map(|(i, v)| (PROTOTYPES[i].0, v))
                     .collect();
-                let line = intent_line(&vectors, &sample, self.time.intent_at);
-                Ok(Protos { vectors, line })
+                let decoys =
+                    self.embedded_texts(&format!("moments.decoys.{model}"), DECOYS).await?;
+                Ok(Protos { vectors, decoys, line: self.time.intent_at.max(INTENT_LINE_FLOOR) })
             })
             .await
     }
@@ -1153,9 +1275,11 @@ mod tests {
 
     #[test]
     fn a_journal_cue_counts_only_at_the_head_of_a_note() {
-        assert_eq!(cue("Heute war ein langer Tag."), Some(Intent::Journal));
         assert_eq!(cue("Today I finally fixed the build"), Some(Intent::Journal));
-        assert_eq!(cue("Das Meeting ist heute um drei"), None, "mid-sentence heute is a word");
+        // *heute* is a weak cue now, so the head is where `weak_cue` looks.
+        assert_eq!(weak_cue("Heute war ein langer Tag."), Some(Intent::Journal));
+        assert_eq!(weak_cue("Das Meeting ist heute um drei"), None, "mid-sentence heute is a word");
+        assert_eq!(cue("Heute war ein langer Tag."), None, "and it never decides on its own");
     }
 
     #[test]
@@ -1176,69 +1300,126 @@ mod tests {
         v
     }
 
+    fn protos(vectors: Vec<(Intent, Vec<f32>)>, decoys: Vec<Vec<f32>>, line: f32) -> Protos {
+        Protos { vectors, decoys, line }
+    }
+
     #[test]
     fn the_best_intent_above_the_line_fires_by_maximum_not_mean() {
-        let protos = vec![
-            (Intent::Remind, unit(0, 4)),
-            (Intent::Remind, unit(1, 4)),
-            (Intent::Remind, unit(2, 4)),
-            (Intent::Journal, unit(3, 4)),
-        ];
+        let p = protos(
+            vec![
+                (Intent::Remind, unit(0, 4)),
+                (Intent::Remind, unit(1, 4)),
+                (Intent::Remind, unit(2, 4)),
+                (Intent::Journal, unit(3, 4)),
+            ],
+            vec![],
+            0.8,
+        );
         let note = vec![0.95, 0.05, 0.0, 0.0];
-        let (intent, score) = classify(&note, &protos, 0.8).expect("fires");
+        let (intent, score) = classify(&note, &p).expect("fires");
         assert_eq!(intent, Intent::Remind);
         assert!(score > 0.9);
     }
 
     #[test]
     fn below_the_line_nothing_fires() {
-        let protos = vec![(Intent::Remind, unit(0, 4))];
-        assert_eq!(classify(&[0.5, 0.5, 0.5, 0.5], &protos, 0.8), None);
+        let p = protos(vec![(Intent::Remind, unit(0, 4))], vec![], 0.8);
+        assert_eq!(classify(&[0.5, 0.5, 0.5, 0.5], &p), None);
     }
 
     #[test]
-    fn the_line_is_measured_from_the_sample_and_clamped() {
-        let protos = vec![(Intent::Remind, unit(0, 4))];
-        // Unrelated sample: the measurement is far below both bounds, so the
-        // configured floor is what stands.
-        let sample: Vec<Vec<f32>> = (0..30).map(|_| unit(1, 4)).collect();
-        assert_eq!(intent_line(&protos, &sample, 0.80), 0.80);
-        assert_eq!(intent_line(&protos, &sample, 0.0), INTENT_LINE_FLOOR, "and never below the constant");
-        let close: Vec<Vec<f32>> = (0..30).map(|_| vec![0.95, 0.312, 0.0, 0.0]).collect();
-        assert_eq!(intent_line(&protos, &close, 0.80), INTENT_LINE_CEILING);
+    fn a_note_nearer_an_ordinary_one_than_to_an_intent_is_an_ordinary_note() {
+        // The hole the decoys close: with nothing to beat, clearing the line
+        // was the whole test, so a note that merely leaned towards a
+        // prototype became an intent. Here it leans — comfortably over 0.8 —
+        // and a decoy leans harder.
+        let p = protos(vec![(Intent::Remind, unit(0, 4))], vec![vec![0.8, 0.6, 0.0, 0.0]], 0.8);
+        let note = vec![0.9, 0.5, 0.0, 0.0];
+        assert!(cosine(&note, &unit(0, 4)) > 0.8, "it does clear the line");
+        assert_eq!(classify(&note, &p), None, "and still loses to an ordinary note");
+
+        // And the decoys do not simply suppress everything: a note squarely on
+        // a prototype still fires with the same decoy present.
+        assert_eq!(classify(&unit(0, 4), &p).map(|(i, _)| i), Some(Intent::Remind));
     }
 
     #[test]
-    fn the_configured_line_is_a_floor_at_every_base_size() {
-        // The bug this covers: past thirty artifacts the measurement replaced
-        // the setting outright, so an operator who raised `time.intent_at` to
-        // keep ordinary notes from becoming reminders got 0.70 instead of the
-        // 0.95 they asked for — and `test_core` itself sets 0.99, which the
-        // 0.92 ceiling would have quietly cut down the moment a test base grew.
-        let protos = vec![(Intent::Remind, unit(0, 4))];
-        let sample: Vec<Vec<f32>> = (0..30).map(|_| unit(1, 4)).collect();
-        assert_eq!(intent_line(&protos, &sample, 0.95), 0.95, "a floor above the ceiling carries it up");
-        assert_eq!(intent_line(&protos, &sample, 0.99), 0.99);
-        let close: Vec<Vec<f32>> = (0..30).map(|_| vec![0.95, 0.312, 0.0, 0.0]).collect();
-        assert_eq!(intent_line(&protos, &close, 0.95), 0.95, "a measurement never drops below it either");
+    fn the_line_is_the_configured_floor_and_never_below_the_constant() {
+        // What replaced the calibrated line: no sample, no percentile, no
+        // ceiling, and nothing that can go stale in a `OnceCell`. The decoys
+        // do the discriminating; this is only a floor.
+        let p = protos(vec![(Intent::Remind, unit(0, 4))], vec![], 0.95_f32.max(INTENT_LINE_FLOOR));
+        assert_eq!(p.line, 0.95, "a configured floor stands as it was set");
+        assert_eq!(0.0_f32.max(INTENT_LINE_FLOOR), INTENT_LINE_FLOOR, "and never below the constant");
+        let note = vec![0.9, 0.5, 0.0, 0.0];
+        assert!(cosine(&note, &unit(0, 4)) < 0.95);
+        assert_eq!(classify(&note, &p), None, "under the floor, nothing fires");
     }
 
     #[test]
-    fn a_small_sample_leaves_the_configured_line_standing() {
-        let protos = vec![(Intent::Remind, unit(0, 4))];
-        let sample: Vec<Vec<f32>> = (0..10).map(|_| unit(1, 4)).collect();
-        assert_eq!(intent_line(&protos, &sample, 0.83), 0.83);
+    fn a_weak_cue_never_outranks_the_vector_and_a_strong_one_always_does() {
+        // The collision the split exists for: a to-do that opens with a day
+        // word. `cue` no longer sees it, so the classifier gets the note;
+        // `weak_cue` still does, for the reading that happens only when the
+        // classifier declines.
+        assert_eq!(cue("Heute den Bericht abgeben"), None);
+        assert_eq!(weak_cue("Heute den Bericht abgeben"), Some(Intent::Journal));
+        // The unmistakable ones decide as they always did.
+        assert_eq!(cue("Dear diary, the move is finally over"), Some(Intent::Journal));
+        assert_eq!(cue("Today i finally got the migration working"), Some(Intent::Journal));
+        assert_eq!(cue("Remind me to send the invoice"), Some(Intent::Remind));
+        assert_eq!(weak_cue("Remind me to send the invoice"), None, "a remind cue is never weak");
+        // And a weak journal cue still has to open the note.
+        assert_eq!(weak_cue("Der Bericht ist heute fällig"), None);
+    }
+
+    #[test]
+    fn a_refusal_is_recorded_per_intent_and_reads_the_key_it_replaced() {
+        let mut meta = serde_json::json!({});
+        assert!(!intent_refused(&meta, Intent::Remind));
+        refuse_intent(&mut meta, Intent::Remind);
+        refuse_intent(&mut meta, Intent::Remind);
+        assert_eq!(meta["intent_refused"], serde_json::json!(["remind"]), "idempotent");
+        assert!(intent_refused(&meta, Intent::Remind));
+        assert!(!intent_refused(&meta, Intent::Journal), "one refusal is not the other");
+
+        refuse_intent(&mut meta, Intent::Journal);
+        allow_intent(&mut meta, Intent::Remind);
+        assert!(!intent_refused(&meta, Intent::Remind));
+        assert!(intent_refused(&meta, Intent::Journal), "and the other one stands");
+        allow_intent(&mut meta, Intent::Journal);
+        assert!(meta.get("intent_refused").is_none(), "the last one takes the key with it");
+
+        // A base written before this keeps its refusals, and withdrawing one
+        // clears the old key too — otherwise the undo would appear to work and
+        // the stage would go on refusing.
+        let mut old = serde_json::json!({"entry_refused": true});
+        assert!(intent_refused(&old, Intent::Journal));
+        assert!(!intent_refused(&old, Intent::Remind));
+        allow_intent(&mut old, Intent::Journal);
+        assert!(!intent_refused(&old, Intent::Journal));
     }
 
     #[test]
     fn every_language_has_a_cue_and_prototypes_for_both_intents() {
         for intent in [Intent::Remind, Intent::Journal] {
-            assert!(CUES.iter().filter(|(i, _)| *i == intent).count() >= 10);
+            assert!(CUES.iter().filter(|(i, _, _)| *i == intent).count() >= 10);
             assert!(PROTOTYPES.iter().filter(|(i, _, _)| *i == intent).count() >= 10);
         }
         for (_, _, p) in PROTOTYPES {
             assert!(p.split_whitespace().count() >= 3, "a prototype is a sentence, not a word: {p}");
         }
+        // A decoy is a sentence for the same reason a prototype is, and there
+        // have to be enough of them to cover more than one shape of note.
+        assert!(DECOYS.len() >= 6);
+        for d in DECOYS {
+            assert!(d.split_whitespace().count() >= 3, "a decoy is a note, not a word: {d}");
+        }
+        // Every remind cue decides; the day words never do.
+        assert!(CUES.iter().filter(|(i, _, _)| *i == Intent::Remind).all(|(_, _, s)| *s == Strength::Strong));
+        assert!(CUES.iter().any(|(i, _, s)| *i == Intent::Journal && *s == Strength::Strong));
+        assert!(CUES.iter().any(|(i, _, s)| *i == Intent::Journal && *s == Strength::Weak));
     }
 
     use chrono::TimeZone;
@@ -1626,17 +1807,24 @@ mod tests {
         let before = embedder.calls();
         let first = core.prototypes().await.unwrap();
         assert_eq!(first.vectors.len(), PROTOTYPES.len());
-        assert_eq!(first.line, core.time.intent_at, "too small a base to measure a line");
-        assert_eq!(embedder.calls(), before + 1, "one batch");
+        assert_eq!(first.decoys.len(), DECOYS.len());
+        assert_eq!(first.line, core.time.intent_at, "the configured floor, and nothing measured");
+        assert_eq!(embedder.calls(), before + 2, "one batch each for the prototypes and the decoys");
         core.prototypes().await.unwrap();
-        assert_eq!(embedder.calls(), before + 1, "held on the core after that");
-        let key = format!("moments.prototypes.{}", core.embedder.model());
-        let cached = core.store.meta_get(&key).await.unwrap().expect("cached in meta");
-        let parsed: Vec<(Intent, Vec<f32>)> = serde_json::from_str(&cached).unwrap();
-        assert_eq!(parsed.len(), PROTOTYPES.len());
+        assert_eq!(embedder.calls(), before + 2, "held on the core after that");
+        // Two keys, so that adding a prototype does not force the decoys to be
+        // embedded again, or the reverse.
+        for (key, want) in [
+            (format!("moments.prototypes.{}", core.embedder.model()), PROTOTYPES.len()),
+            (format!("moments.decoys.{}", core.embedder.model()), DECOYS.len()),
+        ] {
+            let cached = core.store.meta_get(&key).await.unwrap().expect("cached in meta");
+            let parsed: Vec<Vec<f32>> = serde_json::from_str(&cached).unwrap();
+            assert_eq!(parsed.len(), want, "{key}");
+        }
         // A fresh process with the same model reads the cache and embeds nothing.
         core.protos = std::sync::Arc::new(tokio::sync::OnceCell::new());
         core.prototypes().await.unwrap();
-        assert_eq!(embedder.calls(), before + 1);
+        assert_eq!(embedder.calls(), before + 2);
     }
 }

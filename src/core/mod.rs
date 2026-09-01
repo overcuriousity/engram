@@ -568,6 +568,7 @@ pub mod test_support {
             // core that clears this.
             protos: Arc::new(tokio::sync::OnceCell::new_with(Some(crate::core::moments::Protos {
                 vectors: vec![],
+                decoys: vec![],
                 line: 1.0,
             }))),
             generator: Some(Arc::new(FakeCompleter::default())),

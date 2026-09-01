@@ -331,6 +331,26 @@ impl Store {
             .rows_affected())
     }
 
+    /// Withdraw the reminders this artifact's *reading* put here — the same
+    /// rows `delete_read_moments` would drop on a re-read, and no others.
+    ///
+    /// `set` and `armed` rows are somebody's own, and a row that has been
+    /// done, pushed, snoozed or moved has a history of its own; neither is the
+    /// stage's to take back. What is left is exactly a verdict nobody has
+    /// touched, which is what "this is not a reminder" is answering.
+    pub async fn delete_read_due(&self, artifact_id: &str) -> Result<u64> {
+        Ok(sqlx::query(
+            "DELETE FROM moments
+              WHERE artifact_id = ? AND kind = 'due' AND source NOT IN ('set', 'armed')
+                AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL
+                AND moved_at IS NULL",
+        )
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
     /// Open reminders: undone, on an active artifact, and either undated or
     /// due before `to` and not snoozed past `now`. Dated first, by time.
     pub async fn open_due(&self, now: i64, to: i64) -> Result<Vec<DueRow>> {

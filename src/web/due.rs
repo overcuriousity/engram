@@ -24,6 +24,8 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/moments/{id}/snooze", post(snooze))
         .route("/ui/moments/{id}/unsnooze", post(unsnooze))
         .route("/ui/moments/{id}/date", post(set_date))
+        .route("/ui/moments/{id}/not-a-reminder", post(not_a_reminder))
+        .route("/ui/artifacts/{id}/is-a-reminder", post(is_a_reminder))
 }
 
 #[derive(serde::Deserialize)]
@@ -83,10 +85,19 @@ pub(crate) struct EventView {
 /// takes it back. A snooze that says "Done" and offers `undone` undoes
 /// nothing — `undone` clears a `done_at` that is already NULL and leaves
 /// `snoozed_until` set, so the row stays hidden with no way back.
+///
+/// `undo` is the whole path and not a verb appended to the moment's id: "not a
+/// reminder" deletes the moment, so what takes it back is addressed to the
+/// artifact that is still there.
 pub(crate) struct Just {
-    pub id: String,
     pub verb: &'static str,
-    pub undo: &'static str,
+    pub undo: String,
+}
+
+impl Just {
+    fn moment(id: &str, verb: &'static str, undo: &str) -> Self {
+        Just { verb, undo: format!("/ui/moments/{id}/{undo}") }
+    }
 }
 
 #[derive(Template)]
@@ -299,7 +310,7 @@ async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
 
 async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.complete_moment(&id).await?;
-    render(&tenant, &f.tz, Some(Just { id, verb: "Done", undo: "undone" }), f.since, f.all == "1").await
+    render(&tenant, &f.tz, Some(Just::moment(&id, "Done", "undone")), f.since, f.all == "1").await
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -351,7 +362,7 @@ async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -
     if let Some(until) = snooze_until(&f.until, tenant.core.clock.now(), zone(Some(&f.tz))) {
         tenant.core.store.snooze(&id, until).await?;
         tenant.core.store.rearm_remind().await?;
-        just = Some(Just { id, verb: "Snoozed", undo: "unsnooze" });
+        just = Some(Just::moment(&id, "Snoozed", "unsnooze"));
     }
     render(&tenant, &f.tz, just, f.since, f.all == "1").await
 }
@@ -376,6 +387,30 @@ async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
         tenant.core.store.move_moment(&id, at, tz.name()).await?;
         tenant.core.store.rearm_remind().await?;
     }
+    render(&tenant, &f.tz, None, f.since, f.all == "1").await
+}
+
+/// "This is not a reminder", and its undo.
+///
+/// The band's other buttons all say something about *when*; this one says the
+/// reading was wrong. It is the only honest answer to a row the stage put
+/// there and the operator never asked for, and before it the only way to
+/// clear one was to mark it done — recording a task somebody finished where
+/// there had never been a task. The undo is addressed to the artifact because
+/// the moment itself is gone by then, and it hands the note back to the stage
+/// rather than re-inserting a row from memory: what comes back is what the
+/// note actually says.
+async fn not_a_reminder(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+    let Some(m) = tenant.core.store.moment(&id).await? else {
+        return render(&tenant, &f.tz, None, f.since, f.all == "1").await;
+    };
+    tenant.core.set_reminder(&m.artifact_id, false).await?;
+    let just = Just { verb: "Not a reminder", undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id) };
+    render(&tenant, &f.tz, Some(just), f.since, f.all == "1").await
+}
+
+async fn is_a_reminder(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+    tenant.core.set_reminder(&id, true).await?;
     render(&tenant, &f.tz, None, f.since, f.all == "1").await
 }
 
@@ -556,6 +591,73 @@ mod tests {
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(until, 0).unwrap();
         assert_eq!(local.format("%H:%M").to_string(), "09:00");
         assert!(until > crate::store::now());
+    }
+
+    #[tokio::test]
+    async fn a_row_the_stage_read_can_be_told_it_is_not_a_reminder_and_taken_back() {
+        // The only honest answer to a row nobody asked for. Before it, the way
+        // to clear one was `done` — a task recorded as finished where there
+        // had never been a task, and a re-embed put it back regardless.
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let band = body_of(
+            app.clone().oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap(),
+        )
+        .await;
+        assert!(band.contains("not a reminder"), "the band offers it on a row it read: {band}");
+
+        let html = body_of(
+            app.clone()
+                .oneshot(form(&format!("/ui/moments/{id}/not-a-reminder"), &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("Not a reminder"), "{html}");
+        assert!(html.contains(&format!("/ui/artifacts/{aid}/is-a-reminder")), "the undo is on the artifact: {html}");
+        assert!(core.store.moment(&id).await.unwrap().is_none(), "the row is withdrawn, not completed");
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
+
+        app.oneshot(form(&format!("/ui/artifacts/{aid}/is-a-reminder"), &cookie, "tz=Europe/Berlin"))
+            .await
+            .unwrap();
+        assert!(
+            !crate::core::moments::intent_refused(
+                &core.store.get_corpus(&core.store.get_artifact(&aid).await.unwrap().corpus_id.unwrap())
+                    .await
+                    .unwrap()
+                    .metadata,
+                crate::core::moments::Intent::Remind
+            ),
+            "the undo withdraws the refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reminder_somebody_set_themselves_is_not_offered_an_un_reading() {
+        // Offering it would be offering to undo their own typing.
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        core.store.delete_read_due(&aid).await.unwrap();
+        core.store
+            .insert_moment(&NewMoment {
+                artifact_id: aid,
+                kind: Kind::Due,
+                at: Some(crate::store::now() + 3_600),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Set,
+                span: None,
+            })
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let band = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        assert!(!band.contains("not a reminder"), "{band}");
     }
 
     #[tokio::test]

@@ -6,8 +6,8 @@
 //! `remind` intent, and a base with no chat model reads the date by rule.
 
 use crate::core::moments::{
-    absolute_dates, classify, clock_offset, cue, default_zone_name, relative_date, validate_rule, zone,
-    Found, Intent, DEFAULT_HOUR,
+    absolute_dates, classify, clock_offset, cue, default_zone_name, nearest, relative_date,
+    validate_rule, weak_cue, zone, Found, Intent, DEFAULT_HOUR,
 };
 use crate::core::Core;
 use crate::error::Result;
@@ -65,36 +65,63 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // 1–2. Intent: forced by the door, the cue table, then the classifier. A
-    // door's say-so is recorded as a cue — explicit, and still the stage's
-    // own row, so a re-read replaces it rather than doubling it.
-    let (intent, source) = if src.metadata["intent"].as_str() == Some("remind") {
-        (Some(Intent::Remind), Source::Cue)
+    // 1–4. Intent, in order of how much the reading is worth: forced by the
+    // door, a cue that decides on its own, the classifier, and last a weak cue
+    // — a day word, which used to overrule the vector on the strength of being
+    // the first word in the note. See `moments::Strength`. A door's say-so is
+    // recorded as a cue: explicit, and still the stage's own row, so a re-read
+    // replaces it rather than doubling it.
+    let mut score = None;
+    let (intent, source, by) = if src.metadata["intent"].as_str() == Some("remind") {
+        (Some(Intent::Remind), Source::Cue, "forced")
     } else if let Some(i) = cue(&art.text) {
-        (Some(i), Source::Cue)
+        (Some(i), Source::Cue, "cue")
     } else {
         let protos = core.prototypes().await?;
         match core.vectors.dense_of(artifact_id).await? {
-            Some(v) => (classify(&v, &protos.vectors, protos.line).map(|(i, _)| i), Source::Classified),
-            None => (None, Source::Classified),
+            Some(v) => {
+                score = nearest(&v, protos).map(|(_, s)| s);
+                match classify(&v, protos) {
+                    Some((i, _)) => (Some(i), Source::Classified, "classified"),
+                    // The vector placed it nowhere. Only here does a day word
+                    // get to speak, and only for the recall it was in the
+                    // table for: a note resembling nothing that opens with
+                    // *Heute* is still an entry.
+                    None => (weak_cue(&art.text), Source::Cue, "weak cue"),
+                }
+            }
+            None => (None, Source::Classified, "unembedded"),
         }
     };
+    record_intent(core, cid, &src, intent, by, score).await?;
+
+    // What the operator has already said this note is not. The stage derives
+    // the intent again on every re-embed, so a refusal that did not outlive
+    // one would be overruled by a reindex or a switched embed model — on a
+    // note somebody had already put back. `Core::set_entry` and
+    // `Core::set_reminder` are what write it.
+    if intent.is_some_and(|i| crate::core::moments::intent_refused(&src.metadata, i)) {
+        return Ok(());
+    }
 
     match intent {
-        // Not on a note whose filing was already undone. The stage re-derives
-        // the intent on every re-embed, and the undo only put `origin` back —
-        // so a reindex or a switched embed model silently filed the note as an
-        // entry again, over an operator who had said no. `set_entry` records
-        // the refusal for exactly this read; turning the entry back on by hand
-        // clears it.
-        Some(Intent::Journal)
-            if JOURNALABLE.contains(&src.origin.as_str())
-                && !src.metadata["entry_refused"].as_bool().unwrap_or(false) =>
-        {
+        Some(Intent::Journal) if JOURNALABLE.contains(&src.origin.as_str()) => {
             core.set_entry(cid, true).await?;
         }
         Some(Intent::Remind) => {
             let (at, rule) = date_reminder(core, &art.text, src.created_at, tz, &tz_name, &found).await;
+            // A reminder the operator did not ask for has to be corroborated
+            // by a date, and this is where that is cheapest to ask: every date
+            // path has already run. A *cued* remind is somebody typing "remind
+            // me", and an undated one is a question the band asks them. A
+            // *classified* remind with no date anywhere in the note is the
+            // weak case twice over — a guess about a note that names no time —
+            // and it used to become an undated row nagging for a date it never
+            // had. It stays an ordinary capture instead.
+            if source == Source::Classified && at.is_none() && rule.is_none() {
+                tracing::debug!(artifact_id, "a classified reminder with no date is left as a capture");
+                return Ok(());
+            }
             // Undated included: `None` is an instant the guard understands, and
             // an undated reminder that was finished is exactly the row
             // `delete_read_moments` keeps and this must not read back fresh.
@@ -124,6 +151,38 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         Some(Intent::Journal) | None => {}
     }
     Ok(())
+}
+
+/// Write down what was read and how sure it was.
+///
+/// `classify` returned a score and the stage dropped it, so nothing in the
+/// base recorded whether a verdict was a walkover or a hair over the line —
+/// and a near-miss, the reading that would have been most useful to see, left
+/// no trace at all. Three keys on the corpus, written whether or not anything
+/// fired. Cheap, and it makes every later argument about `time.intent_at` an
+/// measurement instead of an opinion.
+async fn record_intent(
+    core: &Core,
+    corpus_id: &str,
+    src: &crate::store::corpora::Corpus,
+    intent: Option<Intent>,
+    by: &str,
+    score: Option<f32>,
+) -> Result<()> {
+    let mut meta = src.metadata.clone();
+    meta["intent_read"] = serde_json::Value::String(
+        intent.map(|i| i.as_str().to_string()).unwrap_or_else(|| "none".into()),
+    );
+    meta["intent_by"] = serde_json::Value::String(by.to_string());
+    match score.and_then(|s| serde_json::Number::from_f64(f64::from(s))) {
+        Some(n) => meta["intent_score"] = serde_json::Value::Number(n),
+        None => {
+            if let Some(m) = meta.as_object_mut() {
+                m.remove("intent_score");
+            }
+        }
+    }
+    core.store.set_corpus_metadata(corpus_id, &meta).await
 }
 
 /// Step 4: the model if there is one, else the relative table, else what step
@@ -223,6 +282,94 @@ mod tests {
         drain(core).await;
         let arts = core.store.artifacts_for_corpus(&out.id).await.unwrap();
         (out.id, arts[0].id.clone())
+    }
+
+    /// Point the classifier straight at an artifact's own vector, so it scores
+    /// 1.0 and fires. The prototypes a real base holds are unreachable from a
+    /// test with a hash embedder; what is under test here is what the stage
+    /// does with a verdict, not how the verdict was reached.
+    async fn classifier_fires_on(core: &mut Core, artifact_id: &str, as_intent: Intent) {
+        let v = core.vectors.dense_of(artifact_id).await.unwrap().expect("embedded");
+        core.protos = std::sync::Arc::new(tokio::sync::OnceCell::new_with(Some(
+            crate::core::moments::Protos { vectors: vec![(as_intent, v)], decoys: vec![], line: 0.5 },
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_classified_reminder_needs_a_date_and_a_cued_one_does_not() {
+        // The expensive false positive, and the one signal that costs nothing
+        // to consult: every date path has already run by the time the intent
+        // branch is reached. A guess about a note that names no time used to
+        // become an undated row on the band, nagging for a date the note never
+        // had. Somebody typing "remind me" is not a guess, so an undated
+        // *cued* reminder still stands — there the question is the point.
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (_, aid) = first_passage(&core, "The gutters need clearing at some point", "ui", None).await;
+        classifier_fires_on(&mut core, &aid, Intent::Remind).await;
+        run(&core, &aid).await.unwrap();
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "no date, no reminder");
+        let meta = core.store.get_corpus(&core.store.get_artifact(&aid).await.unwrap().corpus_id.unwrap())
+            .await
+            .unwrap()
+            .metadata;
+        assert_eq!(meta["intent_read"], "remind", "the reading is still recorded");
+        assert_eq!(meta["intent_by"], "classified");
+
+        // The same verdict on a note that does name a time is a reminder.
+        let (_, dated) = first_passage(&core, "Clear the gutters tomorrow", "ui", Some("Europe/Berlin")).await;
+        classifier_fires_on(&mut core, &dated, Intent::Remind).await;
+        run(&core, &dated).await.unwrap();
+        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1);
+
+        // And a cue with no date anywhere is an undated reminder, as before.
+        let (_, cued) = first_passage(&core, "Remind me to clear the gutters", "ui", None).await;
+        run(&core, &cued).await.unwrap();
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|r| r.moment.at.is_none() && r.moment.source == Source::Cue));
+    }
+
+    #[tokio::test]
+    async fn not_a_reminder_takes_the_row_back_and_outlives_a_re_read() {
+        // The journal side has had a durable refusal for a while; this is the
+        // reminder side of it. Marking a misread row *done* was the only way
+        // to be rid of it, which recorded a task finished where there had
+        // never been a task — and any re-embed put it straight back.
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (cid, aid) = first_passage(&core, "Remind me tomorrow to send the invoice", "ui", Some("Europe/Berlin")).await;
+        run(&core, &aid).await.unwrap();
+        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1);
+
+        core.set_reminder(&aid, false).await.unwrap();
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "the row is gone");
+        assert!(core.store.open_due_for_artifact(&aid).await.unwrap().is_none(), "and not merely out of the band");
+
+        run(&core, &aid).await.unwrap();
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "a re-read does not overrule it");
+        assert!(crate::core::moments::intent_refused(
+            &core.store.get_corpus(&cid).await.unwrap().metadata,
+            Intent::Remind
+        ));
+
+        // The undo hands the note back to the stage rather than restoring a
+        // row from memory, so what comes back is what the note says.
+        core.set_reminder(&aid, true).await.unwrap();
+        drain(&core).await;
+        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1, "and back it comes");
+    }
+
+    #[tokio::test]
+    async fn a_refused_entry_and_a_refused_reminder_do_not_stand_in_for_each_other() {
+        let mut core = test_core().await;
+        core.reminder = None;
+        let (cid, aid) = first_passage(&core, "Remind me tomorrow to send the invoice", "ui", Some("Europe/Berlin")).await;
+        run(&core, &aid).await.unwrap();
+        core.set_reminder(&aid, false).await.unwrap();
+        let meta = core.store.get_corpus(&cid).await.unwrap().metadata;
+        assert!(crate::core::moments::intent_refused(&meta, Intent::Remind));
+        assert!(!crate::core::moments::intent_refused(&meta, Intent::Journal), "one refusal is not the other");
     }
 
     #[tokio::test]

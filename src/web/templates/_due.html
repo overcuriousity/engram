@@ -25,7 +25,7 @@
      hx-vals='{"tz": "{{ tz }}", "since": "{{ since }}", "all": "{% if all %}1{% else %}0{% endif %}"}'>
 {% if let Some(j) = just %}
   <p class="due-row due-done muted"><span class="due-title">{{ j.verb }}</span>
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ j.id }}/{{ j.undo }}" hx-target="#due" hx-swap="outerHTML">undo</button></p>
+    <button class="btn btn-ghost btn-sm" hx-post="{{ j.undo }}" hx-target="#due" hx-swap="outerHTML">undo</button></p>
 {% endif %}
 {% for r in rows %}
   {# `due-new` is on a row whose moment did not exist when this band last
@@ -54,6 +54,12 @@
         <input type="datetime-local" name="when" class="input" required>
         <button class="btn btn-ghost btn-sm" type="submit">set date</button>
       </form>
+      {# The row most likely to be a misreading is the one asking for a date it
+         never had, so this sits beside the field rather than behind a fold. #}
+      {% if r.source != "set" %}
+      <button class="btn btn-ghost btn-sm due-notmine" hx-post="/ui/moments/{{ r.id }}/not-a-reminder"
+              hx-target="#due" hx-swap="outerHTML" title="I never asked to be reminded of this">not a reminder</button>
+      {% endif %}
       {% else %}
       {# Seven controls on one line was the front page's own clutter problem
          one scale down: done, three snoozes, a date field and its button, all
@@ -71,6 +77,13 @@
           <input type="datetime-local" name="when" class="input" required>
           <button class="btn btn-ghost btn-sm" type="submit">move</button>
         </form>
+        {# Only on a row the stage put here. A reminder somebody set themselves
+           is not a misreading, and offering to un-read it would be offering to
+           undo their own typing. #}
+        {% if r.source != "set" %}
+        <button class="btn btn-ghost btn-sm due-notmine" hx-post="/ui/moments/{{ r.id }}/not-a-reminder"
+                hx-target="#due" hx-swap="outerHTML" title="I never asked to be reminded of this">not a reminder</button>
+        {% endif %}
       </details>
       {% endif %}
     </span>

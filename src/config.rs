@@ -473,7 +473,7 @@ impl Default for SittingConfig {
 }
 
 /// A sense of time: what counts as due, what the front page calls coming up,
-/// and the classifier's line on a base too small to measure one.
+/// and the floor under the classifier.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct TimeConfig {
@@ -482,8 +482,9 @@ pub struct TimeConfig {
     pub horizon_hours: u64,
     /// Dates a note refers to inside this many days are listed under "Coming up".
     pub coming_up_days: u64,
-    /// The cosine at which a prototype fires an intent, until the base has
-    /// thirty artifacts to measure the line from.
+    /// The lowest cosine at which a prototype may fire an intent. A plain
+    /// floor: what actually decides is whether the winning prototype beats
+    /// every decoy — see `moments::DECOYS`.
     pub intent_at: f32,
     /// Let an open due reminder lift a hit, bounded by `associate.prime_lift`.
     pub lift: bool,

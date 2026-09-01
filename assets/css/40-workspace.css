@@ -847,6 +847,12 @@ body { overflow-x: hidden; }
 .due-later > summary:hover { color: var(--color-fg-secondary); }
 .due-later[open] { display: inline-flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
 .due-snooze { display: inline-flex; gap: 0.25rem; align-items: baseline; font-size: var(--text-xs); }
+/* "Not a reminder": the answer that says the reading was wrong rather than
+   anything about when. Quiet as the fold is quiet — it is the rarest thing on
+   the row and must not compete with `done` — but it is a real button and not
+   a link, because it takes a row off the band. */
+.due-notmine { color: var(--color-fg-muted); font-size: var(--text-xs); }
+.due-notmine:hover { color: var(--color-fg-secondary); }
 .due-date { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .due-date .input { flex: 1 1 9rem; min-width: 0; }
 .due-coming { margin: 0.25rem 0 0; }

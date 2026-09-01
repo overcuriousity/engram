@@ -2092,7 +2092,7 @@ mod tests {
                     .uri("/ui/capture")
                     .header("cookie", &cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("text=Heute+war+ein+langer+Tag."))
+                    .body(Body::from("text=Dear+diary,+the+move+is+over."))
                     .unwrap(),
             )
             .await
