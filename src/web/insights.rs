@@ -674,7 +674,12 @@ mod tests {
     #[tokio::test]
     async fn a_reminder_inside_the_horizon_gets_its_own_heading_and_band() {
         let core = crate::core::test_support::test_core().await;
-        core.ingest_capture(crate::core::ingest::Capture::new("Remind me tomorrow to send the invoice", "ui")).await.unwrap();
+        core.ingest_capture(
+            crate::core::ingest::Capture::new("Remind me tomorrow to send the invoice", "ui")
+                .with_intent(Some(crate::core::moments::Intent::Remind)),
+        )
+        .await
+        .unwrap();
         crate::jobs::test_support::drain(&core).await;
         let html = insights(core).await;
         assert!(html.contains("<h2>Due</h2>"), "{html}");

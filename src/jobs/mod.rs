@@ -7,8 +7,8 @@ pub mod describe;
 pub mod embed;
 pub mod extract;
 pub mod gaps;
+pub mod judgement;
 pub mod merge;
-pub mod moments;
 pub mod passages;
 pub mod promote;
 pub mod pursuit;
@@ -154,7 +154,6 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::Reap,
             _,
         ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
-        (Stage::Moments, _) => moments::run(core, &job.target_id).await,
         (Stage::Remind, _) => remind::run(core).await,
     };
 

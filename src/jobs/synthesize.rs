@@ -305,7 +305,7 @@ mod tests {
             context_tokens: 2000,
             max_output_tokens: 100_000,
             output_ratio: 1.0,
-            context: crate::infer::context::ContextBudget { opening, overlap },
+            context: crate::infer::context::ContextBudget { opening, overlap, neighbors: 0 },
         }
     }
 

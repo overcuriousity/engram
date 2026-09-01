@@ -359,15 +359,16 @@ mod tests {
         b.context = ContextBudget {
             opening: 200,
             overlap: 150,
+            neighbors: 0,
         };
         let with = segment_tokens(b, 1000);
 
-        // 200 + 2*150 + 40 fences = 540 prompt tokens. The window loses that
+        // 200 + 2*150 + 60 fences = 560 prompt tokens. The window loses that
         // divided by (1 + output_ratio), because every input token it gives up
-        // frees output budget too: 540 / 2.4 = 225.
+        // frees output budget too: 560 / 2.4 = 233.
         assert_eq!(without, 13236);
-        assert_eq!(with, 13011);
-        assert_eq!(without - with, 225);
+        assert_eq!(with, 13003);
+        assert_eq!(without - with, 233);
     }
 
     #[test]

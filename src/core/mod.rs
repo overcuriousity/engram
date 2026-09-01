@@ -144,18 +144,12 @@ pub struct Core {
     /// endpoint as the judges, its own response shape, background only.
     /// `None` with no synthesize role; gaps are then named by their terms.
     pub gap_namer: Option<Arc<dyn Completer>>,
-    /// The one model call time makes: dating a note the classifier said is a
-    /// reminder. `None` with no synthesize role; the stage then falls back to
-    /// the relative-word table.
-    pub reminder: Option<Arc<dyn Completer>>,
     /// The judge that rules on a retired artifact: still worth something, or
     /// nothing the live base does not already say. Same endpoint as the other
     /// judges, its own response shape — the reap verdict is not a duplicate
     /// verdict, and asking it under that grammar could only ever fail to
     /// parse. `None` with no synthesize role.
     pub reaper: Option<Arc<dyn Completer>>,
-    /// Intent prototypes, embedded once per process. See `Core::prototypes`.
-    pub protos: Arc<tokio::sync::OnceCell<crate::core::moments::Protos>>,
     /// The model that writes an artifact from a pursuit. Same endpoint as the
     /// judges, its own response shape, background only. `None` with no
     /// synthesize role.
@@ -316,9 +310,7 @@ impl Core {
             judge: Some(Arc::new(HttpCompleter::for_judging(synth))),
             link_judge: Some(Arc::new(HttpCompleter::for_link_judging(synth))),
             gap_namer: Some(Arc::new(HttpCompleter::for_gap_naming(synth))),
-            reminder: Some(Arc::new(HttpCompleter::for_reminding(synth))),
             reaper: Some(Arc::new(HttpCompleter::for_reaping(synth))),
-            protos: Arc::new(tokio::sync::OnceCell::new()),
             generator: Some(Arc::new(HttpCompleter::for_generating(synth))),
             planner: cfg.infer.ask.as_ref().and_then(|a| {
                 a.plan
@@ -540,21 +532,7 @@ pub mod test_support {
             gap_namer: Some(Arc::new(FakeCompleter {
                 reply: Some(r#"{"label":"Fake topic"}"#.into()),
             })),
-            // Says "no date", so the default core exercises the fallback; a
-            // test wanting a dated reply sets `reminder` itself.
-            reminder: Some(Arc::new(FakeCompleter {
-                reply: Some(r#"{"when":null,"rule":null,"what":"fake"}"#.into()),
-            })),
             reaper: Some(Arc::new(FakeCompleter::default())),
-            // Pre-filled and empty: no test pays an embed call for the
-            // prototypes, and the hash-vector embedder cannot fire the
-            // classifier on noise. `prototypes()` has its own test, over a
-            // core that clears this.
-            protos: Arc::new(tokio::sync::OnceCell::new_with(Some(crate::core::moments::Protos {
-                vectors: vec![],
-                decoys: vec![],
-                line: 1.0,
-            }))),
             generator: Some(Arc::new(FakeCompleter::default())),
             // Off, unlike the shipped default: a test that wants a fan-out puts
             // a completer here, and every other test gets one round and no
@@ -603,7 +581,7 @@ pub mod test_support {
             // The fake embedder hashes text into eight dimensions, where two
             // unrelated strings clear 0.80 by chance and the classifier fires on
             // noise. Tests of the classifier hand it vectors directly.
-            time: crate::config::TimeConfig { intent_at: 0.99, ..Default::default() },
+            time: crate::config::TimeConfig::default(),
             reap: crate::config::ReapConfig::default(),
             // Off, unlike the shipped default: `recommends()` is two flags and
             // a test that leaves both alone must offer nothing. The

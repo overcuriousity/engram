@@ -475,10 +475,6 @@ pub struct TimeConfig {
     pub horizon_hours: u64,
     /// Dates a note refers to inside this many days are listed under "Coming up".
     pub coming_up_days: u64,
-    /// The lowest cosine at which a prototype may fire an intent. A plain
-    /// floor: what actually decides is whether the winning prototype beats
-    /// every decoy — see `moments::DECOYS`.
-    pub intent_at: f32,
     /// Let an open due reminder lift a hit, bounded by `associate.prime_lift`.
     pub lift: bool,
     /// IANA zone for doors that send none. Empty means the server's.
@@ -487,7 +483,7 @@ pub struct TimeConfig {
 
 impl Default for TimeConfig {
     fn default() -> Self {
-        Self { horizon_hours: 48, coming_up_days: 7, intent_at: 0.80, lift: true, default_tz: String::new() }
+        Self { horizon_hours: 48, coming_up_days: 7, lift: true, default_tz: String::new() }
     }
 }
 
@@ -968,6 +964,8 @@ struct RawSynthesizeRole {
     context_opening_tokens: usize,
     #[serde(default = "default_context_overlap_tokens")]
     context_overlap_tokens: usize,
+    #[serde(default = "default_context_neighbor_tokens")]
+    context_neighbor_tokens: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1074,6 +1072,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
                     structured_output: s.structured_output.unwrap_or(st.structured_output),
                     context_opening_tokens: s.context_opening_tokens,
                     context_overlap_tokens: s.context_overlap_tokens,
+                    context_neighbor_tokens: s.context_neighbor_tokens,
                 })
             }
         };
@@ -1224,6 +1223,11 @@ pub struct SynthesizeRole {
     /// Zero disables it.
     #[serde(default = "default_context_overlap_tokens")]
     pub context_overlap_tokens: usize,
+    /// Tokens of nearest-neighbor artifacts shown to a judged capture call,
+    /// so it can resolve references against what the base already holds and
+    /// name the artifacts this capture relates to. Zero disables the block.
+    #[serde(default = "default_context_neighbor_tokens")]
+    pub context_neighbor_tokens: usize,
 }
 
 fn default_true() -> bool {
@@ -1244,6 +1248,10 @@ fn default_context_opening_tokens() -> usize {
 
 fn default_context_overlap_tokens() -> usize {
     150
+}
+
+fn default_context_neighbor_tokens() -> usize {
+    1024
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -2469,6 +2477,7 @@ impl Config {
                     structured_output: true,
                     context_opening_tokens: 200,
                     context_overlap_tokens: 150,
+                    context_neighbor_tokens: 1024,
                 },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),

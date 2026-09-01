@@ -486,6 +486,7 @@ impl HttpSynthesizer {
                 context: crate::infer::context::ContextBudget {
                     opening: cfg.context_opening_tokens,
                     overlap: cfg.context_overlap_tokens,
+                    neighbors: cfg.context_neighbor_tokens,
                 },
             },
             max_artifact_tokens: 1024,
@@ -1065,12 +1066,6 @@ impl HttpCompleter {
         Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))
     }
 
-    /// Dating a note the classifier said is a reminder. Background only, and
-    /// the one call the time features make.
-    pub fn for_reminding(cfg: &SynthesizeRole) -> Self {
-        Self::judging(cfg, ("remind", prompt::remind_schema()))
-    }
-
     /// The judge that rules on a retired artifact, on the judges' endpoint.
     ///
     /// Its own completer for the reason `for_link_judging` is: the response
@@ -1466,6 +1461,7 @@ mod tests {
             structured_output: true,
             context_opening_tokens: 200,
             context_overlap_tokens: 150,
+            context_neighbor_tokens: 0,
         }
     }
     fn ask_cfg(base: String) -> AskRole {

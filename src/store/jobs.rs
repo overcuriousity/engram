@@ -71,9 +71,6 @@ pub enum Stage {
     /// of this faculty is that the learning is a sweep and the read is one
     /// vector query.
     Context,
-    /// One artifact, once its embedding has landed: read the time out of it.
-    /// No model unless a reminder was meant.
-    Moments,
     /// Push what is due. Armed at the next due moment by every write that can
     /// move it, never on a period.
     Remind,
@@ -88,7 +85,7 @@ impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 20] = [
+    pub const ALL: [Stage; 19] = [
         Stage::Synthesize,
         Stage::Enrich,
         Stage::SegmentWindow,
@@ -106,7 +103,6 @@ impl Stage {
         Stage::Retention,
         Stage::ArmDedupe,
         Stage::Context,
-        Stage::Moments,
         Stage::Remind,
         Stage::Reap,
     ];
@@ -130,7 +126,6 @@ impl Stage {
             Stage::Retention => "retention",
             Stage::ArmDedupe => "arm_dedupe",
             Stage::Context => "context",
-            Stage::Moments => "moments",
             Stage::Remind => "remind",
             Stage::Reap => "reap",
         }
@@ -167,7 +162,6 @@ impl Stage {
             | Stage::Retention
             | Stage::ArmDedupe
             | Stage::Context
-            | Stage::Moments
             | Stage::Remind
             | Stage::Reap => 1,
         }
@@ -192,7 +186,6 @@ impl Stage {
             "retention" => Some(Stage::Retention),
             "arm_dedupe" => Some(Stage::ArmDedupe),
             "context" => Some(Stage::Context),
-            "moments" => Some(Stage::Moments),
             "remind" => Some(Stage::Remind),
             "reap" => Some(Stage::Reap),
             _ => None,
@@ -767,20 +760,10 @@ impl Store {
     /// pipeline the operator is watching, against work nobody stands in front
     /// of — and `run_after` excludes a unit whose turn has not come.
     ///
-    /// Plus `moments` by name, which is class 1 and belongs here anyway. It is
-    /// not a sweep: `embed` arms it for one artifact, and it is the stage that
-    /// writes the reminder the band exists to show. Asking about class alone,
-    /// the poll that landed just after the last embed saw an empty queue and
-    /// swapped the fragment in with no trigger on it — and the due row was
-    /// written seconds later, an LLM call away with `core.reminder` configured,
-    /// with nothing left to re-fetch the band. "A reminder appears while you
-    /// watch" quietly became "invisible until a reload". Naming the one stage
-    /// rather than widening to class 1 is deliberate: the rest of that class is
-    /// the parked periodic sweeps this query was narrowed to escape.
     pub async fn foreground_work_in_flight(&self) -> Result<bool> {
         let r: Option<i64> = sqlx::query_scalar(
             "SELECT 1 FROM jobs
-              WHERE subject = ? AND (class = 0 OR stage = 'moments')
+              WHERE subject = ? AND class = 0
                 AND (state = 'running' OR (state = 'pending' AND run_after <= ?))
               LIMIT 1",
         )
@@ -1698,22 +1681,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_stage_that_writes_the_reminder_is_a_capture_in_flight() {
-        // `moments` is class 1, but `embed` arms it for one artifact and it is
-        // the stage that writes the due row the band exists to show. Judged by
-        // class alone, the poll landing just after the last embed saw an empty
-        // queue and swapped the fragment in with no trigger on it — and the
-        // row was written seconds later, an LLM call away, with nothing left
-        // to re-fetch the band.
+    async fn foreground_work_is_the_capture_pipeline_and_nothing_parked() {
+        // Since the reshape, the reminder is written by the capture
+        // pipeline's own window job — class 0 — so class alone draws the
+        // line the band polls against.
         let s = Store::memory().await.unwrap();
-        s.enqueue(Stage::Moments, "artifact", "a-1").await.unwrap();
+        while let Some(j) = s.claim_job().await.unwrap() {
+            s.control.complete_job(j.id).await.unwrap();
+        }
+        assert!(!s.foreground_work_in_flight().await.unwrap());
+        s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
         assert!(s.foreground_work_in_flight().await.unwrap(), "the operator is waiting for this one");
         let j = s.claim_job().await.unwrap().unwrap();
         s.control.complete_job(j.id).await.unwrap();
         assert!(!s.foreground_work_in_flight().await.unwrap());
 
-        // And the rest of class 1 is still what the query was narrowed to
-        // escape: `remind` is the periodic notifier, parked months out.
+        // Class 1 is what the query was narrowed to escape: `remind` is the
+        // periodic notifier, parked months out.
         s.arm_at(Stage::Remind, "sweep", "remind", crate::store::now() + 86_400).await.unwrap();
         assert!(!s.foreground_work_in_flight().await.unwrap(), "a parked sweep is nobody's capture");
     }
@@ -1919,10 +1903,7 @@ mod tests {
 
     #[test]
     fn the_two_time_stages_round_trip_and_are_background() {
-        assert_eq!(Stage::parse("moments"), Some(Stage::Moments));
         assert_eq!(Stage::parse("remind"), Some(Stage::Remind));
-        assert_eq!(Stage::Moments.as_str(), "moments");
         assert_eq!(Stage::Remind.class(), 1);
-        assert_eq!(Stage::Moments.class(), 1);
     }
 }

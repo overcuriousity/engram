@@ -9,20 +9,23 @@ pub struct ContextBudget {
     pub opening: usize,
     /// Tokens of each neighbouring window, on both sides.
     pub overlap: usize,
+    /// Tokens of nearest-neighbor artifacts shown to a judged capture call.
+    pub neighbors: usize,
 }
 
 /// The fence lines and their labels, which are prompt text like any other and
-/// have to be paid for out of the same budget.
-const FENCE_TOKENS: usize = 40;
+/// have to be paid for out of the same budget. Sized for all four block
+/// kinds, the NEIGHBORS and JUDGE fences included.
+const FENCE_TOKENS: usize = 60;
 
 impl ContextBudget {
     /// Everything the context blocks cost, fences included. This is subtracted
     /// from the window so the assembled prompt still fits the model.
     pub fn total(&self) -> usize {
-        if self.opening == 0 && self.overlap == 0 {
+        if self.opening == 0 && self.overlap == 0 && self.neighbors == 0 {
             return 0;
         }
-        self.opening + 2 * self.overlap + FENCE_TOKENS
+        self.opening + 2 * self.overlap + self.neighbors + FENCE_TOKENS
     }
 }
 
@@ -187,6 +190,7 @@ mod tests {
         ContextBudget {
             opening: 30,
             overlap: 20,
+            neighbors: 0,
         }
     }
 

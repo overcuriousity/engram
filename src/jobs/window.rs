@@ -57,6 +57,23 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // every window after it.
     let text = w.text.clone();
 
+    // The judged path: a capture small enough to be one window is judged by
+    // the same call that rewrites it — intent, events, links — against the
+    // base's nearest artifacts. A multi-window corpus is not: a manual's
+    // window is not a reminder, and its links wait for the sweeps.
+    let judging = all.len() == 1;
+    let neighbors = if judging {
+        neighbor_context(core, corpus_id, idx).await
+    } else {
+        Vec::new()
+    };
+    let shown_ids: Vec<String> = neighbors.iter().map(|n| n.id.clone()).collect();
+    let ask = if judging {
+        Some(build_judge_ask(core, corpus_id, neighbors).await?)
+    } else {
+        None
+    };
+
     // The failure this catches is a unit retrying an over-context window against
     // the endpoint with growing backoff and no terminal state. Per-unit budgets
     // made it quieter than it used to be, not rarer: the other thirty-three
@@ -87,15 +104,15 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
 
     let permit = core.gate.background().await;
     let first = synth
-        .segment(crate::infer::SegmentInput {
+        .segment_judged(crate::infer::SegmentInput {
             core: &text,
             context: &ctx,
-            judge: None,
+            judge: ask.as_ref(),
         })
         .await;
     permit.finished();
-    let mut chunks = match first {
-        Ok(c) => c,
+    let mut reply = match first {
+        Ok(r) => r,
         Err(e) => {
             let reason = e.to_string();
             tracing::warn!(
@@ -117,7 +134,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // not, one more attempt sometimes gets it right; a second failure is stored
     // with a flag rather than dropped, because a visible warning beats losing
     // the chapter.
-    if paraphrased(&chunks, &text) {
+    if paraphrased(&reply.artifacts, &text) {
         tracing::warn!(
             corpus_id,
             window = idx,
@@ -125,15 +142,15 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         );
         let permit = core.gate.background().await;
         let second = synth
-            .segment(crate::infer::SegmentInput {
+            .segment_judged(crate::infer::SegmentInput {
                 core: &text,
                 context: &ctx,
-                judge: None,
+                judge: ask.as_ref(),
             })
             .await;
         permit.finished();
         match second {
-            Ok(second) => chunks = second,
+            Ok(second) => reply = second,
             // The first reply parsed; it merely paraphrased. Keeping it and
             // letting `flag_unverified` mark what went missing beats losing a
             // window we can already read.
@@ -148,6 +165,8 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         }
     }
 
+    let judgement = reply.judgement.take();
+    let mut chunks = reply.artifacts;
     if !ctx.is_empty() {
         let before = chunks.len();
         chunks.retain(|c| !from_context_only(&c.text, &text, &ctx));
@@ -225,6 +244,22 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
                 superseded = n,
                 "promotion superseded its covered passages"
             );
+        }
+    }
+    // The judgement, once the artifacts it is about stand. Anchored to the
+    // first live one; a judgement that cannot be applied is a warning — the
+    // artifacts are already the capture.
+    if let Some(j) = judgement {
+        if let Some(anchor) = written.iter().find(|c| c.in_results()) {
+            if let Err(e) =
+                crate::jobs::judgement::apply(core, corpus_id, &anchor.id, &j, &shown_ids).await
+            {
+                tracing::warn!(
+                    corpus_id,
+                    error = %e,
+                    "the judgement could not be applied; the artifacts stand"
+                );
+            }
         }
     }
     core.store
@@ -339,6 +374,84 @@ async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
     .fetch_optional(&core.store.control.pool)
     .await?
     .unwrap_or(MAX_ATTEMPTS))
+}
+
+/// The base's nearest artifacts to this capture, shown to the judged call so
+/// it can resolve references and name relations. Best-effort throughout: any
+/// failure is "no neighbors", never a failed window.
+async fn neighbor_context(
+    core: &Core,
+    corpus_id: &str,
+    idx: i64,
+) -> Vec<crate::infer::Neighbor> {
+    let budget = core.synthesizer.budget().context.neighbors;
+    if budget == 0 {
+        return Vec::new();
+    }
+    let Ok(rows) = core.store.artifacts_for_segment(corpus_id, idx).await else {
+        return Vec::new();
+    };
+    let Some(seed) = rows
+        .iter()
+        .find(|c| c.provenance == crate::store::artifacts::Provenance::Passage)
+    else {
+        return Vec::new();
+    };
+    // The seed passage may not be embedded yet — the window unit and the
+    // corpus embed job race at capture. Embedding it here is idempotent and
+    // cheap next to the model call this context is for.
+    let mut hits = core.vectors.neighbours(&seed.id, 8).await.unwrap_or_default();
+    if hits.is_empty() {
+        let _ = crate::jobs::embed::run(core, &seed.id).await;
+        hits = core.vectors.neighbours(&seed.id, 8).await.unwrap_or_default();
+    }
+    let per = (budget / 5).max(64);
+    let mut out = Vec::new();
+    for h in hits {
+        if h.payload.corpus_id == corpus_id {
+            continue;
+        }
+        // A conservative character cut against the per-neighbor budget; the
+        // fence overhead is already in `ContextBudget::total`.
+        let text: String = h.payload.text.chars().take(per * 3).collect();
+        out.push(crate::infer::Neighbor {
+            id: h.payload.artifact_id,
+            title: h.payload.title,
+            text,
+        });
+        if out.len() == 5 {
+            break;
+        }
+    }
+    out
+}
+
+/// The clock, the zone, and what the door already said — the judged call's
+/// frame of reference.
+async fn build_judge_ask(
+    core: &Core,
+    corpus_id: &str,
+    neighbors: Vec<crate::infer::Neighbor>,
+) -> Result<crate::infer::JudgeAsk> {
+    use chrono::TimeZone;
+    let src = core.store.get_corpus(corpus_id).await?;
+    let tz_name = src.metadata["tz"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| crate::core::moments::default_zone_name(&core.time.default_tz));
+    let tz = crate::core::moments::zone(Some(&tz_name));
+    let now_local = tz
+        .timestamp_opt(src.created_at, 0)
+        .single()
+        .map(|d| d.format("%Y-%m-%d %H:%M (%A)").to_string())
+        .unwrap_or_default();
+    Ok(crate::infer::JudgeAsk {
+        now_local,
+        tz: tz.name().to_string(),
+        forced_intent: src.metadata["intent"].as_str().map(String::from),
+        neighbors,
+    })
 }
 
 /// Where an artifact sits in the source document.

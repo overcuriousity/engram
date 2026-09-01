@@ -2077,7 +2077,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cued_entry_says_so_on_the_receipt_with_its_undo() {
+    async fn an_unforced_note_is_a_plain_capture_on_the_receipt() {
+        // The cue table retired with the classifier: the web box files
+        // nothing at the door, and an entry chip appears only once the
+        // judged synthesis call has said so.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let res = app
@@ -2094,8 +2097,10 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let html = body_of(res).await;
-        assert!(html.contains("Kept as today&rsquo;s entry"), "{html}");
-        assert!(html.contains("/entry\""), "the undo posts to the entry toggle");
+        assert!(
+            !html.contains("Kept as today&rsquo;s entry"),
+            "nothing is filed at the door any more: {html}"
+        );
     }
 
     #[tokio::test]

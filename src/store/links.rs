@@ -91,6 +91,34 @@ pub struct Link {
     pub created_at: i64,
 }
 
+impl Store {
+    /// A relation the capture-time synthesis call named, over both texts it
+    /// was shown. Lands `related` with the model's reason — the judged state,
+    /// not the learning one, because a model explicitly asserted it — and an
+    /// operator's `dismissed` stays unbeatable.
+    pub async fn relate_synthesized(&self, a: &str, b: &str, reason: &str) -> Result<()> {
+        let (a, b) = canonical(a, b);
+        sqlx::query(
+            "INSERT INTO artifact_links
+                   (a_id, b_id, weight, bumped_at, queries, cues, state, reason, created_at)
+             VALUES (?, ?, 1.0, ?, 0, '[]', 'related', ?, ?)
+             ON CONFLICT(a_id, b_id) DO UPDATE SET
+               state = CASE WHEN artifact_links.state = 'dismissed'
+                            THEN artifact_links.state ELSE 'related' END,
+               reason = CASE WHEN artifact_links.state = 'dismissed'
+                             THEN artifact_links.reason ELSE excluded.reason END",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(now())
+        .bind(reason)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
 /// The pair in the order the table stores it. `a_id < b_id` is a CHECK, so this
 /// is not a convention that can be forgotten at one call site.
 pub fn canonical<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {

@@ -305,26 +305,13 @@ impl Core {
 
     /// The same thing, for a door that also knows where the text was read.
     pub async fn ingest_capture(&self, c: Capture) -> Result<IngestOutcome> {
-        // A note that opens like a diary entry is filed as one, on the doors
-        // where a person typed it. Cheap, exact, and undone with one click.
-        //
-        // Two ways in, and the door outranks the text either way. A forced
-        // `journal` is filed on the caller's word alone — it used to need the
-        // cue table to agree, which made an explicit instruction conditional
-        // on a guess. A forced `remind` is never filed. With nothing forced it
-        // is the cue table, and only a cue that decides on its own: this
-        // happens before any vector exists, so a weak cue would settle the
-        // question here with the classifier never getting to look — which is
-        // exactly how `engram -j`-less `Heute den Bericht abgeben` became a
-        // diary entry.
+        // A door that says "this is a journal entry" is taken at its word,
+        // where a person typed it. Everything unforced waits for the judged
+        // synthesis call — the cue table retired with the classifier.
         let mut c = c;
         let journal = crate::core::moments::Intent::Journal;
-        let said = c.metadata["intent"].as_str();
-        let is_entry = match said {
-            Some(i) => i == journal.as_str(),
-            None => crate::core::moments::cue(&c.text) == Some(journal),
-        };
-        if is_entry && crate::jobs::moments::JOURNALABLE.contains(&c.origin.as_str()) {
+        let is_entry = c.metadata["intent"].as_str() == Some(journal.as_str());
+        if is_entry && crate::jobs::judgement::JOURNALABLE.contains(&c.origin.as_str()) {
             let was = std::mem::replace(&mut c.origin, ORIGIN_JOURNAL.to_string());
             c.metadata["origin_was"] = serde_json::Value::String(was);
         }
@@ -1456,7 +1443,19 @@ impl Core {
         if on {
             crate::core::moments::allow_intent(&mut meta, intent);
             self.store.set_corpus_metadata(cid, &meta).await?;
-            self.store.enqueue(Stage::Moments, "artifact", artifact_id).await?;
+            // Hand the note back to the judged read: re-run its window's
+            // synthesis, which is where time is read since the reshape.
+            if let Some(idx) = art.segment_idx {
+                self.store.reset_segment(cid, idx, true).await?;
+                self.store
+                    .enqueue_seq(
+                        Stage::SegmentWindow,
+                        "segment",
+                        &crate::jobs::window::unit_target(cid, idx),
+                        idx,
+                    )
+                    .await?;
+            }
             return Ok(());
         }
         crate::core::moments::refuse_intent(&mut meta, intent);
@@ -1545,13 +1544,6 @@ impl Core {
             | Stage::Reap => {
                 return Err(Error::Validation(
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
-                ));
-            }
-            // Re-read by the embed that lands, per artifact; a reprocess of the
-            // document reaches it through `Embed`.
-            Stage::Moments => {
-                return Err(Error::Validation(
-                    "the time in a document is re-read when it is re-embedded; reprocess Embed".into(),
                 ));
             }
             // A stored PDF can always be read again — with the ML build, or
@@ -3245,9 +3237,15 @@ mod tests {
     #[tokio::test]
     async fn a_journal_cue_at_capture_files_the_note_as_an_entry_and_can_be_undone() {
         let core = test_core().await;
-        // A cue that decides on its own — see `moments::Strength`. A day word
-        // no longer files anything at this door.
-        let out = core.ingest_capture(Capture::new("Dear diary, the move is over.", "ui")).await.unwrap();
+        // The door said so — the cue table retired with the classifier, and
+        // an unforced note waits for the judged synthesis call.
+        let out = core
+            .ingest_capture(
+                Capture::new("Dear diary, the move is over.", "ui")
+                    .with_intent(Some(crate::core::moments::Intent::Journal)),
+            )
+            .await
+            .unwrap();
         let c = core.store.get_corpus(&out.id).await.unwrap();
         assert_eq!(c.origin, "journal");
         assert_eq!(c.metadata["origin_was"], "ui");
@@ -3268,7 +3266,13 @@ mod tests {
     #[tokio::test]
     async fn undoing_an_entry_twice_leaves_the_channel_it_came_through() {
         let core = test_core().await;
-        let out = core.ingest_capture(Capture::new("Dear diary, the move is over.", "cli")).await.unwrap();
+        let out = core
+            .ingest_capture(
+                Capture::new("Dear diary, the move is over.", "cli")
+                    .with_intent(Some(crate::core::moments::Intent::Journal)),
+            )
+            .await
+            .unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
         core.set_entry(&out.id, false).await.unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "cli");
@@ -3326,21 +3330,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
-    }
-
-    #[tokio::test]
-    async fn a_day_word_does_not_file_an_entry_at_the_door_but_still_can_afterwards() {
-        // The collision `Strength` exists for. At capture there is no vector,
-        // so a weak cue deciding here would settle the question before the
-        // classifier ever saw the note. It waits for the stage instead, which
-        // consults it only where the classifier declined.
-        let core = test_core().await;
-        let out = core.ingest_capture(Capture::new("Heute war ein langer Tag.", "ui")).await.unwrap();
-        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "ui", "not at the door");
-        crate::jobs::test_support::drain(&core).await;
-        let c = core.store.get_corpus(&out.id).await.unwrap();
-        assert_eq!(c.origin, "journal", "and filed once the note has been read");
-        assert_eq!(c.metadata["intent_by"], "weak cue");
     }
 
     #[tokio::test]

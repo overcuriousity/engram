@@ -513,25 +513,11 @@ pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
 #[derive(Template)]
 #[template(path = "_intent_echo.html")]
 pub(crate) struct IntentEchoTemplate {
-    /// `reminder`, `journal entry`, or empty for "the cue table proves
-    /// nothing about this text".
+    /// `will be synthesized`, `large paste`, or empty for an empty box.
     pub(crate) kind: &'static str,
-    pub(crate) when: String,
+    pub(crate) detail: String,
 }
 
-/// What the box would become if it were captured, from the cue table and the
-/// date rules alone.
-///
-/// It rides the search response because every keystroke already makes that
-/// request on a 120ms debounce, and everything here is pure string work: no
-/// model call, no embedding, no store read. A second request per keystroke to
-/// say one short line would cost more than the line is worth.
-///
-/// Deliberately without the reminder model, which `jobs::moments` consults
-/// first where one is configured. A model call on a keystroke is out of the
-/// question, so on such a base the echo can name a date the capture then
-/// improves on. It says what it can prove and the band below shows what
-/// actually happened.
 /// A template's markup as a string, for a fragment that is composed into
 /// another rather than returned on its own. An echo that could not render is
 /// no echo, never a 500 over a rail that is otherwise correct.
@@ -539,30 +525,28 @@ pub(crate) fn render_echo(t: &IntentEchoTemplate) -> String {
     t.render().unwrap_or_default()
 }
 
-pub(crate) fn intent_echo(q: &str, tz_name: Option<&str>, now: i64) -> IntentEchoTemplate {
-    use crate::core::moments::{absolute_dates, cue, relative_date, zone, Intent};
-    let tz = zone(tz_name);
-    match cue(q) {
-        Some(Intent::Remind) => {
-            // The same reading `date_reminder` does without its model: every
-            // absolute date still ahead, plus the relative table, nearest
-            // wins. `month_first` is false — the door does not carry a locale,
-            // and 4/9 is the fourth of September to most of the world.
-            let mut candidates: Vec<i64> =
-                absolute_dates(q, now, tz, false).into_iter().map(|f| f.at).filter(|a| *a > now).collect();
-            if let Some(r) = relative_date(q, now, tz) {
-                candidates.push(r.at);
-            }
-            IntentEchoTemplate {
-                kind: "reminder",
-                when: match candidates.into_iter().min() {
-                    Some(at) => crate::web::due::when_words(at, now, tz),
-                    None => "no date read — it will ask you for one".into(),
-                },
-            }
+/// What capture will do with the box, said before it is pressed.
+///
+/// Pure local arithmetic on the same counter and budget the size fork uses —
+/// exact, no model call, no store read — riding the search response the box
+/// already makes on every keystroke at a 120ms debounce.
+pub(crate) fn fate_echo(core: &crate::core::Core, q: &str) -> IntentEchoTemplate {
+    if q.trim().is_empty() {
+        return IntentEchoTemplate { kind: "", detail: String::new() };
+    }
+    let budget = crate::jobs::synthesize::segment_budget(core).max(1);
+    let tokens = core.counter.count(q);
+    if tokens <= budget {
+        IntentEchoTemplate {
+            kind: "will be synthesized",
+            detail: "captured verbatim, then rewritten into structured artifacts".into(),
         }
-        Some(Intent::Journal) => IntentEchoTemplate { kind: "journal entry", when: "today".into() },
-        None => IntentEchoTemplate { kind: "", when: String::new() },
+    } else {
+        let windows = tokens.div_ceil(budget);
+        IntentEchoTemplate {
+            kind: "large paste",
+            detail: format!("stored verbatim in ~{windows} windows; synthesis comes with use"),
+        }
     }
 }
 
@@ -693,7 +677,7 @@ pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemp
         recent,
         held: corpora > 0,
         echo: if oob {
-            render_echo(&intent_echo("", None, 0))
+            render_echo(&IntentEchoTemplate { kind: "", detail: String::new() })
         } else {
             String::new()
         },
@@ -1200,11 +1184,6 @@ pub(crate) struct UiSearchParams {
     /// `Store::record_search`.
     #[serde(default)]
     pub(crate) fold: Option<String>,
-    /// The viewer's IANA zone, filled onto the form by app.js. The echo under
-    /// the box reads a date out of what is being typed, and *tomorrow 09:00*
-    /// is a different second in Berlin than it is on the server.
-    #[serde(default)]
-    pub(crate) tz: Option<String>,
     /// Ask the rail to say why a row is where it is. Off unless the link
     /// carries it: the line is for an operator looking into a ranking, not
     /// something every keystroke paints. `/ui?explain=1` puts it on the form
@@ -1276,7 +1255,14 @@ pub(crate) async fn search_results(
     // limit is on the door rather than in app.js because it is the embedder's
     // bill either way, whatever the client was.
     if p.q.trim().is_empty() || p.q.chars().count() > MAX_QUERY_CHARS {
-        return Ok(HtmlTemplate(idle_foot(&tenant, true).await?).into_response());
+        let mut t = idle_foot(&tenant, true).await?;
+        // A box holding a whole document is not searched, but its fate is
+        // still worth a line: this is exactly the paste the size fork will
+        // store verbatim, and the echo is what says so before Capture.
+        if !p.q.trim().is_empty() {
+            t.echo = render_echo(&fate_echo(&tenant.core, &p.q));
+        }
+        return Ok(HtmlTemplate(t).into_response());
     }
 
     // The same terms the sparse branch derives, handed to the client so
@@ -1377,7 +1363,7 @@ pub(crate) async fn search_results(
         .into_iter()
         .map(|h| render_hit(0, h, &titles, explain))
         .collect();
-    let echo = render_echo(&intent_echo(&q, p.tz.as_deref(), tenant.core.clock.now()));
+    let echo = render_echo(&fate_echo(&tenant.core, &q));
     let mut res = HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
         // good list is ordinary — it is the tail of any ranking — and saying
@@ -4719,32 +4705,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typing_a_reminder_echoes_what_it_will_become() {
+    async fn a_small_paste_echoes_the_synthesis_it_will_get() {
         let (app, cookie) = app_with_session().await;
         app.clone().oneshot(form("/ui/capture", &cookie, "text=mounting+an+image")).await.unwrap();
         let html = get(
             &app,
-            "/ui/search/results?q=remind+me+tomorrow+to+send+the+invoice&tz=Europe/Berlin",
+            "/ui/search/results?q=remind+me+tomorrow+to+send+the+invoice",
             &cookie,
         )
         .await;
         assert!(html.contains(r#"id="intent-echo""#), "{html}");
-        assert!(html.contains("reminder"), "it says what it is: {html}");
-        assert!(html.contains("tomorrow 09:00"), "and when: {html}");
+        assert!(html.contains("will be synthesized"), "it says its fate: {html}");
+        assert!(html.contains("structured artifacts"), "and what that means: {html}");
     }
 
     #[tokio::test]
-    async fn ordinary_text_echoes_nothing_at_all() {
+    async fn a_large_paste_echoes_its_verbatim_windows() {
         let (app, cookie) = app_with_session().await;
         app.clone().oneshot(form("/ui/capture", &cookie, "text=mounting+an+image")).await.unwrap();
-        let html = get(&app, "/ui/search/results?q=vector+index+rebuild", &cookie).await;
+        let big = "filler+words+".repeat(400);
+        let html = get(&app, &format!("/ui/search/results?q={big}"), &cookie).await;
         // The slot is swapped whatever the answer, so an echo for text that is
         // no longer in the box cannot outlive it.
         assert!(html.contains(r#"id="intent-echo""#), "{html}");
-        assert!(
-            !html.contains("intent-echo-kind"),
-            "the echo claims only what the cue table proves: {html}"
-        );
+        assert!(html.contains("large paste"), "{html}");
+        assert!(html.contains("verbatim"), "{html}");
     }
 
     #[tokio::test]
