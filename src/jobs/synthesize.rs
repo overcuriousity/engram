@@ -115,9 +115,7 @@ pub async fn finish(core: &Core, corpus_id: &str) -> Result<()> {
     // attempts and spend another `MAX_ATTEMPTS` on a name already given up
     // on. An operator's reprocess deletes the row and is the one way back. A
     // name given at capture is left alone — someone chose it.
-    if src.title_hint.is_none()
-        && !core.store.has_job(Stage::Title, corpus_id).await?
-    {
+    if src.title_hint.is_none() && !core.store.has_job(Stage::Title, corpus_id).await? {
         core.store
             .enqueue(Stage::Title, "corpus", corpus_id)
             .await?;
@@ -194,7 +192,10 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
     // promotion would — keep the passages, append, supersede.
     for w in core.store.segments_for_corpus(corpus_id).await.unwrap() {
         if w.state == SegmentState::Verbatim {
-            core.store.reset_segment(corpus_id, w.idx, true).await.unwrap();
+            core.store
+                .reset_segment(corpus_id, w.idx, true)
+                .await
+                .unwrap();
             core.store
                 .rearm_idle_seq(
                     Stage::SegmentWindow,
@@ -305,7 +306,11 @@ mod tests {
             context_tokens: 2000,
             max_output_tokens: 100_000,
             output_ratio: 1.0,
-            context: crate::infer::context::ContextBudget { opening, overlap, neighbors: 0 },
+            context: crate::infer::context::ContextBudget {
+                opening,
+                overlap,
+                neighbors: 0,
+            },
         }
     }
 
@@ -447,7 +452,7 @@ mod tests {
         let mut core = crate::core::test_support::test_core().await;
         core.synthesizer = std::sync::Arc::new(GreedySynthesizer {
             budget: context_budget(30, 20),
-        }) ;
+        });
 
         let lines: Vec<String> = (0..400)
             .map(|i| format!("body line {i} with enough words to cost real tokens"))
@@ -485,7 +490,7 @@ mod tests {
 
         let mut core = crate::core::test_support::test_core().await;
         let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
-        core.synthesizer = rec.clone() ;
+        core.synthesizer = rec.clone();
 
         let mut lines = vec!["# Backup Guide".to_string(), "PBS 3.x on Debian 12.".into()];
         for i in 0..400 {
@@ -531,7 +536,7 @@ mod tests {
 
         let mut core = crate::core::test_support::test_core().await;
         let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
-        core.synthesizer = rec.clone() ;
+        core.synthesizer = rec.clone();
 
         let lines: Vec<String> = (0..400)
             .map(|i| format!("body line {i} with enough words to cost real tokens"))
@@ -668,9 +673,8 @@ mod tests {
             .enqueue(Stage::Title, "corpus", &out.id)
             .await
             .unwrap();
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::FakeSynthesizer::failing("no title"),
-        ) ;
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing("no title"));
         for _ in 0..crate::store::jobs::MAX_ATTEMPTS + 3 {
             sqlx::query("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
@@ -775,7 +779,7 @@ mod tests {
         use crate::infer::fake::RecordingSynthesizer;
         let mut core = test_core().await;
         let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
-        core.synthesizer = rec.clone() ;
+        core.synthesizer = rec.clone();
         let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
 
@@ -817,9 +821,9 @@ mod tests {
             .ingest("bravo one\n\nbravo two", "web", None)
             .await
             .unwrap();
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::FakeSynthesizer::unparsable_on("STOPHERE"),
-        ) ;
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
+            "STOPHERE",
+        ));
 
         plan(&core, &a.id).await.unwrap();
         plan(&core, &b.id).await.unwrap();
@@ -868,9 +872,9 @@ mod tests {
         let mut core = test_core().await;
         let body = format!("STOPHERE poison\n\n{}", multi_segment_body());
         let out = core.ingest(&body, "web", None).await.unwrap();
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::FakeSynthesizer::unparsable_on("STOPHERE"),
-        ) ;
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
+            "STOPHERE",
+        ));
 
         segment_all(&core, &out.id).await;
 
@@ -904,9 +908,9 @@ mod tests {
         let mut core = test_core().await;
         let body = format!("STOPHERE poison\n\n{}", multi_segment_body());
         let out = core.ingest(&body, "web", None).await.unwrap();
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::FakeSynthesizer::unparsable_on("STOPHERE"),
-        ) ;
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
+            "STOPHERE",
+        ));
         segment_all(&core, &out.id).await;
         assert_eq!(
             core.store.get_corpus(&out.id).await.unwrap().status,
@@ -915,9 +919,7 @@ mod tests {
 
         // The endpoint comes back to its senses. Settling has to run again, or
         // the document would stay `partial` with a window that is now fine.
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::FakeSynthesizer::default(),
-        ) ;
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::default());
         segment_all(&core, &out.id).await;
 
         let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
@@ -1035,7 +1037,7 @@ Then run sync.";
             "oflag=sync ",
             false,
         ));
-        core.synthesizer = synthesizer.clone() ;
+        core.synthesizer = synthesizer.clone();
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
         segment_all(&core, &out.id).await;
@@ -1051,9 +1053,10 @@ Then run sync.";
     #[tokio::test]
     async fn a_literal_the_retry_also_drops_is_stored_flagged() {
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::ParaphrasingSynthesizer::new("oflag=sync ", true),
-        ) ;
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::ParaphrasingSynthesizer::new(
+            "oflag=sync ",
+            true,
+        ));
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
         segment_all(&core, &out.id).await;
@@ -1085,9 +1088,8 @@ Then run sync.";
         // Where the chunk still reproduces its source, the real span can be
         // found — better than flagging a chunk whose lines we can work out.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::MisreportingSynthesizer { echo_text: true },
-        ) ;
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::MisreportingSynthesizer { echo_text: true });
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
@@ -1114,9 +1116,8 @@ Then run sync.";
         // model call on a whole segment. The span falls back to the window and
         // the reader is none the wiser.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::MisreportingSynthesizer { echo_text: false },
-        ) ;
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::MisreportingSynthesizer { echo_text: false });
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
@@ -1262,7 +1263,10 @@ Then run sync.";
         segment_all(&core, &out.id).await;
 
         let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
-        assert!(windows.len() > 1, "the fixture must produce several windows");
+        assert!(
+            windows.len() > 1,
+            "the fixture must produce several windows"
+        );
 
         let raw = core.store.get_corpus(&out.id).await.unwrap().raw_text;
         for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {
@@ -1315,8 +1319,18 @@ Then run sync.";
         // And the one window is armed for a model read, keeping its passages —
         // the promotion path, with the earning waived.
         let target = crate::jobs::window::unit_target(&out.id, 0);
-        assert!(core.store.live_job(Stage::SegmentWindow, &target).await.unwrap());
-        assert!(core.store.segment_keeps_artifacts(&out.id, 0).await.unwrap());
+        assert!(
+            core.store
+                .live_job(Stage::SegmentWindow, &target)
+                .await
+                .unwrap()
+        );
+        assert!(
+            core.store
+                .segment_keeps_artifacts(&out.id, 0)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1326,12 +1340,20 @@ Then run sync.";
         let out = core.ingest(&body, "web", None).await.unwrap();
         plan(&core, &out.id).await.unwrap();
         let segs = core.store.segments_for_corpus(&out.id).await.unwrap();
-        assert!(segs.len() > 1, "must be multi-window for this test: {}", segs.len());
+        assert!(
+            segs.len() > 1,
+            "must be multi-window for this test: {}",
+            segs.len()
+        );
         for w in &segs {
             assert_eq!(w.state, SegmentState::Verbatim);
             let target = crate::jobs::window::unit_target(&out.id, w.idx);
             assert!(
-                !core.store.live_job(Stage::SegmentWindow, &target).await.unwrap(),
+                !core
+                    .store
+                    .live_job(Stage::SegmentWindow, &target)
+                    .await
+                    .unwrap(),
                 "window {} must wait for promotion",
                 w.idx
             );

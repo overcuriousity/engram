@@ -2,17 +2,17 @@
 //! Read-only over `moments`, plus the four writes a person makes with a
 //! button. No model call anywhere on this page.
 
-use crate::core::moments::{zone, DEFAULT_HOUR};
+use crate::core::moments::{DEFAULT_HOUR, zone};
 use crate::error::Result;
 use crate::store::moments::DueRow;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
 use askama::Template;
+use axum::Router;
 use axum::extract::{Form, Path};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::Router;
 use chrono::{Datelike, TimeZone, Weekday};
 use chrono_tz::Tz;
 
@@ -96,7 +96,10 @@ pub(crate) struct Just {
 
 impl Just {
     fn moment(id: &str, verb: &'static str, undo: &str) -> Self {
-        Just { verb, undo: format!("/ui/moments/{id}/{undo}") }
+        Just {
+            verb,
+            undo: format!("/ui/moments/{id}/{undo}"),
+        }
     }
 }
 
@@ -159,8 +162,12 @@ pub(crate) fn refresh_in(queue_active: bool, next_at: Option<i64>, now: i64) -> 
 
 /// *today 14:00* / *tomorrow 09:00* / *Fri 4 Sep 09:00* / *overdue since Thu 27 Aug 12:00*.
 pub(crate) fn when_words(at: i64, now: i64, tz: Tz) -> String {
-    let Some(d) = tz.timestamp_opt(at, 0).single() else { return String::new() };
-    let Some(n) = tz.timestamp_opt(now, 0).single() else { return String::new() };
+    let Some(d) = tz.timestamp_opt(at, 0).single() else {
+        return String::new();
+    };
+    let Some(n) = tz.timestamp_opt(now, 0).single() else {
+        return String::new();
+    };
     let days = (d.date_naive() - n.date_naive()).num_days();
     let hm = d.format("%H:%M");
     if at < now {
@@ -234,7 +241,13 @@ pub(crate) fn due_words(at: i64, now: i64, tz: Tz) -> String {
     when_words(at, now, tz)
 }
 
-async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64, all: bool) -> Result<Response> {
+async fn render(
+    tenant: &Tenant,
+    tz_name: &str,
+    just: Option<Just>,
+    since: i64,
+    all: bool,
+) -> Result<Response> {
     let tz = zone(Some(tz_name));
     // The zone as the zone table spells it, never as the form spelled it. It
     // is echoed back into the fragment's `hx-vals` JSON, and Askama's escaping
@@ -248,7 +261,11 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64, 
     // The cap is applied to the read, not to the drawing: what is folded away
     // is rows, and the ones kept are the ones the read already put first —
     // overdue, then nearest, then the undated.
-    let hidden = if all { 0 } else { open.len().saturating_sub(BAND_ROWS) };
+    let hidden = if all {
+        0
+    } else {
+        open.len().saturating_sub(BAND_ROWS)
+    };
     let rows = open
         .into_iter()
         .take(if all { usize::MAX } else { BAND_ROWS })
@@ -256,10 +273,21 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64, 
             id: r.moment.id.clone(),
             artifact_id: r.moment.artifact_id.clone(),
             title: r.title,
-            when: r.moment.at.map(|a| due_words(a, now, tz)).unwrap_or_else(|| "when?".into()),
-            full: r.moment.at.map(|a| when_words(a, now, tz)).unwrap_or_default(),
+            when: r
+                .moment
+                .at
+                .map(|a| due_words(a, now, tz))
+                .unwrap_or_else(|| "when?".into()),
+            full: r
+                .moment
+                .at
+                .map(|a| when_words(a, now, tz))
+                .unwrap_or_default(),
             at: r.moment.at.unwrap_or(0),
-            heat: r.moment.at.map_or_else(String::new, |a| format!("{:.3}", heat(a, now))),
+            heat: r
+                .moment
+                .at
+                .map_or_else(String::new, |a| format!("{:.3}", heat(a, now))),
             overdue: r.moment.at.is_some_and(|a| a < now),
             undated: r.moment.at.is_none(),
             recurring: r.moment.rule.is_some(),
@@ -277,13 +305,22 @@ async fn render(tenant: &Tenant, tz_name: &str, just: Option<Just>, since: i64, 
         .map(|r| EventView {
             artifact_id: r.moment.artifact_id,
             title: r.title,
-            when: r.moment.at.map(|a| when_words(a, now, tz)).unwrap_or_default(),
+            when: r
+                .moment
+                .at
+                .map(|a| when_words(a, now, tz))
+                .unwrap_or_default(),
             span: r.moment.span.unwrap_or_default(),
         })
         .collect();
     // What the band is waiting for: a capture still being read, or the next
     // change to what is due — whichever is sooner.
-    let queue_active = tenant.core.store.foreground_work_in_flight().await.unwrap_or(false);
+    let queue_active = tenant
+        .core
+        .store
+        .foreground_work_in_flight()
+        .await
+        .unwrap_or(false);
     let next_at = tenant
         .core
         .store
@@ -310,7 +347,14 @@ async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
 
 async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.complete_moment(&id).await?;
-    render(&tenant, &f.tz, Some(Just::moment(&id, "Done", "undone")), f.since, f.all == "1").await
+    render(
+        &tenant,
+        &f.tz,
+        Some(Just::moment(&id, "Done", "undone")),
+        f.since,
+        f.all == "1",
+    )
+    .await
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -364,7 +408,11 @@ async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -
     render(&tenant, &f.tz, just, f.since, f.all == "1").await
 }
 
-async fn unsnooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn unsnooze(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<TzForm>,
+) -> Result<Response> {
     tenant.core.store.unsnooze(&id).await?;
     tenant.core.store.rearm_remind().await?;
     render(&tenant, &f.tz, None, f.since, f.all == "1").await
@@ -377,9 +425,15 @@ async fn unsnooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
 /// counts rows, so a `FREQ=DAILY;COUNT=3` whose first occurrence was moved once
 /// stopped after two actual reminders. Moving is not completing — the moved row
 /// keeps its identity, and leaves no `done` behind on the day it has left.
-async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn set_date(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<TzForm>,
+) -> Result<Response> {
     let tz = zone(Some(&f.tz));
-    let at = chrono::NaiveDateTime::parse_from_str(&f.when, "%Y-%m-%dT%H:%M").ok().and_then(|dt| local(dt, tz));
+    let at = chrono::NaiveDateTime::parse_from_str(&f.when, "%Y-%m-%dT%H:%M")
+        .ok()
+        .and_then(|dt| local(dt, tz));
     if let (Some(at), Some(_)) = (at, tenant.core.store.moment(&id).await?) {
         tenant.core.store.move_moment(&id, at, tz.name()).await?;
         tenant.core.store.rearm_remind().await?;
@@ -397,16 +451,27 @@ async fn set_date(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>)
 /// the moment itself is gone by then, and it hands the note back to the stage
 /// rather than re-inserting a row from memory: what comes back is what the
 /// note actually says.
-async fn not_a_reminder(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn not_a_reminder(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<TzForm>,
+) -> Result<Response> {
     let Some(m) = tenant.core.store.moment(&id).await? else {
         return render(&tenant, &f.tz, None, f.since, f.all == "1").await;
     };
     tenant.core.set_reminder(&m.artifact_id, false).await?;
-    let just = Just { verb: "Not a reminder", undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id) };
+    let just = Just {
+        verb: "Not a reminder",
+        undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id),
+    };
     render(&tenant, &f.tz, Some(just), f.since, f.all == "1").await
 }
 
-async fn is_a_reminder(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn is_a_reminder(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<TzForm>,
+) -> Result<Response> {
     tenant.core.set_reminder(&id, true).await?;
     render(&tenant, &f.tz, None, f.since, f.all == "1").await
 }
@@ -414,19 +479,30 @@ async fn is_a_reminder(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzF
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::ingest::Capture;
-    use crate::store::moments::{Kind, NewMoment, Source};
-    use crate::core::test_support::test_core;
     use crate::core::Core;
+    use crate::core::ingest::Capture;
+    use crate::core::test_support::test_core;
+    use crate::store::moments::{Kind, NewMoment, Source};
     use crate::web::test_support::{app_with_cookie, body_of};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
     async fn artifact_with_due(core: &Core, at: Option<i64>) -> String {
-        let out = core.ingest_capture(Capture::new("Send the invoice", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(Capture::new("Send the invoice", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
         core.store
             .insert_moment(&NewMoment {
                 artifact_id: aid,
@@ -455,9 +531,17 @@ mod tests {
     async fn nothing_due_renders_nothing_at_all() {
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert!(html.contains(r#"id="due""#));
-        assert!(!html.contains("due-filled"), "a card is drawn around something or not at all");
+        assert!(
+            !html.contains("due-filled"),
+            "a card is drawn around something or not at all"
+        );
     }
 
     #[tokio::test]
@@ -468,12 +552,24 @@ mod tests {
         let soon = artifact_with_due(&core, Some(now + 3_600)).await;
         let none = artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
-        let (a, b, c) = (html.find(&late).unwrap(), html.find(&soon).unwrap(), html.find(&none).unwrap());
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let (a, b, c) = (
+            html.find(&late).unwrap(),
+            html.find(&soon).unwrap(),
+            html.find(&none).unwrap(),
+        );
         assert!(a < b && b < c);
         assert!(html.contains("overdue"));
         assert!(html.contains(&format!("/ui/moments/{late}/done")));
-        assert!(html.contains(&format!("/ui/moments/{none}/date")), "an undated reminder asks for its date");
+        assert!(
+            html.contains(&format!("/ui/moments/{none}/date")),
+            "an undated reminder asks for its date"
+        );
         assert!(html.contains("due-filled"));
     }
 
@@ -483,14 +579,47 @@ mod tests {
         let id = artifact_with_due(&core, Some(crate::store::now() + 60)).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
         let html = body_of(
-            app.clone().oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap(),
+            app.clone()
+                .oneshot(form(
+                    &format!("/ui/moments/{id}/done"),
+                    &cookie,
+                    "tz=Europe/Berlin",
+                ))
+                .await
+                .unwrap(),
         )
         .await;
-        assert!(html.contains(&format!("/ui/moments/{id}/undone")), "an undo is offered");
-        assert!(core.store.moment(&id).await.unwrap().unwrap().done_at.is_some());
-        let res = app.oneshot(form(&format!("/ui/moments/{id}/undone"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        assert!(
+            html.contains(&format!("/ui/moments/{id}/undone")),
+            "an undo is offered"
+        );
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .done_at
+                .is_some()
+        );
+        let res = app
+            .oneshot(form(
+                &format!("/ui/moments/{id}/undone"),
+                &cookie,
+                "tz=Europe/Berlin",
+            ))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(core.store.moment(&id).await.unwrap().unwrap().done_at.is_none());
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .done_at
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -501,7 +630,11 @@ mod tests {
         let (app, cookie) = app_with_cookie(core.clone()).await;
 
         app.clone()
-            .oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin"))
+            .oneshot(form(
+                &format!("/ui/moments/{id}/done"),
+                &cookie,
+                "tz=Europe/Berlin",
+            ))
             .await
             .unwrap();
         assert!(
@@ -509,9 +642,13 @@ mod tests {
             "the last read reminder closed, so the note retires"
         );
 
-        app.oneshot(form(&format!("/ui/moments/{id}/undone"), &cookie, "tz=Europe/Berlin"))
-            .await
-            .unwrap();
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/undone"),
+            &cookie,
+            "tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
         assert!(
             !core.store.is_retired(&cid).await.unwrap(),
             "undo restores the row and the note together"
@@ -521,10 +658,24 @@ mod tests {
     #[tokio::test]
     async fn a_recurring_done_retires_nothing_because_the_next_one_is_open() {
         let core = test_core().await;
-        let out = core.ingest_capture(Capture::new("Pay rent", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(Capture::new("Pay rent", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
-        let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let at = chrono_tz::Tz::Europe__Berlin
+            .with_ymd_and_hms(2026, 9, 1, 9, 0, 0)
+            .unwrap()
+            .timestamp();
         let id = core
             .store
             .insert_moment(&NewMoment {
@@ -539,7 +690,13 @@ mod tests {
             .await
             .unwrap();
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/done"),
+            &cookie,
+            "tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
         assert!(
             !core.store.is_retired(&out.id).await.unwrap(),
             "an occurrence closed, the reminder did not"
@@ -554,7 +711,15 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
         let id = core
             .store
             .insert_moment(&NewMoment {
@@ -569,7 +734,13 @@ mod tests {
             .await
             .unwrap();
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/done"),
+            &cookie,
+            "tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
         assert!(
             !core.store.is_retired(&out.id).await.unwrap(),
             "a document with a date on it stays a document"
@@ -581,11 +752,24 @@ mod tests {
         let core = test_core().await;
         let id = artifact_with_due(&core, Some(crate::store::now() - 60)).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.oneshot(form(&format!("/ui/moments/{id}/snooze"), &cookie, "until=tomorrow&tz=Europe/Berlin"))
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/snooze"),
+            &cookie,
+            "until=tomorrow&tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
+        let until = core
+            .store
+            .moment(&id)
             .await
+            .unwrap()
+            .unwrap()
+            .snoozed_until
             .unwrap();
-        let until = core.store.moment(&id).await.unwrap().unwrap().snoozed_until.unwrap();
-        let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(until, 0).unwrap();
+        let local = chrono_tz::Tz::Europe__Berlin
+            .timestamp_opt(until, 0)
+            .unwrap();
         assert_eq!(local.format("%H:%M").to_string(), "09:00");
         assert!(until > crate::store::now());
     }
@@ -601,29 +785,59 @@ mod tests {
         let (app, cookie) = app_with_cookie(core.clone()).await;
 
         let band = body_of(
-            app.clone().oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap(),
+            app.clone()
+                .oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
         )
         .await;
-        assert!(band.contains("not a reminder"), "the band offers it on a row it read: {band}");
+        assert!(
+            band.contains("not a reminder"),
+            "the band offers it on a row it read: {band}"
+        );
 
         let html = body_of(
             app.clone()
-                .oneshot(form(&format!("/ui/moments/{id}/not-a-reminder"), &cookie, "tz=Europe/Berlin"))
+                .oneshot(form(
+                    &format!("/ui/moments/{id}/not-a-reminder"),
+                    &cookie,
+                    "tz=Europe/Berlin",
+                ))
                 .await
                 .unwrap(),
         )
         .await;
         assert!(html.contains("Not a reminder"), "{html}");
-        assert!(html.contains(&format!("/ui/artifacts/{aid}/is-a-reminder")), "the undo is on the artifact: {html}");
-        assert!(core.store.moment(&id).await.unwrap().is_none(), "the row is withdrawn, not completed");
+        assert!(
+            html.contains(&format!("/ui/artifacts/{aid}/is-a-reminder")),
+            "the undo is on the artifact: {html}"
+        );
+        assert!(
+            core.store.moment(&id).await.unwrap().is_none(),
+            "the row is withdrawn, not completed"
+        );
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
 
-        app.oneshot(form(&format!("/ui/artifacts/{aid}/is-a-reminder"), &cookie, "tz=Europe/Berlin"))
-            .await
-            .unwrap();
+        app.oneshot(form(
+            &format!("/ui/artifacts/{aid}/is-a-reminder"),
+            &cookie,
+            "tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
         assert!(
             !crate::core::moments::intent_refused(
-                &core.store.get_corpus(&core.store.get_artifact(&aid).await.unwrap().corpus_id.unwrap())
+                &core
+                    .store
+                    .get_corpus(
+                        &core
+                            .store
+                            .get_artifact(&aid)
+                            .await
+                            .unwrap()
+                            .corpus_id
+                            .unwrap()
+                    )
                     .await
                     .unwrap()
                     .metadata,
@@ -653,7 +867,12 @@ mod tests {
             .await
             .unwrap();
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        let band = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        let band = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert!(!band.contains("not a reminder"), "{band}");
     }
 
@@ -666,17 +885,39 @@ mod tests {
         let (app, cookie) = app_with_cookie(core.clone()).await;
         let html = body_of(
             app.clone()
-                .oneshot(form(&format!("/ui/moments/{id}/snooze"), &cookie, "until=hour&tz=Europe/Berlin"))
+                .oneshot(form(
+                    &format!("/ui/moments/{id}/snooze"),
+                    &cookie,
+                    "until=hour&tz=Europe/Berlin",
+                ))
                 .await
                 .unwrap(),
         )
         .await;
         assert!(html.contains("Snoozed"), "{html}");
-        assert!(html.contains(&format!("/ui/moments/{id}/unsnooze")), "the undo undoes this: {html}");
+        assert!(
+            html.contains(&format!("/ui/moments/{id}/unsnooze")),
+            "the undo undoes this: {html}"
+        );
         assert!(!html.contains(&format!("/ui/moments/{id}/undone")));
 
-        app.oneshot(form(&format!("/ui/moments/{id}/unsnooze"), &cookie, "tz=Europe/Berlin")).await.unwrap();
-        assert!(core.store.moment(&id).await.unwrap().unwrap().snoozed_until.is_none(), "and it comes back");
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/unsnooze"),
+            &cookie,
+            "tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until
+                .is_none(),
+            "and it comes back"
+        );
     }
 
     #[tokio::test]
@@ -686,10 +927,19 @@ mod tests {
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let html = body_of(
-            app.oneshot(form("/ui/due", &cookie, "tz=Europe%2FBerlin%22%2C%22x%22%3A%22")).await.unwrap(),
+            app.oneshot(form(
+                "/ui/due",
+                &cookie,
+                "tz=Europe%2FBerlin%22%2C%22x%22%3A%22",
+            ))
+            .await
+            .unwrap(),
         )
         .await;
-        assert!(html.contains(r#"{"tz": "UTC""#), "an unreadable zone is UTC, not echoed back: {html}");
+        assert!(
+            html.contains(r#"{"tz": "UTC""#),
+            "an unreadable zone is UTC, not echoed back: {html}"
+        );
     }
 
     #[tokio::test]
@@ -697,9 +947,13 @@ mod tests {
         let core = test_core().await;
         let id = artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2027-01-05T10:30&tz=Europe/Berlin"))
-            .await
-            .unwrap();
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/date"),
+            &cookie,
+            "when=2027-01-05T10:30&tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
         // One row, still the one that was moved: moving is not completing, so
         // it leaves no `done` behind on the day it has left.
         let moved = core.store.moment(&id).await.unwrap().unwrap();
@@ -707,22 +961,48 @@ mod tests {
         // `source` is untouched: it records how the date got here, and
         // correcting *when* says nothing about *how*. What says a person has
         // been at this row is `moved_from`, which is also the misreading kept.
-        assert_eq!(moved.source, Source::Cue, "the reading that made it still stands");
-        assert!(moved.moved_at.is_some(), "and the row is marked as one somebody moved");
+        assert_eq!(
+            moved.source,
+            Source::Cue,
+            "the reading that made it still stands"
+        );
+        assert!(
+            moved.moved_at.is_some(),
+            "and the row is marked as one somebody moved"
+        );
         let rows = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].moment.id, id);
-        let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(rows[0].moment.at.unwrap(), 0).unwrap();
-        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2027-01-05 10:30");
+        let local = chrono_tz::Tz::Europe__Berlin
+            .timestamp_opt(rows[0].moment.at.unwrap(), 0)
+            .unwrap();
+        assert_eq!(
+            local.format("%Y-%m-%d %H:%M").to_string(),
+            "2027-01-05 10:30"
+        );
     }
 
     #[tokio::test]
     async fn a_recurring_done_arms_the_next_occurrence() {
         let core = test_core().await;
-        let out = core.ingest_capture(Capture::new("Pay rent", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(Capture::new("Pay rent", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
-        let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let at = chrono_tz::Tz::Europe__Berlin
+            .with_ymd_and_hms(2026, 9, 1, 9, 0, 0)
+            .unwrap()
+            .timestamp();
         let id = core
             .store
             .insert_moment(&NewMoment {
@@ -737,20 +1017,48 @@ mod tests {
             .await
             .unwrap();
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/done"),
+            &cookie,
+            "tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
         let open = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(open.len(), 1);
-        let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(open[0].moment.at.unwrap(), 0).unwrap();
-        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-10-01 09:00");
-        assert_eq!(open[0].moment.rule.as_deref(), Some("FREQ=MONTHLY;BYMONTHDAY=1"));
+        let local = chrono_tz::Tz::Europe__Berlin
+            .timestamp_opt(open[0].moment.at.unwrap(), 0)
+            .unwrap();
+        assert_eq!(
+            local.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-10-01 09:00"
+        );
+        assert_eq!(
+            open[0].moment.rule.as_deref(),
+            Some("FREQ=MONTHLY;BYMONTHDAY=1")
+        );
     }
 
     /// A recurring reminder on the 1st of each month, 09:00 Berlin.
     async fn artifact_with_rule(core: &Core, rule: &str) -> String {
-        let out = core.ingest_capture(Capture::new("Pay rent", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(Capture::new("Pay rent", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
-        let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let at = chrono_tz::Tz::Europe__Berlin
+            .with_ymd_and_hms(2026, 9, 1, 9, 0, 0)
+            .unwrap()
+            .timestamp();
         core.store
             .insert_moment(&NewMoment {
                 artifact_id: aid,
@@ -776,15 +1084,41 @@ mod tests {
         let id = artifact_with_rule(&core, "FREQ=MONTHLY;BYMONTHDAY=1").await;
         let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.clone().oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
-        assert_eq!(core.store.occurrences_of_rule(&aid, "FREQ=MONTHLY;BYMONTHDAY=1").await.unwrap(), 2);
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/moments/{id}/done"),
+                &cookie,
+                "tz=Europe/Berlin",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store
+                .occurrences_of_rule(&aid, "FREQ=MONTHLY;BYMONTHDAY=1")
+                .await
+                .unwrap(),
+            2
+        );
 
-        app.oneshot(form(&format!("/ui/moments/{id}/undone"), &cookie, "tz=Europe/Berlin")).await.unwrap();
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/undone"),
+            &cookie,
+            "tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
         let open = core.store.open_due(0, i64::MAX).await.unwrap();
-        assert_eq!(open.len(), 1, "one open row, not the reopened one plus its successor");
+        assert_eq!(
+            open.len(),
+            1,
+            "one open row, not the reopened one plus its successor"
+        );
         assert_eq!(open[0].moment.id, id, "and it is the row that was undone");
         assert_eq!(
-            core.store.occurrences_of_rule(&aid, "FREQ=MONTHLY;BYMONTHDAY=1").await.unwrap(),
+            core.store
+                .occurrences_of_rule(&aid, "FREQ=MONTHLY;BYMONTHDAY=1")
+                .await
+                .unwrap(),
             1,
             "the occurrence is given back to the count"
         );
@@ -798,12 +1132,34 @@ mod tests {
         let core = test_core().await;
         let id = artifact_with_rule(&core, "FREQ=MONTHLY;BYMONTHDAY=1").await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.clone().oneshot(form(&format!("/ui/moments/{id}/done"), &cookie, "tz=Europe/Berlin")).await.unwrap();
-        let next = core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.id.clone();
-        core.store.snooze(&next, crate::store::now() + 86_400).await.unwrap();
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/moments/{id}/done"),
+                &cookie,
+                "tz=Europe/Berlin",
+            ))
+            .await
+            .unwrap();
+        let next = core.store.open_due(0, i64::MAX).await.unwrap()[0]
+            .moment
+            .id
+            .clone();
+        core.store
+            .snooze(&next, crate::store::now() + 86_400)
+            .await
+            .unwrap();
 
-        app.oneshot(form(&format!("/ui/moments/{id}/undone"), &cookie, "tz=Europe/Berlin")).await.unwrap();
-        assert!(core.store.moment(&next).await.unwrap().is_some(), "the snoozed occurrence stays");
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/undone"),
+            &cookie,
+            "tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
+        assert!(
+            core.store.moment(&next).await.unwrap().is_some(),
+            "the snoozed occurrence stays"
+        );
     }
 
     #[tokio::test]
@@ -815,15 +1171,28 @@ mod tests {
         let id = artifact_with_rule(&core, "FREQ=DAILY;COUNT=3").await;
         let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2026-09-02T10:30&tz=Europe/Berlin"))
-            .await
-            .unwrap();
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/date"),
+            &cookie,
+            "when=2026-09-02T10:30&tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
         assert_eq!(
-            core.store.occurrences_of_rule(&aid, "FREQ=DAILY;COUNT=3").await.unwrap(),
+            core.store
+                .occurrences_of_rule(&aid, "FREQ=DAILY;COUNT=3")
+                .await
+                .unwrap(),
             1,
             "moving is not a firing"
         );
-        assert!(!core.store.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=3").await.unwrap());
+        assert!(
+            !core
+                .store
+                .rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=3")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -836,12 +1205,29 @@ mod tests {
         let core = test_core().await;
         let id = artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2026-10-25T02:30&tz=Europe/Berlin"))
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/date"),
+            &cookie,
+            "when=2026-10-25T02:30&tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
+        let at = core
+            .store
+            .moment(&id)
             .await
+            .unwrap()
+            .unwrap()
+            .at
+            .expect("the date is set");
+        let local = chrono_tz::Tz::Europe__Berlin
+            .timestamp_opt(at, 0)
+            .earliest()
             .unwrap();
-        let at = core.store.moment(&id).await.unwrap().unwrap().at.expect("the date is set");
-        let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(at, 0).earliest().unwrap();
-        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-10-25 02:30");
+        assert_eq!(
+            local.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-10-25 02:30"
+        );
     }
 
     #[tokio::test]
@@ -853,12 +1239,29 @@ mod tests {
         let core = test_core().await;
         let id = artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2027-03-28T02:30&tz=Europe/Berlin"))
+        app.oneshot(form(
+            &format!("/ui/moments/{id}/date"),
+            &cookie,
+            "when=2027-03-28T02:30&tz=Europe/Berlin",
+        ))
+        .await
+        .unwrap();
+        let at = core
+            .store
+            .moment(&id)
             .await
+            .unwrap()
+            .unwrap()
+            .at
+            .expect("the date is set");
+        let local = chrono_tz::Tz::Europe__Berlin
+            .timestamp_opt(at, 0)
+            .earliest()
             .unwrap();
-        let at = core.store.moment(&id).await.unwrap().unwrap().at.expect("the date is set");
-        let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(at, 0).earliest().unwrap();
-        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2027-03-28 03:00");
+        assert_eq!(
+            local.format("%Y-%m-%d %H:%M").to_string(),
+            "2027-03-28 03:00"
+        );
     }
 
     #[tokio::test]
@@ -871,12 +1274,22 @@ mod tests {
         let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
         for body in ["tz=Europe/Berlin", "until=tomorow&tz=Europe/Berlin"] {
-            let html =
-                body_of(app.clone().oneshot(form(&format!("/ui/moments/{id}/snooze"), &cookie, body)).await.unwrap())
-                    .await;
+            let html = body_of(
+                app.clone()
+                    .oneshot(form(&format!("/ui/moments/{id}/snooze"), &cookie, body))
+                    .await
+                    .unwrap(),
+            )
+            .await;
             assert!(!html.contains("Snoozed"), "{body} is not a snooze: {html}");
             assert!(
-                core.store.moment(&id).await.unwrap().unwrap().snoozed_until.is_none(),
+                core.store
+                    .moment(&id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .snoozed_until
+                    .is_none(),
                 "{body} left the row on the band"
             );
         }
@@ -895,9 +1308,21 @@ mod tests {
             artifact_with_due(&core, Some(now + 3_600 + i as i64)).await;
         }
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
-        assert_eq!(rows_in(&html), BAND_ROWS, "the band stops at its cap: {html}");
-        assert!(html.contains("4 more"), "and says what it is holding back: {html}");
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            rows_in(&html),
+            BAND_ROWS,
+            "the band stops at its cap: {html}"
+        );
+        assert!(
+            html.contains("4 more"),
+            "and says what it is holding back: {html}"
+        );
         assert!(html.contains("show all"));
     }
 
@@ -909,10 +1334,22 @@ mod tests {
             artifact_with_due(&core, Some(now + 3_600 + i as i64)).await;
         }
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&all=1")).await.unwrap()).await;
-        assert_eq!(rows_in(&html), BAND_ROWS + 4, "everything, once asked: {html}");
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&all=1"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            rows_in(&html),
+            BAND_ROWS + 4,
+            "everything, once asked: {html}"
+        );
         assert!(html.contains("show less"));
-        assert!(html.contains(r#""all": "1""#), "the poll asks the same question again: {html}");
+        assert!(
+            html.contains(r#""all": "1""#),
+            "the poll asks the same question again: {html}"
+        );
     }
 
     #[tokio::test]
@@ -920,8 +1357,16 @@ mod tests {
         let core = test_core().await;
         artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
-        assert!(!html.contains("show all"), "nothing is being held back: {html}");
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            !html.contains("show all"),
+            "nothing is being held back: {html}"
+        );
         assert!(!html.contains("show less"));
     }
 
@@ -930,8 +1375,16 @@ mod tests {
         let core = test_core().await;
         artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
-        assert!(html.contains("due-later"), "snooze and move are behind a disclosure: {html}");
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            html.contains("due-later"),
+            "snooze and move are behind a disclosure: {html}"
+        );
         assert!(html.contains("<summary>later</summary>"));
         assert!(html.contains(">done<"), "and done is the one visible verb");
     }
@@ -941,8 +1394,16 @@ mod tests {
         let core = test_core().await;
         artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
-        assert!(!html.contains("due-later"), "asking for the date is the whole point of the row");
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            !html.contains("due-later"),
+            "asking for the date is the whole point of the row"
+        );
         assert!(html.contains("set date"));
     }
 
@@ -953,36 +1414,77 @@ mod tests {
         let (app, cookie) = app_with_cookie(core).await;
         // First render: nothing has been seen, so the row is new by definition.
         let first = body_of(
-            app.clone().oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&since=0")).await.unwrap(),
-        )
-        .await;
-        assert!(first.contains("due-new"), "a row nobody has seen announces itself: {first}");
-        // Second render, carrying a stamp from after the moment was written.
-        let later = crate::store::now() + 60;
-        let again = body_of(
-            app.oneshot(form("/ui/due", &cookie, &format!("tz=Europe/Berlin&since={later}")))
+            app.clone()
+                .oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&since=0"))
                 .await
                 .unwrap(),
         )
         .await;
-        assert!(!again.contains("due-new"), "and does not go on announcing it: {again}");
+        assert!(
+            first.contains("due-new"),
+            "a row nobody has seen announces itself: {first}"
+        );
+        // Second render, carrying a stamp from after the moment was written.
+        let later = crate::store::now() + 60;
+        let again = body_of(
+            app.oneshot(form(
+                "/ui/due",
+                &cookie,
+                &format!("tz=Europe/Berlin&since={later}"),
+            ))
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert!(
+            !again.contains("due-new"),
+            "and does not go on announcing it: {again}"
+        );
     }
 
     #[test]
     fn the_cadence_is_the_soonest_thing_worth_asking_about() {
-        assert_eq!(refresh_in(true, None, 1_000), Some(2), "a capture is still being read");
-        assert_eq!(refresh_in(false, None, 1_000), None, "nothing pending, nothing asked");
-        assert_eq!(refresh_in(false, Some(1_090), 1_000), Some(90), "polled at the second it lands");
-        assert_eq!(refresh_in(false, Some(20_000), 1_000), Some(300), "and no later than the cap");
-        assert_eq!(refresh_in(false, Some(900), 1_000), None, "already past and on screen");
+        assert_eq!(
+            refresh_in(true, None, 1_000),
+            Some(2),
+            "a capture is still being read"
+        );
+        assert_eq!(
+            refresh_in(false, None, 1_000),
+            None,
+            "nothing pending, nothing asked"
+        );
+        assert_eq!(
+            refresh_in(false, Some(1_090), 1_000),
+            Some(90),
+            "polled at the second it lands"
+        );
+        assert_eq!(
+            refresh_in(false, Some(20_000), 1_000),
+            Some(300),
+            "and no later than the cap"
+        );
+        assert_eq!(
+            refresh_in(false, Some(900), 1_000),
+            None,
+            "already past and on screen"
+        );
     }
 
     #[tokio::test]
     async fn an_idle_band_with_nothing_pending_polls_not_at_all() {
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
-        assert!(!html.contains("every "), "an idle page in a background tab makes no requests: {html}");
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            !html.contains("every "),
+            "an idle page in a background tab makes no requests: {html}"
+        );
     }
 
     #[tokio::test]
@@ -996,8 +1498,16 @@ mod tests {
         // turn from coming to overdue.
         artifact_with_due(&core, Some(now + 90)).await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
-        assert!(html.contains("every 90s"), "polled when it lands, not on a fixed tick: {html}");
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            html.contains("every 90s"),
+            "polled when it lands, not on a fixed tick: {html}"
+        );
     }
 
     #[tokio::test]
@@ -1007,24 +1517,38 @@ mod tests {
         core.clock = crate::core::context::Clock::Fixed(now);
         artifact_with_due(&core, Some(now + 30 * 86_400)).await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert!(html.contains("every 300s"), "five-minute cap: {html}");
     }
 
     #[test]
     fn when_words_read_like_a_person_would_say_them() {
         let tz = chrono_tz::Tz::Europe__Berlin;
-        let now = tz.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap().timestamp();
+        let now = tz
+            .with_ymd_and_hms(2026, 8, 30, 12, 0, 0)
+            .unwrap()
+            .timestamp();
         assert_eq!(when_words(now + 2 * 3_600, now, tz), "today 14:00");
         assert_eq!(when_words(now + 21 * 3_600, now, tz), "tomorrow 09:00");
         assert_eq!(when_words(now + 5 * 86_400, now, tz), "Fri 4 Sep 12:00");
-        assert_eq!(when_words(now - 3 * 86_400, now, tz), "overdue since Thu 27 Aug 12:00");
+        assert_eq!(
+            when_words(now - 3 * 86_400, now, tz),
+            "overdue since Thu 27 Aug 12:00"
+        );
     }
 
     #[test]
     fn a_row_counts_down_inside_the_window_and_names_the_day_outside_it() {
         let tz = chrono_tz::Tz::Europe__Berlin;
-        let now = tz.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap().timestamp();
+        let now = tz
+            .with_ymd_and_hms(2026, 8, 30, 12, 0, 0)
+            .unwrap()
+            .timestamp();
         assert_eq!(due_words(now + 45, now, tz), "in 45s");
         assert_eq!(due_words(now + 12 * 60, now, tz), "in 12m");
         assert_eq!(due_words(now + 3 * 3_600 + 300, now, tz), "in 3h 05m");
@@ -1045,7 +1569,10 @@ mod tests {
         assert_eq!(heat(now, now), 1.0);
         assert_eq!(heat(now - 86_400, now), 1.0);
         let half = heat(now + HEAT_HOURS * 1_800, now);
-        assert!((half - 0.5).abs() < 0.001, "halfway through the window: {half}");
+        assert!(
+            (half - 0.5).abs() < 0.001,
+            "halfway through the window: {half}"
+        );
     }
 
     #[tokio::test]
@@ -1056,9 +1583,20 @@ mod tests {
         let at = now + 3 * 3_600;
         artifact_with_due(&core, Some(at)).await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin")).await.unwrap()).await;
-        assert!(html.contains(&format!(r#"data-due-at="{at}""#)), "the instant: {html}");
-        assert!(html.contains("--heat: 0.500"), "halfway up the ramp: {html}");
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            html.contains(&format!(r#"data-due-at="{at}""#)),
+            "the instant: {html}"
+        );
+        assert!(
+            html.contains("--heat: 0.500"),
+            "halfway up the ramp: {html}"
+        );
         assert!(html.contains("in 3h 00m"), "and it counts down: {html}");
     }
 }

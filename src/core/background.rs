@@ -632,9 +632,7 @@ mod tests {
         use crate::store::jobs::Stage;
         let core = crate::core::test_support::test_core().await;
         assert!(
-            periodic_units(&core)
-                .iter()
-                .any(|(s, _)| *s == Stage::Reap),
+            periodic_units(&core).iter().any(|(s, _)| *s == Stage::Reap),
             "on by default when a judge is configured"
         );
         assert_eq!(

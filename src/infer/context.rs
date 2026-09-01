@@ -272,7 +272,12 @@ mod tests {
     #[test]
     fn a_zero_budget_produces_nothing() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 1, ContextBudget::default(), &TokenCounter::default());
+        let c = WindowContext::build(
+            &refs(&w),
+            1,
+            ContextBudget::default(),
+            &TokenCounter::default(),
+        );
         assert_eq!(c, WindowContext::default());
         assert!(c.is_empty());
         assert_eq!(c.blocks().count(), 0);

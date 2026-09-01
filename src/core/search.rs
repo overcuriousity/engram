@@ -1951,14 +1951,25 @@ mod tests {
             ],
         )
         .await;
-        let cid = seed_from(&core, "reminder", &[("remind me friday to send the invoice", "admin", &[])]).await;
+        let cid = seed_from(
+            &core,
+            "reminder",
+            &[("remind me friday to send the invoice", "admin", &[])],
+        )
+        .await;
 
         let before = core.search(&q("invoice"), Door::Cli).await.unwrap();
-        let pos = before.iter().position(|r| r.corpus_id == cid).expect("it places while open");
+        let pos = before
+            .iter()
+            .position(|r| r.corpus_id == cid)
+            .expect("it places while open");
 
         core.store.retire_corpus(&cid, now_secs()).await.unwrap();
         let after = core.search(&q("invoice"), Door::Cli).await.unwrap();
-        let row = after.iter().find(|r| r.corpus_id == cid).expect("still findable — nothing was deleted");
+        let row = after
+            .iter()
+            .find(|r| r.corpus_id == cid)
+            .expect("still findable — nothing was deleted");
         assert!(row.retired, "the row says what it is");
         assert!(row.past_cliff, "and it is below the line");
         assert_eq!(
@@ -1991,7 +2002,10 @@ mod tests {
             .await
             .unwrap();
         let out = core.search(&q("invoice"), Door::Cli).await.unwrap();
-        assert!(out[0].due_at.is_none(), "ten days out is beyond the horizon");
+        assert!(
+            out[0].due_at.is_none(),
+            "ten days out is beyond the horizon"
+        );
         core.store.mark_done(&far, now).await.unwrap();
         core.store
             .insert_moment(&crate::store::moments::NewMoment {
@@ -2008,7 +2022,11 @@ mod tests {
         core.time.lift = false;
         let out = core.search(&q("invoice"), Door::Cli).await.unwrap();
         assert_eq!(out[0].due_at, Some(now + 2 * 3_600));
-        assert_eq!(out[0].due_in.as_deref(), Some("in 2 h"), "the badge is a fact whatever the lift says");
+        assert_eq!(
+            out[0].due_in.as_deref(),
+            Some("in 2 h"),
+            "the badge is a fact whatever the lift says"
+        );
     }
 
     /// The stream is the same search, so it has to answer with the same hits.
@@ -3214,7 +3232,14 @@ mod tests {
     #[test]
     fn the_most_active_hit_cannot_displace_an_exact_match() {
         let act = HashMap::from([("b".to_string(), 9.0)]);
-        let out = prime(ranked(&["a", "b", "c"]), &act, 0.5, 2, &Default::default(), &Default::default());
+        let out = prime(
+            ranked(&["a", "b", "c"]),
+            &act,
+            0.5,
+            2,
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(order(&out), vec!["a", "b", "c"]);
         assert!(out.iter().all(|r| !r.primed));
     }
@@ -3238,7 +3263,14 @@ mod tests {
     #[test]
     fn a_due_hit_is_lifted_like_a_sitting_hit_and_says_so() {
         let due = std::collections::HashSet::from(["d".to_string()]);
-        let out = prime(ranked(&["a", "b", "c", "d"]), &HashMap::new(), 0.5, 2, &Default::default(), &due);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &Default::default(),
+            &due,
+        );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
         assert!(out[1].primed);
         assert!(!out[1].in_sitting, "due is not the sitting");
@@ -3247,8 +3279,19 @@ mod tests {
     #[test]
     fn a_due_hit_never_displaces_an_exact_match() {
         let due = std::collections::HashSet::from(["b".to_string()]);
-        let out = prime(ranked(&["a", "b", "c"]), &HashMap::new(), 0.5, 2, &Default::default(), &due);
-        assert_eq!(order(&out), vec!["a", "b", "c"], "rank 0 never moves and b is already at 1");
+        let out = prime(
+            ranked(&["a", "b", "c"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &Default::default(),
+            &due,
+        );
+        assert_eq!(
+            order(&out),
+            vec!["a", "b", "c"],
+            "rank 0 never moves and b is already at 1"
+        );
     }
 
     #[test]
@@ -3257,7 +3300,14 @@ mod tests {
         // list of two is a list nothing can be lifted in — but a badge that
         // vanishes on short lists reads as the page forgetting, not as a rule.
         let sitting = std::collections::HashSet::from(["b".to_string()]);
-        let out = prime(ranked(&["a", "b"]), &HashMap::new(), 0.5, 2, &sitting, &Default::default());
+        let out = prime(
+            ranked(&["a", "b"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+            &Default::default(),
+        );
         assert_eq!(order(&out), vec!["a", "b"], "nothing can move on two rows");
         assert!(out[1].in_sitting);
         assert!(!out[0].in_sitting);
@@ -3271,7 +3321,14 @@ mod tests {
         // second lift would be the one nobody bounded. One walk, one `lift`.
         let act = HashMap::from([("e".to_string(), 9.0)]);
         let sitting = std::collections::HashSet::from(["e".to_string()]);
-        let out = prime(ranked(&["a", "b", "c", "d", "e"]), &act, 0.5, 2, &sitting, &Default::default());
+        let out = prime(
+            ranked(&["a", "b", "c", "d", "e"]),
+            &act,
+            0.5,
+            2,
+            &sitting,
+            &Default::default(),
+        );
         assert_eq!(
             order(&out),
             vec!["a", "b", "e", "c", "d"],
@@ -3283,7 +3340,14 @@ mod tests {
     fn the_sitting_cannot_displace_the_first_hit_either() {
         // Rank 0 never moves, whatever the reason for moving would have been.
         let sitting = std::collections::HashSet::from(["b".to_string(), "c".to_string()]);
-        let out = prime(ranked(&["a", "b", "c"]), &HashMap::new(), 0.5, 2, &sitting, &Default::default());
+        let out = prime(
+            ranked(&["a", "b", "c"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+            &Default::default(),
+        );
         assert_eq!(order(&out)[0], "a");
     }
 

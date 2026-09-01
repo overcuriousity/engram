@@ -619,7 +619,6 @@ async fn page(tenant: Tenant) -> Result<Response> {
     .into_response())
 }
 
-
 // ── What the sweeps have to say ─────────────────────────────────────────────
 
 /// A recommendation, ready to read and to take.
@@ -893,7 +892,9 @@ mod tests {
     #[tokio::test]
     async fn a_base_with_nothing_due_carries_no_due_heading() {
         let core = crate::core::test_support::test_core().await;
-        core.ingest("just a note, nothing to remind about", "web", None).await.unwrap();
+        core.ingest("just a note, nothing to remind about", "web", None)
+            .await
+            .unwrap();
         let html = insights(core).await;
         assert!(!html.contains("<h2>Due</h2>"), "{html}");
     }
@@ -912,7 +913,10 @@ mod tests {
         crate::jobs::test_support::drain(&core).await;
         let html = insights(core).await;
         assert!(html.contains("<h2>Due</h2>"), "{html}");
-        assert!(html.contains(r#"id="due""#), "the same band the workspace column shows: {html}");
+        assert!(
+            html.contains(r#"id="due""#),
+            "the same band the workspace column shows: {html}"
+        );
     }
 
     /// A closed disclosure with a neutral summary is not a report. The sweep
@@ -1327,7 +1331,11 @@ mod tests {
         let before = *core.ranking.read().unwrap();
 
         let res = post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-        assert_eq!(res.status(), StatusCode::OK, "the operator is told, not 500'd");
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "the operator is told, not 500'd"
+        );
 
         assert_eq!(*core.ranking.read().unwrap(), before, "swapped anyway");
         assert!(

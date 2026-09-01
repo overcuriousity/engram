@@ -41,7 +41,11 @@ pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
     print!("{}", render(face, e, &said));
     // What is due, from a second read that an older server answers 404 to —
     // in which case nothing is said, rather than the status failing.
-    if let Ok(res) = http.get(e.api("/moments?kind=due")).bearer_auth(&e.token).send().await
+    if let Ok(res) = http
+        .get(e.api("/moments?kind=due"))
+        .bearer_auth(&e.token)
+        .send()
+        .await
         && res.status().is_success()
         && let Ok(due) = res.json::<serde_json::Value>().await
     {
@@ -53,7 +57,9 @@ pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
 /// The Due block: one line per open reminder, overdue marked, undated last.
 /// Empty when nothing is due, so a quiet base prints nothing extra.
 pub(crate) fn render_due(face: &Face, rows: &serde_json::Value) -> String {
-    let Some(rows) = rows.as_array().filter(|r| !r.is_empty()) else { return String::new() };
+    let Some(rows) = rows.as_array().filter(|r| !r.is_empty()) else {
+        return String::new();
+    };
     let now = crate::store::now();
     let mut out = String::from("\n  due\n");
     for r in rows {
@@ -330,6 +336,10 @@ mod tests {
         assert!(out.contains("overdue"), "{out}");
         assert!(out.contains("in 2 h"), "{out}");
         assert!(out.contains("(undated)"), "{out}");
-        assert_eq!(render_due(&face(), &serde_json::json!([])), "", "a quiet base says nothing");
+        assert_eq!(
+            render_due(&face(), &serde_json::json!([])),
+            "",
+            "a quiet base says nothing"
+        );
     }
 }

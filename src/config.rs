@@ -483,7 +483,12 @@ pub struct TimeConfig {
 
 impl Default for TimeConfig {
     fn default() -> Self {
-        Self { horizon_hours: 48, coming_up_days: 7, lift: true, default_tz: String::new() }
+        Self {
+            horizon_hours: 48,
+            coming_up_days: 7,
+            lift: true,
+            default_tz: String::new(),
+        }
     }
 }
 
@@ -2661,7 +2666,13 @@ mod tests {
         let path = std::path::Path::new("config.example.toml");
         let raw = std::fs::read_to_string(path).unwrap();
         assert!(raw.contains("\n[reap]\n"), "the block is documented");
-        for key in ["enabled", "interval_mins", "min_age_days", "max_judged_per_run", "max_rescues_per_run"] {
+        for key in [
+            "enabled",
+            "interval_mins",
+            "min_age_days",
+            "max_judged_per_run",
+            "max_rescues_per_run",
+        ] {
             assert!(raw.contains(&format!("\n{key} = ")), "{key} is unnamed");
         }
         let cfg = Config::load(Some(path)).unwrap();
@@ -2726,19 +2737,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
-        assert_eq!(
-            cfg.infer.synthesize.timeout_secs,
-            DEFAULT_TIMEOUT_SECS
-        );
+        assert_eq!(cfg.infer.synthesize.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(
             cfg.infer.ask.as_ref().unwrap().timeout_secs,
             DEFAULT_TIMEOUT_SECS
         );
-        assert_eq!(
-            cfg.infer.synthesize.reasoning_effort,
-            None
-        );
+        assert_eq!(cfg.infer.synthesize.reasoning_effort, None);
     }
 
     #[test]
@@ -3233,8 +3238,14 @@ mode = "off"
         // built to refuse.
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        let p = write(&dir, &format!("{MINIMAL}\n[time]\ndefault_tz = \"Europe/Berlim\"\n"));
-        assert!(matches!(Config::load(Some(&p)), Err(ConfigError::Invalid(_))));
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[time]\ndefault_tz = \"Europe/Berlim\"\n"),
+        );
+        assert!(matches!(
+            Config::load(Some(&p)),
+            Err(ConfigError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -3481,16 +3492,10 @@ mode = "off"
         // A minimal block: the one field that had no default has one now.
         assert_eq!(cfg.infer.synthesize.output_ratio, 8.0);
 
-        assert_eq!(
-            cfg.infer.synthesize.base_url,
-            "http://localhost:8000/v1"
-        );
+        assert_eq!(cfg.infer.synthesize.base_url, "http://localhost:8000/v1");
         assert_eq!(cfg.infer.synthesize.model, "qwen");
         assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
-        assert_eq!(
-            cfg.infer.synthesize.max_output_tokens,
-            16384
-        );
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
         assert_eq!(
             cfg.infer.ask.as_ref().unwrap().base_url,
             "http://localhost:8000/v1"
@@ -3541,10 +3546,7 @@ mode = "off"
             131072,
             "unset fields come from the tier"
         );
-        assert_eq!(
-            cfg.infer.synthesize.max_output_tokens,
-            16384
-        );
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
     }
 
     /// A typo in a tier name must be a startup failure naming the typo, never a
@@ -3598,10 +3600,7 @@ mode = "off"
         );
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
-        assert_eq!(
-            cfg.infer.synthesize.max_output_tokens,
-            16384
-        );
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
         assert_eq!(cfg.infer.ask.as_ref().unwrap().context_tokens, 32768);
         assert_eq!(cfg.infer.ask.as_ref().unwrap().max_output_tokens, 4096);
     }
@@ -4022,10 +4021,7 @@ mode = "off"
     #[test]
     fn the_reshaped_keys_are_refused_by_name() {
         let _guard = env_guard();
-        for key in [
-            "synthesis = \"earned\"",
-            "segment_tokens = 2048",
-        ] {
+        for key in ["synthesis = \"earned\"", "segment_tokens = 2048"] {
             let err = load_infer(&format!(
                 "{BARE_PREAMBLE}
                 [infer]

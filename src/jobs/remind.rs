@@ -29,7 +29,11 @@ pub const LEADS: &[i64] = &[48 * 3_600, 12 * 3_600, 3 * 3_600, 30 * 60, 0];
 /// row. A snooze is a time the operator named; the only thing to say at it is
 /// the reminder, once.
 fn ladder(snoozed: bool) -> &'static [i64] {
-    if snoozed { &LEADS[LEADS.len() - 1..] } else { LEADS }
+    if snoozed {
+        &LEADS[LEADS.len() - 1..]
+    } else {
+        LEADS
+    }
 }
 
 /// The rung a moment owes at `now`: the nearest one already reached that the
@@ -43,7 +47,8 @@ pub fn owed_lead(eff_at: i64, snoozed: bool, notified_at: Option<i64>, now: i64)
     ladder(snoozed)
         .iter()
         .copied()
-        .filter(|lead| eff_at - lead <= now).rfind(|lead| notified_at.is_none_or(|n| n < eff_at - lead))
+        .filter(|lead| eff_at - lead <= now)
+        .rfind(|lead| notified_at.is_none_or(|n| n < eff_at - lead))
 }
 
 /// The next second at which this moment owes a push: the earliest rung the
@@ -65,11 +70,16 @@ pub enum Target {
 /// and its token; a UnifiedPush entry is its endpoint.
 pub fn notify_targets(notify: &serde_json::Value) -> Vec<Target> {
     let mut out = vec![];
-    if let (Some(url), Some(token)) = (notify["gotify"]["url"].as_str(), notify["gotify"]["token"].as_str())
-        && !url.is_empty()
+    if let (Some(url), Some(token)) = (
+        notify["gotify"]["url"].as_str(),
+        notify["gotify"]["token"].as_str(),
+    ) && !url.is_empty()
         && !token.is_empty()
     {
-        out.push(Target::Gotify { url: url.into(), token: token.into() });
+        out.push(Target::Gotify {
+            url: url.into(),
+            token: token.into(),
+        });
     }
     if let Some(e) = notify["unifiedpush"]["endpoint"].as_str()
         && !e.is_empty()
@@ -81,7 +91,12 @@ pub fn notify_targets(notify: &serde_json::Value) -> Vec<Target> {
 
 /// One POST per channel, no library. Gotify takes a JSON body and the token
 /// in a header; UnifiedPush takes the message as the body.
-pub async fn push(http: &reqwest::Client, target: &Target, title: &str, message: &str) -> crate::error::Result<()> {
+pub async fn push(
+    http: &reqwest::Client,
+    target: &Target,
+    title: &str,
+    message: &str,
+) -> crate::error::Result<()> {
     let res = match target {
         Target::Gotify { url, token } => {
             http.post(url)
@@ -90,11 +105,22 @@ pub async fn push(http: &reqwest::Client, target: &Target, title: &str, message:
                 .send()
                 .await
         }
-        Target::UnifiedPush { endpoint } => http.post(endpoint).body(format!("{title}\n{message}")).send().await,
+        Target::UnifiedPush { endpoint } => {
+            http.post(endpoint)
+                .body(format!("{title}\n{message}"))
+                .send()
+                .await
+        }
     };
-    let res = res.map_err(|e| crate::error::Error::Inference { role: "push", detail: e.to_string() })?;
+    let res = res.map_err(|e| crate::error::Error::Inference {
+        role: "push",
+        detail: e.to_string(),
+    })?;
     if !res.status().is_success() {
-        return Err(crate::error::Error::Inference { role: "push", detail: format!("HTTP {}", res.status()) });
+        return Err(crate::error::Error::Inference {
+            role: "push",
+            detail: format!("HTTP {}", res.status()),
+        });
     }
     Ok(())
 }
@@ -143,7 +169,12 @@ pub fn compose(rows: &[crate::store::moments::DueRow], now: i64) -> (String, Str
 /// Shared by the due-time ladder and by an immediate, ad-hoc confirmation
 /// that is not on the ladder at all — neither reads or writes `notified_at`,
 /// so the two can never step on each other's delivery state.
-async fn deliver(http: &reqwest::Client, targets: &[Target], title: &str, message: &str) -> Result<()> {
+async fn deliver(
+    http: &reqwest::Client,
+    targets: &[Target],
+    title: &str,
+    message: &str,
+) -> Result<()> {
     let mut delivered = false;
     let mut failure = None;
     for t in targets {
@@ -221,9 +252,20 @@ mod tests {
     use crate::store::moments::{Kind, NewMoment, Source};
 
     async fn due_at(core: &Core, at: i64) -> String {
-        let out = core.ingest_capture(Capture::new("Send the invoice", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(Capture::new("Send the invoice", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
         let id = core
             .store
             .insert_moment(&NewMoment {
@@ -285,7 +327,16 @@ mod tests {
         let id = due_at(&core, now - 10).await;
 
         run(&core).await.unwrap();
-        assert!(core.store.moment(&id).await.unwrap().unwrap().notified_at.is_some(), "delivered somewhere");
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .notified_at
+                .is_some(),
+            "delivered somewhere"
+        );
         run(&core).await.unwrap(); // the retry: `expect(1)` on the good server verifies on drop
     }
 
@@ -307,14 +358,26 @@ mod tests {
         let b = due_at(&core, now - 5).await;
         core.store
             .control
-            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}))
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}),
+            )
             .await
             .unwrap();
 
         run(&core).await.unwrap();
 
         for id in [&a, &b] {
-            assert!(core.store.moment(id).await.unwrap().unwrap().notified_at.is_some(), "both are said");
+            assert!(
+                core.store
+                    .moment(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .notified_at
+                    .is_some(),
+                "both are said"
+            );
         }
     }
 
@@ -336,7 +399,10 @@ mod tests {
         }
         core.store
             .control
-            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}))
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}),
+            )
             .await
             .unwrap();
 
@@ -344,7 +410,10 @@ mod tests {
 
         for id in &ids {
             let m = core.store.moment(id).await.unwrap().unwrap();
-            assert!(m.notified_at.is_some(), "left out of the body, not off the ladder");
+            assert!(
+                m.notified_at.is_some(),
+                "left out of the body, not off the ladder"
+            );
         }
     }
 
@@ -358,14 +427,25 @@ mod tests {
         let mut core = test_core().await;
         core.store
             .control
-            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": format!("{}/up", bad.uri())}}))
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {"endpoint": format!("{}/up", bad.uri())}}),
+            )
             .await
             .unwrap();
         let now = crate::store::now();
         core.clock = Clock::Fixed(now);
         let id = due_at(&core, now - 10).await;
         assert!(run(&core).await.is_err(), "the queue backs off");
-        assert!(core.store.moment(&id).await.unwrap().unwrap().notified_at.is_none());
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .notified_at
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -380,19 +460,31 @@ mod tests {
         let core = test_core().await;
         core.store
             .control
-            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": "http://127.0.0.1:9/x"}}))
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {"endpoint": "http://127.0.0.1:9/x"}}),
+            )
             .await
             .unwrap();
         // Far enough out that the moments are still climbing the ladder: what
         // the unit waits for is the first rung of the nearer one.
         let now = crate::store::now();
         let a = due_at(&core, now + 30 * 86_400).await;
-        assert_eq!(run_after_of(&core).await, Some(now + 30 * 86_400 - LEADS[0]));
+        assert_eq!(
+            run_after_of(&core).await,
+            Some(now + 30 * 86_400 - LEADS[0])
+        );
         due_at(&core, now + 10 * 86_400).await;
-        assert_eq!(run_after_of(&core).await, Some(now + 10 * 86_400 - LEADS[0]));
+        assert_eq!(
+            run_after_of(&core).await,
+            Some(now + 10 * 86_400 - LEADS[0])
+        );
         core.store.mark_done(&a, now).await.unwrap();
         core.store.rearm_remind().await.unwrap();
-        assert_eq!(run_after_of(&core).await, Some(now + 10 * 86_400 - LEADS[0]));
+        assert_eq!(
+            run_after_of(&core).await,
+            Some(now + 10 * 86_400 - LEADS[0])
+        );
     }
 
     #[tokio::test]
@@ -423,9 +515,20 @@ mod tests {
         let job = core.store.claim_job().await.unwrap().unwrap();
         assert_eq!(job.stage, Stage::Remind);
         crate::jobs::run_claimed(&core, job).await.unwrap();
-        assert!(core.store.moment(&id).await.unwrap().unwrap().notified_at.is_some());
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .notified_at
+                .is_some()
+        );
         run(&core).await.unwrap(); // nothing owed: no second post — `expect(1)` verifies on drop
-        assert!(run_after_of(&core).await.is_none(), "nothing left to wait for");
+        assert!(
+            run_after_of(&core).await.is_none(),
+            "nothing left to wait for"
+        );
     }
 
     /// The second reminder, and the seam it fell through.
@@ -449,7 +552,10 @@ mod tests {
         let mut core = test_core().await;
         core.store
             .control
-            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}))
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}),
+            )
             .await
             .unwrap();
         let now = crate::store::now();
@@ -459,14 +565,34 @@ mod tests {
         // so it is not standing on a rung of its own yet.
         let later = due_at(&core, now + 10 * 86_400).await;
         let owed = due_at(&core, now - 10).await;
-        assert_eq!(run_after_of(&core).await, Some(now - 10 - LEADS[0]), "a rung already behind us");
+        assert_eq!(
+            run_after_of(&core).await,
+            Some(now - 10 - LEADS[0]),
+            "a rung already behind us"
+        );
 
         let job = core.store.claim_job().await.unwrap().unwrap();
         assert_eq!(job.stage, Stage::Remind);
         crate::jobs::run_claimed(&core, job).await.unwrap();
 
-        assert!(core.store.moment(&owed).await.unwrap().unwrap().notified_at.is_some());
-        assert!(core.store.moment(&later).await.unwrap().unwrap().notified_at.is_none());
+        assert!(
+            core.store
+                .moment(&owed)
+                .await
+                .unwrap()
+                .unwrap()
+                .notified_at
+                .is_some()
+        );
+        assert!(
+            core.store
+                .moment(&later)
+                .await
+                .unwrap()
+                .unwrap()
+                .notified_at
+                .is_none()
+        );
         assert_eq!(
             run_after_of(&core).await,
             Some(now + 10 * 86_400 - LEADS[0]),
@@ -484,14 +610,25 @@ mod tests {
         let mut core = test_core().await;
         core.store
             .control
-            .set_notify(&core.store.subject, &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}))
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {"endpoint": server.uri()}}),
+            )
             .await
             .unwrap();
         let now = crate::store::now();
         core.clock = Clock::Fixed(now);
         let id = due_at(&core, now - 10).await;
         assert!(run(&core).await.is_err(), "the queue's backoff handles it");
-        assert!(core.store.moment(&id).await.unwrap().unwrap().notified_at.is_none());
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .notified_at
+                .is_none()
+        );
     }
 
     #[test]
@@ -504,7 +641,9 @@ mod tests {
         );
         assert_eq!(
             notify_targets(&serde_json::json!({"unifiedpush": {"endpoint": "e"}})),
-            vec![Target::UnifiedPush { endpoint: "e".into() }]
+            vec![Target::UnifiedPush {
+                endpoint: "e".into()
+            }]
         );
     }
 }
@@ -516,7 +655,11 @@ mod ladder_tests {
     #[test]
     fn a_far_out_moment_is_owed_its_first_rung_when_it_enters_the_band() {
         let due = 1_000_000;
-        assert_eq!(owed_lead(due, false, None, due - LEADS[0] - 1), None, "still outside the band");
+        assert_eq!(
+            owed_lead(due, false, None, due - LEADS[0] - 1),
+            None,
+            "still outside the band"
+        );
         assert_eq!(owed_lead(due, false, None, due - LEADS[0]), Some(LEADS[0]));
     }
 
@@ -525,14 +668,21 @@ mod ladder_tests {
         let due = 1_000_000;
         let sent = due - LEADS[0];
         assert_eq!(owed_lead(due, false, Some(sent), sent + 1), None);
-        assert_eq!(owed_lead(due, false, Some(sent), due - LEADS[1]), Some(LEADS[1]));
+        assert_eq!(
+            owed_lead(due, false, Some(sent), due - LEADS[1]),
+            Some(LEADS[1])
+        );
     }
 
     #[test]
     fn a_moment_set_inside_the_ladder_owes_one_rung_not_every_passed_one() {
         let due = 1_000_000;
         let now = due - 600; // ten minutes out: every rung above 30m is behind us
-        assert_eq!(owed_lead(due, false, None, now), Some(30 * 60), "the nearest passed rung, once");
+        assert_eq!(
+            owed_lead(due, false, None, now),
+            Some(30 * 60),
+            "the nearest passed rung, once"
+        );
         // And then the moment itself, which is the only rung still ahead.
         assert_eq!(owed_lead(due, false, Some(now), due), Some(0));
     }
@@ -547,7 +697,10 @@ mod ladder_tests {
     fn the_next_boundary_is_the_earliest_rung_not_yet_covered() {
         let due = 1_000_000;
         assert_eq!(next_lead_at(due, false, None), Some(due - LEADS[0]));
-        assert_eq!(next_lead_at(due, false, Some(due - LEADS[0])), Some(due - LEADS[1]));
+        assert_eq!(
+            next_lead_at(due, false, Some(due - LEADS[0])),
+            Some(due - LEADS[1])
+        );
         assert_eq!(next_lead_at(due, false, Some(due)), None);
     }
 }

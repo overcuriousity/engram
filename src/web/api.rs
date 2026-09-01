@@ -349,7 +349,9 @@ pub(crate) fn capture_time(
         Some(name) => match name.parse::<chrono_tz::Tz>() {
             Ok(z) => Some(z.name().to_string()),
             Err(_) => {
-                return Err(Error::Validation(format!("tz={name}: not an IANA zone name")));
+                return Err(Error::Validation(format!(
+                    "tz={name}: not an IANA zone name"
+                )));
             }
         },
     };
@@ -357,14 +359,18 @@ pub(crate) fn capture_time(
         None => default_origin,
         Some("journal") => crate::core::ingest::ORIGIN_JOURNAL,
         Some(other) => {
-            return Err(Error::Validation(format!("origin={other}: only `journal` can be asked for")));
+            return Err(Error::Validation(format!(
+                "origin={other}: only `journal` can be asked for"
+            )));
         }
     };
     let intent = match intent.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
         None => None,
         Some("remind") => Some(crate::core::moments::Intent::Remind),
         Some(other) => {
-            return Err(Error::Validation(format!("intent={other}: only `remind` can be asked for")));
+            return Err(Error::Validation(format!(
+                "intent={other}: only `remind` can be asked for"
+            )));
         }
     };
     Ok(CaptureTime { tz, origin, intent })
@@ -1801,16 +1807,22 @@ pub struct MomentsQuery {
 
 /// Reminders and dates in a window. `due` answers what the front page shows —
 /// open rows only, undated last; `event` answers what refers to the window.
-async fn list_moments(tenant: Tenant, Query(q): Query<MomentsQuery>) -> Result<Json<serde_json::Value>> {
+async fn list_moments(
+    tenant: Tenant,
+    Query(q): Query<MomentsQuery>,
+) -> Result<Json<serde_json::Value>> {
     let now = tenant.core.clock.now();
     let from = q.from.unwrap_or(now);
-    let to = q.to.unwrap_or(now + tenant.core.time.horizon_hours as i64 * 3_600);
+    let to =
+        q.to.unwrap_or(now + tenant.core.time.horizon_hours as i64 * 3_600);
     let rows = match q.kind.as_deref().unwrap_or("due") {
         "due" => tenant.core.store.open_due(from, to).await?,
         "event" => tenant.core.store.event_moments_between(from, to).await?,
         other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
     };
-    Ok(Json(serde_json::to_value(rows).map_err(|e| Error::Internal(e.to_string()))?))
+    Ok(Json(
+        serde_json::to_value(rows).map_err(|e| Error::Internal(e.to_string()))?,
+    ))
 }
 
 async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
@@ -1832,7 +1844,11 @@ pub struct SnoozeBody {
     pub until: i64,
 }
 
-async fn moment_snooze(tenant: Tenant, Path(id): Path<String>, Json(b): Json<SnoozeBody>) -> Result<StatusCode> {
+async fn moment_snooze(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Json(b): Json<SnoozeBody>,
+) -> Result<StatusCode> {
     tenant.core.store.snooze(&id, b.until).await?;
     tenant.core.store.rearm_remind().await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1879,7 +1895,11 @@ async fn set_moment(
         None => "UTC".to_string(),
         Some(name) => match name.parse::<chrono_tz::Tz>() {
             Ok(z) => z.name().to_string(),
-            Err(_) => return Err(Error::Validation(format!("tz={name}: not an IANA zone name"))),
+            Err(_) => {
+                return Err(Error::Validation(format!(
+                    "tz={name}: not an IANA zone name"
+                )));
+            }
         },
     };
     let id = tenant
@@ -2128,16 +2148,27 @@ pub(crate) mod tests {
     /// A capture with one due moment on it, `cue`-sourced — which is what
     /// makes the note a reminder's note, and so what makes completing the last
     /// open reminder retire the corpus.
-    async fn corpus_with_due(
-        core: &crate::core::Core,
-        rule: Option<&str>,
-    ) -> (String, String) {
+    async fn corpus_with_due(core: &crate::core::Core, rule: Option<&str>) -> (String, String) {
         use crate::store::moments::{Kind, NewMoment, Source};
         use chrono::TimeZone;
-        let out = core.ingest_capture(crate::core::ingest::Capture::new("Pay rent", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
-        let at = chrono_tz::Tz::Europe__Berlin.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap().timestamp();
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let at = chrono_tz::Tz::Europe__Berlin
+            .with_ymd_and_hms(2026, 9, 1, 9, 0, 0)
+            .unwrap()
+            .timestamp();
         let id = core
             .store
             .insert_moment(&NewMoment {
@@ -2165,18 +2196,32 @@ pub(crate) mod tests {
 
         let done = app
             .clone()
-            .oneshot(post_json(&format!("/api/v1/moments/{id}/done"), &token, serde_json::json!({})))
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
             .await
             .unwrap();
         assert_eq!(done.status(), StatusCode::NO_CONTENT);
-        assert!(core.store.is_retired(&cid).await.unwrap(), "completing the last reminder retires the note");
+        assert!(
+            core.store.is_retired(&cid).await.unwrap(),
+            "completing the last reminder retires the note"
+        );
 
         let undone = app
-            .oneshot(post_json(&format!("/api/v1/moments/{id}/undone"), &token, serde_json::json!({})))
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/undone"),
+                &token,
+                serde_json::json!({}),
+            ))
             .await
             .unwrap();
         assert_eq!(undone.status(), StatusCode::NO_CONTENT);
-        assert!(!core.store.is_retired(&cid).await.unwrap(), "and undoing brings it back");
+        assert!(
+            !core.store.is_retired(&cid).await.unwrap(),
+            "and undoing brings it back"
+        );
     }
 
     #[tokio::test]
@@ -2184,16 +2229,32 @@ pub(crate) mod tests {
         let (app, token, core) = app_token_and_core().await;
         let (_, id) = corpus_with_due(&core, Some("FREQ=MONTHLY;BYMONTHDAY=1")).await;
         app.clone()
-            .oneshot(post_json(&format!("/api/v1/moments/{id}/done"), &token, serde_json::json!({})))
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
             .await
             .unwrap();
-        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1, "the successor is armed");
+        assert_eq!(
+            core.store.open_due(0, i64::MAX).await.unwrap().len(),
+            1,
+            "the successor is armed"
+        );
 
-        app.oneshot(post_json(&format!("/api/v1/moments/{id}/undone"), &token, serde_json::json!({})))
-            .await
-            .unwrap();
+        app.oneshot(post_json(
+            &format!("/api/v1/moments/{id}/undone"),
+            &token,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
         let open = core.store.open_due(0, i64::MAX).await.unwrap();
-        assert_eq!(open.len(), 1, "one open row, not the reopened one plus its successor");
+        assert_eq!(
+            open.len(),
+            1,
+            "one open row, not the reopened one plus its successor"
+        );
         assert_eq!(open[0].moment.id, id, "and it is the row that was undone");
     }
 
@@ -4293,13 +4354,26 @@ pub(crate) mod tests {
             "/api/v1/capture?origin=journal",
             "/api/v1/capture?intent=remind",
         ] {
-            let res = app.clone().oneshot(text(uri, "https://example.com/a")).await.unwrap();
-            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{uri} was accepted and dropped");
+            let res = app
+                .clone()
+                .oneshot(text(uri, "https://example.com/a"))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} was accepted and dropped"
+            );
         }
         // A PDF or an image read by the server, same answer.
         let res = app
             .clone()
-            .oneshot(raw_post("/api/v1/capture?tz=Europe/Berlin", &token, "image/png", &a_png()))
+            .oneshot(raw_post(
+                "/api/v1/capture?tz=Europe/Berlin",
+                &token,
+                "image/png",
+                &a_png(),
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -4325,7 +4399,10 @@ pub(crate) mod tests {
             .oneshot(multipart(
                 "/api/v1/capture",
                 &token,
-                &[("text", "Heute war ein langer Tag."), ("tz", "Europe/Berlin")],
+                &[
+                    ("text", "Heute war ein langer Tag."),
+                    ("tz", "Europe/Berlin"),
+                ],
                 &[],
             ))
             .await
@@ -4336,11 +4413,11 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 mod patch_tests {
-    use super::tests::{app_token_and_core, post_json};
-    use crate::web::test_support::json_of;
     use super::tests::*;
+    use super::tests::{app_token_and_core, post_json};
     use crate::store::artifacts::{EmbedState, NewArtifact};
     use crate::vector::SearchFilter;
+    use crate::web::test_support::json_of;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -4684,7 +4761,15 @@ mod patch_tests {
             .await
             .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
         let at = crate::store::now() + 600;
         let res = app
             .clone()
@@ -4697,19 +4782,32 @@ mod patch_tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let id = json_of(res).await["id"].as_str().unwrap().to_string();
-        let list = json_of(app.clone().oneshot(bearer_get("/api/v1/moments?kind=due", &token)).await.unwrap()).await;
+        let list = json_of(
+            app.clone()
+                .oneshot(bearer_get("/api/v1/moments?kind=due", &token))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert_eq!(list[0]["moment"]["id"], id);
         assert_eq!(list[0]["opening"], "Pay rent");
         assert!(!list[0]["title"].as_str().unwrap_or_default().is_empty());
         let res = app
             .clone()
-            .oneshot(post_json(&format!("/api/v1/moments/{id}/done"), &token, serde_json::json!({})))
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let list = json_of(
             app.clone()
-                .oneshot(bearer_get(&format!("/api/v1/moments?kind=due&to={}", at + 40 * 86_400), &token))
+                .oneshot(bearer_get(
+                    &format!("/api/v1/moments?kind=due&to={}", at + 40 * 86_400),
+                    &token,
+                ))
                 .await
                 .unwrap(),
         )
@@ -4727,7 +4825,15 @@ mod patch_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        assert!(core.store.moment(&next).await.unwrap().unwrap().snoozed_until.is_some());
+        assert!(
+            core.store
+                .moment(&next)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -4738,7 +4844,15 @@ mod patch_tests {
             .await
             .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
         let res = app
             .oneshot(post_json(
                 &format!("/api/v1/artifacts/{aid}/moments"),
@@ -4766,7 +4880,10 @@ mod patch_tests {
         };
         let res = app
             .clone()
-            .oneshot(text("/api/v1/capture?tz=Europe/Berlin&origin=journal", "Long day."))
+            .oneshot(text(
+                "/api/v1/capture?tz=Europe/Berlin&origin=journal",
+                "Long day.",
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
@@ -4777,14 +4894,23 @@ mod patch_tests {
 
         let res = app
             .clone()
-            .oneshot(text("/api/v1/capture?intent=remind", "call the bank tomorrow"))
+            .oneshot(text(
+                "/api/v1/capture?intent=remind",
+                "call the bank tomorrow",
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let id = json_of(res).await["id"].as_str().unwrap().to_string();
-        assert_eq!(core.store.get_corpus(&id).await.unwrap().metadata["intent"], "remind");
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().metadata["intent"],
+            "remind"
+        );
 
-        let res = app.oneshot(text("/api/v1/capture?origin=mcp", "x")).await.unwrap();
+        let res = app
+            .oneshot(text("/api/v1/capture?origin=mcp", "x"))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -4804,15 +4930,36 @@ mod patch_tests {
                 .body(Body::from(body.to_string()))
                 .unwrap()
         };
-        let res = app.clone().oneshot(text("/api/v1/capture?tz=Europe/Berlim", "call the bank tomorrow")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(text(
+                "/api/v1/capture?tz=Europe/Berlim",
+                "call the bank tomorrow",
+            ))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        assert!(json_of(res).await["error"].as_str().unwrap_or_default().contains("Europe/Berlim"));
+        assert!(
+            json_of(res).await["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Europe/Berlim")
+        );
 
         // And a name it does know is stored as the table spells it.
-        let res = app.oneshot(text("/api/v1/capture?tz=Europe%2FBerlin", "call the bank tomorrow")).await.unwrap();
+        let res = app
+            .oneshot(text(
+                "/api/v1/capture?tz=Europe%2FBerlin",
+                "call the bank tomorrow",
+            ))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let id = json_of(res).await["id"].as_str().unwrap().to_string();
-        assert_eq!(core.store.get_corpus(&id).await.unwrap().metadata["tz"], "Europe/Berlin");
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().metadata["tz"],
+            "Europe/Berlin"
+        );
     }
 
     #[tokio::test]
@@ -4821,9 +4968,20 @@ mod patch_tests {
         // occurrence of the recurrence by the caller's whole offset, and the
         // row then said UTC as though somebody had asked for it.
         let (app, token, core) = app_token_and_core().await;
-        let out = core.ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
 
         let res = app
             .clone()
@@ -4835,7 +4993,10 @@ mod patch_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty(), "and nothing was written");
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "and nothing was written"
+        );
 
         let res = app
             .oneshot(post_json(
@@ -4846,7 +5007,9 @@ mod patch_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
-        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.tz, "Europe/Berlin");
+        assert_eq!(
+            core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.tz,
+            "Europe/Berlin"
+        );
     }
-
 }

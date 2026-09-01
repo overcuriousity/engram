@@ -207,7 +207,8 @@ pub(crate) async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
         let ids: Vec<String> = reaped.iter().map(|c| c.id.clone()).collect();
         core.vectors.delete_artifacts(&ids).await?;
     }
-    let rows: Vec<crate::vector::LifecycleRow> = standing.iter().map(|c| lifecycle_row_of(c)).collect();
+    let rows: Vec<crate::vector::LifecycleRow> =
+        standing.iter().map(|c| lifecycle_row_of(c)).collect();
     if !rows.is_empty() {
         core.vectors.apply_lifecycle(&rows).await?;
     }

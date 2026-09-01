@@ -1,7 +1,7 @@
 //! A time attached to an artifact. See the schema comment and the spec's §3.
 
 use crate::error::Result;
-use crate::store::{new_id, Store};
+use crate::store::{Store, new_id};
 use sqlx::Row;
 use std::collections::HashMap;
 
@@ -131,9 +131,21 @@ fn moment_of(r: &sqlx::sqlite::SqliteRow) -> Moment {
 
 fn row_of(r: &sqlx::sqlite::SqliteRow) -> DueRow {
     let text: String = r.get("text");
-    let opening = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(120).collect::<String>();
+    let opening = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect::<String>();
     let title: Option<String> = r.get("title");
-    DueRow { moment: moment_of(r), title: title.filter(|t| !t.is_empty()).unwrap_or_else(|| opening.clone()), opening }
+    DueRow {
+        moment: moment_of(r),
+        title: title
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| opening.clone()),
+        opening,
+    }
 }
 
 /// What a row is due *at* from the reader's point of view: an elapsed snooze
@@ -143,7 +155,8 @@ fn eff_at(r: &DueRow) -> i64 {
     r.moment.snoozed_until.or(r.moment.at).unwrap_or(0)
 }
 
-const JOINED: &str = "SELECT m.*, a.title, a.text FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
+const JOINED: &str =
+    "SELECT m.*, a.title, a.text FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
 
 impl Store {
     /// A moment hangs off an artifact; the note is the artifact's corpus.
@@ -249,7 +262,12 @@ impl Store {
     /// of the same prose put a second undated row beside the dated one. A row
     /// moved off nothing *is* the undated reading, so the undated probe reads
     /// `moved_at` where `moved_from` has nothing to say.
-    pub async fn has_moment_at(&self, artifact_id: &str, kind: Kind, at: Option<i64>) -> Result<bool> {
+    pub async fn has_moment_at(
+        &self,
+        artifact_id: &str,
+        kind: Kind,
+        at: Option<i64>,
+    ) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM moments
               WHERE artifact_id = ? AND kind = ?
@@ -271,18 +289,22 @@ impl Store {
     /// done rows included — the history of a recurring reminder is its rows,
     /// so counting them is counting the occurrences.
     pub async fn occurrences_of_rule(&self, artifact_id: &str, rule: &str) -> Result<i64> {
-        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = 'due' AND rule = ?")
-            .bind(artifact_id)
-            .bind(rule)
-            .fetch_one(&self.pool)
-            .await?)
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = 'due' AND rule = ?",
+        )
+        .bind(artifact_id)
+        .bind(rule)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Has a `COUNT=n` rule had its n occurrences? False for a rule with no
     /// COUNT, which is open-ended, and for one that does not parse — an
     /// unreadable rule is `next_after`'s to refuse, not this read's.
     pub async fn rule_is_exhausted(&self, artifact_id: &str, rule: &str) -> Result<bool> {
-        let Some(count) = crate::core::moments::rule_count(rule) else { return Ok(false) };
+        let Some(count) = crate::core::moments::rule_count(rule) else {
+            return Ok(false);
+        };
         Ok(self.occurrences_of_rule(artifact_id, rule).await? >= count as i64)
     }
 
@@ -336,10 +358,10 @@ impl Store {
                 AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL
                 AND moved_at IS NULL",
         )
-            .bind(artifact_id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Withdraw the reminders this artifact's *reading* put here — the same
@@ -384,7 +406,12 @@ impl Store {
     /// moment before `to`, snoozes respected. No lower bound: a reminder that
     /// is already overdue is the one that most deserves the badge and the
     /// lift, and it is what `SearchResult::due_in`'s "1 h ago" is for.
-    pub async fn due_for(&self, artifact_ids: &[String], now: i64, to: i64) -> Result<HashMap<String, i64>> {
+    pub async fn due_for(
+        &self,
+        artifact_ids: &[String],
+        now: i64,
+        to: i64,
+    ) -> Result<HashMap<String, i64>> {
         let mut out = HashMap::new();
         if artifact_ids.is_empty() {
             return Ok(out);
@@ -420,21 +447,30 @@ impl Store {
 
     /// Both kinds, any state — the day page's "was due" shows what was done.
     pub async fn moments_between(&self, from: i64, to: i64) -> Result<Vec<DueRow>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!("{JOINED} WHERE m.at >= ? AND m.at < ? ORDER BY m.at")))
-            .bind(from)
-            .bind(to)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{JOINED} WHERE m.at >= ? AND m.at < ? ORDER BY m.at"
+        )))
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.iter().map(row_of).collect())
     }
 
     pub async fn mark_done(&self, id: &str, at: i64) -> Result<()> {
-        sqlx::query("UPDATE moments SET done_at = ? WHERE id = ?").bind(at).bind(id).execute(&self.pool).await?;
+        sqlx::query("UPDATE moments SET done_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn undo_done(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE moments SET done_at = NULL WHERE id = ?").bind(id).execute(&self.pool).await?;
+        sqlx::query("UPDATE moments SET done_at = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -478,7 +514,12 @@ impl Store {
     /// occurrence has been done, pushed or snoozed in its own right it has a
     /// history of its own, and an undo two steps back does not get to discard
     /// it. Returns whether anything went.
-    pub async fn delete_armed_occurrence(&self, artifact_id: &str, rule: &str, at: i64) -> Result<bool> {
+    pub async fn delete_armed_occurrence(
+        &self,
+        artifact_id: &str,
+        rule: &str,
+        at: i64,
+    ) -> Result<bool> {
         let n = sqlx::query(
             "DELETE FROM moments
               WHERE artifact_id = ? AND kind = 'due' AND rule = ? AND at = ?
@@ -511,7 +552,10 @@ impl Store {
     }
 
     pub async fn unsnooze(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE moments SET snoozed_until = NULL WHERE id = ?").bind(id).execute(&self.pool).await?;
+        sqlx::query("UPDATE moments SET snoozed_until = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -578,14 +622,17 @@ impl Store {
     /// write that can move that minimum; a user with no channel never has it
     /// armed, and nothing owed disarms it.
     pub async fn rearm_remind(&self) -> Result<()> {
-        use crate::jobs::remind::{notify_targets, REMIND_TARGET};
+        use crate::jobs::remind::{REMIND_TARGET, notify_targets};
         use crate::store::jobs::Stage;
         let notify = self.control.notify(&self.subject).await?;
         if notify_targets(&notify).is_empty() {
             return self.disarm(Stage::Remind, REMIND_TARGET).await;
         }
         match self.next_notify_at().await? {
-            Some(at) => self.arm_at(Stage::Remind, "collection", REMIND_TARGET, at).await,
+            Some(at) => {
+                self.arm_at(Stage::Remind, "collection", REMIND_TARGET, at)
+                    .await
+            }
             None => self.disarm(Stage::Remind, REMIND_TARGET).await,
         }
     }
@@ -649,12 +696,15 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::artifacts::NewArtifact;
     use crate::store::Store;
+    use crate::store::artifacts::NewArtifact;
 
     async fn store_with_artifact() -> (Store, String) {
         let s = Store::memory().await.unwrap();
-        let c = s.insert_corpus("Remind me friday to send the invoice", "ui", None).await.unwrap();
+        let c = s
+            .insert_corpus("Remind me friday to send the invoice", "ui", None)
+            .await
+            .unwrap();
         let made = s
             .insert_artifacts(
                 &c.id,
@@ -707,8 +757,15 @@ mod tests {
         s.undo_done(&id).await.unwrap();
         assert_eq!(s.open_due(500, 10_000).await.unwrap().len(), 1);
         s.snooze(&id, 5_000).await.unwrap();
-        assert!(s.open_due(2_000, 10_000).await.unwrap().is_empty(), "snoozed past now");
-        assert_eq!(s.open_due(6_000, 10_000).await.unwrap().len(), 1, "snooze elapsed");
+        assert!(
+            s.open_due(2_000, 10_000).await.unwrap().is_empty(),
+            "snoozed past now"
+        );
+        assert_eq!(
+            s.open_due(6_000, 10_000).await.unwrap().len(),
+            1,
+            "snooze elapsed"
+        );
     }
 
     #[tokio::test]
@@ -738,14 +795,28 @@ mod tests {
         let a = s.insert_moment(&due(&aid, Some(10_000_000))).await.unwrap();
         let b = s.insert_moment(&due(&aid, Some(9_000_000))).await.unwrap();
         s.insert_moment(&due(&aid, None)).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), Some(9_000_000 - LEADS[0]), "the nearer moment's first rung");
-        s.mark_notified(std::slice::from_ref(&b), 9_000_000).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), Some(10_000_000 - LEADS[0]), "b is said and done");
+        assert_eq!(
+            s.next_notify_at().await.unwrap(),
+            Some(9_000_000 - LEADS[0]),
+            "the nearer moment's first rung"
+        );
+        s.mark_notified(std::slice::from_ref(&b), 9_000_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.next_notify_at().await.unwrap(),
+            Some(10_000_000 - LEADS[0]),
+            "b is said and done"
+        );
         let owed = s.due_owed(10_000_000 - LEADS[0]).await.unwrap();
         assert_eq!(owed.len(), 1);
         assert_eq!(owed[0].moment.id, a);
         s.snooze(&b, 11_000_000).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), Some(10_000_000 - LEADS[0]), "b is owed again, after a");
+        assert_eq!(
+            s.next_notify_at().await.unwrap(),
+            Some(10_000_000 - LEADS[0]),
+            "b is owed again, after a"
+        );
         assert_eq!(s.due_owed(11_000_000).await.unwrap().len(), 2);
     }
 
@@ -755,15 +826,27 @@ mod tests {
         let (s, aid) = store_with_artifact().await;
         let at = 10_000_000;
         let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
-        assert!(s.due_owed(at - LEADS[0] - 1).await.unwrap().is_empty(), "not yet in the band");
+        assert!(
+            s.due_owed(at - LEADS[0] - 1).await.unwrap().is_empty(),
+            "not yet in the band"
+        );
 
         let owed = s.due_owed(at - LEADS[0]).await.unwrap();
         assert_eq!(owed.len(), 1);
         assert_eq!(owed[0].moment.id, id);
-        s.mark_notified(std::slice::from_ref(&id), at - LEADS[0]).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&id), at - LEADS[0])
+            .await
+            .unwrap();
 
-        assert!(s.due_owed(at - LEADS[1] - 1).await.unwrap().is_empty(), "the rung is taken");
-        assert_eq!(s.due_owed(at - LEADS[1]).await.unwrap().len(), 1, "the next one comes round");
+        assert!(
+            s.due_owed(at - LEADS[1] - 1).await.unwrap().is_empty(),
+            "the rung is taken"
+        );
+        assert_eq!(
+            s.due_owed(at - LEADS[1]).await.unwrap().len(),
+            1,
+            "the next one comes round"
+        );
     }
 
     #[tokio::test]
@@ -773,10 +856,18 @@ mod tests {
         let at = 10_000_000;
         let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
         assert_eq!(s.next_notify_at().await.unwrap(), Some(at - LEADS[0]));
-        s.mark_notified(std::slice::from_ref(&id), at - LEADS[0]).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&id), at - LEADS[0])
+            .await
+            .unwrap();
         assert_eq!(s.next_notify_at().await.unwrap(), Some(at - LEADS[1]));
-        s.mark_notified(std::slice::from_ref(&id), at).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), None, "the last rung was the moment itself");
+        s.mark_notified(std::slice::from_ref(&id), at)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.next_notify_at().await.unwrap(),
+            None,
+            "the last rung was the moment itself"
+        );
     }
 
     #[tokio::test]
@@ -784,7 +875,9 @@ mod tests {
         let (s, aid) = store_with_artifact().await;
         let at = 10_000_000;
         let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
-        s.mark_notified(std::slice::from_ref(&id), at).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&id), at)
+            .await
+            .unwrap();
         assert_eq!(s.next_notify_at().await.unwrap(), None);
 
         // An hour, which is shorter than every lead above the last one. On the
@@ -793,15 +886,30 @@ mod tests {
         // aside, on the next queue tick.
         let until = at + 3_600;
         s.snooze(&id, until).await.unwrap();
-        assert_eq!(s.next_notify_at().await.unwrap(), Some(until), "the snooze's own end, and nothing sooner");
-        assert!(s.due_owed(at + 1).await.unwrap().is_empty(), "not the second it was put aside");
-        assert!(s.due_owed(until - 1).await.unwrap().is_empty(), "nor at any lead inside it");
+        assert_eq!(
+            s.next_notify_at().await.unwrap(),
+            Some(until),
+            "the snooze's own end, and nothing sooner"
+        );
+        assert!(
+            s.due_owed(at + 1).await.unwrap().is_empty(),
+            "not the second it was put aside"
+        );
+        assert!(
+            s.due_owed(until - 1).await.unwrap().is_empty(),
+            "nor at any lead inside it"
+        );
 
         let owed = s.due_owed(until).await.unwrap();
         assert_eq!(owed.len(), 1, "and then it comes back, once");
         assert_eq!(owed[0].moment.id, id);
-        s.mark_notified(std::slice::from_ref(&id), until).await.unwrap();
-        assert!(s.due_owed(until + 10_000).await.unwrap().is_empty(), "one rung, said");
+        s.mark_notified(std::slice::from_ref(&id), until)
+            .await
+            .unwrap();
+        assert!(
+            s.due_owed(until + 10_000).await.unwrap().is_empty(),
+            "one rung, said"
+        );
         assert_eq!(s.next_notify_at().await.unwrap(), None);
     }
 
@@ -809,10 +917,25 @@ mod tests {
     async fn due_for_answers_only_the_asked_artifacts_inside_the_window() {
         let (s, aid) = store_with_artifact().await;
         s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
-        let hit = s.due_for(&[aid.clone(), "other".into()], 500, 2_000).await.unwrap();
+        let hit = s
+            .due_for(&[aid.clone(), "other".into()], 500, 2_000)
+            .await
+            .unwrap();
         assert_eq!(hit.get(&aid), Some(&1_000));
-        assert!(s.due_for(&["other".into()], 500, 2_000).await.unwrap().is_empty(), "not asked for");
-        assert!(s.due_for(std::slice::from_ref(&aid), 500, 900).await.unwrap().is_empty(), "past the window");
+        assert!(
+            s.due_for(&["other".into()], 500, 2_000)
+                .await
+                .unwrap()
+                .is_empty(),
+            "not asked for"
+        );
+        assert!(
+            s.due_for(std::slice::from_ref(&aid), 500, 900)
+                .await
+                .unwrap()
+                .is_empty(),
+            "past the window"
+        );
     }
 
     #[tokio::test]
@@ -822,7 +945,10 @@ mod tests {
         // this row.
         let (s, aid) = store_with_artifact().await;
         s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
-        let hit = s.due_for(std::slice::from_ref(&aid), 5_000, 9_000).await.unwrap();
+        let hit = s
+            .due_for(std::slice::from_ref(&aid), 5_000, 9_000)
+            .await
+            .unwrap();
         assert_eq!(hit.get(&aid), Some(&1_000), "overdue still lifts");
     }
 
@@ -832,18 +958,30 @@ mod tests {
     #[tokio::test]
     async fn open_due_for_artifact_ignores_the_horizon_but_not_done_or_undated() {
         let (s, aid) = store_with_artifact().await;
-        assert!(s.open_due_for_artifact(&aid).await.unwrap().is_none(), "nothing set yet");
+        assert!(
+            s.open_due_for_artifact(&aid).await.unwrap().is_none(),
+            "nothing set yet"
+        );
 
         let far = s.insert_moment(&due(&aid, Some(50_000_000))).await.unwrap();
         let hit = s.open_due_for_artifact(&aid).await.unwrap().unwrap();
-        assert_eq!(hit.id, far, "far outside any horizon, still the pane's own reminder");
+        assert_eq!(
+            hit.id, far,
+            "far outside any horizon, still the pane's own reminder"
+        );
 
         s.mark_done(&far, 900).await.unwrap();
-        assert!(s.open_due_for_artifact(&aid).await.unwrap().is_none(), "done is not open");
+        assert!(
+            s.open_due_for_artifact(&aid).await.unwrap().is_none(),
+            "done is not open"
+        );
 
         s.insert_moment(&due(&aid, None)).await.unwrap();
         let undated = s.open_due_for_artifact(&aid).await.unwrap().unwrap();
-        assert!(undated.at.is_none(), "an undated reminder is still open, just not lifted by ago_or_ahead");
+        assert!(
+            undated.at.is_none(),
+            "an undated reminder is still open, just not lifted by ago_or_ahead"
+        );
     }
 
     #[tokio::test]
@@ -854,9 +992,15 @@ mod tests {
         let (s, aid) = store_with_artifact().await;
         s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
         assert!(s.next_notify_at().await.unwrap().is_some());
-        s.set_artifact_status(&aid, crate::store::artifacts::ArtifactStatus::Deprecated).await.unwrap();
+        s.set_artifact_status(&aid, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
         assert!(s.due_owed(9_000).await.unwrap().is_empty());
-        assert_eq!(s.next_notify_at().await.unwrap(), None, "nothing to find, so nothing to wait for");
+        assert_eq!(
+            s.next_notify_at().await.unwrap(),
+            None,
+            "nothing to find, so nothing to wait for"
+        );
     }
 
     #[tokio::test]
@@ -870,15 +1014,27 @@ mod tests {
         let pushed = s.insert_moment(&due(&aid, Some(3_000))).await.unwrap();
         let put_off = s.insert_moment(&due(&aid, Some(4_000))).await.unwrap();
         s.mark_done(&done, 10).await.unwrap();
-        s.mark_notified(std::slice::from_ref(&pushed), 10).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&pushed), 10)
+            .await
+            .unwrap();
         s.snooze(&put_off, 9_000).await.unwrap();
 
-        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 1, "only the untouched reading");
+        assert_eq!(
+            s.delete_read_moments(&aid).await.unwrap(),
+            1,
+            "only the untouched reading"
+        );
         assert!(s.moment(&fresh).await.unwrap().is_none());
         for kept in [&done, &pushed, &put_off] {
-            assert!(s.moment(kept).await.unwrap().is_some(), "a row with a history outlives the reading");
+            assert!(
+                s.moment(kept).await.unwrap().is_some(),
+                "a row with a history outlives the reading"
+            );
         }
-        assert!(s.has_moment_at(&aid, Kind::Due, Some(2_000)).await.unwrap(), "and the stage knows not to make it twice");
+        assert!(
+            s.has_moment_at(&aid, Kind::Due, Some(2_000)).await.unwrap(),
+            "and the stage knows not to make it twice"
+        );
         assert!(!s.has_moment_at(&aid, Kind::Due, Some(1_000)).await.unwrap());
     }
 
@@ -887,14 +1043,30 @@ mod tests {
         let (s, aid) = store_with_artifact().await;
         let mut m = due(&aid, Some(1_000));
         m.rule = Some("FREQ=DAILY;COUNT=2".into());
-        assert!(!s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2").await.unwrap(), "none yet");
+        assert!(
+            !s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2")
+                .await
+                .unwrap(),
+            "none yet"
+        );
         s.insert_moment(&m).await.unwrap();
-        assert!(!s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2").await.unwrap());
+        assert!(
+            !s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2")
+                .await
+                .unwrap()
+        );
         s.insert_moment(&m).await.unwrap();
-        assert!(s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2").await.unwrap(), "two of two");
-        assert!(!s.rule_is_exhausted(&aid, "FREQ=DAILY").await.unwrap(), "open-ended is never exhausted");
+        assert!(
+            s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2")
+                .await
+                .unwrap(),
+            "two of two"
+        );
+        assert!(
+            !s.rule_is_exhausted(&aid, "FREQ=DAILY").await.unwrap(),
+            "open-ended is never exhausted"
+        );
     }
-
 
     #[tokio::test]
     async fn dating_an_undated_reminder_still_covers_the_undated_probe() {
@@ -918,7 +1090,9 @@ mod tests {
         let (s, aid) = store_with_artifact().await;
         let now = crate::store::now();
         let id = s.insert_moment(&due(&aid, Some(now - 10))).await.unwrap();
-        s.mark_notified(std::slice::from_ref(&id), now - 5).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&id), now - 5)
+            .await
+            .unwrap();
         assert!(s.due_owed(now).await.unwrap().is_empty(), "said already");
 
         s.snooze(&id, now + 3_600).await.unwrap();
@@ -956,9 +1130,17 @@ mod tests {
         assert_eq!(m.at, Some(5_000));
         assert_eq!(m.moved_from, Some(1_000), "the misreading is kept");
         assert!(m.moved_at.is_some());
-        assert_eq!(m.source, Source::Cue, "moving says nothing about how the date got here");
+        assert_eq!(
+            m.source,
+            Source::Cue,
+            "moving says nothing about how the date got here"
+        );
 
-        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 0, "a moved row has a history");
+        assert_eq!(
+            s.delete_read_moments(&aid).await.unwrap(),
+            0,
+            "a moved row has a history"
+        );
         assert!(
             s.has_moment_at(&aid, Kind::Due, Some(1_000)).await.unwrap(),
             "and the stage will not put a fresh one back on the date that was corrected away from"
@@ -967,7 +1149,10 @@ mod tests {
         // A second move keeps the first instant: what is worth keeping is what
         // the base read, not the operator's own way to the date they meant.
         s.move_moment(&id, 9_000, "Europe/Berlin").await.unwrap();
-        assert_eq!(s.moment(&id).await.unwrap().unwrap().moved_from, Some(1_000));
+        assert_eq!(
+            s.moment(&id).await.unwrap().unwrap().moved_from,
+            Some(1_000)
+        );
     }
 
     #[tokio::test]
@@ -981,7 +1166,11 @@ mod tests {
         let m = s.moment(&id).await.unwrap().unwrap();
         assert_eq!(m.moved_from, None);
         assert!(m.moved_at.is_some());
-        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 0, "and it is not read away");
+        assert_eq!(
+            s.delete_read_moments(&aid).await.unwrap(),
+            0,
+            "and it is not read away"
+        );
     }
 
     #[tokio::test]
@@ -991,7 +1180,11 @@ mod tests {
         m.source = Source::Armed;
         let armed = s.insert_moment(&m).await.unwrap();
         let read = s.insert_moment(&due(&aid, Some(2_000))).await.unwrap();
-        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 1, "only the reading");
+        assert_eq!(
+            s.delete_read_moments(&aid).await.unwrap(),
+            1,
+            "only the reading"
+        );
         assert!(s.moment(&armed).await.unwrap().is_some());
         assert!(s.moment(&read).await.unwrap().is_none());
     }
@@ -1005,7 +1198,9 @@ mod tests {
         let cid = s.get_artifact(&aid).await.unwrap().corpus_id.unwrap();
         s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
         assert!(s.has_open_reminder_for_corpus(&cid).await.unwrap());
-        s.set_artifact_status(&aid, crate::store::artifacts::ArtifactStatus::Deprecated).await.unwrap();
+        s.set_artifact_status(&aid, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
         assert!(!s.has_open_reminder_for_corpus(&cid).await.unwrap());
     }
 

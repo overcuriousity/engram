@@ -617,7 +617,9 @@ impl Store {
         if corpus_ids.is_empty() {
             return Ok(Default::default());
         }
-        let marks = std::iter::repeat_n("?", corpus_ids.len()).collect::<Vec<_>>().join(",");
+        let marks = std::iter::repeat_n("?", corpus_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
         // `AssertSqlSafe` because the string is assembled here — the values are
         // bound, and the only thing spliced in is a run of `?` this function
         // counted itself. Same idiom as `due_for`.
@@ -878,7 +880,11 @@ mod tests {
         assert!(s.is_retired(&src.id).await.unwrap());
 
         s.unretire_corpus(&src.id).await.unwrap();
-        assert_eq!(s.recent_captures(5).await.unwrap().len(), 1, "undo puts it back");
+        assert_eq!(
+            s.recent_captures(5).await.unwrap().len(),
+            1,
+            "undo puts it back"
+        );
         assert!(!s.is_retired(&src.id).await.unwrap());
     }
 

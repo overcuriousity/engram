@@ -484,7 +484,12 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
-        Ok(self.points.read().unwrap().get(artifact_id).map(|p| p.vector.clone()))
+        Ok(self
+            .points
+            .read()
+            .unwrap()
+            .get(artifact_id)
+            .map(|p| p.vector.clone()))
     }
 
     async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {

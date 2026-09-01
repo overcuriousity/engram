@@ -2049,7 +2049,10 @@ impl VectorStore for QdrantVectors {
         Ok(points.and_then(|ps| {
             let p = ps.into_iter().next()?;
             let dense = dense_of(&p.vector)?.as_array()?;
-            dense.iter().map(|x| x.as_f64().map(|f| f as f32)).collect::<Option<Vec<f32>>>()
+            dense
+                .iter()
+                .map(|x| x.as_f64().map(|f| f as f32))
+                .collect::<Option<Vec<f32>>>()
         }))
     }
 

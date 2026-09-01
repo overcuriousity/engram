@@ -10,11 +10,11 @@ use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
 use askama::Template;
+use axum::Router;
 use axum::extract::{Form, Path, Query};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use chrono::{NaiveDate, TimeZone};
 use chrono_tz::Tz;
 
@@ -108,17 +108,35 @@ fn day_start(date: NaiveDate, tz: Tz) -> Option<i64> {
 }
 
 fn hm(at: i64, tz: Tz) -> String {
-    tz.timestamp_opt(at, 0).single().map(|d| d.format("%H:%M").to_string()).unwrap_or_default()
+    tz.timestamp_opt(at, 0)
+        .single()
+        .map(|d| d.format("%H:%M").to_string())
+        .unwrap_or_default()
 }
 
 async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> Result<Response> {
     let tz = zone(Some(&q.tz));
-    let d = tz.timestamp_opt(tenant.core.clock.now(), 0).single().map(|d| d.date_naive()).unwrap_or_default();
-    Ok(Redirect::to(&format!("/ui/day/{}?tz={}", d.format("%Y-%m-%d"), tz.name())).into_response())
+    let d = tz
+        .timestamp_opt(tenant.core.clock.now(), 0)
+        .single()
+        .map(|d| d.date_naive())
+        .unwrap_or_default();
+    Ok(Redirect::to(&format!(
+        "/ui/day/{}?tz={}",
+        d.format("%Y-%m-%d"),
+        tz.name()
+    ))
+    .into_response())
 }
 
-async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>) -> Result<Response> {
-    let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else { return Err(Error::NotFound) };
+async fn page(
+    tenant: Tenant,
+    Path(date): Path<String>,
+    Query(q): Query<TzQuery>,
+) -> Result<Response> {
+    let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
+        return Err(Error::NotFound);
+    };
     // Round-tripped through the parse, the way `entry` does it and for the
     // same reason: chrono reads `%Y-%m-%d` leniently, so `/ui/day/2026-8-30`
     // parses. Left as it was spelled, that string is what `corpora_by_day`
@@ -132,7 +150,9 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
     // it: it goes back out on every `prev`/`next` href and in the entry form's
     // hidden field, and `due.rs::render` normalises for the same reason.
     let tz_name = tz.name().to_string();
-    let Some((from, to)) = bounds(day, tz) else { return Err(Error::NotFound) };
+    let Some((from, to)) = bounds(day, tz) else {
+        return Err(Error::NotFound);
+    };
     let store = &tenant.core.store;
 
     // Every corpus created on the day, plus any entry that names the day.
@@ -207,8 +227,16 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
     }
 
     let t = DayTemplate {
-        prev: day.checked_sub_signed(chrono::Duration::days(1)).unwrap_or(day).format("%Y-%m-%d").to_string(),
-        next: day.checked_add_signed(chrono::Duration::days(1)).unwrap_or(day).format("%Y-%m-%d").to_string(),
+        prev: day
+            .checked_sub_signed(chrono::Duration::days(1))
+            .unwrap_or(day)
+            .format("%Y-%m-%d")
+            .to_string(),
+        next: day
+            .checked_add_signed(chrono::Duration::days(1))
+            .unwrap_or(day)
+            .format("%Y-%m-%d")
+            .to_string(),
         heading: day.format("%A, %-d %B %Y").to_string(),
         date,
         tz: tz_name,
@@ -221,7 +249,11 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
     Ok(HtmlTemplate(t).into_response())
 }
 
-async fn entry(tenant: Tenant, Path(date): Path<String>, Form(f): Form<EntryForm>) -> Result<Response> {
+async fn entry(
+    tenant: Tenant,
+    Path(date): Path<String>,
+    Form(f): Form<EntryForm>,
+) -> Result<Response> {
     // The date is a date, exactly as `page` demands — and for both of the
     // reasons `page` has plus one of its own. Unchecked, `POST
     // /ui/day/garbage/entry` stored a capture carrying `metadata.day =
@@ -230,7 +262,9 @@ async fn entry(tenant: Tenant, Path(date): Path<String>, Form(f): Form<EntryForm
     // fail `HeaderValue::try_from` and answer 500 *after* the entry had been
     // written — which is the failure the comment just below says was fixed for
     // the zone, arriving through the other half of the same URL.
-    let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else { return Err(Error::NotFound) };
+    let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
+        return Err(Error::NotFound);
+    };
     // Round-tripped through the parse, so what goes into the header and into
     // `metadata.day` is the canonical spelling and not whatever spelled it.
     let date = day.format("%Y-%m-%d").to_string();
@@ -281,7 +315,11 @@ mod tests {
     use tower::ServiceExt;
 
     fn get(uri: &str, cookie: &str) -> Request<Body> {
-        Request::builder().uri(uri).header("cookie", cookie).body(Body::empty()).unwrap()
+        Request::builder()
+            .uri(uri)
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap()
     }
 
     fn form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
@@ -298,7 +336,12 @@ mod tests {
     async fn an_empty_day_says_so_and_still_offers_the_box() {
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
-        let html = body_of(app.oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie)).await.unwrap()).await;
+        let html = body_of(
+            app.oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert!(html.contains("Nothing on this day"));
         assert!(html.contains(r#"action="/ui/day/2026-08-30/entry""#));
         assert!(html.contains("/ui/day/2026-08-29") && html.contains("/ui/day/2026-08-31"));
@@ -327,13 +370,21 @@ mod tests {
     #[tokio::test]
     async fn the_entry_toggle_does_not_redirect_off_site() {
         let core = test_core().await;
-        let out = core.ingest_capture(crate::core::ingest::Capture::new("Long day.", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Long day.", "ui"))
+            .await
+            .unwrap();
         let (app, cookie) = app_with_cookie(core).await;
         let mut req = form(&format!("/ui/corpora/{}/entry", out.id), &cookie, "on=1");
-        req.headers_mut().insert("referer", "https://evil.example/ui/".parse().unwrap());
+        req.headers_mut()
+            .insert("referer", "https://evil.example/ui/".parse().unwrap());
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
-        assert_eq!(res.headers()["location"], "/ui/day/today", "an absolute URL is somebody else's origin");
+        assert_eq!(
+            res.headers()["location"],
+            "/ui/day/today",
+            "an absolute URL is somebody else's origin"
+        );
     }
 
     #[tokio::test]
@@ -342,7 +393,12 @@ mod tests {
         let (app, cookie) = app_with_cookie(core).await;
         let res = app.oneshot(get("/ui/day/today", &cookie)).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
-        assert!(res.headers()["location"].to_str().unwrap().starts_with("/ui/day/20"));
+        assert!(
+            res.headers()["location"]
+                .to_str()
+                .unwrap()
+                .starts_with("/ui/day/20")
+        );
     }
 
     #[tokio::test]
@@ -354,15 +410,30 @@ mod tests {
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         for tz in ["%C3%9C", "Europe%2FBerlin%0D%0AX:+1", "Not/AZone"] {
-            let res = app.clone().oneshot(get(&format!("/ui/day/today?tz={tz}"), &cookie)).await.unwrap();
-            assert_eq!(res.status(), StatusCode::SEE_OTHER, "tz={tz} did not redirect");
+            let res = app
+                .clone()
+                .oneshot(get(&format!("/ui/day/today?tz={tz}"), &cookie))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::SEE_OTHER,
+                "tz={tz} did not redirect"
+            );
             let loc = res.headers()["location"].to_str().unwrap();
-            assert!(loc.ends_with("?tz=UTC"), "an unreadable zone is UTC, not echoed back: {loc}");
+            assert!(
+                loc.ends_with("?tz=UTC"),
+                "an unreadable zone is UTC, not echoed back: {loc}"
+            );
         }
         // And on the entry form, which redirects back to the page it posted from.
         let (app, cookie) = app_with_cookie(test_core().await).await;
         let res = app
-            .oneshot(form("/ui/day/2026-08-28/entry", &cookie, "text=Long+day.&tz=%C3%9C"))
+            .oneshot(form(
+                "/ui/day/2026-08-28/entry",
+                &cookie,
+                "text=Long+day.&tz=%C3%9C",
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
@@ -380,12 +451,19 @@ mod tests {
         for date in ["garbage", "2026-13-40", "2026-08-30%0d%0aX", "today"] {
             let res = app
                 .clone()
-                .oneshot(form(&format!("/ui/day/{date}/entry"), &cookie, "text=Long+day.&tz=Europe/Berlin"))
+                .oneshot(form(
+                    &format!("/ui/day/{date}/entry"),
+                    &cookie,
+                    "text=Long+day.&tz=Europe/Berlin",
+                ))
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::NOT_FOUND, "{date}");
         }
-        assert!(core.store.recent_captures(5).await.unwrap().is_empty(), "and nothing was stored");
+        assert!(
+            core.store.recent_captures(5).await.unwrap().is_empty(),
+            "and nothing was stored"
+        );
     }
 
     #[tokio::test]
@@ -393,10 +471,19 @@ mod tests {
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
         app.clone()
-            .oneshot(form("/ui/day/2026-08-28/entry", &cookie, "text=Long+day.&tz=Europe/Berlin"))
+            .oneshot(form(
+                "/ui/day/2026-08-28/entry",
+                &cookie,
+                "text=Long+day.&tz=Europe/Berlin",
+            ))
             .await
             .unwrap();
-        let html = body_of(app.oneshot(get("/ui/day/2026-08-28?tz=Europe/Berlin", &cookie)).await.unwrap()).await;
+        let html = body_of(
+            app.oneshot(get("/ui/day/2026-08-28?tz=Europe/Berlin", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert!(html.contains("Long day."));
         assert!(html.contains("Entries"));
         let c = core.store.recent_captures(1).await.unwrap();
@@ -414,26 +501,51 @@ mod tests {
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         app.clone()
-            .oneshot(form("/ui/day/2026-08-28/entry", &cookie, "text=Long+day.&tz=Europe/Berlin"))
+            .oneshot(form(
+                "/ui/day/2026-08-28/entry",
+                &cookie,
+                "text=Long+day.&tz=Europe/Berlin",
+            ))
             .await
             .unwrap();
-        let html = body_of(app.oneshot(get("/ui/day/2026-8-28?tz=Europe/Berlin", &cookie)).await.unwrap()).await;
+        let html = body_of(
+            app.oneshot(get("/ui/day/2026-8-28?tz=Europe/Berlin", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert!(html.contains("Long day."), "the day's own entry: {html}");
-        assert!(html.contains(r#"action="/ui/day/2026-08-28/entry""#), "and the form posts the canonical day");
+        assert!(
+            html.contains(r#"action="/ui/day/2026-08-28/entry""#),
+            "and the form posts the canonical day"
+        );
     }
 
     #[tokio::test]
     async fn the_day_shows_captures_what_was_due_what_refers_to_it_and_sittings() {
         let mut core = test_core().await;
         let tz = chrono_tz::Tz::Europe__Berlin;
-        let day = tz.with_ymd_and_hms(2026, 8, 30, 0, 0, 0).unwrap().timestamp();
+        let day = tz
+            .with_ymd_and_hms(2026, 8, 30, 0, 0, 0)
+            .unwrap()
+            .timestamp();
         core.clock = Clock::Fixed(day + 10 * 3_600);
-        let out = core.ingest_capture(Capture::new("Zahnarzt 12.9.", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(Capture::new("Zahnarzt 12.9.", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0].id.clone();
+        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
         for (kind, at, source, span) in [
             (Kind::Due, day + 9 * 3_600, Source::Set, None),
-            (Kind::Event, day + 14 * 3_600, Source::Extracted, Some("12.9.".to_string())),
+            (
+                Kind::Event,
+                day + 14 * 3_600,
+                Source::Extracted,
+                Some("12.9.".to_string()),
+            ),
         ] {
             core.store
                 .insert_moment(&NewMoment {
@@ -449,7 +561,12 @@ mod tests {
                 .unwrap();
         }
         core.store
-            .insert_pursuit(day + 14 * 3_600, &["qdrant payload filter".into()], std::slice::from_ref(&aid), None)
+            .insert_pursuit(
+                day + 14 * 3_600,
+                &["qdrant payload filter".into()],
+                std::slice::from_ref(&aid),
+                None,
+            )
             .await
             .unwrap();
         // The capture itself landed at the real now, not on the fixed day;
@@ -463,11 +580,21 @@ mod tests {
             .await
             .unwrap();
         let (app, cookie) = app_with_cookie(core).await;
-        let res = app.oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie)).await.unwrap();
+        let res = app
+            .oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie))
+            .await
+            .unwrap();
         let status = res.status();
         let html = body_of(res).await;
         assert_eq!(status, StatusCode::OK, "{html}");
-        for s in ["Captured", "Was due", "Refers to this day", "Sittings", "qdrant payload filter", "12.9."] {
+        for s in [
+            "Captured",
+            "Was due",
+            "Refers to this day",
+            "Sittings",
+            "qdrant payload filter",
+            "12.9.",
+        ] {
             assert!(html.contains(s), "{s}");
         }
     }
@@ -475,9 +602,19 @@ mod tests {
     #[tokio::test]
     async fn not_an_entry_restores_the_origin() {
         let core = test_core().await;
-        let out = core.ingest_capture(Capture::new("Heute war ein langer Tag.", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(Capture::new("Heute war ein langer Tag.", "ui"))
+            .await
+            .unwrap();
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        let res = app.oneshot(form(&format!("/ui/corpora/{}/entry", out.id), &cookie, "on=0")).await.unwrap();
+        let res = app
+            .oneshot(form(
+                &format!("/ui/corpora/{}/entry", out.id),
+                &cookie,
+                "on=0",
+            ))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "ui");
     }

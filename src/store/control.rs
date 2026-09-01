@@ -674,9 +674,12 @@ mod tests {
         let c = Control::memory().await.unwrap();
         c.provision("u", None).await.unwrap();
         assert_eq!(c.notify("u").await.unwrap(), serde_json::json!({}));
-        c.set_notify("u", &serde_json::json!({"gotify": {"url": "https://g/message", "token": "t"}}))
-            .await
-            .unwrap();
+        c.set_notify(
+            "u",
+            &serde_json::json!({"gotify": {"url": "https://g/message", "token": "t"}}),
+        )
+        .await
+        .unwrap();
         assert_eq!(c.notify("u").await.unwrap()["gotify"]["token"], "t");
     }
 

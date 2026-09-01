@@ -1100,7 +1100,10 @@ mod tests {
     #[tokio::test]
     async fn an_embedded_artifact_arms_the_moments_read() {
         let core = test_core().await;
-        let _out = core.ingest_capture(crate::core::ingest::Capture::new("Anything at all", "ui")).await.unwrap();
+        let _out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Anything at all", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(&core).await;
     }
 

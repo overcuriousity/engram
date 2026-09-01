@@ -199,10 +199,7 @@ impl Synthesizer for FakeSynthesizer {
     /// A judged reply the way a model that obeys the hint would answer: the
     /// door's forced intent, else "none", with no date and no links. A test
     /// wanting a richer judgement brings its own synthesizer.
-    async fn segment_judged(
-        &self,
-        input: SegmentInput<'_>,
-    ) -> Result<crate::infer::SegmentReply> {
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
         let judgement = input.judge.map(|j| crate::infer::Judgement {
             intent: Some(j.forced_intent.clone().unwrap_or_else(|| "none".into())),
             when: None,

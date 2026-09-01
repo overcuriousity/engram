@@ -1403,7 +1403,10 @@ impl Core {
             if src.origin != ORIGIN_JOURNAL {
                 return Ok(());
             }
-            let was = meta["origin_was"].as_str().unwrap_or(ORIGIN_WEB).to_string();
+            let was = meta["origin_was"]
+                .as_str()
+                .unwrap_or(ORIGIN_WEB)
+                .to_string();
             if let Some(m) = meta.as_object_mut() {
                 m.remove("origin_was");
             }
@@ -1436,7 +1439,9 @@ impl Core {
     /// first time. Nothing here rewrites text.
     pub async fn set_reminder(&self, artifact_id: &str, on: bool) -> Result<()> {
         let art = self.store.get_artifact(artifact_id).await?;
-        let Some(cid) = art.corpus_id.as_deref() else { return Ok(()) };
+        let Some(cid) = art.corpus_id.as_deref() else {
+            return Ok(());
+        };
         let src = self.store.get_corpus(cid).await?;
         let mut meta = src.metadata.clone();
         let intent = crate::core::moments::Intent::Remind;
@@ -2235,7 +2240,9 @@ mod tests {
             .execute(&core.store.pool)
             .await
             .unwrap();
-        crate::jobs::synthesize::finish(&core, &src.id).await.unwrap();
+        crate::jobs::synthesize::finish(&core, &src.id)
+            .await
+            .unwrap();
         assert!(
             core.store.has_job(Stage::Title, &src.id).await.unwrap(),
             "the fixture must arm a title unit"
@@ -2459,9 +2466,9 @@ mod tests {
         // The whole point of deferred processing: a broken inference endpoint
         // must not turn into a failed capture.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::FakeSynthesizer::failing("endpoint down"),
-        ) ;
+        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+            "endpoint down",
+        ));
         let out = core.ingest("still accepted", "web", None).await.unwrap();
         assert_eq!(out.status, CorpusStatus::Raw);
     }
@@ -3254,7 +3261,10 @@ mod tests {
         assert_eq!(c.origin, "ui");
         assert!(c.metadata.get("origin_was").is_none());
         core.set_entry(&out.id, true).await.unwrap();
-        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().origin,
+            "journal"
+        );
     }
 
     /// The undo is idempotent, and a note that is not an entry has none.
@@ -3273,7 +3283,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().origin,
+            "journal"
+        );
         core.set_entry(&out.id, false).await.unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "cli");
         core.set_entry(&out.id, false).await.unwrap();
@@ -3284,16 +3297,28 @@ mod tests {
         );
 
         // And a note that was never an entry is untouched by the off switch.
-        let plain = core.ingest_capture(Capture::new("Die Portnummer ist 8443.", "share")).await.unwrap();
-        assert_eq!(core.store.get_corpus(&plain.id).await.unwrap().origin, "share");
+        let plain = core
+            .ingest_capture(Capture::new("Die Portnummer ist 8443.", "share"))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.get_corpus(&plain.id).await.unwrap().origin,
+            "share"
+        );
         core.set_entry(&plain.id, false).await.unwrap();
-        assert_eq!(core.store.get_corpus(&plain.id).await.unwrap().origin, "share");
+        assert_eq!(
+            core.store.get_corpus(&plain.id).await.unwrap().origin,
+            "share"
+        );
     }
 
     #[tokio::test]
     async fn a_journal_cue_through_the_api_or_mcp_is_left_alone() {
         let core = test_core().await;
-        let out = core.ingest_capture(Capture::new("Heute war ein langer Tag.", "mcp")).await.unwrap();
+        let out = core
+            .ingest_capture(Capture::new("Heute war ein langer Tag.", "mcp"))
+            .await
+            .unwrap();
         assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "mcp");
     }
 
@@ -3313,7 +3338,11 @@ mod tests {
         assert_eq!(c.origin, "ui", "not filed as an entry");
         assert!(c.metadata.get("origin_was").is_none());
         crate::jobs::test_support::drain(&core).await;
-        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1, "and it is a reminder");
+        assert_eq!(
+            core.store.open_due(0, i64::MAX).await.unwrap().len(),
+            1,
+            "and it is a reminder"
+        );
     }
 
     #[tokio::test]
@@ -3329,7 +3358,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "journal");
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().origin,
+            "journal"
+        );
     }
 
     #[tokio::test]
@@ -3339,6 +3371,9 @@ mod tests {
             .ingest_capture(Capture::new("x", "ui").with_tz(Some("Europe/Berlin".into())))
             .await
             .unwrap();
-        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().metadata["tz"], "Europe/Berlin");
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().metadata["tz"],
+            "Europe/Berlin"
+        );
     }
 }

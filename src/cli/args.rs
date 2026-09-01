@@ -497,11 +497,28 @@ mod tests {
 
     #[test]
     fn a_reminder_and_an_entry_are_verbs_of_their_own() {
-        let r = CliArgs { remind: vec!["call".into(), "the".into(), "bank".into()], ..Default::default() };
-        assert!(matches!(verb(&r, false, false, || Ok(String::new())), Ok(Some(Verb::Remind(t))) if t == "call the bank"));
-        let j = CliArgs { journal: vec!["long".into(), "day".into()], ..Default::default() };
-        assert!(matches!(verb(&j, false, false, || Ok(String::new())), Ok(Some(Verb::Journal(t))) if t == "long day"));
-        let both = CliArgs { remind: vec!["x".into()], capture: vec!["y".into()], ..Default::default() };
-        assert!(verb(&both, false, false, || Ok(String::new())).is_err(), "one verb at a time");
+        let r = CliArgs {
+            remind: vec!["call".into(), "the".into(), "bank".into()],
+            ..Default::default()
+        };
+        assert!(
+            matches!(verb(&r, false, false, || Ok(String::new())), Ok(Some(Verb::Remind(t))) if t == "call the bank")
+        );
+        let j = CliArgs {
+            journal: vec!["long".into(), "day".into()],
+            ..Default::default()
+        };
+        assert!(
+            matches!(verb(&j, false, false, || Ok(String::new())), Ok(Some(Verb::Journal(t))) if t == "long day")
+        );
+        let both = CliArgs {
+            remind: vec!["x".into()],
+            capture: vec!["y".into()],
+            ..Default::default()
+        };
+        assert!(
+            verb(&both, false, false, || Ok(String::new())).is_err(),
+            "one verb at a time"
+        );
     }
 }

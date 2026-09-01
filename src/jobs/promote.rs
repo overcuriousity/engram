@@ -263,7 +263,11 @@ mod tests {
             .await
             .unwrap();
         let segs = core.store.segments_for_corpus(&out.id).await.unwrap();
-        assert!(segs.len() > 1, "the fixture must be multi-window: {}", segs.len());
+        assert!(
+            segs.len() > 1,
+            "the fixture must be multi-window: {}",
+            segs.len()
+        );
         let p = core
             .store
             .artifacts_for_segment(&out.id, 0)

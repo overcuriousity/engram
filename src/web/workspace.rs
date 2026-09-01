@@ -228,7 +228,9 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<
 /// unreadable is a reader we know nothing about, and English is what the page
 /// says then.
 fn examples(headers: &axum::http::HeaderMap) -> (&'static str, &'static str) {
-    let raw = headers.get(axum::http::header::ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok());
+    let raw = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok());
     crate::core::moments::examples_for(raw.unwrap_or(""))
 }
 
@@ -390,7 +392,10 @@ async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Re
         },
         None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
     };
-    let out = tenant.core.ingest_capture(capture.with_tz(viewer_zone(f.tz.as_deref()))).await?;
+    let out = tenant
+        .core
+        .ingest_capture(capture.with_tz(viewer_zone(f.tz.as_deref())))
+        .await?;
     let entry = tenant
         .core
         .store
@@ -1431,7 +1436,10 @@ mod tests {
             html.contains(r#"aria-label="Attach a file"#),
             "and Attach still names its types to a screen reader: {html}"
         );
-        assert!(!html.contains("attach-types"), "but not a third time in prose: {html}");
+        assert!(
+            !html.contains("attach-types"),
+            "but not a third time in prose: {html}"
+        );
     }
 
     /// Results appear beside a person who pressed nothing. The old hint
@@ -2147,9 +2155,16 @@ mod tests {
         // turn: the undo for a wrongly-cued entry was unreachable without a
         // reload.
         let html = workspace_held("/ui").await;
-        let pane = html.find(r#"<div id="pane""#).expect("the pane is on the page");
-        let receipt = html.find(r#"<div id="capture-result">"#).expect("and so is the receipt");
-        assert!(receipt < pane, "the receipt is above the pane, not inside it: {html}");
+        let pane = html
+            .find(r#"<div id="pane""#)
+            .expect("the pane is on the page");
+        let receipt = html
+            .find(r#"<div id="capture-result">"#)
+            .expect("and so is the receipt");
+        assert!(
+            receipt < pane,
+            "the receipt is above the pane, not inside it: {html}"
+        );
     }
 
     #[tokio::test]
@@ -2176,10 +2191,18 @@ mod tests {
             body_of(res).await
         };
 
-        post(app.clone(), cookie.clone(), "text=Remind+me+tomorrow+at+9&tz=Europe%2FBerlin").await;
+        post(
+            app.clone(),
+            cookie.clone(),
+            "text=Remind+me+tomorrow+at+9&tz=Europe%2FBerlin",
+        )
+        .await;
         let stored = core.store.recent_captures(1).await.unwrap();
         let cid = stored[0].0.clone();
-        assert_eq!(core.store.get_corpus(&cid).await.unwrap().metadata["tz"], "Europe/Berlin");
+        assert_eq!(
+            core.store.get_corpus(&cid).await.unwrap().metadata["tz"],
+            "Europe/Berlin"
+        );
 
         // A zone the table does not know is dropped rather than stored: nobody
         // typed this field, and a 400 would lose the text of the capture.

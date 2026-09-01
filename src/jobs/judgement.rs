@@ -7,10 +7,10 @@
 //! best-effort against artifacts that already stand: a judgement that cannot
 //! be applied is a warning, never a lost capture.
 
-use crate::core::moments::{
-    default_zone_name, intent_refused, validate_rule, zone, Intent, DEFAULT_HOUR,
-};
 use crate::core::Core;
+use crate::core::moments::{
+    DEFAULT_HOUR, Intent, default_zone_name, intent_refused, validate_rule, zone,
+};
 use crate::error::Result;
 use crate::infer::Judgement;
 use crate::store::moments::{Kind, NewMoment, Source};
@@ -86,10 +86,10 @@ pub async fn apply(
     match j.intent.as_deref() {
         Some("journal")
             if JOURNALABLE.contains(&src.origin.as_str())
-                && !intent_refused(&src.metadata, Intent::Journal)
-            => {
-                core.set_entry(corpus_id, true).await?;
-            }
+                && !intent_refused(&src.metadata, Intent::Journal) =>
+        {
+            core.set_entry(corpus_id, true).await?;
+        }
         Some("remind") => {
             if intent_refused(&src.metadata, Intent::Remind) {
                 return Ok(());
@@ -109,7 +109,10 @@ pub async fn apply(
             // and an undated one is a question the band asks them.
             let forced_remind = forced == Some("remind");
             if at.is_none() && rule.is_none() && !forced_remind {
-                tracing::debug!(corpus_id, "a judged reminder with no date is left as a capture");
+                tracing::debug!(
+                    corpus_id,
+                    "a judged reminder with no date is left as a capture"
+                );
                 return Ok(());
             }
             // Undated included: `None` is an instant the guard understands,
@@ -223,7 +226,7 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::infer::fake::FAKE_BUDGET;
     use crate::infer::{
-        ProposedArtifact, ProposedLink, SegmentInput, SegmentReply, Synthesizer, SynthesisBudget,
+        ProposedArtifact, ProposedLink, SegmentInput, SegmentReply, SynthesisBudget, Synthesizer,
     };
     use crate::jobs::test_support::drain;
     use async_trait::async_trait;
@@ -348,7 +351,10 @@ mod tests {
     async fn events_land_and_links_only_to_what_was_shown() {
         let core = test_core().await;
         // A neighbor that exists and was "shown".
-        let other = core.ingest("the invoice workflow notes", "web", None).await.unwrap();
+        let other = core
+            .ingest("the invoice workflow notes", "web", None)
+            .await
+            .unwrap();
         drain(&core).await;
         let neighbor = core
             .store

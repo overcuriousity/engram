@@ -1584,11 +1584,13 @@ impl Store {
         // separate statement afterwards, a crash in the window left a stub
         // whose Qdrant point still held the reaped text, and the drift repair
         // only scans marked rows — nothing else would ever notice.
-        sqlx::query("UPDATE artifacts SET text = '', reaped_at = ?, lifecycle_dirty = 1 WHERE id = ?")
-            .bind(reaped_at)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE artifacts SET text = '', reaped_at = ?, lifecycle_dirty = 1 WHERE id = ?",
+        )
+        .bind(reaped_at)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2604,18 +2606,42 @@ mod tests {
         s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_some());
+        assert!(
+            s.get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .retired_at
+                .is_some()
+        );
         s.set_artifact_status(&made[0].id, ArtifactStatus::Active)
             .await
             .unwrap();
-        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_none());
+        assert!(
+            s.get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .retired_at
+                .is_none()
+        );
 
         s.set_superseded_by(&made[0].id, Some(&made[1].id))
             .await
             .unwrap();
-        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_some());
+        assert!(
+            s.get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .retired_at
+                .is_some()
+        );
         s.set_superseded_by(&made[0].id, None).await.unwrap();
-        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_none());
+        assert!(
+            s.get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .retired_at
+                .is_none()
+        );
     }
 
     /// Push an artifact's retirement into the past, as if it happened then.
@@ -2648,7 +2674,10 @@ mod tests {
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
-            .insert_artifacts(&src.id, &[nc(0, "old"), nc(1, "young"), nc(2, "unreachable-reminder")])
+            .insert_artifacts(
+                &src.id,
+                &[nc(0, "old"), nc(1, "young"), nc(2, "unreachable-reminder")],
+            )
             .await
             .unwrap();
         for c in &made {
@@ -2671,11 +2700,16 @@ mod tests {
         // "raw" would be the same note again rather than a second one.
         let other = s.insert_corpus("another note", "web", None).await.unwrap();
         let pair = s
-            .insert_artifacts(&other.id, &[nc(0, "live"), nc(1, "retired-beside-a-live-reminder")])
+            .insert_artifacts(
+                &other.id,
+                &[nc(0, "live"), nc(1, "retired-beside-a-live-reminder")],
+            )
             .await
             .unwrap();
         insert_open_moment(&s, &pair[0].id).await;
-        s.set_artifact_status(&pair[1].id, ArtifactStatus::Deprecated).await.unwrap();
+        s.set_artifact_status(&pair[1].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
         backdate_retired_at(&s, &pair[1].id, 100 * 86_400).await;
 
         let got = s.reap_candidates(90 * 86_400, 20).await.unwrap();
@@ -2683,7 +2717,10 @@ mod tests {
         ids.sort_unstable();
         let mut want = vec![made[0].id.as_str(), made[2].id.as_str()];
         want.sort_unstable();
-        assert_eq!(ids, want, "the old retirements, the note with a live reminder aside");
+        assert_eq!(
+            ids, want,
+            "the old retirements, the note with a live reminder aside"
+        );
     }
 
     #[tokio::test]
@@ -2704,9 +2741,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.stamp_unaged_retired().await.unwrap(), 1);
-        assert!(s.get_artifact(&made[0].id).await.unwrap().retired_at.is_some());
-        assert!(s.get_artifact(&made[1].id).await.unwrap().retired_at.is_none());
-        assert_eq!(s.stamp_unaged_retired().await.unwrap(), 0, "stamping is once");
+        assert!(
+            s.get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .retired_at
+                .is_some()
+        );
+        assert!(
+            s.get_artifact(&made[1].id)
+                .await
+                .unwrap()
+                .retired_at
+                .is_none()
+        );
+        assert_eq!(
+            s.stamp_unaged_retired().await.unwrap(),
+            0,
+            "stamping is once"
+        );
     }
 
     #[tokio::test]
@@ -2716,21 +2769,39 @@ mod tests {
         // put back. Unguarded, the burial wiped the text of a live row.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
-        let made = s.insert_artifacts(&src.id, &[nc(0, "still wanted")]).await.unwrap();
-        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "still wanted")])
+            .await
+            .unwrap();
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
         // Reactivated while the judgement was in flight.
-        s.set_artifact_status(&made[0].id, ArtifactStatus::Active).await.unwrap();
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Active)
+            .await
+            .unwrap();
 
-        assert!(matches!(s.bury(&made[0].id, "{}").await, Err(Error::NotFound)));
+        assert!(matches!(
+            s.bury(&made[0].id, "{}").await,
+            Err(Error::NotFound)
+        ));
         let row = s.get_artifact(&made[0].id).await.unwrap();
-        assert_eq!(row.text, "still wanted", "the text of a live row is untouched");
+        assert_eq!(
+            row.text, "still wanted",
+            "the text of a live row is untouched"
+        );
         assert!(row.reaped_at.is_none());
         assert!(s.graveyard_row(&made[0].id).await.unwrap().is_none());
 
         // And a row already buried is not buried twice.
-        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated).await.unwrap();
+        s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
         s.bury(&made[0].id, "{}").await.unwrap();
-        assert!(matches!(s.bury(&made[0].id, "{}").await, Err(Error::NotFound)));
+        assert!(matches!(
+            s.bury(&made[0].id, "{}").await,
+            Err(Error::NotFound)
+        ));
     }
 
     #[tokio::test]
@@ -2744,7 +2815,9 @@ mod tests {
         s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        s.bury(&made[0].id, r#"{"reason":"nothing new"}"#).await.unwrap();
+        s.bury(&made[0].id, r#"{"reason":"nothing new"}"#)
+            .await
+            .unwrap();
 
         let row = s.get_artifact(&made[0].id).await.unwrap();
         assert_eq!(row.text, "");
@@ -2754,10 +2827,17 @@ mod tests {
             "the stub keeps its status"
         );
         let (text, meta, _) = s.graveyard_row(&made[0].id).await.unwrap().unwrap();
-        assert!(text.contains("xylophone"), "the graveyard holds the full text");
+        assert!(
+            text.contains("xylophone"),
+            "the graveyard holds the full text"
+        );
         assert!(meta.contains("nothing new"));
         assert!(
-            s.dirty_lifecycle_artifacts(10).await.unwrap().iter().any(|c| c.id == made[0].id),
+            s.dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|c| c.id == made[0].id),
             "the wipe and the drift marker commit together, so a crash between \
              them cannot leave a stub whose vector still holds the text"
         );

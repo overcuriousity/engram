@@ -431,7 +431,13 @@ impl Store {
     /// Arm a unit at an absolute time, or move a waiting one there. A running
     /// row is left alone: the run re-arms at its end. Attempts reset, because
     /// this is new information and not a retry.
-    pub async fn arm_at(&self, stage: Stage, target_kind: &str, target_id: &str, run_after: i64) -> Result<()> {
+    pub async fn arm_at(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        run_after: i64,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class, empty_runs)
              VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, 0)
@@ -1658,26 +1664,48 @@ mod tests {
     #[tokio::test]
     async fn a_parked_sweep_is_not_a_capture_in_flight() {
         let s = Store::memory().await.unwrap();
-        assert!(!s.foreground_work_in_flight().await.unwrap(), "an idle base");
+        assert!(
+            !s.foreground_work_in_flight().await.unwrap(),
+            "an idle base"
+        );
 
         // What every live install looks like: the periodic units sit `pending`
         // with their turn months away. `oldest_pending_age` says yes to this
         // forever, which is why the due band polled at two seconds on a base
         // that had finished every capture it ever took.
-        s.arm_at(Stage::Consolidate, "sweep", "consolidate", crate::store::now() + 86_400)
-            .await
-            .unwrap();
-        assert!(s.oldest_pending_age().await.unwrap().is_some(), "the old question says yes");
-        assert!(!s.foreground_work_in_flight().await.unwrap(), "and it is nobody's capture");
+        s.arm_at(
+            Stage::Consolidate,
+            "sweep",
+            "consolidate",
+            crate::store::now() + 86_400,
+        )
+        .await
+        .unwrap();
+        assert!(
+            s.oldest_pending_age().await.unwrap().is_some(),
+            "the old question says yes"
+        );
+        assert!(
+            !s.foreground_work_in_flight().await.unwrap(),
+            "and it is nobody's capture"
+        );
 
         // A capture actually moving.
-        s.enqueue(Stage::Synthesize, "corpus", "src-1").await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
         assert!(s.foreground_work_in_flight().await.unwrap());
         // Still true once claimed: it is in flight, not waiting to be.
         let j = s.claim_job().await.unwrap().unwrap();
-        assert!(s.foreground_work_in_flight().await.unwrap(), "running counts");
+        assert!(
+            s.foreground_work_in_flight().await.unwrap(),
+            "running counts"
+        );
         s.control.complete_job(j.id).await.unwrap();
-        assert!(!s.foreground_work_in_flight().await.unwrap(), "and it is over when it is done");
+        assert!(
+            !s.foreground_work_in_flight().await.unwrap(),
+            "and it is over when it is done"
+        );
     }
 
     #[tokio::test]
@@ -1691,15 +1719,28 @@ mod tests {
         }
         assert!(!s.foreground_work_in_flight().await.unwrap());
         s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
-        assert!(s.foreground_work_in_flight().await.unwrap(), "the operator is waiting for this one");
+        assert!(
+            s.foreground_work_in_flight().await.unwrap(),
+            "the operator is waiting for this one"
+        );
         let j = s.claim_job().await.unwrap().unwrap();
         s.control.complete_job(j.id).await.unwrap();
         assert!(!s.foreground_work_in_flight().await.unwrap());
 
         // Class 1 is what the query was narrowed to escape: `remind` is the
         // periodic notifier, parked months out.
-        s.arm_at(Stage::Remind, "sweep", "remind", crate::store::now() + 86_400).await.unwrap();
-        assert!(!s.foreground_work_in_flight().await.unwrap(), "a parked sweep is nobody's capture");
+        s.arm_at(
+            Stage::Remind,
+            "sweep",
+            "remind",
+            crate::store::now() + 86_400,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !s.foreground_work_in_flight().await.unwrap(),
+            "a parked sweep is nobody's capture"
+        );
     }
 
     #[tokio::test]

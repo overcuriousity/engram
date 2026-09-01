@@ -32,96 +32,376 @@ impl Intent {
 /// in step by counting is a defect waiting for its first careless insert.
 pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
     // ── en ──
-    (Intent::Remind, "en", "remind me to send the invoice on friday"),
+    (
+        Intent::Remind,
+        "en",
+        "remind me to send the invoice on friday",
+    ),
     (Intent::Remind, "en", "remind me next week to call the bank"),
-    (Intent::Remind, "en", "don't forget to book the train tickets tomorrow"),
-    (Intent::Remind, "en", "i need to renew my passport before the end of the month"),
-    (Intent::Journal, "en", "today i finally got the migration working"),
-    (Intent::Journal, "en", "long day, nothing got done, but the walk helped"),
-    (Intent::Journal, "en", "slept badly again, the whole afternoon was a write-off"),
-    (Intent::Journal, "en", "quiet evening, cooked properly for once and felt better for it"),
+    (
+        Intent::Remind,
+        "en",
+        "don't forget to book the train tickets tomorrow",
+    ),
+    (
+        Intent::Remind,
+        "en",
+        "i need to renew my passport before the end of the month",
+    ),
+    (
+        Intent::Journal,
+        "en",
+        "today i finally got the migration working",
+    ),
+    (
+        Intent::Journal,
+        "en",
+        "long day, nothing got done, but the walk helped",
+    ),
+    (
+        Intent::Journal,
+        "en",
+        "slept badly again, the whole afternoon was a write-off",
+    ),
+    (
+        Intent::Journal,
+        "en",
+        "quiet evening, cooked properly for once and felt better for it",
+    ),
     // ── de ──
-    (Intent::Remind, "de", "erinnere mich morgen an den zahnarzttermin"),
-    (Intent::Remind, "de", "erinnere mich nächste woche an die steuererklärung"),
-    (Intent::Remind, "de", "nicht vergessen: am freitag die rechnung abschicken"),
-    (Intent::Remind, "de", "ich muss bis ende des monats den pass verlängern"),
-    (Intent::Remind, "de", "erinnerung termin foto ausweis mittwoch 0900 zimmer a323"),
-    (Intent::Journal, "de", "heute war ein langer tag und ich bin müde"),
-    (Intent::Journal, "de", "heute morgen endlich den fehler gefunden"),
-    (Intent::Journal, "de", "wieder schlecht geschlafen, der ganze nachmittag war für die katz"),
-    (Intent::Journal, "de", "ruhiger abend, endlich mal richtig gekocht und es ging mir besser"),
+    (
+        Intent::Remind,
+        "de",
+        "erinnere mich morgen an den zahnarzttermin",
+    ),
+    (
+        Intent::Remind,
+        "de",
+        "erinnere mich nächste woche an die steuererklärung",
+    ),
+    (
+        Intent::Remind,
+        "de",
+        "nicht vergessen: am freitag die rechnung abschicken",
+    ),
+    (
+        Intent::Remind,
+        "de",
+        "ich muss bis ende des monats den pass verlängern",
+    ),
+    (
+        Intent::Remind,
+        "de",
+        "erinnerung termin foto ausweis mittwoch 0900 zimmer a323",
+    ),
+    (
+        Intent::Journal,
+        "de",
+        "heute war ein langer tag und ich bin müde",
+    ),
+    (
+        Intent::Journal,
+        "de",
+        "heute morgen endlich den fehler gefunden",
+    ),
+    (
+        Intent::Journal,
+        "de",
+        "wieder schlecht geschlafen, der ganze nachmittag war für die katz",
+    ),
+    (
+        Intent::Journal,
+        "de",
+        "ruhiger abend, endlich mal richtig gekocht und es ging mir besser",
+    ),
     // ── fr ──
-    (Intent::Remind, "fr", "rappelle-moi d'appeler la banque lundi"),
-    (Intent::Remind, "fr", "rappelle-moi la semaine prochaine de renouveler l'assurance"),
-    (Intent::Remind, "fr", "ne pas oublier d'envoyer la facture vendredi"),
-    (Intent::Remind, "fr", "je dois refaire mon passeport avant la fin du mois"),
-    (Intent::Journal, "fr", "aujourd'hui j'ai enfin terminé le rapport"),
-    (Intent::Journal, "fr", "longue journée, rien d'avancé, mais la promenade m'a fait du bien"),
-    (Intent::Journal, "fr", "encore mal dormi, tout l'après-midi est passé à côté"),
-    (Intent::Journal, "fr", "soirée tranquille, j'ai enfin cuisiné correctement"),
+    (
+        Intent::Remind,
+        "fr",
+        "rappelle-moi d'appeler la banque lundi",
+    ),
+    (
+        Intent::Remind,
+        "fr",
+        "rappelle-moi la semaine prochaine de renouveler l'assurance",
+    ),
+    (
+        Intent::Remind,
+        "fr",
+        "ne pas oublier d'envoyer la facture vendredi",
+    ),
+    (
+        Intent::Remind,
+        "fr",
+        "je dois refaire mon passeport avant la fin du mois",
+    ),
+    (
+        Intent::Journal,
+        "fr",
+        "aujourd'hui j'ai enfin terminé le rapport",
+    ),
+    (
+        Intent::Journal,
+        "fr",
+        "longue journée, rien d'avancé, mais la promenade m'a fait du bien",
+    ),
+    (
+        Intent::Journal,
+        "fr",
+        "encore mal dormi, tout l'après-midi est passé à côté",
+    ),
+    (
+        Intent::Journal,
+        "fr",
+        "soirée tranquille, j'ai enfin cuisiné correctement",
+    ),
     // ── es ──
-    (Intent::Remind, "es", "recuérdame pagar el alquiler el día uno"),
-    (Intent::Remind, "es", "recuérdame la semana que viene llamar al banco"),
-    (Intent::Remind, "es", "no olvidar enviar la factura el viernes"),
-    (Intent::Remind, "es", "tengo que renovar el pasaporte antes de fin de mes"),
+    (
+        Intent::Remind,
+        "es",
+        "recuérdame pagar el alquiler el día uno",
+    ),
+    (
+        Intent::Remind,
+        "es",
+        "recuérdame la semana que viene llamar al banco",
+    ),
+    (
+        Intent::Remind,
+        "es",
+        "no olvidar enviar la factura el viernes",
+    ),
+    (
+        Intent::Remind,
+        "es",
+        "tengo que renovar el pasaporte antes de fin de mes",
+    ),
     (Intent::Journal, "es", "hoy fue un día tranquilo, leí mucho"),
-    (Intent::Journal, "es", "día largo, no avancé nada, pero el paseo ayudó"),
-    (Intent::Journal, "es", "otra vez dormí mal, se me fue la tarde entera"),
-    (Intent::Journal, "es", "por fin cociné bien esta noche y me sentó bien"),
+    (
+        Intent::Journal,
+        "es",
+        "día largo, no avancé nada, pero el paseo ayudó",
+    ),
+    (
+        Intent::Journal,
+        "es",
+        "otra vez dormí mal, se me fue la tarde entera",
+    ),
+    (
+        Intent::Journal,
+        "es",
+        "por fin cociné bien esta noche y me sentó bien",
+    ),
     // ── pt ──
-    (Intent::Remind, "pt", "lembre-me de renovar o passaporte em setembro"),
-    (Intent::Remind, "pt", "lembre-me na próxima semana de ligar para o banco"),
-    (Intent::Remind, "pt", "não esquecer de enviar a fatura na sexta"),
-    (Intent::Remind, "pt", "preciso pagar o aluguel até o dia primeiro"),
+    (
+        Intent::Remind,
+        "pt",
+        "lembre-me de renovar o passaporte em setembro",
+    ),
+    (
+        Intent::Remind,
+        "pt",
+        "lembre-me na próxima semana de ligar para o banco",
+    ),
+    (
+        Intent::Remind,
+        "pt",
+        "não esquecer de enviar a fatura na sexta",
+    ),
+    (
+        Intent::Remind,
+        "pt",
+        "preciso pagar o aluguel até o dia primeiro",
+    ),
     (Intent::Journal, "pt", "hoje acordei cedo e fui correr"),
-    (Intent::Journal, "pt", "dia longo, não rendi nada, mas a caminhada ajudou"),
-    (Intent::Journal, "pt", "dormi mal de novo, perdi a tarde inteira"),
-    (Intent::Journal, "pt", "noite tranquila, cozinhei direito pela primeira vez em semanas"),
+    (
+        Intent::Journal,
+        "pt",
+        "dia longo, não rendi nada, mas a caminhada ajudou",
+    ),
+    (
+        Intent::Journal,
+        "pt",
+        "dormi mal de novo, perdi a tarde inteira",
+    ),
+    (
+        Intent::Journal,
+        "pt",
+        "noite tranquila, cozinhei direito pela primeira vez em semanas",
+    ),
     // ── it ──
-    (Intent::Remind, "it", "ricordami di comprare i biglietti domani"),
-    (Intent::Remind, "it", "ricordami la settimana prossima di chiamare la banca"),
-    (Intent::Remind, "it", "non dimenticare di mandare la fattura venerdì"),
-    (Intent::Remind, "it", "devo rinnovare il passaporto entro fine mese"),
+    (
+        Intent::Remind,
+        "it",
+        "ricordami di comprare i biglietti domani",
+    ),
+    (
+        Intent::Remind,
+        "it",
+        "ricordami la settimana prossima di chiamare la banca",
+    ),
+    (
+        Intent::Remind,
+        "it",
+        "non dimenticare di mandare la fattura venerdì",
+    ),
+    (
+        Intent::Remind,
+        "it",
+        "devo rinnovare il passaporto entro fine mese",
+    ),
     (Intent::Journal, "it", "oggi è stata una giornata pesante"),
-    (Intent::Journal, "it", "giornata lunga, non ho concluso niente, ma la passeggiata è servita"),
-    (Intent::Journal, "it", "ho dormito male di nuovo, pomeriggio buttato"),
-    (Intent::Journal, "it", "serata tranquilla, finalmente ho cucinato come si deve"),
+    (
+        Intent::Journal,
+        "it",
+        "giornata lunga, non ho concluso niente, ma la passeggiata è servita",
+    ),
+    (
+        Intent::Journal,
+        "it",
+        "ho dormito male di nuovo, pomeriggio buttato",
+    ),
+    (
+        Intent::Journal,
+        "it",
+        "serata tranquilla, finalmente ho cucinato come si deve",
+    ),
     // ── nl ──
-    (Intent::Remind, "nl", "herinner me eraan om de huur te betalen"),
-    (Intent::Remind, "nl", "herinner me volgende week aan het gesprek met de bank"),
-    (Intent::Remind, "nl", "niet vergeten om vrijdag de factuur te versturen"),
-    (Intent::Remind, "nl", "ik moet mijn paspoort verlengen voor het eind van de maand"),
+    (
+        Intent::Remind,
+        "nl",
+        "herinner me eraan om de huur te betalen",
+    ),
+    (
+        Intent::Remind,
+        "nl",
+        "herinner me volgende week aan het gesprek met de bank",
+    ),
+    (
+        Intent::Remind,
+        "nl",
+        "niet vergeten om vrijdag de factuur te versturen",
+    ),
+    (
+        Intent::Remind,
+        "nl",
+        "ik moet mijn paspoort verlengen voor het eind van de maand",
+    ),
     (Intent::Journal, "nl", "vandaag eindelijk de tuin gedaan"),
-    (Intent::Journal, "nl", "lange dag, niets afgekregen, maar die wandeling hielp"),
-    (Intent::Journal, "nl", "weer slecht geslapen, de hele middag was verloren"),
-    (Intent::Journal, "nl", "rustige avond, eindelijk weer eens goed gekookt"),
+    (
+        Intent::Journal,
+        "nl",
+        "lange dag, niets afgekregen, maar die wandeling hielp",
+    ),
+    (
+        Intent::Journal,
+        "nl",
+        "weer slecht geslapen, de hele middag was verloren",
+    ),
+    (
+        Intent::Journal,
+        "nl",
+        "rustige avond, eindelijk weer eens goed gekookt",
+    ),
     // ── pl ──
-    (Intent::Remind, "pl", "przypomnij mi jutro o spotkaniu z lekarzem"),
-    (Intent::Remind, "pl", "przypomnij mi w przyszłym tygodniu zadzwonić do banku"),
-    (Intent::Remind, "pl", "nie zapomnieć wysłać faktury w piątek"),
-    (Intent::Remind, "pl", "muszę wyrobić paszport do końca miesiąca"),
-    (Intent::Journal, "pl", "dzisiaj byłem u dentysty, poszło dobrze"),
-    (Intent::Journal, "pl", "długi dzień, nic nie zrobiłem, ale spacer pomógł"),
-    (Intent::Journal, "pl", "znowu źle spałem, całe popołudnie zmarnowane"),
-    (Intent::Journal, "pl", "spokojny wieczór, w końcu porządnie ugotowałem"),
+    (
+        Intent::Remind,
+        "pl",
+        "przypomnij mi jutro o spotkaniu z lekarzem",
+    ),
+    (
+        Intent::Remind,
+        "pl",
+        "przypomnij mi w przyszłym tygodniu zadzwonić do banku",
+    ),
+    (
+        Intent::Remind,
+        "pl",
+        "nie zapomnieć wysłać faktury w piątek",
+    ),
+    (
+        Intent::Remind,
+        "pl",
+        "muszę wyrobić paszport do końca miesiąca",
+    ),
+    (
+        Intent::Journal,
+        "pl",
+        "dzisiaj byłem u dentysty, poszło dobrze",
+    ),
+    (
+        Intent::Journal,
+        "pl",
+        "długi dzień, nic nie zrobiłem, ale spacer pomógł",
+    ),
+    (
+        Intent::Journal,
+        "pl",
+        "znowu źle spałem, całe popołudnie zmarnowane",
+    ),
+    (
+        Intent::Journal,
+        "pl",
+        "spokojny wieczór, w końcu porządnie ugotowałem",
+    ),
     // ── tr ──
     (Intent::Remind, "tr", "yarın bana faturayı ödemeyi hatırlat"),
-    (Intent::Remind, "tr", "gelecek hafta bankayı aramayı hatırlat"),
+    (
+        Intent::Remind,
+        "tr",
+        "gelecek hafta bankayı aramayı hatırlat",
+    ),
     (Intent::Remind, "tr", "cuma günü faturayı göndermeyi unutma"),
-    (Intent::Remind, "tr", "ay sonuna kadar pasaportu yenilemem lazım"),
+    (
+        Intent::Remind,
+        "tr",
+        "ay sonuna kadar pasaportu yenilemem lazım",
+    ),
     (Intent::Journal, "tr", "bugün çok yorucu bir gündü"),
-    (Intent::Journal, "tr", "uzun bir gündü, hiçbir şey ilerlemedi ama yürüyüş iyi geldi"),
-    (Intent::Journal, "tr", "yine kötü uyudum, bütün öğleden sonra boşa gitti"),
-    (Intent::Journal, "tr", "sakin bir akşam, uzun zamandır ilk kez doğru düzgün yemek yaptım"),
+    (
+        Intent::Journal,
+        "tr",
+        "uzun bir gündü, hiçbir şey ilerlemedi ama yürüyüş iyi geldi",
+    ),
+    (
+        Intent::Journal,
+        "tr",
+        "yine kötü uyudum, bütün öğleden sonra boşa gitti",
+    ),
+    (
+        Intent::Journal,
+        "tr",
+        "sakin bir akşam, uzun zamandır ilk kez doğru düzgün yemek yaptım",
+    ),
     // ── ru ──
     (Intent::Remind, "ru", "напомни мне завтра позвонить маме"),
-    (Intent::Remind, "ru", "напомни мне на следующей неделе про страховку"),
+    (
+        Intent::Remind,
+        "ru",
+        "напомни мне на следующей неделе про страховку",
+    ),
     (Intent::Remind, "ru", "не забыть отправить счёт в пятницу"),
-    (Intent::Remind, "ru", "нужно продлить паспорт до конца месяца"),
+    (
+        Intent::Remind,
+        "ru",
+        "нужно продлить паспорт до конца месяца",
+    ),
     (Intent::Journal, "ru", "сегодня наконец закончил проект"),
-    (Intent::Journal, "ru", "длинный день, ничего не сделал, но прогулка помогла"),
-    (Intent::Journal, "ru", "опять плохо спал, весь день насмарку"),
-    (Intent::Journal, "ru", "тихий вечер, наконец нормально приготовил ужин"),
+    (
+        Intent::Journal,
+        "ru",
+        "длинный день, ничего не сделал, но прогулка помогла",
+    ),
+    (
+        Intent::Journal,
+        "ru",
+        "опять плохо спал, весь день насмарку",
+    ),
+    (
+        Intent::Journal,
+        "ru",
+        "тихий вечер, наконец нормально приготовил ужин",
+    ),
 ];
 
 /// One reminder and one journal example, in the reader's language where the
@@ -145,7 +425,10 @@ pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
         .to_ascii_lowercase();
     let pick = |intent: Intent| -> &'static str {
         let of = |lang: &str| {
-            PROTOTYPES.iter().find(|(i, l, _)| *i == intent && *l == lang).map(|(_, _, p)| *p)
+            PROTOTYPES
+                .iter()
+                .find(|(i, l, _)| *i == intent && *l == lang)
+                .map(|(_, _, p)| *p)
         };
         of(&want).or_else(|| of("en")).unwrap_or("")
     };
@@ -174,8 +457,10 @@ pub fn refuse_intent(meta: &mut serde_json::Value, intent: Intent) {
     if intent_refused(meta, intent) {
         return;
     }
-    let mut all: Vec<serde_json::Value> =
-        meta["intent_refused"].as_array().cloned().unwrap_or_default();
+    let mut all: Vec<serde_json::Value> = meta["intent_refused"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     all.push(serde_json::Value::String(intent.as_str().to_string()));
     meta["intent_refused"] = serde_json::Value::Array(all);
 }
@@ -184,8 +469,11 @@ pub fn refuse_intent(meta: &mut serde_json::Value, intent: Intent) {
 /// the operator saying the note may be read again.
 pub fn allow_intent(meta: &mut serde_json::Value, intent: Intent) {
     if let Some(a) = meta["intent_refused"].as_array() {
-        let kept: Vec<serde_json::Value> =
-            a.iter().filter(|v| v.as_str() != Some(intent.as_str())).cloned().collect();
+        let kept: Vec<serde_json::Value> = a
+            .iter()
+            .filter(|v| v.as_str() != Some(intent.as_str()))
+            .cloned()
+            .collect();
         if kept.is_empty() {
             if let Some(m) = meta.as_object_mut() {
                 m.remove("intent_refused");
@@ -194,7 +482,9 @@ pub fn allow_intent(meta: &mut serde_json::Value, intent: Intent) {
             meta["intent_refused"] = serde_json::Value::Array(kept);
         }
     }
-    if intent == Intent::Journal && let Some(m) = meta.as_object_mut() {
+    if intent == Intent::Journal
+        && let Some(m) = meta.as_object_mut()
+    {
         m.remove("entry_refused");
     }
 }
@@ -214,10 +504,15 @@ pub fn zone(name: Option<&str>) -> Tz {
 /// of every capture that arrives without a zone, and asking the host on each
 /// one is a syscall and a file read for an answer that does not change.
 static SERVER_ZONE: LazyLock<String> = LazyLock::new(|| {
-    match iana_time_zone::get_timezone().ok().filter(|n| n.parse::<Tz>().is_ok()) {
+    match iana_time_zone::get_timezone()
+        .ok()
+        .filter(|n| n.parse::<Tz>().is_ok())
+    {
         Some(n) => n,
         None => {
-            tracing::info!("the platform cannot name its zone; dates from doors that send none are read in UTC");
+            tracing::info!(
+                "the platform cannot name its zone; dates from doors that send none are read in UTC"
+            );
             Tz::UTC.name().to_string()
         }
     }
@@ -261,11 +556,19 @@ enum Freq {
 }
 
 fn parse_rule(rule: &str) -> Result<Rule, String> {
-    let mut r =
-        Rule { freq: Freq::Daily, interval: 1, by_day: vec![], by_month_day: None, until: None, count: None };
+    let mut r = Rule {
+        freq: Freq::Daily,
+        interval: 1,
+        by_day: vec![],
+        by_month_day: None,
+        until: None,
+        count: None,
+    };
     let mut has_freq = false;
     for part in rule.split(';').filter(|p| !p.is_empty()) {
-        let (k, v) = part.split_once('=').ok_or_else(|| format!("not key=value: {part}"))?;
+        let (k, v) = part
+            .split_once('=')
+            .ok_or_else(|| format!("not key=value: {part}"))?;
         match k {
             "FREQ" => {
                 r.freq = match v {
@@ -294,24 +597,36 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                         "FR" => Weekday::Fri,
                         "SA" => Weekday::Sat,
                         "SU" => Weekday::Sun,
-                        other => return Err(format!("BYDAY={other}: weekday codes only, no ordinals")),
+                        other => {
+                            return Err(format!("BYDAY={other}: weekday codes only, no ordinals"));
+                        }
                     });
                 }
             }
             "BYMONTHDAY" => {
-                r.by_month_day =
-                    Some(v.parse::<u32>().ok().filter(|n| (1..=31).contains(n)).ok_or("BYMONTHDAY out of range")?)
+                r.by_month_day = Some(
+                    v.parse::<u32>()
+                        .ok()
+                        .filter(|n| (1..=31).contains(n))
+                        .ok_or("BYMONTHDAY out of range")?,
+                )
             }
             "UNTIL" => {
                 let dt = chrono::NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%SZ")
                     .or_else(|_| {
-                        NaiveDate::parse_from_str(v, "%Y%m%d").map(|d| d.and_hms_opt(23, 59, 59).unwrap())
+                        NaiveDate::parse_from_str(v, "%Y%m%d")
+                            .map(|d| d.and_hms_opt(23, 59, 59).unwrap())
                     })
                     .map_err(|_| format!("UNTIL={v} is not a date"))?;
                 r.until = Some(dt.and_utc().timestamp());
             }
             "COUNT" => {
-                r.count = Some(v.parse::<u32>().ok().filter(|n| *n >= 1).ok_or("COUNT must be a positive integer")?);
+                r.count = Some(
+                    v.parse::<u32>()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .ok_or("COUNT must be a positive integer")?,
+                );
             }
             other => return Err(format!("{other} is outside the subset")),
         }
@@ -346,7 +661,10 @@ pub(crate) fn resolve_local(dt: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
     // Gaps are 30 or 60 minutes almost everywhere (Lord Howe's is 30); three
     // hours of quarter-hour steps covers the historical 2 h ones too.
     (1..=12)
-        .find_map(|q| tz.from_local_datetime(&(dt + chrono::Duration::minutes(15 * q))).earliest())
+        .find_map(|q| {
+            tz.from_local_datetime(&(dt + chrono::Duration::minutes(15 * q)))
+                .earliest()
+        })
         .map(|d| d.timestamp())
 }
 
@@ -380,7 +698,8 @@ pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
             }
             Freq::Monthly => {
                 let dom = r.by_month_day.unwrap_or(origin.day());
-                let months = (date.year() - origin.year()) * 12 + (date.month() as i32 - origin.month() as i32);
+                let months = (date.year() - origin.year()) * 12
+                    + (date.month() as i32 - origin.month() as i32);
                 date.day() == dom && months % r.interval as i32 == 0
             }
             Freq::Yearly => {
@@ -466,14 +785,18 @@ impl crate::core::Core {
     ///
     /// The successor is deleted rather than marked: it never happened.
     pub async fn uncomplete_moment(&self, id: &str) -> crate::error::Result<()> {
-        let Some(m) = self.store.moment(id).await? else { return Ok(()) };
+        let Some(m) = self.store.moment(id).await? else {
+            return Ok(());
+        };
         // Before the row is reopened: while it is still done, it is the row
         // whose completion armed the successor, and `next_after` from its own
         // `at` is the instant that successor was given.
         if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
             && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
         {
-            self.store.delete_armed_occurrence(&m.artifact_id, rule, next).await?;
+            self.store
+                .delete_armed_occurrence(&m.artifact_id, rule, next)
+                .await?;
         }
         self.store.undo_done(id).await?;
         // The row comes back, so the note comes back with it. Unconditional: a
@@ -494,16 +817,32 @@ mod tests {
     async fn a_counted_recurrence_stops_at_its_count() {
         use crate::store::moments::{Kind, NewMoment, Source};
         let core = crate::core::test_support::test_core().await;
-        let out = core.ingest_capture(crate::core::ingest::Capture::new("Water the plants", "ui")).await.unwrap();
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Water the plants", "ui"))
+            .await
+            .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        let aid = core.store.artifacts_for_corpus(&out.id).await.unwrap().into_iter().find(|c| c.in_results()).expect("a live artifact").id;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
         let rule = "FREQ=DAILY;COUNT=2";
         let first = core
             .store
             .insert_moment(&NewMoment {
                 artifact_id: aid.clone(),
                 kind: Kind::Due,
-                at: Some(berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp()),
+                at: Some(
+                    berlin()
+                        .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+                        .unwrap()
+                        .timestamp(),
+                ),
                 tz: "Europe/Berlin".into(),
                 rule: Some(rule.into()),
                 source: Source::Cue,
@@ -513,11 +852,19 @@ mod tests {
             .unwrap();
 
         core.complete_moment(&first).await.unwrap();
-        assert_eq!(core.store.occurrences_of_rule(&aid, rule).await.unwrap(), 2, "the second occurrence is armed");
+        assert_eq!(
+            core.store.occurrences_of_rule(&aid, rule).await.unwrap(),
+            2,
+            "the second occurrence is armed"
+        );
         let second = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(second.len(), 1);
         core.complete_moment(&second[0].moment.id).await.unwrap();
-        assert_eq!(core.store.occurrences_of_rule(&aid, rule).await.unwrap(), 2, "two of two, and no third");
+        assert_eq!(
+            core.store.occurrences_of_rule(&aid, rule).await.unwrap(),
+            2,
+            "two of two, and no third"
+        );
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
     }
 
@@ -528,11 +875,17 @@ mod tests {
         assert!(journal.starts_with("heute"), "{journal}");
 
         let (remind, journal) = examples_for("");
-        assert!(remind.starts_with("remind me"), "English is the fallback: {remind}");
+        assert!(
+            remind.starts_with("remind me"),
+            "English is the fallback: {remind}"
+        );
         assert!(journal.starts_with("today i"), "{journal}");
 
         let (remind, _) = examples_for("xx-YY");
-        assert!(remind.starts_with("remind me"), "an unknown language falls back too");
+        assert!(
+            remind.starts_with("remind me"),
+            "an unknown language falls back too"
+        );
     }
 
     /// The table is read by index and by language, so its shape is a contract
@@ -543,10 +896,16 @@ mod tests {
     fn every_language_carries_both_intents_and_no_sentence_twice() {
         let langs: std::collections::BTreeSet<&str> =
             PROTOTYPES.iter().map(|(_, l, _)| *l).collect();
-        assert!(langs.contains("en"), "English is the fallback and must exist");
+        assert!(
+            langs.contains("en"),
+            "English is the fallback and must exist"
+        );
         for l in &langs {
             for intent in [Intent::Remind, Intent::Journal] {
-                let n = PROTOTYPES.iter().filter(|(i, x, _)| i == &intent && x == l).count();
+                let n = PROTOTYPES
+                    .iter()
+                    .filter(|(i, x, _)| i == &intent && x == l)
+                    .count();
                 assert!(n >= 2, "{l} has {n} {} prototypes", intent.as_str());
             }
             let (r, j) = examples_for(l);
@@ -564,16 +923,29 @@ mod tests {
         assert!(!intent_refused(&meta, Intent::Remind));
         refuse_intent(&mut meta, Intent::Remind);
         refuse_intent(&mut meta, Intent::Remind);
-        assert_eq!(meta["intent_refused"], serde_json::json!(["remind"]), "idempotent");
+        assert_eq!(
+            meta["intent_refused"],
+            serde_json::json!(["remind"]),
+            "idempotent"
+        );
         assert!(intent_refused(&meta, Intent::Remind));
-        assert!(!intent_refused(&meta, Intent::Journal), "one refusal is not the other");
+        assert!(
+            !intent_refused(&meta, Intent::Journal),
+            "one refusal is not the other"
+        );
 
         refuse_intent(&mut meta, Intent::Journal);
         allow_intent(&mut meta, Intent::Remind);
         assert!(!intent_refused(&meta, Intent::Remind));
-        assert!(intent_refused(&meta, Intent::Journal), "and the other one stands");
+        assert!(
+            intent_refused(&meta, Intent::Journal),
+            "and the other one stands"
+        );
         allow_intent(&mut meta, Intent::Journal);
-        assert!(meta.get("intent_refused").is_none(), "the last one takes the key with it");
+        assert!(
+            meta.get("intent_refused").is_none(),
+            "the last one takes the key with it"
+        );
 
         // A base written before this keeps its refusals, and withdrawing one
         // clears the old key too — otherwise the undo would appear to work
@@ -589,7 +961,11 @@ mod tests {
         chrono_tz::Tz::Europe__Berlin
     }
     fn local(at: i64) -> String {
-        berlin().timestamp_opt(at, 0).unwrap().format("%Y-%m-%d %H:%M").to_string()
+        berlin()
+            .timestamp_opt(at, 0)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
     }
 
     #[test]
@@ -617,43 +993,78 @@ mod tests {
         ] {
             assert!(validate_rule(bad).is_err(), "{bad}");
         }
-        assert_eq!(rule_count("FREQ=DAILY;COUNT=5"), Some(5), "COUNT is kept, not discarded");
+        assert_eq!(
+            rule_count("FREQ=DAILY;COUNT=5"),
+            Some(5),
+            "COUNT is kept, not discarded"
+        );
         assert_eq!(rule_count("FREQ=DAILY"), None);
     }
 
     #[test]
     fn weekly_keeps_the_wall_clock_across_dst() {
         // Monday 2026-10-19 09:00 CEST → Monday 2026-10-26 09:00 CET (DST ends 25 Oct).
-        let at = berlin().with_ymd_and_hms(2026, 10, 19, 9, 0, 0).unwrap().timestamp();
+        let at = berlin()
+            .with_ymd_and_hms(2026, 10, 19, 9, 0, 0)
+            .unwrap()
+            .timestamp();
         let next = next_after("FREQ=WEEKLY;BYDAY=MO", at, berlin()).unwrap();
         assert_eq!(local(next), "2026-10-26 09:00");
-        assert_eq!(next - at, 7 * 86_400 + 3_600, "one week and the hour DST gave back");
+        assert_eq!(
+            next - at,
+            7 * 86_400 + 3_600,
+            "one week and the hour DST gave back"
+        );
     }
 
     #[test]
     fn byday_picks_the_next_listed_day() {
-        let mon = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
-        assert_eq!(local(next_after("FREQ=WEEKLY;BYDAY=MO,WE", mon, berlin()).unwrap()), "2026-09-02 09:00");
+        let mon = berlin()
+            .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            local(next_after("FREQ=WEEKLY;BYDAY=MO,WE", mon, berlin()).unwrap()),
+            "2026-09-02 09:00"
+        );
     }
 
     #[test]
     fn monthly_on_the_31st_skips_short_months() {
-        let at = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
-        assert_eq!(local(next_after("FREQ=MONTHLY;BYMONTHDAY=31", at, berlin()).unwrap()), "2026-10-31 09:00");
+        let at = berlin()
+            .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            local(next_after("FREQ=MONTHLY;BYMONTHDAY=31", at, berlin()).unwrap()),
+            "2026-10-31 09:00"
+        );
     }
 
     #[test]
     fn until_ends_the_rule() {
-        let at = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
+        let at = berlin()
+            .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+            .unwrap()
+            .timestamp();
         assert!(next_after("FREQ=DAILY;UNTIL=20260831T235959Z", at, berlin()).is_none());
         assert!(next_after("FREQ=DAILY;UNTIL=20260901T235959Z", at, berlin()).is_some());
     }
 
     #[test]
     fn interval_and_yearly() {
-        let at = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
-        assert_eq!(local(next_after("FREQ=DAILY;INTERVAL=3", at, berlin()).unwrap()), "2026-09-03 09:00");
-        assert_eq!(local(next_after("FREQ=YEARLY", at, berlin()).unwrap()), "2027-08-31 09:00");
+        let at = berlin()
+            .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            local(next_after("FREQ=DAILY;INTERVAL=3", at, berlin()).unwrap()),
+            "2026-09-03 09:00"
+        );
+        assert_eq!(
+            local(next_after("FREQ=YEARLY", at, berlin()).unwrap()),
+            "2027-08-31 09:00"
+        );
     }
 
     #[test]
@@ -663,7 +1074,10 @@ mod tests {
         // fires the one after. Counted in 7-day blocks from the origin it
         // fired at +5 days.
         let wed = resolve_local(
-            chrono::NaiveDate::from_ymd_opt(2026, 9, 2).unwrap().and_hms_opt(9, 0, 0).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 2)
+                .unwrap()
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
             berlin(),
         )
         .unwrap();
@@ -676,7 +1090,10 @@ mod tests {
         // 02:30 on 2027-03-28 does not exist in Berlin. chrono maps it to
         // `None` — there is no `earliest()` to take — and the date was
         // silently dropped where the operator had named one.
-        let dt = chrono::NaiveDate::from_ymd_opt(2027, 3, 28).unwrap().and_hms_opt(2, 30, 0).unwrap();
+        let dt = chrono::NaiveDate::from_ymd_opt(2027, 3, 28)
+            .unwrap()
+            .and_hms_opt(2, 30, 0)
+            .unwrap();
         let ts = resolve_local(dt, berlin()).unwrap();
         assert_eq!(local(ts), "2027-03-28 03:00");
     }

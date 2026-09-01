@@ -2796,7 +2796,11 @@ mod tests {
         assert_eq!(j.events, vec!["2026-09-12T00:00"]);
         assert_eq!(j.links[0].artifact_id, "a-1");
         assert!(r.artifacts[0].pinned);
-        assert_eq!(r.artifacts[0].tags, vec!["billing"], "trimmed and lowercased");
+        assert_eq!(
+            r.artifacts[0].tags,
+            vec!["billing"],
+            "trimmed and lowercased"
+        );
     }
 
     #[test]
@@ -2836,7 +2840,9 @@ mod tests {
         assert!(!allowed.is_empty());
         for v in allowed {
             let reply = serde_json::json!({"verdict": v, "reason": "why"}).to_string();
-            parse_reap(&reply).unwrap_or_else(|e| panic!("the schema permits {v}, which the parser refuses: {e}"));
+            parse_reap(&reply).unwrap_or_else(|e| {
+                panic!("the schema permits {v}, which the parser refuses: {e}")
+            });
         }
     }
 
@@ -2844,11 +2850,16 @@ mod tests {
     fn parse_reap_reads_both_verdicts_and_refuses_the_rest() {
         assert_eq!(
             parse_reap(r#"{"verdict":"worthless","reason":"covered by [1]"}"#).unwrap(),
-            Reap::Worthless { reason: "covered by [1]".into() }
+            Reap::Worthless {
+                reason: "covered by [1]".into()
+            }
         );
         assert_eq!(
-            parse_reap("```json\n{\"verdict\":\"valuable\",\"reason\":\"names a port\"}\n```").unwrap(),
-            Reap::Valuable { reason: "names a port".into() }
+            parse_reap("```json\n{\"verdict\":\"valuable\",\"reason\":\"names a port\"}\n```")
+                .unwrap(),
+            Reap::Valuable {
+                reason: "names a port".into()
+            }
         );
         assert!(parse_reap(r#"{"verdict":"maybe","reason":""}"#).is_err());
         assert!(parse_reap("no json here").is_err());
@@ -2866,7 +2877,11 @@ mod tests {
         assert!(p.contains("RETIRED ARTIFACT") && p.contains("--legacy-peer-deps"));
         assert!(p.contains("NAMED REPLACEMENT") && p.contains("--install-strategy"));
         assert!(p.contains("[1] Title: N1") && p.contains("[2] Title: N2"));
-        let no_successor = ReapCase { successor: None, neighbours: vec![], ..case };
+        let no_successor = ReapCase {
+            successor: None,
+            neighbours: vec![],
+            ..case
+        };
         assert!(!reap_prompt(&no_successor).contains("NAMED REPLACEMENT"));
     }
 }

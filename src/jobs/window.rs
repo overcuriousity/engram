@@ -251,15 +251,15 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // artifacts are already the capture.
     if let Some(j) = judgement
         && let Some(anchor) = written.iter().find(|c| c.in_results())
-            && let Err(e) =
-                crate::jobs::judgement::apply(core, corpus_id, &anchor.id, &j, &shown_ids).await
-            {
-                tracing::warn!(
-                    corpus_id,
-                    error = %e,
-                    "the judgement could not be applied; the artifacts stand"
-                );
-            }
+        && let Err(e) =
+            crate::jobs::judgement::apply(core, corpus_id, &anchor.id, &j, &shown_ids).await
+    {
+        tracing::warn!(
+            corpus_id,
+            error = %e,
+            "the judgement could not be applied; the artifacts stand"
+        );
+    }
     core.store
         .set_segment_state(corpus_id, idx, SegmentState::Done, None)
         .await?;
@@ -377,11 +377,7 @@ async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
 /// The base's nearest artifacts to this capture, shown to the judged call so
 /// it can resolve references and name relations. Best-effort throughout: any
 /// failure is "no neighbors", never a failed window.
-async fn neighbor_context(
-    core: &Core,
-    corpus_id: &str,
-    idx: i64,
-) -> Vec<crate::infer::Neighbor> {
+async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::infer::Neighbor> {
     let budget = core.synthesizer.budget().context.neighbors;
     if budget == 0 {
         return Vec::new();
@@ -398,10 +394,18 @@ async fn neighbor_context(
     // The seed passage may not be embedded yet — the window unit and the
     // corpus embed job race at capture. Embedding it here is idempotent and
     // cheap next to the model call this context is for.
-    let mut hits = core.vectors.neighbours(&seed.id, 8).await.unwrap_or_default();
+    let mut hits = core
+        .vectors
+        .neighbours(&seed.id, 8)
+        .await
+        .unwrap_or_default();
     if hits.is_empty() {
         let _ = crate::jobs::embed::run(core, &seed.id).await;
-        hits = core.vectors.neighbours(&seed.id, 8).await.unwrap_or_default();
+        hits = core
+            .vectors
+            .neighbours(&seed.id, 8)
+            .await
+            .unwrap_or_default();
     }
     let per = (budget / 5).max(64);
     let mut out = Vec::new();
@@ -876,11 +880,7 @@ mod tests {
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
         run(&core, &unit_target(&out.id, 0)).await.unwrap();
 
-        let rows = core
-            .store
-            .artifacts_for_segment(&out.id, 0)
-            .await
-            .unwrap();
+        let rows = core.store.artifacts_for_segment(&out.id, 0).await.unwrap();
         let written: Vec<String> = rows
             .iter()
             .filter(|c| c.provenance != crate::store::artifacts::Provenance::Passage)
@@ -915,9 +915,8 @@ mod tests {
         let mut core = test_core().await;
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        core.synthesizer = std::sync::Arc::new(
-            crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"),
-        );
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"));
 
         let err = run(&core, &unit_target(&out.id, 0)).await.unwrap_err();
         assert!(err.retryable(), "the window is still owed a call");

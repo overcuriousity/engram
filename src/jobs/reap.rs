@@ -301,7 +301,12 @@ async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u
     }
     let ids: Vec<String> = cands.iter().map(|c| c.id.clone()).collect();
     let payloads = core.vectors.payloads_of(&ids).await?;
-    cands.retain(|c| goes_before_the_judge(c.retired_at, payloads.get(&c.id).and_then(|p| p.last_seen_at)));
+    cands.retain(|c| {
+        goes_before_the_judge(
+            c.retired_at,
+            payloads.get(&c.id).and_then(|p| p.last_seen_at),
+        )
+    });
     // The cap is the sweep's, not the query's: what is over it is still oldest
     // -first and comes back on the next run.
     cands.truncate(want.max(0) as usize);
@@ -357,7 +362,9 @@ async fn judge_one(
     };
     let user = crate::infer::prompt::reap_prompt(&case);
     let permit = core.gate.background().await;
-    let reply = judge.complete(crate::infer::prompt::REAP_SYSTEM, &user).await;
+    let reply = judge
+        .complete(crate::infer::prompt::REAP_SYSTEM, &user)
+        .await;
     permit.finished();
     crate::infer::prompt::parse_reap(&reply?)
 }
@@ -389,7 +396,11 @@ mod tests {
     /// themselves: `insert_corpus` deduplicates on content, so two seeds with a
     /// fixed string would be one note and not two.
     async fn seed(core: &Core, texts: &[&str]) -> Vec<String> {
-        let src = core.store.insert_corpus(&texts.join(" | "), "web", None).await.unwrap();
+        let src = core
+            .store
+            .insert_corpus(&texts.join(" | "), "web", None)
+            .await
+            .unwrap();
         let rows: Vec<NewArtifact> = texts
             .iter()
             .enumerate()
@@ -433,7 +444,11 @@ mod tests {
     #[tokio::test]
     async fn an_active_young_seen_or_reminded_artifact_is_never_nominated() {
         let core = test_core().await;
-        let ids = seed(&core, &["active", "young", "seen", "unreachable-reminder", "clean"]).await;
+        let ids = seed(
+            &core,
+            &["active", "young", "seen", "unreachable-reminder", "clean"],
+        )
+        .await;
         // ids[0] stays active.
         core.store
             .set_artifact_status(&ids[1], ArtifactStatus::Deprecated)
@@ -442,10 +457,7 @@ mod tests {
         deprecate_long_ago(&core, &ids[2]).await;
         crate::jobs::embed::run(&core, &ids[2]).await.unwrap();
         core.vectors
-            .touch(
-                &[crate::vector::Touch::shown(&ids[2])],
-                crate::store::now(),
-            )
+            .touch(&[crate::vector::Touch::shown(&ids[2])], crate::store::now())
             .await
             .unwrap(); // seen after retirement
         // Retired, with a reminder of its own. Nobody can reach that reminder —
@@ -466,7 +478,10 @@ mod tests {
         got.sort_unstable();
         let mut want = vec![ids[3].as_str(), ids[4].as_str()];
         want.sort_unstable();
-        assert_eq!(got, want, "the old unseen retirements, the live reminder's note aside");
+        assert_eq!(
+            got, want,
+            "the old unseen retirements, the live reminder's note aside"
+        );
     }
 
     /// A due moment nobody has completed, on this artifact.
@@ -656,8 +671,7 @@ mod tests {
         assert_eq!(stub.superseded_by.as_deref(), Some(ids[1].as_str()));
     }
 
-    const RESCUE_REPLY: &str =
-        r#"{"artifact":{"title":"Kept fact","text":"the port is 8443","category":null,"tags":[],"caveats":[]}}"#;
+    const RESCUE_REPLY: &str = r#"{"artifact":{"title":"Kept fact","text":"the port is 8443","category":null,"tags":[],"caveats":[]}}"#;
 
     #[tokio::test]
     async fn a_valuable_deprecated_artifact_is_rewritten_and_superseded_by_the_rewrite() {
@@ -679,7 +693,10 @@ mod tests {
         let old = core.store.get_artifact(&ids[0]).await.unwrap();
         let new_id = old.superseded_by.expect("superseded by the rewrite");
         let new = core.store.get_artifact(&new_id).await.unwrap();
-        assert_eq!(new.provenance, crate::store::artifacts::Provenance::Synthesized);
+        assert_eq!(
+            new.provenance,
+            crate::store::artifacts::Provenance::Synthesized
+        );
         assert_eq!(new.text, "the port is 8443");
         assert!(new.in_results(), "the rewrite is live");
         assert!(!old.text.is_empty(), "a rescue wipes nothing");
@@ -748,7 +765,10 @@ mod tests {
         roots.sort();
         let mut want = ids.clone();
         want.sort();
-        assert_eq!(roots, want, "the rewrite's lineage names the captured roots");
+        assert_eq!(
+            roots, want,
+            "the rewrite's lineage names the captured roots"
+        );
     }
 
     #[tokio::test]
@@ -810,7 +830,10 @@ mod tests {
 
         // The rescue restamped the candidate, so it is not a nominee now.
         let (none_yet, _) = nominees(&core).await.unwrap();
-        assert!(none_yet.is_empty(), "a rescued candidate waits out a fresh age");
+        assert!(
+            none_yet.is_empty(),
+            "a rescued candidate waits out a fresh age"
+        );
 
         // An age passes — off the clock the rescue itself set.
         backdate_retired_at(&core, &ids[0], 100 * 86_400).await;

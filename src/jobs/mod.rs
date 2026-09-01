@@ -2,7 +2,6 @@ pub mod associate;
 pub mod consolidate;
 pub mod context;
 pub mod dedupe;
-pub mod reap;
 pub mod describe;
 pub mod embed;
 pub mod extract;
@@ -12,6 +11,7 @@ pub mod merge;
 pub mod passages;
 pub mod promote;
 pub mod pursuit;
+pub mod reap;
 pub mod reconcile;
 pub mod relate;
 pub mod remind;
@@ -773,7 +773,7 @@ mod tests {
         let mut core = test_core().await;
         core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
             "HTTP 400: context length exceeded",
-        )) ;
+        ));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         let delay = |core: &Core| {
@@ -1211,7 +1211,7 @@ mod tests {
         let mut core = test_core().await;
         core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::failing(
             "endpoint down",
-        )) ;
+        ));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         // Each attempt fails and pushes run_after forward; wind it back to

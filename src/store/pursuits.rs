@@ -349,11 +349,13 @@ impl Store {
 
     /// A day's sittings, oldest first — the day page's read.
     pub async fn pursuits_between(&self, from: i64, to: i64) -> Result<Vec<Pursuit>> {
-        let rows = sqlx::query("SELECT * FROM pursuits WHERE opened_at >= ? AND opened_at < ? ORDER BY opened_at")
-            .bind(from)
-            .bind(to)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT * FROM pursuits WHERE opened_at >= ? AND opened_at < ? ORDER BY opened_at",
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.iter().map(row_to_pursuit).collect())
     }
 

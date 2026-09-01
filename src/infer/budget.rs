@@ -50,7 +50,9 @@ impl TokenCounter {
     pub fn load(spec: Option<&str>, cache_dir: &std::path::Path) -> TokenCounter {
         let from_bytes = |b: &[u8], what: &str| {
             tokenizers::Tokenizer::from_bytes(b)
-                .map_err(|e| tracing::warn!(error = %e, what, "tokenizer did not parse; falling back"))
+                .map_err(
+                    |e| tracing::warn!(error = %e, what, "tokenizer did not parse; falling back"),
+                )
                 .ok()
         };
         let tok = match spec {

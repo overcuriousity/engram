@@ -803,7 +803,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, cfg_toml).unwrap();
-        let err = crate::config::Config::load(Some(&path)).unwrap_err().to_string();
+        let err = crate::config::Config::load(Some(&path))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("2026-09 capture reshape"), "{err}");
         assert!(err.contains("infer.synthesis"), "{err}");
     }

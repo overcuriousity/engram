@@ -173,7 +173,11 @@ pub(crate) fn format_due(rows: &[crate::store::moments::DueRow], now: i64) -> St
             Some(at) => format!(
                 "- **{}** — {} (id: {})",
                 r.title,
-                crate::web::due::when_words(at, now, crate::core::moments::zone(Some(&r.moment.tz))),
+                crate::web::due::when_words(
+                    at,
+                    now,
+                    crate::core::moments::zone(Some(&r.moment.tz))
+                ),
                 r.moment.id
             ),
         };
@@ -184,7 +188,11 @@ pub(crate) fn format_due(rows: &[crate::store::moments::DueRow], now: i64) -> St
         }
     }
     let mut out = String::new();
-    for (head, lines) in [("## Overdue", overdue), ("## Due", due), ("## Undated", undated)] {
+    for (head, lines) in [
+        ("## Overdue", overdue),
+        ("## Due", due),
+        ("## Undated", undated),
+    ] {
         if lines.is_empty() {
             continue;
         }
@@ -1096,8 +1104,16 @@ mod tests {
     #[test]
     fn a_horizon_off_the_wire_is_clamped_before_it_is_cast() {
         let now = 1_000_000;
-        assert_eq!(due_horizon(now, 48), now + 48 * 3_600, "the ordinary case is untouched");
-        assert_eq!(due_horizon(now, 0), now, "and so is asking for nothing ahead");
+        assert_eq!(
+            due_horizon(now, 48),
+            now + 48 * 3_600,
+            "the ordinary case is untouched"
+        );
+        assert_eq!(
+            due_horizon(now, 0),
+            now,
+            "and so is asking for nothing ahead"
+        );
         // Both of the shapes an unclamped `as i64 * 3_600` got wrong: a
         // negative horizon, and an overflowing multiply.
         let century = 100 * 365 * 24 * 3_600;
@@ -1607,12 +1623,23 @@ mod tests {
     fn the_due_tool_answers_in_three_sections_or_one_line() {
         let now = 1_000_000;
         let out = format_due(
-            &[due_row("late", Some(now - 60)), due_row("soon", Some(now + 3_600)), due_row("someday", None)],
+            &[
+                due_row("late", Some(now - 60)),
+                due_row("soon", Some(now + 3_600)),
+                due_row("someday", None),
+            ],
             now,
         );
-        let (o, d, u) = (out.find("## Overdue").unwrap(), out.find("## Due").unwrap(), out.find("## Undated").unwrap());
+        let (o, d, u) = (
+            out.find("## Overdue").unwrap(),
+            out.find("## Due").unwrap(),
+            out.find("## Undated").unwrap(),
+        );
         assert!(o < d && d < u, "{out}");
-        assert!(out.contains("**late**") && out.contains("id: m-late"), "{out}");
+        assert!(
+            out.contains("**late**") && out.contains("id: m-late"),
+            "{out}"
+        );
         assert_eq!(format_due(&[], now), "_Nothing is due._");
     }
 

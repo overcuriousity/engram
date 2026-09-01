@@ -532,7 +532,10 @@ pub(crate) fn render_echo(t: &IntentEchoTemplate) -> String {
 /// already makes on every keystroke at a 120ms debounce.
 pub(crate) fn fate_echo(core: &crate::core::Core, q: &str) -> IntentEchoTemplate {
     if q.trim().is_empty() {
-        return IntentEchoTemplate { kind: "", detail: String::new() };
+        return IntentEchoTemplate {
+            kind: "",
+            detail: String::new(),
+        };
     }
     let budget = crate::jobs::synthesize::segment_budget(core).max(1);
     let tokens = core.counter.count(q);
@@ -677,7 +680,10 @@ pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemp
         recent,
         held: corpora > 0,
         echo: if oob {
-            render_echo(&IntentEchoTemplate { kind: "", detail: String::new() })
+            render_echo(&IntentEchoTemplate {
+                kind: "",
+                detail: String::new(),
+            })
         } else {
             String::new()
         },
@@ -704,7 +710,11 @@ pub(crate) fn ago_or_ahead(at: i64) -> String {
     let words = match span {
         s if s < 3_600 => "under an hour".to_string(),
         s if s < 86_400 => format!("{} h", s / 3_600),
-        s => format!("{} day{}", s / 86_400, if s / 86_400 == 1 { "" } else { "s" }),
+        s => format!(
+            "{} day{}",
+            s / 86_400,
+            if s / 86_400 == 1 { "" } else { "s" }
+        ),
     };
     match ahead {
         true => format!("in {words}"),
@@ -2488,11 +2498,24 @@ async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
 /// Housekeeping is: neither belongs in a top row that is three destinations
 /// wide on purpose.
 async fn settings(tenant: Tenant) -> Result<Response> {
-    let notify = tenant.core.store.control.notify(&tenant.user.subject).await?;
+    let notify = tenant
+        .core
+        .store
+        .control
+        .notify(&tenant.user.subject)
+        .await?;
     Ok(HtmlTemplate(SettingsTemplate {
-        gotify_url: notify["gotify"]["url"].as_str().unwrap_or_default().to_string(),
-        gotify_token_set: notify["gotify"]["token"].as_str().is_some_and(|t| !t.is_empty()),
-        up_endpoint: notify["unifiedpush"]["endpoint"].as_str().unwrap_or_default().to_string(),
+        gotify_url: notify["gotify"]["url"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        gotify_token_set: notify["gotify"]["token"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        up_endpoint: notify["unifiedpush"]["endpoint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         tokens: token_rows(&tenant).await?,
         feedback: match tenant.core.learn.enabled {
             true => Some(
@@ -2576,7 +2599,10 @@ async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> Result<Respon
     let url = f.gotify_url.trim();
     if !url.is_empty() {
         let token = match f.gotify_token.trim() {
-            "" => stored["gotify"]["token"].as_str().unwrap_or_default().to_string(),
+            "" => stored["gotify"]["token"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
             t => t.to_string(),
         };
         notify["gotify"] = serde_json::json!({ "url": url, "token": token });
@@ -2597,13 +2623,23 @@ struct NotifyTestForm {
 
 /// One test message down the named channel, answered as a fragment.
 async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> Result<Response> {
-    let notify = tenant.core.store.control.notify(&tenant.user.subject).await?;
-    let target = crate::jobs::remind::notify_targets(&notify).into_iter().find(|t| match t {
-        crate::jobs::remind::Target::Gotify { .. } => f.channel == "gotify",
-        crate::jobs::remind::Target::UnifiedPush { .. } => f.channel == "unifiedpush",
-    });
+    let notify = tenant
+        .core
+        .store
+        .control
+        .notify(&tenant.user.subject)
+        .await?;
+    let target = crate::jobs::remind::notify_targets(&notify)
+        .into_iter()
+        .find(|t| match t {
+            crate::jobs::remind::Target::Gotify { .. } => f.channel == "gotify",
+            crate::jobs::remind::Target::UnifiedPush { .. } => f.channel == "unifiedpush",
+        });
     let Some(target) = target else {
-        return Ok(axum::response::Html("<p class=\"muted\">That channel is not configured — save it first.</p>").into_response());
+        return Ok(axum::response::Html(
+            "<p class=\"muted\">That channel is not configured — save it first.</p>",
+        )
+        .into_response());
     };
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -3249,10 +3285,7 @@ async fn artifact_detail(
     if headers.contains_key("hx-request") {
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
-    Ok(HtmlTemplate(ArtifactDetailPage {
-        d,
-    })
-    .into_response())
+    Ok(HtmlTemplate(ArtifactDetailPage { d }).into_response())
 }
 
 /// The operator saying this pair does not belong together.
@@ -3290,8 +3323,7 @@ async fn mark_artifact_reviewed(tenant: Tenant, Path(cid): Path<String>) -> Resu
 
 #[derive(Template)]
 #[template(path = "not_found.html")]
-struct NotFoundTemplate {
-}
+struct NotFoundTemplate {}
 
 /// The app's own answer to a path it does not have.
 ///
@@ -3328,8 +3360,7 @@ pub async fn not_found(
     let Some(_tenant) = tenant else {
         return crate::error::Error::Unauthorized.into_response();
     };
-    let page = NotFoundTemplate {
-    };
+    let page = NotFoundTemplate {};
     match askama::Template::render(&page) {
         Ok(html) => (
             axum::http::StatusCode::NOT_FOUND,
@@ -4681,7 +4712,10 @@ mod tests {
     #[test]
     fn the_idle_column_is_hidden_and_the_band_re_fetched_never_removed() {
         let js = include_str!("../../assets/app.js");
-        assert!(js.contains("function showIdle()"), "nothing brings the column back");
+        assert!(
+            js.contains("function showIdle()"),
+            "nothing brings the column back"
+        );
         assert!(
             js.contains("htmx.trigger(due, 'refresh')"),
             "the column comes back holding what was due a minute ago"
@@ -4705,7 +4739,10 @@ mod tests {
     #[tokio::test]
     async fn a_small_paste_echoes_the_synthesis_it_will_get() {
         let (app, cookie) = app_with_session().await;
-        app.clone().oneshot(form("/ui/capture", &cookie, "text=mounting+an+image")).await.unwrap();
+        app.clone()
+            .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
+            .await
+            .unwrap();
         let html = get(
             &app,
             "/ui/search/results?q=remind+me+tomorrow+to+send+the+invoice",
@@ -4713,14 +4750,23 @@ mod tests {
         )
         .await;
         assert!(html.contains(r#"id="intent-echo""#), "{html}");
-        assert!(html.contains("will be synthesized"), "it says its fate: {html}");
-        assert!(html.contains("structured artifacts"), "and what that means: {html}");
+        assert!(
+            html.contains("will be synthesized"),
+            "it says its fate: {html}"
+        );
+        assert!(
+            html.contains("structured artifacts"),
+            "and what that means: {html}"
+        );
     }
 
     #[tokio::test]
     async fn a_large_paste_echoes_its_verbatim_windows() {
         let (app, cookie) = app_with_session().await;
-        app.clone().oneshot(form("/ui/capture", &cookie, "text=mounting+an+image")).await.unwrap();
+        app.clone()
+            .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
+            .await
+            .unwrap();
         let big = "filler+words+".repeat(400);
         let html = get(&app, &format!("/ui/search/results?q={big}"), &cookie).await;
         // The slot is swapped whatever the answer, so an echo for text that is
@@ -4733,7 +4779,10 @@ mod tests {
     #[tokio::test]
     async fn the_examples_under_the_box_are_in_the_readers_language() {
         let (app, cookie) = app_with_session().await;
-        app.clone().oneshot(form("/ui/capture", &cookie, "text=mounting+an+image")).await.unwrap();
+        app.clone()
+            .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
+            .await
+            .unwrap();
         let res = app
             .oneshot(
                 Request::builder()
@@ -4746,7 +4795,10 @@ mod tests {
             .await
             .unwrap();
         let html = body_of(res).await;
-        assert!(html.contains("erinnere mich morgen"), "a German reader is shown German: {html}");
+        assert!(
+            html.contains("erinnere mich morgen"),
+            "a German reader is shown German: {html}"
+        );
         assert!(html.contains("chip-example"), "and it is pressable");
     }
 
@@ -4772,14 +4824,19 @@ mod tests {
         // marooned at the far end of the verb row, and the same five captures
         // rendered twice in two shapes is what this page used to be.
         let html = get(&app, "/ui", &cookie).await;
-        assert!(html.contains(r#"id="idle""#), "the column exists as one element");
+        assert!(
+            html.contains(r#"id="idle""#),
+            "the column exists as one element"
+        );
         // Asserted against the template source, not a render: facets come from
         // the vector store and the fixture seeds none, so a render of this page
         // carries no chip row to be wrong about. What is being asserted is the
         // gate, and the gate is in the markup.
         let tpl = include_str!("templates/workspace.html");
         assert!(
-            tpl.contains(r#"<span id="kind-row" class="kind-row"{% if idle_state %} hidden{% endif %}>"#),
+            tpl.contains(
+                r#"<span id="kind-row" class="kind-row"{% if idle_state %} hidden{% endif %}>"#
+            ),
             "chips qualify a search, and an idle page has none"
         );
         assert!(
@@ -4807,7 +4864,9 @@ mod tests {
         // Under the box, not inside the column app.js hides on the first
         // keystroke: the echo says what is being typed *now*.
         let tpl = include_str!("templates/workspace.html");
-        let hint = tpl.find(r#"{% include "_box_hint.html" %}"#).expect("the include");
+        let hint = tpl
+            .find(r#"{% include "_box_hint.html" %}"#)
+            .expect("the include");
         assert!(hint < tpl.find(r#"<div id="idle""#).expect("the column"));
 
         // A base with something in it introduces itself.
@@ -4818,7 +4877,10 @@ mod tests {
         .await
         .unwrap();
         let html = get(&app, "/ui", &cookie).await;
-        assert!(html.contains("artifact"), "the closing line counts what is held");
+        assert!(
+            html.contains("artifact"),
+            "the closing line counts what is held"
+        );
         assert!(html.contains("last kept"), "and names what last went in");
         assert!(
             html.contains("LevelDB tombstones"),
@@ -4832,7 +4894,10 @@ mod tests {
         // Clearing the box returns to idle, not to "No matches." — which
         // would be a claim about a base nobody searched.
         let frag = get(&app, "/ui/search/results?q=", &cookie).await;
-        assert!(frag.contains(r#"id="idle-foot""#), "an empty query is idle again");
+        assert!(
+            frag.contains(r#"id="idle-foot""#),
+            "an empty query is idle again"
+        );
         assert!(!frag.contains("No matches"), "not a verdict on the base");
     }
 
@@ -6243,7 +6308,10 @@ mod tests {
 
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
         assert!(page.contains("badge-due"), "{page}");
-        assert!(page.contains("30 days"), "far outside the 48h horizon, still shown: {page}");
+        assert!(
+            page.contains("30 days"),
+            "far outside the 48h horizon, still shown: {page}"
+        );
     }
 
     #[tokio::test]
@@ -12251,17 +12319,38 @@ mod tests {
         assert!(html.contains("••••"), "a stored token is shown as stored");
         assert!(!html.contains("abc"), "and never rendered");
         app.clone()
-            .oneshot(form("/ui/settings/notify", &cookie, "gotify_url=https%3A%2F%2Fg%2Fmessage&gotify_token=&up_endpoint="))
+            .oneshot(form(
+                "/ui/settings/notify",
+                &cookie,
+                "gotify_url=https%3A%2F%2Fg%2Fmessage&gotify_token=&up_endpoint=",
+            ))
             .await
             .unwrap();
-        let notify = core.store.control.notify(&core.store.subject).await.unwrap();
+        let notify = core
+            .store
+            .control
+            .notify(&core.store.subject)
+            .await
+            .unwrap();
         assert_eq!(notify["gotify"]["token"], "abc");
         app.clone()
-            .oneshot(form("/ui/settings/notify", &cookie, "gotify_url=&gotify_token=&up_endpoint=https%3A%2F%2Fu%2Fx"))
+            .oneshot(form(
+                "/ui/settings/notify",
+                &cookie,
+                "gotify_url=&gotify_token=&up_endpoint=https%3A%2F%2Fu%2Fx",
+            ))
             .await
             .unwrap();
-        let notify = core.store.control.notify(&core.store.subject).await.unwrap();
-        assert!(notify.get("gotify").is_none(), "a blank url switches the channel off");
+        let notify = core
+            .store
+            .control
+            .notify(&core.store.subject)
+            .await
+            .unwrap();
+        assert!(
+            notify.get("gotify").is_none(),
+            "a blank url switches the channel off"
+        );
         assert_eq!(notify["unifiedpush"]["endpoint"], "https://u/x");
     }
 
@@ -12269,7 +12358,10 @@ mod tests {
     async fn a_test_on_an_unconfigured_channel_says_so() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_for(core).await;
-        let res = app.oneshot(form("/ui/settings/notify/test", &cookie, "channel=gotify")).await.unwrap();
+        let res = app
+            .oneshot(form("/ui/settings/notify/test", &cookie, "channel=gotify"))
+            .await
+            .unwrap();
         let html = body_of(res).await;
         assert!(html.contains("not configured"), "{html}");
     }

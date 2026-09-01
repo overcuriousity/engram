@@ -35,11 +35,7 @@ pub struct Window {
 /// neither chunk's *text* — but a line nothing claims is a line nothing
 /// renders, so each window's range runs to the line before its successor,
 /// and the first starts at line 1.
-pub fn split_into_segments(
-    text: &str,
-    counter: &TokenCounter,
-    budget: usize,
-) -> Vec<Window> {
+pub fn split_into_segments(text: &str, counter: &TokenCounter, budget: usize) -> Vec<Window> {
     if text.trim().is_empty() {
         return vec![];
     }
@@ -48,8 +44,7 @@ pub fn split_into_segments(
     if chunks.is_empty() {
         return vec![];
     }
-    let line_of =
-        |off: usize| text[..off].bytes().filter(|b| *b == b'\n').count() as i64 + 1;
+    let line_of = |off: usize| text[..off].bytes().filter(|b| *b == b'\n').count() as i64 + 1;
     let total_lines = text.lines().count().max(1) as i64;
     let mut out = Vec::with_capacity(chunks.len());
     for (i, (off, body)) in chunks.iter().enumerate() {
@@ -125,7 +120,9 @@ mod tests {
         assert!(
             w.iter().any(|w| w.text.trim_start().starts_with("## Two")),
             "{:?}",
-            w.iter().map(|w| w.text.lines().next().unwrap_or("")).collect::<Vec<_>>()
+            w.iter()
+                .map(|w| w.text.lines().next().unwrap_or(""))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -150,7 +147,11 @@ mod tests {
         assert!(!w.is_empty());
         for win in &w {
             assert!(TokenCounter::default().count(&win.text) <= 100 * 2);
-            assert_eq!((win.start_line, win.end_line), (1, 1), "one line is all there is");
+            assert_eq!(
+                (win.start_line, win.end_line),
+                (1, 1),
+                "one line is all there is"
+            );
         }
     }
 
@@ -162,7 +163,11 @@ mod tests {
             "two ".repeat(40)
         );
         let w = split_into_segments(&text, &TokenCounter::default(), 60);
-        let joined: String = w.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("\n");
+        let joined: String = w
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             assert!(joined.contains(line.trim()), "lost: {line:?}");
         }

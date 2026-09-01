@@ -26,8 +26,25 @@ pub async fn run(
     for target in targets {
         let read = read_target(target)?;
         let tz = zone_for(&read.content_type, &read.bytes);
-        let meta = Meta { title, note, tz: tz.as_deref(), origin: None, intent: None };
-        ids.push(post(&http, e, read.bytes, &read.content_type, read.label, meta, face).await?);
+        let meta = Meta {
+            title,
+            note,
+            tz: tz.as_deref(),
+            origin: None,
+            intent: None,
+        };
+        ids.push(
+            post(
+                &http,
+                e,
+                read.bytes,
+                &read.content_type,
+                read.label,
+                meta,
+                face,
+            )
+            .await?,
+        );
     }
     Ok(ids)
 }
@@ -52,7 +69,13 @@ pub async fn run_piped(
         text.into_bytes(),
         "text/plain",
         "stdin",
-        Meta { title, note, tz: tz.as_deref(), origin: None, intent: None },
+        Meta {
+            title,
+            note,
+            tz: tz.as_deref(),
+            origin: None,
+            intent: None,
+        },
         face,
     )
     .await?;
@@ -133,7 +156,13 @@ pub async fn run_text(
         text.into_bytes(),
         "text/plain",
         "text",
-        Meta { title, note, tz: tz.as_deref(), origin, intent },
+        Meta {
+            title,
+            note,
+            tz: tz.as_deref(),
+            origin,
+            intent,
+        },
         face,
     )
     .await
@@ -159,7 +188,11 @@ async fn post(
         if let Some(n) = meta.note {
             url.push_str(&format!("note={}&", encode(n)));
         }
-        for (key, value) in [("tz", meta.tz), ("origin", meta.origin), ("intent", meta.intent)] {
+        for (key, value) in [
+            ("tz", meta.tz),
+            ("origin", meta.origin),
+            ("intent", meta.intent),
+        ] {
             if let Some(v) = value {
                 url.push_str(&format!("{key}={}&", encode(v)));
             }
@@ -355,7 +388,9 @@ fn looks_like_a_path(target: &str) -> bool {
         && (target.contains(std::path::MAIN_SEPARATOR)
             || target.contains('/')
             || target.starts_with('~')
-            || std::path::Path::new(target).extension().is_some_and(|e| !e.is_empty()))
+            || std::path::Path::new(target)
+                .extension()
+                .is_some_and(|e| !e.is_empty()))
 }
 
 /// The bytes to send and what to call them.
@@ -369,7 +404,11 @@ fn looks_like_a_path(target: &str) -> bool {
 /// answering it with `Filename too long` is the client insisting on a reading
 /// of the argument that nothing about the argument supports.
 fn read_target(target: &str) -> Result<Read> {
-    let text = |bytes: Vec<u8>, label: &str| Read { bytes, content_type: "text/plain".into(), label: label.into() };
+    let text = |bytes: Vec<u8>, label: &str| Read {
+        bytes,
+        content_type: "text/plain".into(),
+        label: label.into(),
+    };
     if target == "-" {
         use std::io::Read as _;
         let mut buf = Vec::new();
@@ -384,7 +423,9 @@ fn read_target(target: &str) -> Result<Read> {
     let bytes = match std::fs::read(target) {
         Ok(b) => b,
         // A path that misses is an error; a sentence was never a path.
-        Err(e) if looks_like_a_path(target) => return Err(Error::Validation(format!("{target}: {e}"))),
+        Err(e) if looks_like_a_path(target) => {
+            return Err(Error::Validation(format!("{target}: {e}")));
+        }
         Err(_) => return Ok(text(target.as_bytes().to_vec(), "text")),
     };
     // The extension is what this end knows; the server sniffs the bytes anyway.
@@ -394,7 +435,11 @@ fn read_target(target: &str) -> Result<Read> {
         .first_raw()
         .unwrap_or("text/plain")
         .to_string();
-    Ok(Read { bytes, content_type: mime, label: target.into() })
+    Ok(Read {
+        bytes,
+        content_type: mime,
+        label: target.into(),
+    })
 }
 
 #[cfg(test)]
@@ -475,7 +520,13 @@ mod tests {
         ] {
             assert!(!looks_like_a_path(prose), "{prose}");
         }
-        for path in ["notes.pdf", "./missing", "/etc/hosts", "~/notes.md", "dir/file"] {
+        for path in [
+            "notes.pdf",
+            "./missing",
+            "/etc/hosts",
+            "~/notes.md",
+            "dir/file",
+        ] {
             assert!(looks_like_a_path(path), "{path}");
         }
     }
@@ -488,7 +539,9 @@ mod tests {
         let (e, core) = endpoint().await;
         let text = "PUID steht bei Microsoft für „Personal User ID“ (Persönliche Benutzer-ID).\n\
                     Es handelt sich um einen eindeutigen alphanumerischen Code.";
-        let ids = run(&e, &[text.to_string()], None, None, &off()).await.unwrap();
+        let ids = run(&e, &[text.to_string()], None, None, &off())
+            .await
+            .unwrap();
         let stored = core.store.get_corpus(&ids[0]).await.expect("stored");
         assert_eq!(stored.raw_text, text);
     }
@@ -503,22 +556,34 @@ mod tests {
         // capture`. The one branch the CLI tests exercised was `.txt`, which is
         // the one branch that accepts it.
         let (e, _core) = endpoint().await;
-        assert!(local_zone().is_some(), "the fixture needs a host that names its zone");
+        assert!(
+            local_zone().is_some(),
+            "the fixture needs a host that names its zone"
+        );
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("shot.png");
         std::fs::write(&png, crate::web::test_support::a_png()).unwrap();
 
-        run(&e, &[png.display().to_string()], None, None, &off()).await.expect("a photo");
+        run(&e, &[png.display().to_string()], None, None, &off())
+            .await
+            .expect("a photo");
 
         // A link is a fetch, and this fixture has nothing to fetch — so it is
         // the *reason* that is asserted. What must not come back is the door
         // refusing the request before it ever tried.
         for said in [
-            run(&e, &["https://example.com/a".into()], None, None, &off()).await.err(),
-            run_piped(&e, "https://example.com/b".into(), None, None, &off()).await.err(),
+            run(&e, &["https://example.com/a".into()], None, None, &off())
+                .await
+                .err(),
+            run_piped(&e, "https://example.com/b".into(), None, None, &off())
+                .await
+                .err(),
         ] {
             let said = said.map(|e| e.to_string()).unwrap_or_default();
-            assert!(!said.contains("tz only applies"), "the door refused the link over a zone: {said}");
+            assert!(
+                !said.contains("tz only applies"),
+                "the door refused the link over a zone: {said}"
+            );
         }
     }
 
@@ -526,20 +591,42 @@ mod tests {
     async fn a_note_still_travels_with_the_zone_it_was_typed_in() {
         let (e, core) = endpoint().await;
         let want = local_zone().expect("the fixture needs a host that names its zone");
-        let id = run_text(&e, "Remind me tomorrow at 9".into(), None, None, None, Some("remind"), &off())
+        let id = run_text(
+            &e,
+            "Remind me tomorrow at 9".into(),
+            None,
+            None,
+            None,
+            Some("remind"),
+            &off(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().metadata["tz"],
+            want
+        );
+
+        let ids = run_piped(&e, "an ordinary note".into(), None, None, &off())
             .await
             .unwrap();
-        assert_eq!(core.store.get_corpus(&id).await.unwrap().metadata["tz"], want);
-
-        let ids = run_piped(&e, "an ordinary note".into(), None, None, &off()).await.unwrap();
-        assert_eq!(core.store.get_corpus(&ids[0]).await.unwrap().metadata["tz"], want, "a pipe of prose is a text capture");
+        assert_eq!(
+            core.store.get_corpus(&ids[0]).await.unwrap().metadata["tz"],
+            want,
+            "a pipe of prose is a text capture"
+        );
     }
 
     #[tokio::test]
     async fn a_path_that_misses_is_still_an_error() {
         let (e, _core) = endpoint().await;
-        let err = run(&e, &["notes.pdf".into()], None, None, &off()).await.unwrap_err();
-        assert!(format!("{err}").contains("notes.pdf"), "the file it could not find, not the text: {err}");
+        let err = run(&e, &["notes.pdf".into()], None, None, &off())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("notes.pdf"),
+            "the file it could not find, not the text: {err}"
+        );
     }
 
     #[tokio::test]
