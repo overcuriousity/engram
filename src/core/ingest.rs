@@ -2981,7 +2981,6 @@ mod tests {
                     start_line: 1,
                     end_line: 2,
                     text: "l1\nl2",
-                    carry_lines: 0,
                 }],
             )
             .await

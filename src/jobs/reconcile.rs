@@ -238,7 +238,6 @@ mod tests {
             start_line,
             end_line,
             text,
-            carry_lines: 0,
         }
     }
 

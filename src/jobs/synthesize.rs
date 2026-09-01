@@ -42,7 +42,6 @@ pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
             start_line: w.start_line,
             end_line: w.end_line,
             text: w.text.as_str(),
-            carry_lines: w.carry_lines,
         })
         .collect();
     core.store.upsert_segments(corpus_id, &rows).await?;
@@ -1276,11 +1275,10 @@ Then run sync.";
     }
 
     #[tokio::test]
-    async fn a_carried_heading_does_not_shift_the_spans_of_its_window() {
-        // A window that continues a section opens with the heading copied from
-        // further up the document, and that line occupies none of the window's
-        // own lines. Measuring an artifact's offset against it put every span in
-        // every continuing window one line too far down the source.
+    async fn every_artifacts_span_reads_back_its_own_text() {
+        // Spans are addresses into the raw source. Whatever the splitter did
+        // to window the document, an artifact's claimed lines must contain
+        // the text the artifact ends with.
         let core = test_core().await;
         let mut lines = vec!["## Section one".to_string(), String::new()];
         for i in 0..400 {
@@ -1293,10 +1291,7 @@ Then run sync.";
         segment_all(&core, &out.id).await;
 
         let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
-        assert!(
-            windows.iter().any(|w| w.carry_lines == 1),
-            "the fixture must produce windows that carry the heading"
-        );
+        assert!(windows.len() > 1, "the fixture must produce several windows");
 
         let raw = core.store.get_corpus(&out.id).await.unwrap().raw_text;
         for c in core.store.artifacts_for_corpus(&out.id).await.unwrap() {

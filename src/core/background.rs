@@ -751,13 +751,11 @@ mod tests {
                         start_line: 1,
                         end_line: 10,
                         text: "first window",
-                        carry_lines: 0,
                     },
                     crate::store::segments::NewSegment {
                         start_line: 11,
                         end_line: 20,
                         text: "second window",
-                        carry_lines: 0,
                     },
                 ],
             )

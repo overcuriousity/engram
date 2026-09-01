@@ -103,6 +103,7 @@ iana-time-zone = "0.1"
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 crossterm = "0.29.0"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+text-splitter = { version = "0.32", features = ["markdown"] }
 
 [dev-dependencies]
 # `test-util` is not part of tokio's `full`. It carries the pausable clock the

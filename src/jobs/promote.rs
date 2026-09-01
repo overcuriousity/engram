@@ -660,7 +660,6 @@ mod tests {
                     start_line: 1,
                     end_line: 6,
                     text: "l1\nl2\nl3\nl4\nl5\nl6",
-                    carry_lines: 0,
                 }],
             )
             .await
@@ -931,7 +930,6 @@ mod tests {
                     start_line: 1,
                     end_line: 2,
                     text: "l1\nl2",
-                    carry_lines: 0,
                 }],
             )
             .await

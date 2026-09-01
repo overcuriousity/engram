@@ -71,13 +71,11 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // window that can never fit keeps asking at the six-hour ceiling with
     // nothing in the journal naming the cause.
     //
-    // The ceiling is twice the budget rather than the budget itself, because
-    // that is what the splitter actually promises: it flushes once the buffer
-    // has *reached* the budget, and `flush` then prepends the carried heading,
-    // so a window legitimately lands somewhat over. Twice is the bound
-    // `text_with_no_structure_still_splits_by_line_cap` has always asserted.
-    // What must never happen is unbounded — the corpus that came back fifteen
-    // times its budget.
+    // The ceiling is twice the budget rather than the budget itself: the
+    // splitter aims under it but a hard-cut line can land a window somewhat
+    // over, and `text_with_no_structure_still_splits_within_budget` asserts
+    // the same bound. What must never happen is unbounded — the corpus that
+    // came back fifteen times its budget.
     let window_budget = super::synthesize::segment_budget(core);
     let window_tokens = core.counter.count(&text);
     debug_assert!(
@@ -172,14 +170,8 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         }
     }
 
-    // The span is ours to compute. Without the carried heading, which is
-    // prepended text from further up the document and occupies none of this
-    // window's lines.
-    let body: String = text
-        .lines()
-        .skip(w.carry_lines as usize)
-        .collect::<Vec<_>>()
-        .join("\n");
+    // The span is ours to compute, against the window's own text.
+    let body: String = text.clone();
     for c in &mut chunks {
         c.corpus_lines = Some(resolve_span(&c.text, &body, &w, c.corpus_lines));
     }
@@ -358,19 +350,16 @@ async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
 /// hint for the case where nothing matches at all. Nothing here can disagree
 /// with the artifact, so nothing here has anything to report.
 ///
-/// `body` is the window without its carried heading — text prepended from
-/// further up the document, occupying none of the window's own lines. Both
-/// paths have to discount it: `locate_span` because it searches `body`, and the
-/// hint because the model numbered its lines from the top of what it was shown,
-/// and line 1 of that is the carried heading. Correcting only the first left
-/// every hinted span in a continuing section `carry_lines` too far down.
+/// `body` is the window's own text: the model numbered its lines from the top
+/// of what it was shown, so a hinted line k is source line
+/// `start_line + k - 1`.
 pub(crate) fn resolve_span(
     artifact: &str,
     body: &str,
     w: &crate::store::segments::Segment,
     hint: Option<(i64, i64)>,
 ) -> (i64, i64) {
-    let shift = w.start_line - 1 - w.carry_lines;
+    let shift = w.start_line - 1;
     let hinted = hint.map(|(a, b)| (a + shift, b + shift));
     let span = crate::infer::verify::locate_span(artifact, body, w.start_line)
         .or(hinted)
@@ -836,16 +825,15 @@ mod tests {
         );
     }
 
-    /// A window fixture for the span tests: the text is irrelevant to them, the
-    /// line range and the carried heading are the whole point.
-    fn window(start_line: i64, end_line: i64, carry_lines: i64) -> crate::store::segments::Segment {
+    /// A window fixture for the span tests: the text is irrelevant to them,
+    /// the line range is the whole point.
+    fn window(start_line: i64, end_line: i64) -> crate::store::segments::Segment {
         crate::store::segments::Segment {
             corpus_id: "c".into(),
             idx: 1,
             start_line,
             end_line,
             text: String::new(),
-            carry_lines,
             state: SegmentState::Pending,
             attempts: 0,
             last_error: None,
@@ -853,28 +841,8 @@ mod tests {
     }
 
     #[test]
-    fn a_hinted_span_discounts_the_carried_heading_too() {
-        // The window covers source lines 50-60 and opens with one heading
-        // carried from further up, so the model's line 2 is source line 50.
-        // The artifact is reworded past recognition, which is exactly when the
-        // hint is all there is — and the path that used it was the one place
-        // the carried heading was still being counted.
-        let w = window(50, 60, 1);
-        let body = "first body line\nsecond body line";
-        assert_eq!(
-            resolve_span(
-                "nothing here matches the source at all",
-                body,
-                &w,
-                Some((2, 3))
-            ),
-            (50, 51)
-        );
-    }
-
-    #[test]
-    fn a_window_carrying_nothing_reads_the_hint_straight_through() {
-        let w = window(50, 60, 0);
+    fn an_unlocatable_artifact_reads_the_hint_against_the_window() {
+        let w = window(50, 60);
         assert_eq!(
             resolve_span("unlocatable", "a\nb", &w, Some((2, 3))),
             (51, 52)
@@ -884,7 +852,7 @@ mod tests {
     #[test]
     fn the_artifacts_own_text_beats_the_hint() {
         // `locate_span` reads the artifact; the hint is only a claim about it.
-        let w = window(50, 60, 1);
+        let w = window(50, 60);
         let body = "first body line\nsecond body line";
         assert_eq!(
             resolve_span("second body line", body, &w, Some((9, 9))),
@@ -894,11 +862,9 @@ mod tests {
 
     #[test]
     fn a_hint_pointing_outside_the_window_falls_back_to_the_whole_window() {
-        let w = window(50, 60, 1);
-        // Discounting the carry can push a hint of line 1 — the heading
-        // itself — below the window's first line. Clamping keeps it inside.
+        let w = window(50, 60);
         assert_eq!(
-            resolve_span("unlocatable", "a\nb", &w, Some((1, 1))),
+            resolve_span("unlocatable", "a\nb", &w, Some((-3, -3))),
             (50, 50)
         );
         assert_eq!(resolve_span("unlocatable", "a\nb", &w, None), (50, 60));
@@ -954,13 +920,11 @@ mod tests {
                         start_line: 1,
                         end_line: 2,
                         text: "l1\nl2",
-                        carry_lines: 0,
                     },
                     crate::store::segments::NewSegment {
                         start_line: 3,
                         end_line: 4,
                         text: "l3\nl4",
-                        carry_lines: 0,
                     },
                 ],
             )

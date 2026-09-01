@@ -9006,7 +9006,6 @@ mod tests {
                     start_line: 1,
                     end_line: 2,
                     text: "alpha beta\ngamma delta",
-                    carry_lines: 0,
                 }],
             )
             .await
@@ -9070,13 +9069,11 @@ mod tests {
                         start_line: 1,
                         end_line: 2,
                         text: "alpha beta\ngamma delta",
-                        carry_lines: 0,
                     },
                     NewSegment {
                         start_line: 3,
                         end_line: 4,
                         text: "omega sigma\nkappa lambda",
-                        carry_lines: 0,
                     },
                 ],
             )
@@ -9149,13 +9146,11 @@ mod tests {
                         start_line: 1,
                         end_line: 3,
                         text: "one\ntwo\nthree",
-                        carry_lines: 0,
                     },
                     NewSegment {
                         start_line: 4,
                         end_line: 6,
                         text: "four\nfive\nsix",
-                        carry_lines: 0,
                     },
                 ],
             )
@@ -11431,7 +11426,6 @@ mod tests {
                     start_line: 1,
                     end_line: 2,
                     text: "l1\nl2",
-                    carry_lines: 0,
                 }],
             )
             .await
