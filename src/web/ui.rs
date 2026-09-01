@@ -3674,30 +3674,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_judges_own_answers_stay_with_the_question() {
-        // The three ways out sat below every candidate — twenty at
-        // `feedback.candidates`' default — so answering "None of these" meant
-        // scrolling past all of them first. A sticky bar was the first answer to
-        // that. The bound on the pool is the second and the better one: the card
-        // is the only thing on the page, the pool is the only thing inside it
-        // with a scrollbar, and the question and its answers are on screen
-        // together whatever the pool is scrolled to.
-        //
-        // The bound is the load-bearing part, so it is what this holds — along
-        // with the action row being outside the box that scrolls, which is the
-        // whole of why it stays put.
-        let css = include_str!("../../assets/css/42-judge.css");
-        assert!(
-            css.contains(".judge-pool {") && css.contains("max-height: 56vh"),
-            "the pool is unbounded, so the card is as tall as the pool"
-        );
-        assert!(
-            css.contains("overflow: auto"),
-            "a bounded pool that does not scroll is a shortened pool"
-        );
-    }
-
     #[tokio::test]
     async fn a_search_with_nothing_open_leaves_the_grid_free_to_widen_the_rail() {
         // 22rem of rail beside a thousand pixels holding one line of

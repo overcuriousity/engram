@@ -58,12 +58,11 @@ impl TokenCounter {
                 let cache = Self::cache_path(cache_dir, s);
                 let bytes = match std::fs::read(&cache) {
                     Ok(b) => Some(b),
-                    Err(_) => fetch_blocking(s).map(|b| {
+                    Err(_) => fetch_blocking(s).inspect(|b| {
                         let _ = std::fs::create_dir_all(cache_dir);
-                        if let Err(e) = std::fs::write(&cache, &b) {
+                        if let Err(e) = std::fs::write(&cache, b) {
                             tracing::warn!(error = %e, "could not cache the tokenizer; it will re-download next boot");
                         }
-                        b
                     }),
                 };
                 bytes

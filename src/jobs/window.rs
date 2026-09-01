@@ -249,9 +249,9 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // The judgement, once the artifacts it is about stand. Anchored to the
     // first live one; a judgement that cannot be applied is a warning — the
     // artifacts are already the capture.
-    if let Some(j) = judgement {
-        if let Some(anchor) = written.iter().find(|c| c.in_results()) {
-            if let Err(e) =
+    if let Some(j) = judgement
+        && let Some(anchor) = written.iter().find(|c| c.in_results())
+            && let Err(e) =
                 crate::jobs::judgement::apply(core, corpus_id, &anchor.id, &j, &shown_ids).await
             {
                 tracing::warn!(
@@ -260,8 +260,6 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
                     "the judgement could not be applied; the artifacts stand"
                 );
             }
-        }
-    }
     core.store
         .set_segment_state(corpus_id, idx, SegmentState::Done, None)
         .await?;

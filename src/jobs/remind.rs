@@ -43,9 +43,7 @@ pub fn owed_lead(eff_at: i64, snoozed: bool, notified_at: Option<i64>, now: i64)
     ladder(snoozed)
         .iter()
         .copied()
-        .filter(|lead| eff_at - lead <= now)
-        .filter(|lead| notified_at.is_none_or(|n| n < eff_at - lead))
-        .next_back()
+        .filter(|lead| eff_at - lead <= now).rfind(|lead| notified_at.is_none_or(|n| n < eff_at - lead))
 }
 
 /// The next second at which this moment owes a push: the earliest rung the

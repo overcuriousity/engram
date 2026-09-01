@@ -85,13 +85,12 @@ pub async fn apply(
 
     let forced = src.metadata["intent"].as_str();
     match j.intent.as_deref() {
-        Some("journal") => {
+        Some("journal")
             if JOURNALABLE.contains(&src.origin.as_str())
                 && !intent_refused(&src.metadata, Intent::Journal)
-            {
+            => {
                 core.set_entry(corpus_id, true).await?;
             }
-        }
         Some("remind") => {
             if intent_refused(&src.metadata, Intent::Remind) {
                 return Ok(());

@@ -318,7 +318,7 @@ async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u
 /// used to be `i64::MAX`, which no stamp can clear — the exact inverse, and a
 /// missing stamp fed the row to a destructive sweep rather than defending it.
 fn goes_before_the_judge(retired_at: Option<i64>, last_seen_at: Option<i64>) -> bool {
-    !last_seen_at.is_some_and(|t| t >= retired_at.unwrap_or(0))
+    last_seen_at.is_none_or(|t| t < retired_at.unwrap_or(0))
 }
 
 /// One nominee, one call. The judge is `core.reaper` — the judges' endpoint
