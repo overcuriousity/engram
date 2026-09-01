@@ -185,14 +185,19 @@ otherwise fine.
 
 ### The operator knows before pressing capture
 
-A debounced probe from the capture box (`POST /ui/capture/probe`) runs the
-real `TokenCounter` against the same `segment_tokens` budget the fork uses —
-exact, not a client-side guess — and swaps a one-line hint into the slot the
-old intent echo used: this paste **will be synthesized** into structured
-artifacts, or it is **large — stored verbatim** in N windows. The hint is
-the nudge: it says, before the fact, that a smaller paste becomes a
-higher-quality retrievable piece, and it makes the fork legible instead of
-silent.
+The fate echo runs the real `TokenCounter` against the same
+`segment_tokens` budget the fork uses — exact, not a client-side guess —
+and swaps a one-line hint into the slot the old intent echo used: this
+paste **will be synthesized** into structured artifacts, or it is **large —
+stored verbatim** in N windows. The hint is the nudge: it says, before the
+fact, that a smaller paste becomes a higher-quality retrievable piece, and
+it makes the fork legible instead of silent.
+
+*(Implementation deviation, deliberate: no separate `POST /ui/capture/probe`
+endpoint — the echo rides the search response the box already makes on
+every keystroke, the same vehicle the old intent echo used, and the
+over-long-paste guard branch carries it too, since a whole pasted document
+never reaches the search itself.)*
 
 ## 6. Moments: the classifier dies, the store survives
 
