@@ -506,7 +506,11 @@ impl HttpSynthesizer {
     /// constraint, which is the only thing that reliably stops a small local
     /// model closing an array with a brace or dropping a required field. The
     /// calls that want prose rather than JSON — titles — pass `None`.
-    async fn chat(&self, messages: serde_json::Value, schema: Option<&str>) -> Result<String> {
+    async fn chat(
+        &self,
+        messages: serde_json::Value,
+        schema: Option<(&str, serde_json::Value)>,
+    ) -> Result<String> {
         let spent = message_tokens(&messages);
         let mut body = json!({
             "messages": messages,
@@ -515,8 +519,8 @@ impl HttpSynthesizer {
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
-        if let Some(name) = schema.filter(|_| self.structured_output) {
-            body["response_format"] = response_format(name, prompt::artifacts_schema());
+        if let Some((name, value)) = schema.filter(|_| self.structured_output) {
+            body["response_format"] = response_format(name, value);
         }
         // The same invariant every other caller keeps: prompt plus ceiling has
         // to fit the window as the server counts both. `segment`'s first call
@@ -537,22 +541,48 @@ impl HttpSynthesizer {
     }
 }
 
-#[async_trait]
-impl Synthesizer for HttpSynthesizer {
-    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
-        let user = prompt::user_prompt(input.core, 1, self.max_artifact_tokens, input.context);
+impl HttpSynthesizer {
+    /// One synthesis call, judged or plain: the same transport, prompt
+    /// scaffold, and one repair attempt; only the schema, the JUDGE block,
+    /// and the parse differ.
+    async fn run_segment(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
+        let judged = input.judge.is_some();
+        let user = prompt::user_prompt(
+            input.core,
+            1,
+            self.max_artifact_tokens,
+            input.context,
+            input.judge,
+        );
+        let schema = || {
+            if judged {
+                ("judged_artifacts", prompt::judged_artifacts_schema())
+            } else {
+                ("artifacts", prompt::artifacts_schema())
+            }
+        };
+        let parse = |body: &str| -> Result<crate::infer::SegmentReply> {
+            if judged {
+                prompt::parse_judged_response(body)
+            } else {
+                Ok(crate::infer::SegmentReply {
+                    artifacts: prompt::parse_response(body)?,
+                    judgement: None,
+                })
+            }
+        };
         let first = self
             .chat(
                 json!([
                     {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
                     {"role":"user","content": user}
                 ]),
-                Some("artifacts"),
+                Some(schema()),
             )
             .await?;
 
-        match prompt::parse_response(&first) {
-            Ok(chunks) => Ok(chunks),
+        match parse(&first) {
+            Ok(reply) => Ok(reply),
             Err(e) => {
                 // One repair attempt with the parser error fed back. Beyond
                 // that the caller falls back to a structural split.
@@ -586,10 +616,21 @@ impl Synthesizer for HttpSynthesizer {
                     return Err(e);
                 }
 
-                let second = self.chat(messages, Some("artifacts")).await?;
-                prompt::parse_response(&second)
+                let second = self.chat(messages, Some(schema())).await?;
+                parse(&second)
             }
         }
+    }
+}
+
+#[async_trait]
+impl Synthesizer for HttpSynthesizer {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        Ok(self.run_segment(input).await?.artifacts)
+    }
+
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
+        self.run_segment(input).await
     }
 
     fn budget(&self) -> SynthesisBudget {
@@ -1391,6 +1432,7 @@ mod tests {
         SegmentInput {
             core: text,
             context: &EMPTY_CONTEXT,
+            judge: None,
         }
     }
     use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
@@ -1673,8 +1715,12 @@ mod tests {
             .await;
 
         // A ceiling that is half its window, which is the shape the shipped
-        // example config uses and the one where this fails.
+        // example config uses and the one where this fails. Doubled first:
+        // the system prompt grew with the judged contract, and this test is
+        // about the repair's arithmetic, not about a window too small for
+        // the scaffolding itself.
         let mut cfg = synthesize_cfg(server.uri());
+        cfg.context_tokens *= 2;
         cfg.max_output_tokens = cfg.context_tokens / 2;
         let context = cfg.context_tokens;
         HttpSynthesizer::new(&cfg)

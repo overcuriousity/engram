@@ -191,6 +191,7 @@ impl Synthesizer for FakeSynthesizer {
                 tags: vec!["fake".into()],
                 corpus_lines: None,
                 caveats: vec![],
+                pinned: false,
             })
             .collect())
     }
@@ -260,6 +261,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],
+            pinned: false,
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -289,6 +291,7 @@ impl Synthesizer for GreedySynthesizer {
                 tags: vec![],
                 corpus_lines: None,
                 caveats: vec![],
+                pinned: false,
             });
         }
         Ok(out)
@@ -328,6 +331,7 @@ impl Synthesizer for RecordingSynthesizer {
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],
+            pinned: false,
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -361,6 +365,7 @@ impl Synthesizer for MisreportingSynthesizer {
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
             caveats: vec![],
+            pinned: false,
         }])
     }
     fn budget(&self) -> SynthesisBudget {

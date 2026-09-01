@@ -22,6 +22,61 @@ pub struct ProposedArtifact {
     /// them. The model is already holding this segment, so asking for these
     /// costs output tokens rather than another call.
     pub caveats: Vec<String>,
+    /// The model says this artifact records a decision or commitment the
+    /// operator made — the shape the `pinned` boost exists for. Honored only
+    /// on the judged capture path; a promotion never pins.
+    pub pinned: bool,
+}
+
+/// One nearest artifact shown to a judged synthesis call: id-addressable, so
+/// the reply's links can only name what was actually on the table.
+#[derive(Debug, Clone)]
+pub struct Neighbor {
+    pub id: String,
+    pub title: Option<String>,
+    pub text: String,
+}
+
+/// What a judged call is given to judge with: the clock, the zone, what the
+/// capture door already said, and the base's nearest artifacts.
+#[derive(Debug, Clone)]
+pub struct JudgeAsk {
+    /// "2026-09-04 09:00 (Friday)" — local wall clock at capture.
+    pub now_local: String,
+    /// "Europe/Berlin".
+    pub tz: String,
+    /// The door forced an intent (`metadata.intent`): a hint, not a bypass.
+    pub forced_intent: Option<String>,
+    pub neighbors: Vec<Neighbor>,
+}
+
+/// A relation the model asserted between this capture and a shown neighbor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProposedLink {
+    pub artifact_id: String,
+    pub reason: String,
+}
+
+/// The judged half of a capture-time synthesis reply.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Judgement {
+    /// "remind" | "journal" | "none".
+    pub intent: Option<String>,
+    /// Local ISO-8601, no zone — the reminder's instant.
+    pub when: Option<String>,
+    /// An iCalendar RRULE, when the note says it repeats.
+    pub rule: Option<String>,
+    /// Local ISO-8601 datetimes the note states without being the reminder.
+    pub events: Vec<String>,
+    pub links: Vec<ProposedLink>,
+}
+
+/// One synthesis reply: the artifacts, and — on the judged path — what the
+/// model made of the note as a moment in time.
+#[derive(Debug, Clone)]
+pub struct SegmentReply {
+    pub artifacts: Vec<ProposedArtifact>,
+    pub judgement: Option<Judgement>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,12 +97,24 @@ pub struct SynthesisBudget {
 pub struct SegmentInput<'a> {
     pub core: &'a str,
     pub context: &'a crate::infer::context::WindowContext,
+    /// `Some` on the judged capture path: the same call also reads intent,
+    /// events, and links. `None` for a promotion's window.
+    pub judge: Option<&'a JudgeAsk>,
 }
 
 #[async_trait]
 pub trait Synthesizer: Send + Sync {
     /// Segment one window of text. Windowing itself is the caller's job.
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>>;
+    /// The judged form: the same call, its reply also carrying the judgement
+    /// when `input.judge` was given. Defaulted so a test double that has no
+    /// opinion about moments needs no code for them.
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<SegmentReply> {
+        Ok(SegmentReply {
+            artifacts: self.segment(input).await?,
+            judgement: None,
+        })
+    }
     fn budget(&self) -> SynthesisBudget;
     /// A short name for a whole document, given its opening and the titles of
     /// the artifacts drawn from it.

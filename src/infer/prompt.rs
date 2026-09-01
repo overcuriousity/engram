@@ -13,16 +13,20 @@
 use super::ProposedArtifact;
 use crate::error::{Error, Result};
 
-pub const SYNTHESIZER_SYSTEM: &str = r#"You turn reference material into atomic, self-contained knowledge artifacts.
+pub const SYNTHESIZER_SYSTEM: &str = r#"You turn captured material into atomic, self-contained knowledge artifacts, written to be found again by semantic search.
 
 Each artifact holds exactly one thing: one technique, one procedure, one fact,
-one configuration. If a passage covers three techniques, emit three artifacts.
+one decision, one configuration. If a passage covers three techniques, emit
+three artifacts.
 
 Always use the language the input was written in.
 
-Rewrite each artifact so it stands alone without the surrounding document. Resolve
+Write each artifact as the search result someone will read months from now:
+it stands alone without the surrounding document, opens with the terms a
+person would search for, and states its point in the first sentence. Resolve
 pronouns and implicit references: "this command" becomes the actual command,
-"the above directory" becomes the actual path.
+"the above directory" becomes the actual path. Unstructured notes come out
+structured — a telegraphic fragment becomes a complete statement.
 
 Reproduce commands, file paths, registry keys, error strings, code, and version
 numbers VERBATIM. Never paraphrase, reformat, correct, or abbreviate them. The
@@ -33,8 +37,9 @@ A block labelled "context only" is there so you can resolve references — what 
 pronoun points at, which version or platform the document is about. Use it to
 write artifacts that stand alone. Never emit an artifact for material that
 appears only in a context block: the window that owns that material will emit
-it, and emitting it twice puts two copies in the knowledge base. Extract
-exclusively from the INPUT block.
+it, and emitting it twice puts two copies in the knowledge base. A NEIGHBORS
+block shows what the knowledge base already holds: write what the input adds,
+never restate a neighbor's content. Extract exclusively from the INPUT block.
 
 Write artifact text as markdown: fenced code blocks with a language tag, lists for
 step-by-step procedures, tables where they fit. Do NOT use an H1 (`# `) heading;
@@ -42,7 +47,7 @@ the title is a separate field, so any headings inside the text start at `## `.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."]}]}
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
 
 - title: a short noun phrase naming the artifact.
 - category: exactly one of: concept, procedure, reference, snippet,
@@ -54,13 +59,44 @@ Reply with JSON only, no commentary, in exactly this shape:
   destructive effect, a documented failure. Take these only from what the input
   states or plainly implies. Never invent a caveat, never add general advice,
   and never put a command in a caveat that is not in the input. Use an empty
-  list when the input states none, which is the common case."#;
+  list when the input states none, which is the common case.
+- tags: 0-3 short lowercase topic words, in the input's language. Empty when
+  no topic word is obvious.
+- pinned: true ONLY when the artifact records a decision or commitment the
+  writer made ("we chose X", "I will always Y"). Everything else is false.
+
+When the prompt carries a JUDGE block, add three top-level fields beside
+"artifacts" — "moment", "events", "links" — judging the INPUT as a note in
+time:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" only when the note asks future-self to act; "journal" only when it
+  records what the writer did or experienced; everything else is "none".
+  "when" is the local wall-clock date and time as ISO-8601 without a zone
+  (e.g. 2026-09-04T09:00), or null if the note names no time. Relative words
+  (tomorrow, next Friday, in two weeks) are resolved against the current time
+  you are given. That time carries minutes, and an offset shorter than a day
+  is counted off it: at 16:57, "in 10 minutes" is 17:07 the same day. Only
+  move to the next date when the arithmetic actually passes midnight. A time
+  of day that is not stated is 09:00, but an offset states one. "rule" is an
+  iCalendar RRULE using only FREQ, INTERVAL, BYDAY (weekday codes),
+  BYMONTHDAY, UNTIL, COUNT when the note says it repeats, else null. Never
+  invent a date.
+- events: dates the note states that are not the reminder itself, as local
+  ISO-8601 datetimes ("the release is on the 12th" → its date). Empty when it
+  states none.
+- links: relations to entries of the NEIGHBORS block, as
+  {"artifact_id":"...","reason":"..."} using ONLY ids shown there, with a
+  one-line reason. Empty when nothing shown relates.
+
+With no JUDGE block, reply with "artifacts" alone."#;
 
 pub fn user_prompt(
     segment_text: &str,
     first_line: i64,
     max_artifact_tokens: usize,
     context: &crate::infer::context::WindowContext,
+    judge: Option<&crate::infer::JudgeAsk>,
 ) -> String {
     let mut out = String::new();
     // The opening leads so that the system prompt followed by it is a
@@ -88,6 +124,24 @@ pub fn user_prompt(
             "\n\n----- FOLLOWING CONTEXT (context only) -----\n{a}\n\
              ----- END FOLLOWING CONTEXT -----"
         ));
+    }
+    if let Some(j) = judge {
+        if !j.neighbors.is_empty() {
+            out.push_str("\n\n----- NEIGHBORS (context only; link targets) -----");
+            for n in &j.neighbors {
+                let title = n.title.as_deref().unwrap_or("untitled");
+                out.push_str(&format!("\n[id: {}] {title}\n{}", n.id, n.text));
+            }
+            out.push_str("\n----- END NEIGHBORS -----");
+        }
+        out.push_str(&format!(
+            "\n\n----- JUDGE -----\nCurrent local time: {}\nTime zone: {}\n",
+            j.now_local, j.tz
+        ));
+        if let Some(f) = &j.forced_intent {
+            out.push_str(&format!("The capture door says this is: {f}\n"));
+        }
+        out.push_str("Judge this note: moment, events, links.\n----- END JUDGE -----");
     }
     out
 }
@@ -1087,6 +1141,49 @@ struct Envelope {
     artifacts: Vec<RawArtifact>,
 }
 
+/// Deserialize to `None` on a type mismatch instead of failing: a malformed
+/// judgement half must never cost the artifacts beside it.
+fn lenient<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(<serde_json::Value as serde::Deserialize>::deserialize(d)
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// The judged reply: the artifacts, plus the moment/events/links the JUDGE
+/// block asked for — each one lenient, so a model that fumbles the judgement
+/// still delivers its artifacts.
+#[derive(serde::Deserialize)]
+struct JudgedEnvelope {
+    artifacts: Vec<RawArtifact>,
+    #[serde(default, deserialize_with = "lenient")]
+    moment: Option<RawMoment>,
+    #[serde(default, deserialize_with = "lenient")]
+    events: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "lenient")]
+    links: Option<Vec<RawLink>>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawMoment {
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    when: Option<String>,
+    #[serde(default)]
+    rule: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawLink {
+    artifact_id: String,
+    #[serde(default)]
+    reason: String,
+}
+
 #[derive(serde::Deserialize)]
 struct RawArtifact {
     text: String,
@@ -1098,6 +1195,10 @@ struct RawArtifact {
     corpus_lines: Option<Vec<i64>>,
     #[serde(default)]
     caveats: Vec<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    pinned: bool,
 }
 
 /// What kind of thing an artifact is.
@@ -1165,9 +1266,11 @@ pub fn artifacts_schema() -> serde_json::Value {
                             "minItems": 2,
                             "maxItems": 2
                         },
-                        "caveats": {"type": "array", "items": {"type": "string"}}
+                        "caveats": {"type": "array", "items": {"type": "string"}},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "pinned": {"type": "boolean"}
                     },
-                    "required": ["text", "title", "category", "corpus_lines", "caveats"],
+                    "required": ["text", "title", "category", "corpus_lines", "caveats", "tags", "pinned"],
                     "additionalProperties": false
                 }
             }
@@ -1175,6 +1278,40 @@ pub fn artifacts_schema() -> serde_json::Value {
         "required": ["artifacts"],
         "additionalProperties": false
     })
+}
+
+/// [`artifacts_schema`] plus the judged fields — each nullable, because a
+/// strict decoder must be able to say "no judgement" without inventing one.
+pub fn judged_artifacts_schema() -> serde_json::Value {
+    let mut schema = artifacts_schema();
+    schema["properties"]["moment"] = serde_json::json!({
+        "type": ["object", "null"],
+        "properties": {
+            "intent": {"type": "string", "enum": ["remind", "journal", "none"]},
+            "when": {"type": ["string", "null"]},
+            "rule": {"type": ["string", "null"]}
+        },
+        "required": ["intent", "when", "rule"],
+        "additionalProperties": false
+    });
+    schema["properties"]["events"] = serde_json::json!({
+        "type": "array",
+        "items": {"type": "string"}
+    });
+    schema["properties"]["links"] = serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string"},
+                "reason": {"type": "string"}
+            },
+            "required": ["artifact_id", "reason"],
+            "additionalProperties": false
+        }
+    });
+    schema["required"] = serde_json::json!(["artifacts", "moment", "events", "links"]);
+    schema
 }
 
 /// The shape `parse_dedupe` will accept. Lives beside `Raw` for the same reason
@@ -1427,8 +1564,18 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
         }
     };
 
-    let artifacts: Vec<ProposedArtifact> = env
-        .artifacts
+    proposed_from(env.artifacts, false)
+}
+
+/// Raw artifacts to proposed ones, shared by the plain and judged parses.
+///
+/// `judged` gates the model-written tags and the pin: on the judged capture
+/// path the operator asked for them; on a promotion window model tags stay
+/// off — no domain-agnostic vocabulary exists for subject words, so a
+/// generated one drifts (`forensics` and `forensik`, two filters over one
+/// idea), and a promoted rewrite of an old window must not pin itself.
+fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArtifact>> {
+    let artifacts: Vec<ProposedArtifact> = raws
         .into_iter()
         .filter(|c| !c.text.trim().is_empty())
         .map(|c| ProposedArtifact {
@@ -1443,14 +1590,17 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                 .category
                 .filter(|t| !t.trim().is_empty())
                 .map(|t| normalize_category(&t)),
-            // Nothing writes tags automatically any more. No domain-agnostic
-            // vocabulary exists for subject words, so a generated one is a
-            // vocabulary that drifts: `forensics` and `forensik`, `security`
-            // and `sicherheit`, two filters over one idea and nothing able to
-            // tell they are the same. The field stays — it is the channel
-            // pinning rides on and a public API filter — written by a caller
-            // who means a particular tag.
-            tags: Vec::new(),
+            tags: if judged {
+                c.tags
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.trim().to_lowercase())
+                    .filter(|t| !t.is_empty())
+                    .take(3)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             corpus_lines: match c.corpus_lines.as_deref() {
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
@@ -1465,6 +1615,7 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                 .filter(|c| !c.is_empty())
                 .take(3)
                 .collect(),
+            pinned: judged && c.pinned,
         })
         .collect();
 
@@ -1474,6 +1625,59 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
         ));
     }
     Ok(artifacts)
+}
+
+/// Parse a judged reply: the artifacts under the same rules as
+/// [`parse_response`], plus whatever of the judgement stands up. A missing or
+/// malformed judgement never fails artifacts that are otherwise fine, and a
+/// reply that needed salvaging carries no judgement at all — half-read
+/// intent is worse than none.
+pub fn parse_judged_response(body: &str) -> Result<crate::infer::SegmentReply> {
+    let json = extract_json(body);
+    match serde_json::from_str::<JudgedEnvelope>(json) {
+        Ok(env) => {
+            let judgement = crate::infer::Judgement {
+                intent: env.moment.as_ref().and_then(|m| m.intent.clone()),
+                when: env.moment.as_ref().and_then(|m| m.when.clone()),
+                rule: env.moment.as_ref().and_then(|m| m.rule.clone()),
+                events: env.events.unwrap_or_default(),
+                links: env
+                    .links
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|l| !l.artifact_id.trim().is_empty())
+                    .map(|l| crate::infer::ProposedLink {
+                        artifact_id: l.artifact_id,
+                        reason: l.reason,
+                    })
+                    .collect(),
+            };
+            Ok(crate::infer::SegmentReply {
+                artifacts: proposed_from(env.artifacts, true)?,
+                judgement: Some(judgement),
+            })
+        }
+        Err(e) => {
+            let objects = salvage_objects(json);
+            if objects.is_empty() {
+                tracing::debug!(
+                    error = %e,
+                    raw = %json.chars().take(RAW_ON_FAILURE).collect::<String>(),
+                    "judged synthesizer output could not be parsed or salvaged"
+                );
+                return Err(Error::MalformedLlmOutput(e.to_string()));
+            }
+            tracing::warn!(
+                error = %e,
+                artifacts = objects.len(),
+                "judged output was cut off or malformed; keeping the artifacts, dropping the judgement"
+            );
+            Ok(crate::infer::SegmentReply {
+                artifacts: proposed_from(objects, true)?,
+                judgement: None,
+            })
+        }
+    }
 }
 
 pub const DESCRIBE_SYSTEM: &str = r#"You read images for a personal knowledge base and write down everything in them worth keeping, as markdown.
@@ -1624,20 +1828,30 @@ mod tests {
     }
 
     #[test]
-    fn the_schema_no_longer_asks_for_tags() {
-        // No domain-agnostic vocabulary exists for subject words, so a
-        // generated one is a vocabulary that drifts: `forensics` and `forensik`
-        // became two filters over one idea. The field survives for callers who
-        // mean a particular tag; nothing writes it on their behalf.
+    fn the_schema_asks_for_tags_and_a_pin_and_the_judged_one_for_the_moment() {
+        // Strict decoding requires every property, so both are in the schema;
+        // whether they are *honored* is the parse's per-path decision — see
+        // `the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model`.
         let items = &artifacts_schema()["properties"]["artifacts"]["items"];
-        assert!(items["properties"]["tags"].is_null());
         let required: Vec<&str> = items["required"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(!required.contains(&"tags"), "{required:?}");
+        assert!(required.contains(&"tags"), "{required:?}");
+        assert!(required.contains(&"pinned"), "{required:?}");
+
+        let judged = judged_artifacts_schema();
+        let top: Vec<&str> = judged["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for field in ["artifacts", "moment", "events", "links"] {
+            assert!(top.contains(&field), "{top:?}");
+        }
     }
 
     #[test]
@@ -1705,7 +1919,7 @@ mod tests {
             before: Some("previous window tail".into()),
             after: Some("next window head".into()),
         };
-        let p = user_prompt("the window body", 1, 1024, &ctx);
+        let p = user_prompt("the window body", 1, 1024, &ctx, None);
 
         assert!(p.contains("PBS 3.x on Debian 12."));
         assert!(p.contains("previous window tail"));
@@ -1726,7 +1940,7 @@ mod tests {
     fn an_empty_context_renders_exactly_the_prompt_of_before() {
         use crate::infer::context::WindowContext;
 
-        let p = user_prompt("body", 1, 1024, &WindowContext::default());
+        let p = user_prompt("body", 1, 1024, &WindowContext::default(), None);
         assert!(
             !p.contains("context only"),
             "an empty context must not emit empty fences: {p}"
@@ -1754,7 +1968,7 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect::<Vec<_>>();
         let reply = r#"{"artifacts":[{"text":"body","title":"A","category":"note",
-            "tags":["t"],"corpus_lines":[1,4],"caveats":["only on linux"]}]}"#;
+            "tags":["t"],"pinned":false,"corpus_lines":[1,4],"caveats":["only on linux"]}]}"#;
         // The literal above is the model's side of the bargain: every field the
         // schema makes mandatory has to be one this parser reads.
         for field in &required {
@@ -2628,6 +2842,47 @@ mod tests {
         let r = parse_remind(r#"{"when":null,"rule":"FREQ=WEEKLY;BYDAY=MO","what":"x"}"#).unwrap();
         assert!(r.when.is_none());
         assert!(parse_remind("not json").is_err());
+    }
+
+    #[test]
+    fn a_judged_reply_parses_moment_events_links_tags_and_pinned() {
+        let body = r#"{"moment":{"intent":"remind","when":"2026-09-04T09:00","rule":null},
+            "events":["2026-09-12T00:00"],
+            "links":[{"artifact_id":"a-1","reason":"same migration"}],
+            "artifacts":[{"text":"Send the invoice","title":"Invoice","category":"other",
+                          "corpus_lines":[1,1],"caveats":[],"tags":["Billing "],"pinned":true}]}"#;
+        let r = parse_judged_response(body).unwrap();
+        let j = r.judgement.unwrap();
+        assert_eq!(j.intent.as_deref(), Some("remind"));
+        assert_eq!(j.when.as_deref(), Some("2026-09-04T09:00"));
+        assert_eq!(j.rule, None);
+        assert_eq!(j.events, vec!["2026-09-12T00:00"]);
+        assert_eq!(j.links[0].artifact_id, "a-1");
+        assert!(r.artifacts[0].pinned);
+        assert_eq!(r.artifacts[0].tags, vec!["billing"], "trimmed and lowercased");
+    }
+
+    #[test]
+    fn a_missing_or_malformed_judgement_never_fails_the_artifacts() {
+        let plain = r#"{"artifacts":[{"text":"x"}]}"#;
+        let r = parse_judged_response(plain).unwrap();
+        assert_eq!(r.artifacts.len(), 1);
+        assert_eq!(r.judgement.unwrap(), crate::infer::Judgement::default());
+        let bad = r#"{"moment":"not an object","events":7,"links":{"no":"list"},
+            "artifacts":[{"text":"x"}]}"#;
+        let r = parse_judged_response(bad).unwrap();
+        assert_eq!(r.artifacts.len(), 1);
+        assert_eq!(r.judgement.unwrap(), crate::infer::Judgement::default());
+    }
+
+    #[test]
+    fn the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model() {
+        // Promotion windows: model tags stay off (vocabulary drift), and a
+        // rewrite must not pin itself.
+        let body = r#"{"artifacts":[{"text":"x","tags":["topic"],"pinned":true}]}"#;
+        let arts = parse_response(body).unwrap();
+        assert!(arts[0].tags.is_empty());
+        assert!(!arts[0].pinned);
     }
 
     #[test]

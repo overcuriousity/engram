@@ -90,6 +90,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         .segment(crate::infer::SegmentInput {
             core: &text,
             context: &ctx,
+            judge: None,
         })
         .await;
     permit.finished();
@@ -127,6 +128,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             .segment(crate::infer::SegmentInput {
                 core: &text,
                 context: &ctx,
+                judge: None,
             })
             .await;
         permit.finished();
