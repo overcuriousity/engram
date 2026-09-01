@@ -2611,12 +2611,19 @@ async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> Result<Re
         .map_err(|e| Error::Internal(e.to_string()))?;
     Ok(match crate::jobs::remind::push(&http, &target, "engram", "A test from Settings.").await {
         Ok(()) => axum::response::Html("<p class=\"muted\">Sent.</p>".to_string()),
-        // The error names the endpoint the operator typed; escaped, since it
-        // is rendered as a fragment.
-        Err(e) => axum::response::Html(format!(
-            "<p class=\"muted\">Could not send: {}</p>",
-            e.to_string().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-        )),
+        // The transport detail goes to the server log, never the page: this
+        // is a server-side POST to whatever URL the user saved, and in a
+        // multi-tenant registry the difference between "connection refused",
+        // a timeout and an HTTP status is a port-scan of the server's own
+        // network, read back through the button.
+        Err(e) => {
+            tracing::warn!(error = %e, channel = %f.channel, "the test push could not be delivered");
+            axum::response::Html(
+                "<p class=\"muted\">Could not send — the endpoint did not take it. \
+                 The server log has the transport detail.</p>"
+                    .to_string(),
+            )
+        }
     }
     .into_response())
 }

@@ -14,7 +14,6 @@ use crate::core::Core;
 use crate::error::Result;
 use crate::infer::Judgement;
 use crate::store::moments::{Kind, NewMoment, Source};
-use chrono::TimeZone;
 
 /// Apply one judgement to the capture it was made about.
 ///
@@ -214,10 +213,7 @@ pub(crate) fn parse_local(s: &str, tz: chrono_tz::Tz) -> Option<i64> {
                 .map(|d| d.and_hms_opt(DEFAULT_HOUR, 0, 0).unwrap())
         })
         .ok()?;
-    tz.from_local_datetime(&dt)
-        .single()
-        .or_else(|| tz.from_local_datetime(&dt).earliest())
-        .map(|d| d.timestamp())
+    crate::core::moments::resolve_local(dt, tz)
 }
 
 #[cfg(test)]

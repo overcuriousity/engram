@@ -245,8 +245,10 @@ async fn reap_one(core: &Core, c: &crate::store::artifacts::Chunk, reason: &str)
     })
     .to_string();
     let _guard = core.lifecycle_lock.lock().await;
+    // `bury` sets `lifecycle_dirty` inside its own transaction, so from the
+    // instant the text is wiped the drift repair can finish the delete below
+    // if this process never gets to it.
     core.store.bury(&c.id, &meta).await?;
-    core.store.mark_lifecycle_dirty(&c.id).await?;
     core.vectors
         .delete_artifacts(std::slice::from_ref(&c.id))
         .await?;

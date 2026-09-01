@@ -343,18 +343,15 @@ fn snooze_until(word: &str, now: i64, tz: Tz) -> Option<i64> {
     local(at, tz)
 }
 
-/// A local wall-clock time as an instant, choosing for the operator on the two
-/// days a year when the zone cannot. `single()` is `None` twice: on the hour a
-/// fall-back repeats, where either answer is a defensible reading of what they
-/// typed, and in the gap a spring-forward skips, where no answer is. `earliest`
-/// takes the first of an ambiguous pair and the instant the gap closes at, so a
-/// date the operator set is a date that gets set. Every other date path in the
-/// crate already reads a local time this way; these two were the exceptions.
+/// A local wall-clock time as an instant, choosing for the operator on the
+/// two days a year when the zone cannot: the first reading of an ambiguous
+/// fall-back hour, and the first instant the zone has again after a
+/// spring-forward gap — chrono's mapping for the gap is `None`, and
+/// `earliest()` on it is `None` too, not the gap-close its name suggests, so
+/// a date the operator set was a button that silently did nothing. See
+/// `core::moments::resolve_local`, which every date path reads through now.
 fn local(at: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
-    tz.from_local_datetime(&at)
-        .single()
-        .or_else(|| tz.from_local_datetime(&at).earliest())
-        .map(|d| d.timestamp())
+    crate::core::moments::resolve_local(at, tz)
 }
 
 async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -845,6 +842,23 @@ mod tests {
         let at = core.store.moment(&id).await.unwrap().unwrap().at.expect("the date is set");
         let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(at, 0).earliest().unwrap();
         assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2026-10-25 02:30");
+    }
+
+    #[tokio::test]
+    async fn a_date_in_the_hour_the_clocks_skip_is_still_set() {
+        // 02:30 on 28 March 2027 never happens in Berlin: the clocks jump
+        // from 02:00 to 03:00. The move used to be silently dropped — the
+        // operator pressed the button and the band came back unchanged. The
+        // first instant the zone has again is taken instead.
+        let core = test_core().await;
+        let id = artifact_with_due(&core, None).await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        app.oneshot(form(&format!("/ui/moments/{id}/date"), &cookie, "when=2027-03-28T02:30&tz=Europe/Berlin"))
+            .await
+            .unwrap();
+        let at = core.store.moment(&id).await.unwrap().unwrap().at.expect("the date is set");
+        let local = chrono_tz::Tz::Europe__Berlin.timestamp_opt(at, 0).earliest().unwrap();
+        assert_eq!(local.format("%Y-%m-%d %H:%M").to_string(), "2027-03-28 03:00");
     }
 
     #[tokio::test]

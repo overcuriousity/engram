@@ -1580,7 +1580,11 @@ impl Store {
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
-        sqlx::query("UPDATE artifacts SET text = '', reaped_at = ? WHERE id = ?")
+        // `lifecycle_dirty` rides the same transaction as the wipe: set as a
+        // separate statement afterwards, a crash in the window left a stub
+        // whose Qdrant point still held the reaped text, and the drift repair
+        // only scans marked rows — nothing else would ever notice.
+        sqlx::query("UPDATE artifacts SET text = '', reaped_at = ?, lifecycle_dirty = 1 WHERE id = ?")
             .bind(reaped_at)
             .bind(id)
             .execute(&mut *tx)
@@ -2752,6 +2756,11 @@ mod tests {
         let (text, meta, _) = s.graveyard_row(&made[0].id).await.unwrap().unwrap();
         assert!(text.contains("xylophone"), "the graveyard holds the full text");
         assert!(meta.contains("nothing new"));
+        assert!(
+            s.dirty_lifecycle_artifacts(10).await.unwrap().iter().any(|c| c.id == made[0].id),
+            "the wipe and the drift marker commit together, so a crash between \
+             them cannot leave a stub whose vector still holds the text"
+        );
 
         assert_eq!(s.retired_unreaped_count().await.unwrap(), 0);
         s.set_artifact_status(&made[1].id, ArtifactStatus::Deprecated)

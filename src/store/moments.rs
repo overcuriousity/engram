@@ -241,14 +241,25 @@ impl Store {
     /// instant to compare: `moved_from IS NOT NULL` cannot hold while the bound
     /// value is NULL, so an undated reminder still matches on `at` alone and
     /// not on every unmoved row of its kind.
+    ///
+    /// The third clause is the undated probe's own half of the moved story.
+    /// Dating a reminder nobody could date is a move off no instant —
+    /// `move_moment` leaves `moved_from` NULL and stamps `moved_at` — so
+    /// neither of the first two clauses can hold for it, and the next re-read
+    /// of the same prose put a second undated row beside the dated one. A row
+    /// moved off nothing *is* the undated reading, so the undated probe reads
+    /// `moved_at` where `moved_from` has nothing to say.
     pub async fn has_moment_at(&self, artifact_id: &str, kind: Kind, at: Option<i64>) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM moments
               WHERE artifact_id = ? AND kind = ?
-                AND (at IS ? OR (moved_from IS NOT NULL AND moved_from IS ?))",
+                AND (at IS ?
+                     OR (moved_from IS NOT NULL AND moved_from IS ?)
+                     OR (? IS NULL AND moved_at IS NOT NULL AND moved_from IS NULL))",
         )
         .bind(artifact_id)
         .bind(kind.as_str())
+        .bind(at)
         .bind(at)
         .bind(at)
         .fetch_one(&self.pool)
@@ -352,12 +363,15 @@ impl Store {
     }
 
     /// Open reminders: undone, on an active artifact, and either undated or
-    /// due before `to` and not snoozed past `now`. Dated first, by time.
+    /// due before `to` and not snoozed past `now`. Dated first, by time —
+    /// the *effective* time: a row whose snooze has elapsed re-enters the
+    /// band at the instant the operator named, not sorted as most overdue by
+    /// the date they put aside.
     pub async fn open_due(&self, now: i64, to: i64) -> Result<Vec<DueRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{JOINED} WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'
                AND (m.at IS NULL OR (m.at < ? AND (m.snoozed_until IS NULL OR m.snoozed_until <= ?)))
-             ORDER BY m.at IS NULL, m.at, m.created_at"
+             ORDER BY m.at IS NULL, COALESCE(m.snoozed_until, m.at), m.created_at"
         )))
         .bind(to)
         .bind(now)
@@ -479,16 +493,16 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// A snooze that ends re-notifies, so the mark is cleared with it.
-    ///
-    /// Clearing it is only safe because a snoozed row climbs a one-rung
-    /// ladder — see [`crate::jobs::remind::owed_lead`]. `eff_at` becomes
-    /// `snoozed_until`, so with the full ladder every lead above the snooze's
-    /// own length sat *behind* the new time and the cleared mark owed one of
-    /// them at once: the operator put a reminder aside for an hour and the
-    /// phone said it again on the next queue tick.
+    /// A snooze that ends re-notifies on its own: `eff_at` becomes
+    /// `snoozed_until`, so whatever `notified_at` holds is behind the new
+    /// time and the one-rung ladder owes the snooze's end regardless — see
+    /// [`crate::jobs::remind::owed_lead`]. The mark is deliberately kept.
+    /// It used to be cleared here, which the snooze itself never needed, and
+    /// an *unsnooze* then found a bare ladder: the reminder the phone had
+    /// already said was owed — and said — again the moment the snooze was
+    /// taken back.
     pub async fn snooze(&self, id: &str, until: i64) -> Result<()> {
-        sqlx::query("UPDATE moments SET snoozed_until = ?, notified_at = NULL WHERE id = ?")
+        sqlx::query("UPDATE moments SET snoozed_until = ? WHERE id = ?")
             .bind(until)
             .bind(id)
             .execute(&self.pool)
@@ -501,10 +515,23 @@ impl Store {
         Ok(())
     }
 
+    /// One statement for the whole batch: the caller has already sent one
+    /// push covering every id, so a failure part-way through a row-at-a-time
+    /// loop left half the batch marked — and the retry that the error buys
+    /// then re-delivered the other half as a second push.
     pub async fn mark_notified(&self, ids: &[String], at: i64) -> Result<()> {
-        for id in ids {
-            sqlx::query("UPDATE moments SET notified_at = ? WHERE id = ?").bind(at).bind(id).execute(&self.pool).await?;
+        if ids.is_empty() {
+            return Ok(());
         }
+        let marks = vec!["?"; ids.len()].join(",");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE moments SET notified_at = ? WHERE id IN ({marks})"
+        )))
+        .bind(at);
+        for id in ids {
+            q = q.bind(id);
+        }
+        q.execute(&self.pool).await?;
         Ok(())
     }
 
@@ -866,6 +893,57 @@ mod tests {
         s.insert_moment(&m).await.unwrap();
         assert!(s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2").await.unwrap(), "two of two");
         assert!(!s.rule_is_exhausted(&aid, "FREQ=DAILY").await.unwrap(), "open-ended is never exhausted");
+    }
+
+
+    #[tokio::test]
+    async fn dating_an_undated_reminder_still_covers_the_undated_probe() {
+        // The move off no instant leaves `moved_from` NULL, so the undated
+        // probe has to read `moved_at` — or the next re-judgement of the same
+        // prose put a second undated row beside the dated one.
+        let (s, aid) = store_with_artifact().await;
+        let id = s.insert_moment(&due(&aid, None)).await.unwrap();
+        s.move_moment(&id, 5_000, "Europe/Berlin").await.unwrap();
+        assert!(
+            s.has_moment_at(&aid, Kind::Due, None).await.unwrap(),
+            "the dated row still answers for the undated reading"
+        );
+        assert!(s.has_moment_at(&aid, Kind::Due, Some(5_000)).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn unsnoozing_does_not_owe_an_already_said_rung_again() {
+        // Snoozing used to clear `notified_at`; taking the snooze back then
+        // found a bare ladder and the phone said the reminder again.
+        let (s, aid) = store_with_artifact().await;
+        let now = crate::store::now();
+        let id = s.insert_moment(&due(&aid, Some(now - 10))).await.unwrap();
+        s.mark_notified(std::slice::from_ref(&id), now - 5).await.unwrap();
+        assert!(s.due_owed(now).await.unwrap().is_empty(), "said already");
+
+        s.snooze(&id, now + 3_600).await.unwrap();
+        s.unsnooze(&id).await.unwrap();
+        assert!(
+            s.due_owed(now).await.unwrap().is_empty(),
+            "an unsnooze owes nothing the push already covered"
+        );
+        // And a snooze that runs out still re-notifies: the new effective
+        // time is ahead of the old mark, so the one-rung ladder owes its end.
+        s.snooze(&id, now + 60).await.unwrap();
+        assert_eq!(s.due_owed(now + 61).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_elapsed_snooze_re_enters_the_band_at_its_own_time() {
+        // Sorted by `m.at`, a row put aside for an hour came back at the top
+        // of the band as the most overdue thing on it.
+        let (s, aid) = store_with_artifact().await;
+        let put_off = s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        s.snooze(&put_off, 8_000).await.unwrap();
+        let newer = s.insert_moment(&due(&aid, Some(5_000))).await.unwrap();
+        let rows = s.open_due(9_000, 20_000).await.unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.moment.id.as_str()).collect();
+        assert_eq!(ids, vec![newer.as_str(), put_off.as_str()]);
     }
 
     #[tokio::test]

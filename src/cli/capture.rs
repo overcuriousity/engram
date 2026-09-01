@@ -345,12 +345,17 @@ struct Read {
 /// choose between two answers: refuse it as a missing file, or store it as a
 /// note. `notes.pdf` typed with the file in the other directory should be the
 /// error it is, and `engram -c "buy milk"` should be the note it is.
+/// Nothing with whitespace in it is a path: a sentence that happens to carry
+/// a slash — "siehe https://example.com/x für Details", "Zahlung 12/2026
+/// überweisen" — is exactly the prose the text fallthrough exists for, and
+/// the slash branch used to claim it anyway, failing the capture with the
+/// `File name too long` this heuristic was written to remove.
 fn looks_like_a_path(target: &str) -> bool {
-    target.contains(std::path::MAIN_SEPARATOR)
-        || target.contains('/')
-        || target.starts_with('~')
-        || (!target.chars().any(char::is_whitespace)
-            && std::path::Path::new(target).extension().is_some_and(|e| !e.is_empty()))
+    !target.chars().any(char::is_whitespace)
+        && (target.contains(std::path::MAIN_SEPARATOR)
+            || target.contains('/')
+            || target.starts_with('~')
+            || std::path::Path::new(target).extension().is_some_and(|e| !e.is_empty()))
 }
 
 /// The bytes to send and what to call them.
@@ -465,6 +470,8 @@ mod tests {
             "PUID steht bei Microsoft für „Personal User ID“.\nEine zweite Zeile.",
             "buy milk",
             "erinnere mich",
+            "siehe https://example.com/x für Details",
+            "Zahlung 12/2026 überweisen",
         ] {
             assert!(!looks_like_a_path(prose), "{prose}");
         }

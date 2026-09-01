@@ -333,6 +333,23 @@ pub fn rule_count(rule: &str) -> Option<u32> {
     parse_rule(rule).ok()?.count
 }
 
+/// A local wall-clock time as an instant, choosing for the operator on the
+/// two days a year when the zone cannot. An ambiguous fall-back hour takes
+/// its earlier reading; a time inside a spring-forward gap rolls forward to
+/// the first instant the zone has again, in quarter-hour steps — chrono's
+/// mapping for a gap is `None` with nothing to call `earliest()` on, and
+/// treating that as "no answer" silently dropped a date the operator named.
+pub(crate) fn resolve_local(dt: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
+    if let Some(d) = tz.from_local_datetime(&dt).earliest() {
+        return Some(d.timestamp());
+    }
+    // Gaps are 30 or 60 minutes almost everywhere (Lord Howe's is 30); three
+    // hours of quarter-hour steps covers the historical 2 h ones too.
+    (1..=12)
+        .find_map(|q| tz.from_local_datetime(&(dt + chrono::Duration::minutes(15 * q))).earliest())
+        .map(|d| d.timestamp())
+}
+
 /// The next occurrence strictly after `at`, keeping `at`'s wall-clock time in
 /// `tz`. None when the rule is exhausted or invalid. COUNT is enforced by
 /// `complete_moment`, which counts the occurrences already on the artifact.
@@ -351,7 +368,14 @@ pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
             Freq::Weekly => {
                 let own = [origin.weekday()];
                 let days: &[Weekday] = if r.by_day.is_empty() { &own } else { &r.by_day };
-                let weeks = (date - origin).num_days().div_euclid(7);
+                // RFC 5545 counts calendar weeks (WKST defaults to Monday),
+                // not 7-day blocks from the origin instant: INTERVAL=2 with
+                // BYDAY=MO from a Wednesday origin must skip the Monday five
+                // days later — it is already the next week.
+                let monday = |d: chrono::NaiveDate| {
+                    d - chrono::Duration::days(d.weekday().num_days_from_monday() as i64)
+                };
+                let weeks = (monday(date) - monday(origin)).num_days() / 7;
                 days.contains(&date.weekday()) && weeks % r.interval as i64 == 0
             }
             Freq::Monthly => {
@@ -369,10 +393,9 @@ pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
             continue;
         }
         let dt = date.and_time(time);
-        let Some(next) = tz.from_local_datetime(&dt).single().or_else(|| tz.from_local_datetime(&dt).earliest()) else {
+        let Some(ts) = resolve_local(dt, tz) else {
             continue;
         };
-        let ts = next.timestamp();
         if let Some(until) = r.until
             && ts > until
         {
@@ -631,5 +654,30 @@ mod tests {
         let at = berlin().with_ymd_and_hms(2026, 8, 31, 9, 0, 0).unwrap().timestamp();
         assert_eq!(local(next_after("FREQ=DAILY;INTERVAL=3", at, berlin()).unwrap()), "2026-09-03 09:00");
         assert_eq!(local(next_after("FREQ=YEARLY", at, berlin()).unwrap()), "2027-08-31 09:00");
+    }
+
+    #[test]
+    fn a_weekly_interval_counts_calendar_weeks_not_day_blocks() {
+        // RFC 5545: INTERVAL=2 with BYDAY=MO from a Wednesday origin skips
+        // the Monday five days later — it is already the next week — and
+        // fires the one after. Counted in 7-day blocks from the origin it
+        // fired at +5 days.
+        let wed = resolve_local(
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 2).unwrap().and_hms_opt(9, 0, 0).unwrap(),
+            berlin(),
+        )
+        .unwrap();
+        let next = next_after("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO", wed, berlin()).unwrap();
+        assert_eq!(local(next), "2026-09-14 09:00");
+    }
+
+    #[test]
+    fn a_time_in_the_spring_forward_gap_rolls_to_the_gap_close() {
+        // 02:30 on 2027-03-28 does not exist in Berlin. chrono maps it to
+        // `None` — there is no `earliest()` to take — and the date was
+        // silently dropped where the operator had named one.
+        let dt = chrono::NaiveDate::from_ymd_opt(2027, 3, 28).unwrap().and_hms_opt(2, 30, 0).unwrap();
+        let ts = resolve_local(dt, berlin()).unwrap();
+        assert_eq!(local(ts), "2027-03-28 03:00");
     }
 }

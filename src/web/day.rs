@@ -86,7 +86,11 @@ impl DayTemplate {
 
 /// The day's `[from, to)` in Unix seconds, in the viewer's zone.
 fn bounds(date: NaiveDate, tz: Tz) -> Option<(i64, i64)> {
-    Some((day_start(date, tz)?, day_start(date + chrono::Duration::days(1), tz)?))
+    // Checked: chrono's `%Y` reads signed six-digit years, so a URL can name
+    // `NaiveDate::MAX`, and a plain `+ days(1)` on it panics the connection
+    // away instead of answering the 404 the caller makes of `None`.
+    let next = date.checked_add_signed(chrono::Duration::days(1))?;
+    Some((day_start(date, tz)?, day_start(next, tz)?))
 }
 
 /// Local midnight — or, where there is no local midnight, the first instant of
@@ -203,8 +207,8 @@ async fn page(tenant: Tenant, Path(date): Path<String>, Query(q): Query<TzQuery>
     }
 
     let t = DayTemplate {
-        prev: (day - chrono::Duration::days(1)).format("%Y-%m-%d").to_string(),
-        next: (day + chrono::Duration::days(1)).format("%Y-%m-%d").to_string(),
+        prev: day.checked_sub_signed(chrono::Duration::days(1)).unwrap_or(day).format("%Y-%m-%d").to_string(),
+        next: day.checked_add_signed(chrono::Duration::days(1)).unwrap_or(day).format("%Y-%m-%d").to_string(),
         heading: day.format("%A, %-d %B %Y").to_string(),
         date,
         tz: tz_name,
@@ -310,6 +314,14 @@ mod tests {
         let (from, to) = bounds(day, tz).expect("the day starts at 01:00, not never");
         assert!(from < to);
         assert_eq!(hm(from, tz), "01:00");
+    }
+
+    #[test]
+    fn the_edge_of_representable_time_is_a_404_not_a_panic() {
+        // chrono's `%Y` reads signed six-digit years, so a URL can spell the
+        // last representable day; the +1 for the day's upper bound must
+        // answer `None` — the page's 404 — not abort the connection.
+        assert!(bounds(NaiveDate::MAX, "UTC".parse().unwrap()).is_none());
     }
 
     #[tokio::test]

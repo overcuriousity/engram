@@ -2240,6 +2240,14 @@ impl Config {
             .templates()
             .validate()
             .map_err(ConfigError::Invalid)?;
+        let tz = self.time.default_tz.trim();
+        if !tz.is_empty() && tz.parse::<chrono_tz::Tz>().is_err() {
+            return Err(ConfigError::Invalid(format!(
+                "time.default_tz {tz:?} is not an IANA zone name (e.g. \"Europe/Berlin\"): \
+                 left standing, every capture from a door that sends no zone would be \
+                 silently read and stamped in UTC"
+            )));
+        }
         Ok(())
     }
 
@@ -3216,6 +3224,17 @@ mode = "off"
             Config::load(Some(&p)),
             Err(ConfigError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn a_misspelt_default_zone_is_refused_at_startup() {
+        // "Europe/Berlim" parses as no zone and fell back to UTC without a
+        // word — the exact silent misread the capture-time zone plumbing was
+        // built to refuse.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, &format!("{MINIMAL}\n[time]\ndefault_tz = \"Europe/Berlim\"\n"));
+        assert!(matches!(Config::load(Some(&p)), Err(ConfigError::Invalid(_))));
     }
 
     #[test]
