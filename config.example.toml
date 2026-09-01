@@ -238,6 +238,13 @@ output_ratio = 8.0
 # ceiling than the tier's:
 # max_output_tokens = 8192
 # Pacing lives in `[pacing]` at the bottom of this file.
+# Tokens of nearest-neighbour artifacts from the rest of the base shown to a
+# small capture's synthesis call, so it can resolve references ("the migration
+# issue" → which one), name what this capture relates to, and write what the
+# base does not already hold. Read with the capture's own just-stored vectors
+# — no extra embedding call. 0 turns the block off; promotion's window calls
+# never carry it.
+# context_neighbor_tokens = 1024
 # Tokens of the document's verbatim opening prepended to every window, so an
 # artifact from deep in a long document still knows what product, version and
 # platform it belongs to — which is what the caveats field asks for and what a
@@ -270,10 +277,11 @@ dim = 768
 # engram splits the artifact instead, but it splits sooner and cheaper if this
 # number is honest. 2048 is the model's window; use the server's if lower.
 max_input_tokens = 2048
-# Passage size at synthesis = "off"/"earned", in estimator tokens: about a
-# paragraph and a half, which is about one idea. Clamped to what the embedder
-# will take (max_input_tokens * 0.8). Argued, not measured — the judge
-# harness is what is allowed to move it.
+# Passage size for verbatim passages, and the cap each synthesized artifact
+# is asked to fit, so every artifact embeds whole: about a paragraph and a
+# half, which is about one idea. Clamped to what the embedder will take
+# (max_input_tokens * 0.8). Argued, not measured — the judge harness is what
+# is allowed to move it.
 # chunk_tokens = 384
 # The recipe. `{text}` is the query or the body; `{title}` is the artifact's
 # title. A document with no title takes the `_untitled` template — the model
@@ -573,8 +581,9 @@ confirmed = 3.0
 cited = 0.5
 
 # ── Promotion ────────────────────────────────────────────────────────────────
-# At synthesis = "earned", when a passage has earned its window a synthesis
-# call. Read against [activation] and above the capture baseline, which decays
+# The large side of capture's size fork: when a passage has earned its window
+# a synthesis call. (A capture that fits one call was synthesized at capture.)
+# Read against [activation] and above the capture baseline, which decays
 # at the same rate as what use adds and is subtracted decayed before the
 # comparison: so 3.0 is one confirmation, or three openings, at any age.
 # Checked only when a passage is opened, confirmed or cited by an answer —
@@ -799,8 +808,9 @@ age_after_mins = 60
 # bounds a shared GPU — but it serves no gap and starts none. The gap is sized
 # against a generation; an encoder answering a batch of 32 in about a second is
 # not one, and pacing it spends nearly the whole budget on the one role that
-# needs no protecting. At `synthesis = "earned"`, where capture generates
-# nothing at all, that was most of what this setting did.
+# needs no protecting. A large capture generates nothing at capture time, so
+# what this paces is mostly promotion, the judged links, and the one synthesis
+# call a small capture arms.
 cooldown_secs = 0
 
 [capture]

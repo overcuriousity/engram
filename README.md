@@ -3,8 +3,9 @@
 **A trace of everything worth keeping.**
 
 A self-hosted knowledge base you search by meaning. Paste anything — text, a
-link, a PDF, a photo. engram splits it, embeds it, and hands back the passages
-that answer you. Your words. Ranked. Never a rewrite.
+link, a PDF, a photo. engram stores it verbatim, splits and embeds it, and
+hands back the passages that answer you — rewritten for retrieval only where
+that helps, with your original always kept.
 
 Everybody else summarizes your notes and shows you the summary. Then the summary
 is all you have. We keep the original and we keep it in front of you.
@@ -12,11 +13,14 @@ is all you have. We keep the original and we keep it in front of you.
 Three doors, one backend: the web UI, a REST API at `/api/v1`, and an MCP server
 at `/mcp` so an agent can read and write mid-session. Three doors is enough.
 
-**Nothing gets rewritten until it earns it.** Capture spends no model call on
-paragraphs nobody will ever ask about, and that is most of them. A passage is
-rewritten once you have actually used it, and it says so. That is
-`infer.synthesis = "earned"`, the default. `"eager"` rewrites everything up
-front; `"off"` rewrites nothing and needs no chat model at all.
+**Small pastes are structured on the spot; big ones earn it.** A capture that
+fits one synthesis call is rewritten immediately into artifacts built for
+retrieval — and judged in the same pass: a reminder arms itself, a journal
+line files itself, dates land on the day page, tags and links come back
+without a second call. Anything larger is stored verbatim, searchable the
+moment it embeds, and a window of it is rewritten once you have actually used
+it. The box says which fate a paste will meet before you press capture, and
+either way the original stays reachable behind every rewrite.
 
 **Both halves of retrieval.** A dense embedding for meaning, a local BM25 vector
 for characters. Meaning finds the paragraph you half-remember. Characters find
@@ -24,8 +28,9 @@ for characters. Meaning finds the paragraph you half-remember. Characters find
 
 **It grades itself, honestly.** A test query written while looking at the answer
 passes on every system ever built. Meaningless. engram records the searches you
-made in earnest and lets you judge them later — recall@10 and MRR, from the
-positions those searches really gave. Not a proxy score.
+made in earnest and reads recall@10 and MRR off the verdicts you give under
+the results — from the positions those searches really gave. Not a proxy
+score.
 
 ## What it does
 
@@ -42,9 +47,10 @@ positions those searches really gave. Not a proxy score.
 - **From a shell** — capture, search, ask, read. Drawn on a terminal, plain text
   in a pipe. See [The client](#the-client).
 - **Judge** — a result you read, or answer *Was this what you were looking
-  for?* under, is a labelled pair; what that leaves comes back as a card, top
-  five in order, one keystroke each. It all stays on your machine, and one
-  button forgets it.
+  for?* under, is a labelled pair; Insights reads recall@10 and MRR off those
+  verdicts, and a background sweep turns them into tuning recommendations you
+  apply with one press. It all stays on your machine, and one button forgets
+  it.
 - **Duplicates** — near-duplicates parked at capture, close pairs queued for a
   person. Nothing deleted. No merge drops a number, a command or a path. Undo on
   everything.
@@ -64,9 +70,11 @@ positions those searches really gave. Not a proxy score.
   half an hour, and the moment itself, one message a wake however many are
   owed. The band fills itself while you watch, and a reminder that is done
   retires the note it came from: still searchable, no
-  longer one of the last things you kept. Dates a note refers to are read out
-  of it with no model. Every *today* is a link to the day: what you wrote,
-  what you looked for, what was due.
+  longer one of the last things you kept. The same synthesis call that
+  structures a small capture reads its dates — a reminder is judged, not
+  pattern-matched, and other dates a note mentions land on the day page.
+  Every *today* is a link to the day: what you wrote, what you looked for,
+  what was due.
 
 Everything after the paste runs on its own, and sweeps repair whatever was
 interrupted. You do not babysit it.
@@ -80,9 +88,11 @@ A **segment** is a slice of one corpus, sized to the model's context. Local and
 mechanical, and it doubles as the memory that lets an interrupted run resume.
 
 An **artifact** is a unit of retrieval: text with a title, category and tags,
-ranked on its own. Most are verbatim *passages*, split on the document's own
-headings. A *synthesized* or *captured* one was written by the model from a
-window, badged wherever it is shown, and retired with one click.
+ranked on its own, sized so it embeds whole. Most are verbatim *passages*,
+split on the document's own structure. A *synthesized* or *captured* one was
+written by the model from a window or a small capture, badged wherever it is
+shown, supersedes the passages it covers without deleting them, and is retired
+with one click.
 
 ## Three rules
 
@@ -247,10 +257,10 @@ in, the surviving alias is adopted and the deleted account comes back with every
 vector it had. Nothing is deleted when it stops that way, so the fix is to bring
 Qdrant back and run it again.
 
-The judge grant gates the whole of `/ui/judge`, which is also the only route in
-the tree that writes `config.toml` — applying a tuning recommendation moves the
-instance's ranking parameters. There is no admin role; the flag is granted out
-of band, per user, and takes effect on the next request rather than on a
+The judge grant gates applying a tuning recommendation on `/ui/insights` —
+the only route in the tree that writes `config.toml`, since applying one moves
+the instance's ranking parameters. There is no admin role; the flag is granted
+out of band, per user, and takes effect on the next request rather than on a
 restart. The raw form works too:
 
 ```bash
