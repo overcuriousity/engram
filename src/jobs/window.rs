@@ -300,16 +300,44 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // The judgement, once the artifacts it is about stand. Anchored to the
     // first live one; a judgement that cannot be applied is a warning — the
     // artifacts are already the capture.
-    if let Some(j) = judgement
-        && let Some(anchor) = live.iter().find(|c| c.in_results())
-        && let Err(e) =
-            crate::jobs::judgement::apply(core, corpus_id, &anchor.id, &j, &shown_ids).await
-    {
-        tracing::warn!(
-            corpus_id,
-            error = %e,
-            "the judgement could not be applied; the artifacts stand"
-        );
+    //
+    // A judged window may legitimately have written none. The prompt forbids
+    // an artifact that only restates the note's intent or its dates, so a
+    // note that is nothing but a reminder leaves the model nothing to write,
+    // and the verbatim passage this window was going to promote stays as the
+    // record. It is a live row of this corpus, so it is what the moment hangs
+    // on — anchoring only to synthesized artifacts silently dropped the one
+    // reminder such a capture exists to set.
+    if let Some(j) = judgement {
+        let anchor = match live.iter().find(|c| c.in_results()) {
+            Some(c) => Some(c.id.clone()),
+            None => core
+                .store
+                .artifacts_for_segment(corpus_id, idx)
+                .await?
+                .into_iter()
+                .find(|c| c.in_results())
+                .map(|c| c.id),
+        };
+        match anchor {
+            Some(anchor) => {
+                if let Err(e) =
+                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids).await
+                {
+                    tracing::warn!(
+                        corpus_id,
+                        error = %e,
+                        "the judgement could not be applied; the artifacts stand"
+                    );
+                }
+            }
+            None => tracing::warn!(
+                corpus_id,
+                window = idx,
+                "the judgement has nothing to hang on: the window wrote no artifact \
+                 and holds no passage"
+            ),
+        }
     }
     core.store
         .set_segment_state(corpus_id, idx, SegmentState::Done, None)

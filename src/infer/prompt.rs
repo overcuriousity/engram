@@ -2490,8 +2490,21 @@ pub fn parse_judged_response(body: &str) -> Result<crate::infer::SegmentReply> {
                     })
                     .collect(),
             };
+            // An empty artifact list is a real answer here, and only here.
+            // The system prompt's last rule forbids an artifact that
+            // describes the note's intent, repeats its dates or names its
+            // relation to a neighbour — so a note that is *only* a reminder
+            // leaves the model nothing it is allowed to write, and it
+            // answers with the judgement alone. Held to `proposed_from`'s
+            // floor that reply was thrown away as malformed, the reminder
+            // with it, and the window retried the same call to exhaustion.
+            let artifacts = if env.artifacts.is_empty() && judgement.says_something() {
+                Vec::new()
+            } else {
+                proposed_from(env.artifacts, true)?
+            };
             Ok(crate::infer::SegmentReply {
-                artifacts: proposed_from(env.artifacts, true)?,
+                artifacts,
                 judgement: Some(judgement),
             })
         }
@@ -3865,6 +3878,35 @@ mod tests {
         let r = parse_judged_response(bad).unwrap();
         assert_eq!(r.artifacts.len(), 1);
         assert_eq!(r.judgement.unwrap(), crate::infer::Judgement::default());
+    }
+
+    #[test]
+    fn a_reminder_note_that_is_only_a_judgement_keeps_its_judgement() {
+        // The prompt's own last rule — "Das Urteil ist kein Artefakt" — leaves
+        // a bare reminder with nothing it is allowed to write an artifact
+        // about, so the model answers with an empty list and the judgement
+        // filled in. That is the reply the capture door exists for; refusing
+        // it as malformed threw the reminder away and retried the call until
+        // the unit gave up.
+        let body = r#"{"artifacts":[],
+            "moment":{"intent":"remind","when":"2026-09-05T13:45","rule":null},
+            "events":["2026-09-05T13:45"],"links":[]}"#;
+        let r = parse_judged_response(body).unwrap();
+        assert!(r.artifacts.is_empty());
+        let j = r.judgement.expect("the judgement is the whole reply");
+        assert_eq!(j.intent.as_deref(), Some("remind"));
+        assert_eq!(j.when.as_deref(), Some("2026-09-05T13:45"));
+    }
+
+    #[test]
+    fn a_judged_reply_with_neither_artifacts_nor_a_judgement_is_still_malformed() {
+        // The empty list is only meaningful beside a judgement. A reply that
+        // says nothing at all is a model that answered nothing, and the
+        // window must go on treating that as a failure to retry.
+        let body = r#"{"artifacts":[],"moment":{"intent":"none","when":null,"rule":null},
+            "events":[],"links":[]}"#;
+        assert!(parse_judged_response(body).is_err());
+        assert!(parse_judged_response(r#"{"artifacts":[]}"#).is_err());
     }
 
     #[test]

@@ -72,6 +72,21 @@ pub struct Judgement {
     pub links: Vec<ProposedLink>,
 }
 
+impl Judgement {
+    /// Whether the model said anything about the note as a moment in time.
+    ///
+    /// The one caller that matters is the judged parse: a reply with no
+    /// artifacts is a failure when this is false and the whole point of the
+    /// call when it is true. `intent: "none"` is an answer, not a claim —
+    /// the model saying the note is neither a reminder nor a journal entry
+    /// leaves nothing behind, so it does not count.
+    pub fn says_something(&self) -> bool {
+        matches!(self.intent.as_deref(), Some("remind") | Some("journal"))
+            || !self.events.is_empty()
+            || !self.links.is_empty()
+    }
+}
+
 /// One synthesis reply: the artifacts, and — on the judged path — what the
 /// model made of the note as a moment in time.
 #[derive(Debug, Clone)]
