@@ -142,13 +142,22 @@ pub async fn apply(
                 .as_deref()
                 .and_then(|w| parse_local(w, tz))
                 .map(reconcile);
-            let rule = j.rule.clone().filter(|r| match validate_rule(r) {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(rule = %r, error = %e, "rule outside the subset; the reminder is single");
-                    false
-                }
-            });
+            let rule = j
+                .rule
+                .clone()
+                .filter(|r| match validate_rule(r) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(rule = %r, error = %e, "rule outside the subset; the reminder is single");
+                        false
+                    }
+                })
+                // A rule that yields one occurrence is not a repetition, it is
+                // the date `when` already carries. Asked to judge "Freitag
+                // 13:45" the configured model answers
+                // `FREQ=WEEKLY;BYDAY=FR;COUNT=1`, and stored, that made the
+                // band offer to repeat a note that never said it repeats.
+                .filter(|r| !single_occurrence(r));
             // A judged reminder with no date anywhere stays an ordinary
             // capture — a guess about a note that names no time used to
             // become an undated row nagging for a date it never had. A
@@ -221,6 +230,19 @@ async fn record_intent(
         m.remove("intent_score");
     }
     core.store.set_corpus_metadata(corpus_id, &meta).await
+}
+
+/// Does this RRULE describe exactly one occurrence?
+///
+/// `COUNT=1` says so outright, and it is the shape a model reaches for when it
+/// is asked for a rule and has only the one date to give. Nothing else is
+/// decided here: a rule whose `UNTIL` happens to leave one occurrence is still
+/// a note that says it repeats, and the recurrence code reads it.
+fn single_occurrence(rule: &str) -> bool {
+    rule.split(';').any(|part| {
+        let (k, v) = part.split_once('=').unwrap_or((part, ""));
+        k.trim().eq_ignore_ascii_case("COUNT") && v.trim() == "1"
+    })
 }
 
 /// The push that says a reminder was just set, at capture time and
@@ -486,6 +508,100 @@ mod tests {
 
     fn judged_core_reply(j: Judgement) -> std::sync::Arc<JudgedFake> {
         std::sync::Arc::new(JudgedFake(std::sync::Mutex::new(j)))
+    }
+
+    /// A synthesizer that answers a bare reminder the way a model held to the
+    /// prompt does: the judgement, and no artifact at all.
+    struct JudgementOnly(Judgement);
+
+    #[async_trait]
+    impl Synthesizer for JudgementOnly {
+        async fn segment(
+            &self,
+            _input: SegmentInput<'_>,
+        ) -> crate::error::Result<Vec<ProposedArtifact>> {
+            Ok(Vec::new())
+        }
+        async fn segment_judged(
+            &self,
+            _input: SegmentInput<'_>,
+        ) -> crate::error::Result<SegmentReply> {
+            Ok(SegmentReply {
+                artifacts: Vec::new(),
+                judgement: Some(self.0.clone()),
+            })
+        }
+        fn budget(&self) -> SynthesisBudget {
+            FAKE_BUDGET
+        }
+    }
+
+    #[tokio::test]
+    async fn a_note_that_is_only_a_reminder_still_gets_its_moment() {
+        // "erinnere mich an den Termin, Freitag 13:45" holds nothing the
+        // prompt lets the model write an artifact about — the intent and the
+        // date belong to `moment`. The window used to drop the reply on the
+        // floor for having no artifacts, retry the same call to exhaustion,
+        // and leave the corpus `partial` with no reminder anywhere.
+        let mut core = test_core().await;
+        core.synthesizer = std::sync::Arc::new(JudgementOnly(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T13:45".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        }));
+        let out = core
+            .ingest(
+                "erinnere mich an den Gastroentereologentermin, Freitag 13:45 uhr.",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        drain(&core).await;
+
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "the reminder is the whole point: {rows:?}");
+        assert!(rows[0].moment.at.is_some());
+        // The verbatim passage is the record, and it is what the moment hangs
+        // on: there is no artifact for it to hang on.
+        let held = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(
+            held.iter().any(|c| c.id == rows[0].moment.artifact_id),
+            "the moment is anchored in this corpus: {held:?}"
+        );
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            crate::store::corpora::CorpusStatus::Ready,
+            "a note the model answered is not a half-finished capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recurrence_of_one_occurrence_is_not_a_recurrence() {
+        // Asked to judge "Freitag 13:45", the configured model answers
+        // `FREQ=WEEKLY;BYDAY=FR;COUNT=1;INTERVAL=1` — a rule that describes
+        // the single date it already gave in `when`. Stored, it makes the
+        // band offer to repeat a note that says nothing about repeating.
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T13:45".into()),
+            rule: Some("FREQ=WEEKLY;BYDAY=FR;COUNT=1;INTERVAL=1".into()),
+            events: vec![],
+            links: vec![],
+        });
+        core.ingest("den Termin am Freitag 13:45", "web", None)
+            .await
+            .unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].moment.rule, None,
+            "a COUNT=1 rule is the one date, not a repetition"
+        );
     }
 
     #[tokio::test]
