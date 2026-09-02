@@ -364,12 +364,39 @@ impl Default for AssociateConfig {
 #[serde(default)]
 pub struct PromoteConfig {
     pub activation_above: f64,
+    /// Cosine at or above which an artifact counts as traceable to a passage
+    /// it covers by span, when it copied no line of it.
+    ///
+    /// A span is a claim the splitter can verify for a passage and only guess
+    /// for a rewrite, so supersession asks for corroboration on top of the
+    /// majority. That corroboration used to be a line of the passage appearing
+    /// verbatim in the artifact — which is exactly what synthesis is *for* not
+    /// producing. Prose came back rewritten, no line matched, and the verbatim
+    /// passage stayed in results beside the artifact written from it: two hits
+    /// for one note, every time, on every capture that was not code.
+    ///
+    /// This is the second way to be traceable, and free: both vectors are
+    /// already stored by the time supersession runs, so it is two reads and a
+    /// cosine, never a model call.
+    ///
+    /// It is not the dedupe threshold and must not be read as one. `[consolidate]
+    /// auto_supersede` compares two *independent* artifacts, where a cosine
+    /// cannot tell "runs on ext4" from "does not run on ext4" and a judge
+    /// stands behind every hide. Here the relation is known by construction —
+    /// this artifact is the output of synthesizing this window — and the only
+    /// open question is which passage of that one window it came from. So the
+    /// bar is set to separate passages of a single document from each other,
+    /// not to assert that two texts say the same thing.
+    ///
+    /// Above 1.0 switches the path off, leaving the verbatim rule alone.
+    pub traceable_min: f32,
 }
 
 impl Default for PromoteConfig {
     fn default() -> Self {
         Self {
             activation_above: 3.0,
+            traceable_min: 0.75,
         }
     }
 }

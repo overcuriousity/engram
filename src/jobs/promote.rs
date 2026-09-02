@@ -118,6 +118,53 @@ pub fn covered_by<'a>(
     out
 }
 
+/// Whether an artifact is traceable to a passage by meaning, for the rewrites
+/// that copied no line of it.
+///
+/// Read against `[promote] traceable_min`, and deliberately not against
+/// `[consolidate] auto_supersede`: that threshold compares two independent
+/// artifacts, where a cosine cannot tell "runs on ext4" from "does not run on
+/// ext4" and a judge stands behind every hide. The relation here is known by
+/// construction — this artifact is the output of synthesizing this window —
+/// and the only open question is which passage of that one window it came
+/// from. Separating passages of a single document is a far weaker claim than
+/// asserting two texts agree.
+///
+/// Free: both points are already in the store — the passages were embedded at
+/// capture, and `embed_written` embedded the artifacts before this was
+/// called — so this is two reads and an arithmetic mean. No model call.
+///
+/// Every way of not knowing answers `false`. A missing point, a store that
+/// cannot be reached, a threshold set above 1.0: each leaves the passage
+/// standing in results, which is the direction promotion is allowed to fail
+/// in. A vector outage must not hide verbatim text.
+async fn corroborated_by_vector(core: &Core, artifact_id: &str, passage_id: &str) -> bool {
+    let min = core.promote.traceable_min;
+    if min > 1.0 {
+        return false;
+    }
+    let dense = |id: String| async move {
+        match core.vectors.dense_of(&id).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    artifact_id = %id,
+                    error = %e,
+                    "could not read a vector while judging a promotion; leaving the passage in results"
+                );
+                None
+            }
+        }
+    };
+    let (Some(a), Some(p)) = (
+        dense(artifact_id.to_string()).await,
+        dense(passage_id.to_string()).await,
+    ) else {
+        return false;
+    };
+    crate::vector::cosine(&a, &p) >= min
+}
+
 /// After a promoted window's artifacts are written: supersede the passages
 /// they cover and carry the passages' access forward.
 ///
@@ -146,22 +193,35 @@ pub async fn supersede_covered(
     // whole window when nothing in the artifact locates verbatim, and a
     // heavily paraphrasing model then hands every artifact the same span. So
     // a majority by span is necessary, not sufficient: the artifact must also
-    // be *traceable* to the passage — at least one of its lines found in the
-    // passage's text. Whatever is not traceable leaves the passage standing,
-    // which is the direction promotion is allowed to fail in.
+    // be *traceable* to the passage. Whatever is not traceable leaves the
+    // passage standing, which is the direction promotion is allowed to fail
+    // in.
+    //
+    // Traceable two ways, and the second one is why this reads as a loop
+    // rather than a filter. A line of the passage appearing verbatim in the
+    // artifact is the cheap way and stays first: it costs nothing and it is
+    // exact. But it is also the one thing synthesis is *for* not doing —
+    // "unstructured notes come out structured", pronouns resolved, fragments
+    // completed — so for a capture of prose no line ever matches, and the
+    // verbatim passage stood in results beside the artifact written from it.
+    // Two hits for one note, every time, on every capture that was not code.
+    // The second way is the meaning: the two vectors are both already stored
+    // by the time this runs, so corroboration is two reads and a cosine.
     let text_of = |id: &str| rows.iter().find(|c| c.id == id).map(|c| c.text.as_str());
-    let pairs: Vec<(&str, &str)> = covered_by(&passages, &artifacts)
-        .into_iter()
-        .filter(|(p, a)| {
-            let (Some(passage_text), Some(artifact_text)) = (
-                text_of(p),
-                written.iter().find(|c| c.id == *a).map(|c| c.text.as_str()),
-            ) else {
-                return false;
-            };
-            crate::infer::verify::locate_span(artifact_text, passage_text, 1).is_some()
-        })
-        .collect();
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    for (p, a) in covered_by(&passages, &artifacts) {
+        let (Some(passage_text), Some(artifact_text)) = (
+            text_of(p),
+            written.iter().find(|c| c.id == a).map(|c| c.text.as_str()),
+        ) else {
+            continue;
+        };
+        if crate::infer::verify::locate_span(artifact_text, passage_text, 1).is_some()
+            || corroborated_by_vector(core, a, p).await
+        {
+            pairs.push((p, a));
+        }
+    }
     if pairs.is_empty() {
         return Ok(0);
     }
@@ -844,6 +904,168 @@ mod tests {
                 .unwrap()
                 .len(),
             5
+        );
+    }
+
+    /// A point for one artifact, so a test can say what the store already
+    /// holds by the time supersession runs: the passages were embedded at
+    /// capture and `embed_written` embedded the artifacts.
+    async fn embed_as(core: &crate::core::Core, id: &str, corpus: &str, v: Vec<f32>) {
+        core.vectors
+            .upsert(vec![crate::vector::VectorPoint {
+                vector: v,
+                sparse: Default::default(),
+                payload: crate::vector::VectorPayload {
+                    artifact_id: id.into(),
+                    corpus_id: corpus.into(),
+                    text: String::new(),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    created_at: 0,
+                    last_seen_at: None,
+                    hit_count: None,
+                    status: None,
+                    last_verified_at: None,
+                    superseded_by: None,
+                    origin_corpora: vec![],
+                    provenance: None,
+                },
+            }])
+            .await
+            .unwrap();
+    }
+
+    /// One artifact over the passage it was written from, sharing not one line
+    /// with it.
+    ///
+    /// This is the ordinary case, not an exotic one: synthesis resolves
+    /// pronouns and completes fragments, so a capture of prose comes back with
+    /// nothing matching word for word. The verbatim rule alone left the
+    /// passage in results beside the artifact written from it — two hits for
+    /// one note, on every capture that was not code.
+    #[tokio::test]
+    async fn a_rewrite_that_copied_no_line_supersedes_the_passage_it_says() {
+        let (core, corpus, passages, _written) = promoted_fixture().await;
+        let rewrite = core
+            .store
+            .insert_artifacts(
+                &corpus,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 9,
+                    text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
+                    corpus_span: Some(sp(3, 4)),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        // What the embedder would have said: the rewrite lands on the passage
+        // it rewrote.
+        embed_as(&core, &rewrite[0].id, &corpus, vec![1.0, 0.0]).await;
+        embed_as(&core, &passages[1].id, &corpus, vec![1.0, 0.0]).await;
+        embed_as(&core, &passages[0].id, &corpus, vec![0.0, 1.0]).await;
+        embed_as(&core, &passages[2].id, &corpus, vec![0.0, 1.0]).await;
+
+        let n = supersede_covered(&core, &corpus, 0, &rewrite, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "the passage the rewrite covers is still in results");
+        let hidden = core.store.get_artifact(&passages[1].id).await.unwrap();
+        assert!(!hidden.in_results());
+        assert_eq!(
+            hidden.superseded_by.as_deref(),
+            Some(rewrite[0].id.as_str())
+        );
+        // Hidden, never gone: the split pane still renders it, and the reaper
+        // is what decides its fate later.
+        assert_eq!(hidden.text, passages[1].text);
+        // And only the one it covers.
+        for other in [&passages[0], &passages[2]] {
+            assert!(
+                core.store
+                    .get_artifact(&other.id)
+                    .await
+                    .unwrap()
+                    .in_results(),
+                "a passage the rewrite does not cover was hidden too"
+            );
+        }
+    }
+
+    /// The guard the cosine must not weaken.
+    ///
+    /// A span the model only guessed at, over text the artifact says nothing
+    /// about. The verbatim rule caught this and so must the meaning: promotion
+    /// is allowed to fail only in the direction that leaves verbatim text
+    /// standing.
+    #[tokio::test]
+    async fn a_rewrite_about_something_else_leaves_the_passage_standing() {
+        let (core, corpus, passages, _written) = promoted_fixture().await;
+        let stray = core
+            .store
+            .insert_artifacts(
+                &corpus,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 9,
+                    text: "an entirely different sentence about nothing here".into(),
+                    corpus_span: Some(sp(3, 4)),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        embed_as(&core, &stray[0].id, &corpus, vec![1.0, 0.0]).await;
+        embed_as(&core, &passages[1].id, &corpus, vec![0.0, 1.0]).await;
+
+        let n = supersede_covered(&core, &corpus, 0, &stray, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        for p in &passages {
+            assert!(core.store.get_artifact(&p.id).await.unwrap().in_results());
+        }
+    }
+
+    /// Above 1.0 is how the key says "verbatim only", and it has to reach the
+    /// path that would otherwise have superseded.
+    #[tokio::test]
+    async fn a_threshold_over_one_leaves_only_the_verbatim_rule() {
+        let (mut core, corpus, passages, _written) = promoted_fixture().await;
+        core.promote.traceable_min = 1.1;
+        let rewrite = core
+            .store
+            .insert_artifacts(
+                &corpus,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 9,
+                    text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
+                    corpus_span: Some(sp(3, 4)),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        embed_as(&core, &rewrite[0].id, &corpus, vec![1.0, 0.0]).await;
+        embed_as(&core, &passages[1].id, &corpus, vec![1.0, 0.0]).await;
+
+        assert_eq!(
+            supersede_covered(&core, &corpus, 0, &rewrite, 2_000)
+                .await
+                .unwrap(),
+            0
         );
     }
 

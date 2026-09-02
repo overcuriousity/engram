@@ -592,6 +592,23 @@ cited = 0.5
 # artifacts inherit the access the passages earned.
 [promote]
 activation_above = 3.0
+# Cosine at or above which a rewritten artifact counts as traceable to a
+# passage it already covers by a majority of its lines, and so may supersede
+# it. Checked only when the artifact copied no line of the passage verbatim,
+# which is the normal case for prose: synthesis resolves pronouns and completes
+# fragments, so nothing matches word for word and — before this key existed —
+# the verbatim passage stayed in results beside the artifact written from it.
+#
+# Not a duplicate-detection threshold. [consolidate] auto_supersede compares two
+# independent artifacts and has a judge behind it, because a cosine cannot tell
+# "runs on ext4" from "does not run on ext4". Here the relation is known: this
+# artifact came out of synthesizing this window, and the only question is which
+# passage of that window. Set it to separate passages of one document from each
+# other, not to assert that two texts agree.
+#
+# Above 1.0 switches the check off: only a verbatim line then supersedes
+# anything, which is how it behaved before.
+traceable_min = 0.75
 
 # ── Pursuits ─────────────────────────────────────────────────────────────────
 # A coherent run of searches, what was opened and pivoted through, and — when
