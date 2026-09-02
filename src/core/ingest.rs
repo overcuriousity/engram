@@ -411,8 +411,19 @@ impl Core {
         }
         self.refuse_a_reminder_too_large_to_judge(&c)?;
 
+        let forced_remind =
+            c.metadata["intent"].as_str() == Some(crate::core::moments::Intent::Remind.as_str());
+
         if let Some(existing) = self.store.find_by_hash(&content_hash(text)).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate ingest, returning existing source");
+            // The same bytes captured twice, the second time with "remind me"
+            // on them. The stored corpus is the right row and this call adds
+            // no text to the base — but it does carry a request, and returning
+            // the id alone armed nothing at all.
+            if forced_remind {
+                self.ask_the_judged_read_for_a_reminder(&existing.id)
+                    .await?;
+            }
             return Ok(IngestOutcome::existing(&existing));
         }
 
@@ -429,11 +440,17 @@ impl Core {
         // on Ops. Nothing is lost either way — the corpus is stored verbatim
         // like any other. Written with the row, not after it.
         let followup = match &near {
-            Some(n) => Followup::Park {
+            // A forced reminder is never parked. Parking is a decision about
+            // whether text that resembles something stored deserves the
+            // synthesis call; a door saying "remind me" has already asked for
+            // that call, and parked, the capture got no `Synthesize` job, no
+            // judgement and no moment — the operator was told "held for
+            // review" and no reminder was ever set.
+            Some(n) if !forced_remind => Followup::Park {
                 of: n.corpus_id.clone(),
                 similarity: n.similarity,
             },
-            None => Followup::Queue(Stage::Synthesize),
+            _ => Followup::Queue(Stage::Synthesize),
         };
         let src = match self
             .store
@@ -467,7 +484,8 @@ impl Core {
                 corpus_id = %src.id,
                 near = %n.corpus_id,
                 similarity = n.similarity,
-                "capture looks like an existing corpus; parked for review"
+                parked = !forced_remind,
+                "capture looks like an existing corpus"
             ),
             None => tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested"),
         }
@@ -1555,8 +1573,46 @@ impl Core {
             crate::core::moments::refuse_intent(&mut meta, crate::core::moments::Intent::Journal);
             was
         };
+        // One write: the undo removes `origin_was` and restores `origin` from
+        // what it held, and a failure between the two left the entry flag on
+        // with nothing left to restore from.
+        self.store
+            .set_corpus_origin_and_metadata(corpus_id, &origin, &meta)
+            .await
+    }
+
+    /// Hand a corpus that already stands back to the judged read, as a door
+    /// that asked for a reminder on text the base already holds.
+    ///
+    /// The same route `set_reminder(on = true)` takes, and refused for the
+    /// same reason on a capture that splits: a multi-window corpus is read
+    /// window by window and never judged.
+    async fn ask_the_judged_read_for_a_reminder(&self, corpus_id: &str) -> Result<()> {
+        let src = self.store.get_corpus(corpus_id).await?;
+        let mut meta = src.metadata.clone();
+        let intent = crate::core::moments::Intent::Remind;
+        meta["intent"] = serde_json::Value::String(intent.as_str().to_string());
+        crate::core::moments::allow_intent(&mut meta, intent);
         self.store.set_corpus_metadata(corpus_id, &meta).await?;
-        self.store.set_corpus_origin(corpus_id, &origin).await
+        let windows = self.store.segments_for_corpus(corpus_id).await?;
+        if windows.len() != 1 {
+            tracing::info!(
+                corpus_id,
+                windows = windows.len(),
+                "the stored capture is not read in one pass; no reminder was armed on it"
+            );
+            return Ok(());
+        }
+        let idx = windows[0].idx;
+        self.store.reset_segment(corpus_id, idx, true).await?;
+        self.store
+            .rearm_idle_seq(
+                Stage::SegmentWindow,
+                "segment",
+                &crate::jobs::window::unit_target(corpus_id, idx),
+                idx,
+            )
+            .await
     }
 
     /// The reminder's half of `set_entry`: "this is not a reminder", with an
@@ -1587,21 +1643,49 @@ impl Core {
         let mut meta = src.metadata.clone();
         let intent = crate::core::moments::Intent::Remind;
         if on {
+            // A capture that splits into windows is read window by window and
+            // never judged (`jobs::window`, `judging = all.len() == 1`), the
+            // same reason `refuse_a_reminder_too_large_to_judge` turns a long
+            // `engram -r` away at the door. Pressing the button here used to
+            // re-promote the whole document and produce no judgement and no
+            // moment at all; nothing is armed and the caller is told so.
+            let windows = self.store.segments_for_corpus(cid).await?.len();
+            if windows > 1 {
+                tracing::info!(
+                    corpus_id = cid,
+                    windows,
+                    "a reminder is read in one pass; this capture is read window by window"
+                );
+                return Ok(false);
+            }
+            // Nothing to re-read: an artifact with no window cannot be handed
+            // back to the judged call, and saying it was armed something was
+            // a claim about a job that was never queued.
+            let Some(idx) = art.segment_idx else {
+                tracing::info!(
+                    artifact_id,
+                    "artifact belongs to no window; there is nothing to re-read"
+                );
+                return Ok(false);
+            };
             crate::core::moments::allow_intent(&mut meta, intent);
             self.store.set_corpus_metadata(cid, &meta).await?;
             // Hand the note back to the judged read: re-run its window's
             // synthesis, which is where time is read since the reshape.
-            if let Some(idx) = art.segment_idx {
-                self.store.reset_segment(cid, idx, true).await?;
-                self.store
-                    .enqueue_seq(
-                        Stage::SegmentWindow,
-                        "segment",
-                        &crate::jobs::window::unit_target(cid, idx),
-                        idx,
-                    )
-                    .await?;
-            }
+            //
+            // Armed the way every automatic arming is. `enqueue_seq` rewrites
+            // a row in any state, `running` included, and a second worker then
+            // claims the window the first is inside: two writes of the
+            // segment's artifacts and two runs of `supersede_covered`.
+            self.store.reset_segment(cid, idx, true).await?;
+            self.store
+                .rearm_idle_seq(
+                    Stage::SegmentWindow,
+                    "segment",
+                    &crate::jobs::window::unit_target(cid, idx),
+                    idx,
+                )
+                .await?;
             return Ok(true);
         }
         crate::core::moments::refuse_intent(&mut meta, intent);
@@ -3537,6 +3621,109 @@ mod tests {
             core.store.open_due(0, i64::MAX).await.unwrap().len(),
             1,
             "and it is a reminder"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forced_reminder_is_never_parked_beside_what_it_resembles() {
+        // Parking is a decision about whether text worth little deserves the
+        // synthesis call. A door saying "remind me" has asked for that call:
+        // parked, the capture got no job, no judgement and no moment, and the
+        // operator was told it was held for review.
+        let core = test_core().await;
+        let first: String = (1..=30)
+            .map(|n| format!("Schritt {n}: die Unterlagen für den Termin durchsehen.\n"))
+            .collect();
+        core.ingest(&first, "web", None).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+
+        let again = first.replacen("Schritt 7:", "Schritt sieben:", 1);
+        let again = again.as_str();
+        let out = core
+            .ingest_capture(
+                Capture::new(again, "cli").with_intent(Some(crate::core::moments::Intent::Remind)),
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.near_duplicate.is_some(),
+            "the fixture must actually resemble the first capture"
+        );
+        assert_ne!(
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            CorpusStatus::NeedsReview,
+            "a forced reminder is not held for review"
+        );
+        crate::jobs::test_support::drain(&core).await;
+        assert_eq!(
+            core.store.open_due(0, i64::MAX).await.unwrap().len(),
+            1,
+            "the reminder the door asked for was armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reminder_on_text_already_captured_is_armed_on_the_stored_row() {
+        // `engram -r` over bytes the base already holds returns the stored
+        // corpus, which is right — and used to arm nothing at all, so the
+        // request the door carried was dropped in silence.
+        let core = test_core().await;
+        let text = "Rechnung am Freitag verschicken.";
+        let first = core.ingest(text, "web", None).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "the first capture named no intent, so it armed nothing"
+        );
+
+        let again = core
+            .ingest_capture(
+                Capture::new(text, "cli").with_intent(Some(crate::core::moments::Intent::Remind)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.id, first.id, "the stored row is the right row");
+        assert!(again.duplicate);
+        assert_eq!(
+            core.store.get_corpus(&first.id).await.unwrap().metadata["intent"],
+            "remind",
+            "the door's word is written down"
+        );
+        crate::jobs::test_support::drain(&core).await;
+        assert_eq!(
+            core.store.open_due(0, i64::MAX).await.unwrap().len(),
+            1,
+            "the judged read ran again and armed the reminder"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_a_reminder_arms_nothing_on_a_capture_read_window_by_window() {
+        // The judged read runs on single-window corpora alone. On a long
+        // capture the button re-ran the whole promotion and produced no
+        // judgement and no moment; and on an artifact belonging to no window
+        // it armed nothing while answering that it had.
+        let core = test_core().await;
+        let long = "Der Bericht behandelt die Migration im Detail. ".repeat(400);
+        let out = core.ingest(&long, "web", None).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        assert!(
+            core.store.segments_for_corpus(&out.id).await.unwrap().len() > 1,
+            "the fixture must actually split"
+        );
+        let art = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        let aid = art
+            .first()
+            .expect("the capture produced artifacts")
+            .id
+            .clone();
+        assert!(
+            !core.set_reminder(&aid, true).await.unwrap(),
+            "nothing was armed, and the answer says so"
+        );
+        assert!(
+            core.store.claim_job().await.unwrap().is_none(),
+            "and no window was sent back to be re-read"
         );
     }
 

@@ -481,6 +481,38 @@ impl Store {
         Ok(())
     }
 
+    /// The channel label and the metadata in one write.
+    ///
+    /// `set_entry` depends on both landing: turning an entry off removes
+    /// `origin_was` from the metadata and restores `origin` from what it held.
+    /// As two statements, a crash or an error between them left `origin =
+    /// journal` with `origin_was` already gone, and the next press fell
+    /// through to `web` — permanently rewriting a `cli`, `share` or
+    /// `extension` capture's channel to one it never came through, which is
+    /// exactly what the guard in `set_entry` exists to prevent.
+    pub async fn set_corpus_origin_and_metadata(
+        &self,
+        id: &str,
+        origin: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<()> {
+        // One statement, so there is no window to crash in — a transaction
+        // around a single UPDATE would only say the same thing at more length.
+        let n =
+            sqlx::query("UPDATE corpora SET origin = ?, metadata = ?, updated_at = ? WHERE id = ?")
+                .bind(origin)
+                .bind(metadata.to_string())
+                .bind(now())
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        if n == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
     /// Names a corpus after the fact. Capture makes no inference call by
     /// design, so the name arrives later — once synthesis has read the document
     /// and knows what it is about.
