@@ -1202,7 +1202,7 @@ mod tests {
             "what the application does, in one clause"
         );
         assert!(
-            html.contains("nobody else can search it"),
+            html.contains("nobody else can search this base"),
             "and the boundary, which is what a person wants before pasting \
              their own notes onto someone else's server"
         );

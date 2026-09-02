@@ -1018,6 +1018,9 @@ body { overflow-x: hidden; }
    It replaced a block of counts and a list of five captures in the rail — the
    same five the middle column was already rendering in another shape. */
 .idle-foot { margin: 0.75rem 0 0; font-size: var(--text-xs); }
+/* An empty base prints no foot at all — the hint under the box says the one
+   thing there is to say — and an empty paragraph would still take its margin. */
+.idle-foot:empty { display: none; }
 .idle-foot a { color: inherit; }
 
 /* The chip row is revealed by app.js on the first keystroke. `display: contents`

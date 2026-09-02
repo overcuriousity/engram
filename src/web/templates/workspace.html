@@ -97,13 +97,12 @@
      name it twice.
 
      `data-placeholder-narrow` is the same sentence for a box one row tall on a
-     phone, where the long one is clipped around its thirtieth character — and
-     where the hint below is `display: none`, so that clipped placeholder is the
-     only thing left saying what the box is for. app.js swaps them. #}
+     phone, where the long one is clipped around its thirtieth character.
+     app.js swaps them. #}
   <textarea class="box" name="q" rows="1"
             aria-label="Search, ask, or capture"
-            placeholder="{% if held %}Describe the situation, ask a question, or paste anything worth keeping…{% else %}Paste anything worth keeping — a note, an article, a chunk of a chat.{% endif %}"
-            data-placeholder-narrow="{% if held %}Ask, search, or paste to keep…{% else %}Paste anything worth keeping…{% endif %}"
+            placeholder="{% if held %}Describe the situation, ask a question, or paste anything worth keeping…{% else %}Paste something to keep…{% endif %}"
+            data-placeholder-narrow="{% if held %}Ask, search, or paste to keep…{% else %}Paste something to keep…{% endif %}"
             {%- if !held %}
             {# The sentences this box will use once the base stops being empty,
                carried on the element rather than swapped in. The rest of the

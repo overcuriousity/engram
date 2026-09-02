@@ -20,13 +20,12 @@
 <div class="rail-act" hx-swap-oob="innerHTML:#rail-head"></div>
 <p id="idle-foot" class="idle-foot muted" hx-swap-oob="true">
 {%- if !held %}
-  {# No counts to print and no last capture to name. The one thing worth
-     saying to somebody who has put nothing in yet is what putting something
-     in does — and for an operator who arrived through an identity provider
-     and never saw the login card, this is the only place the program
-     introduces itself at all. #}
-  Nothing here yet. Paste anything worth keeping into the box above, or attach
-  a file — it becomes searchable, in your own words.
+  {# Nothing. No counts to print and no last capture to name, and the sentence
+     that used to stand here was the third copy of one thought: the placeholder
+     inside the box, the hint under it, and this. The hint keeps it, being the
+     one of the three that is next to the box and read in both states. The
+     branch stays because the paragraph is the out-of-band swap target, and it
+     renders empty — `.idle-foot:empty` takes the margin with it. #}
 {%- else %}
   <span class="mono">{{ artifacts }}</span> artifact{% if artifacts != 1 %}s{% endif %}
   from <span class="mono">{{ corpora }}</span> source{% if corpora != 1 %}s{% endif %}

@@ -4924,9 +4924,17 @@ mod tests {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_for(core.clone()).await;
 
-        // Empty base: the one instruction that matters.
+        // Empty base: the one instruction that matters, said once — under the
+        // box, where the eye already is. The foot below it says nothing at all.
         let html = get(&app, "/ui", &cookie).await;
-        assert!(html.contains("Nothing here yet"), "the empty base says so");
+        assert!(
+            html.contains("Paste anything worth keeping"),
+            "the empty base says what to do"
+        );
+        assert!(
+            !html.contains("Nothing here yet"),
+            "and does not say it a second time under the column"
+        );
         assert!(
             html.contains(r#"<label class="btn btn-ghost" id="drop""#),
             "the picker is in the verb row, not inside the hidden staged box"
