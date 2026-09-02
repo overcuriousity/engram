@@ -89,7 +89,19 @@ impl TokenCounter {
                     |e| tracing::warn!(error = %e, what, "tokenizer did not parse; falling back"),
                 )
                 .ok()
-                .map(std::sync::Arc::new)
+                .map(|mut t| {
+                    // A counter counts. `infer.tokenizer` takes any HF file,
+                    // and the BERT-family ones — `bge-m3`, which the example
+                    // config names as the embedder — carry `truncation` with
+                    // `max_length: 512` in the file. Honoured, every count
+                    // saturates there: a book is one window, `ceiling_for_prompt`
+                    // returns the whole output budget, and every synthesis call
+                    // is a 400 nothing retries — with the guards that would
+                    // catch it blind, because they share the undercount.
+                    t.with_truncation(None).ok();
+                    t.with_padding(None);
+                    std::sync::Arc::new(t)
+                })
         };
         match spec {
             Some(s) if s.starts_with("http://") || s.starts_with("https://") => {
@@ -309,6 +321,36 @@ mod tests {
         let c = TokenCounter::load(Some("/no/such/file.json"), std::path::Path::new("/tmp"));
         let bundled = TokenCounter::load(None, std::path::Path::new("/tmp"));
         assert_eq!(c.count("hello world"), bundled.count("hello world"));
+    }
+
+    #[test]
+    fn a_tokenizer_file_carrying_truncation_still_counts_the_whole_text() {
+        // `infer.tokenizer` takes any HF file, and the BERT-family ones carry
+        // a `truncation` block. Honoured, every count saturated at its
+        // `max_length`: a book counted as one window and every synthesis call
+        // went out over the endpoint's real limit.
+        let dir = std::env::temp_dir().join(format!("tok-trunc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tokenizer.json");
+        let truncating = String::from_utf8(BUNDLED.to_vec()).unwrap().replacen(
+            "\"truncation\": null",
+            "\"truncation\": {\"direction\": \"Right\", \"max_length\": 8, \
+                 \"strategy\": \"LongestFirst\", \"stride\": 0}",
+            1,
+        );
+        std::fs::write(&file, &truncating).unwrap();
+        let c = TokenCounter::load(Some(file.to_str().unwrap()), &dir);
+        let long = "eine Zeile, die sich wiederholt. ".repeat(200);
+        assert!(
+            c.count(&long) > 8,
+            "the count saturated at the file's max_length"
+        );
+        assert_eq!(
+            c.count(&long),
+            TokenCounter::load(None, &dir).count(&long),
+            "and it is the count the same tokenizer gives without the block"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

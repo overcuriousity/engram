@@ -477,7 +477,17 @@ fn read_target(target: &str) -> Result<Read> {
         // through here and captured the word "archive" as a note, exit 0 —
         // and an unreadable file (`EACCES`) did the same. Only "there is
         // nothing at this name" leaves room for the reading that it was prose.
-        Err(e) if looks_like_a_path(target) || e.kind() != std::io::ErrorKind::NotFound => {
+        // `ENAMETOOLONG` is the same answer as `NotFound` for this purpose:
+        // there is no file at that name and there can be none. A sentence of
+        // more than 255 bytes — one ordinary paragraph — exited 2 with "File
+        // name too long" and the whole paragraph echoed back as the path.
+        Err(e)
+            if looks_like_a_path(target)
+                || !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+                ) =>
+        {
             return Err(Error::Validation(format!("{target}: {e}")));
         }
         Err(_) => return Ok(text(target.as_bytes().to_vec(), "text")),
@@ -610,6 +620,21 @@ mod tests {
             panic!("a sentence is a note");
         };
         assert_eq!(read.label, "text");
+    }
+
+    /// A paragraph is longer than a file name may be, and the kernel says so
+    /// with `ENAMETOOLONG` rather than `ENOENT`. Keyed on `NotFound` alone,
+    /// the fallthrough missed it: a 265-byte sentence exited 2 with "File
+    /// name too long" and the whole paragraph echoed back as a path.
+    #[test]
+    fn a_sentence_longer_than_a_file_name_is_still_prose() {
+        let prose = "eine Zeile, die sich wiederholt und wiederholt, ".repeat(6);
+        assert!(prose.len() > 255, "the fixture must exceed NAME_MAX");
+        let Ok(read) = read_target(&prose) else {
+            panic!("a paragraph is a note, not a path");
+        };
+        assert_eq!(read.label, "text");
+        assert_eq!(read.bytes, prose.as_bytes());
     }
 
     /// A body that is one link is read by the server as a page to fetch, and a
