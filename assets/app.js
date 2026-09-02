@@ -1103,13 +1103,25 @@
       var hasText = !!box.value.trim();
       var stagedEl = document.getElementById('staged');
       var hasFile = !!(stagedEl && !stagedEl.hidden);
+      // Which verb the accent goes to. Not which verb runs — that stays a
+      // press — only which one is lit. A trailing question mark or a leading
+      // question word says Ask; a paste (long, multi-line, or a file) says
+      // Capture; a short plain sentence lights neither, because typing
+      // already searches and there is nothing to press for.
+      var text = box.value.trim();
+      var asksLike = /\?\s*$/.test(text) ||
+        /^(who|what|when|where|why|how|which|is|are|do|does|did|can|could|should|wer|was|wann|wo|warum|wie|welche|ist|sind|kann|hat|habe)\b/i.test(text);
+      var keepsLike = hasFile || text.length > 200 || text.indexOf('\n') !== -1;
       for (var i = 0; i < buttons.length; i++) {
-        buttons[i].disabled = buttons[i].getAttribute('data-verb') === 'capture'
+        var verb = buttons[i].getAttribute('data-verb');
+        buttons[i].disabled = verb === 'capture'
           ? !(hasText || hasFile)
           // A staged file has made the box that file's note. Asking a note is
           // not a thing to do, and the answer would land beside a file the
           // question was never about.
           : (!hasText || hasFile);
+        var lead = verb === 'ask' ? (asksLike && !keepsLike) : keepsLike;
+        buttons[i].classList.toggle('btn-accent', lead && !buttons[i].disabled);
       }
     }
 

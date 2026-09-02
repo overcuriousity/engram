@@ -11,6 +11,13 @@
 }
 .btn:hover { background: var(--color-bg-hover); }
 .btn:disabled { opacity: 0.4; pointer-events: none; }
+/* A disabled verb is grey, whatever it would be when armed. The accent at
+   0.4 opacity still read as the lit primary on an empty box — the one state
+   in which nothing on the page should say "press me". */
+.btn-accent:disabled {
+  background: var(--color-bg-active); color: var(--color-fg-muted);
+  border-color: var(--color-border-strong); font-weight: 500;
+}
 .btn-accent { background: var(--color-accent); color: var(--color-accent-fg); font-weight: 600; border-color: transparent; }
 .btn-accent:hover { opacity: 0.9; background: var(--color-accent); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--color-fg-secondary); }
