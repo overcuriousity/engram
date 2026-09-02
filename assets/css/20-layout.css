@@ -176,7 +176,9 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    on the pages that are that wide, and simply runs wider than the reading
    column on the pages that are not. Always the same width beats sometimes
    lining up. */
-.topbar { border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; }
+/* Painted, not transparent: the projection's axes ran straight through the
+   nav, which made the chrome look like part of the picture. */
+.topbar { border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; background: var(--color-bg-surface); }
 nav.top {
   display: flex; gap: 0.25rem; align-items: center;
   max-width: 110rem; margin: 0 auto; padding: 0.75rem 1rem;

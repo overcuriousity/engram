@@ -917,6 +917,7 @@
   // the page is doing: with an intent expressed there is a rail and a pane and
   // a chip row to narrow with; with none there is the column.
   function hideIdle() {
+    document.documentElement.classList.add('typing');
     var idle = document.getElementById('idle');
     if (idle) idle.hidden = true;
     show('rail', true);
@@ -928,6 +929,7 @@
   // re-fetched rather than left as it stands: it may have been hidden through
   // a capture that armed something, and what it holds is a minute old.
   function showIdle() {
+    document.documentElement.classList.remove('typing');
     var idle = document.getElementById('idle');
     if (idle) idle.hidden = false;
     show('rail', false);
