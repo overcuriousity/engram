@@ -43,6 +43,27 @@ pub async fn apply(
     // the wall-clock back out of what is stored here.
     let tz_name = tz.name().to_string();
 
+    // The note's own weekday, read once for the events and the reminder
+    // below. See `onto_named_weekday`.
+    let named_day = weekday_named(&src.raw_text);
+    let created_at = src.created_at;
+    let reconcile = move |at: i64| match named_day {
+        Some(d) => {
+            let moved = onto_named_weekday(at, d, created_at, tz);
+            if moved != at {
+                tracing::warn!(
+                    corpus_id,
+                    from = at,
+                    to = moved,
+                    weekday = ?d,
+                    "the model's date fell on another weekday than the note names; moved"
+                );
+            }
+            moved
+        }
+        None => at,
+    };
+
     core.store.delete_read_moments(anchor_id).await?;
     record_intent(core, corpus_id, &src, j.intent.as_deref()).await?;
 
@@ -57,7 +78,7 @@ pub async fn apply(
     // caller already assumes: it logs a failed `apply` and lets the artifacts
     // stand.
     for e in &j.events {
-        let Some(at) = parse_local(e, tz) else {
+        let Some(at) = parse_local(e, tz).map(reconcile) else {
             continue;
         };
         match core
@@ -116,7 +137,11 @@ pub async fn apply(
             if intent_refused(&src.metadata, Intent::Remind) {
                 return Ok(());
             }
-            let at = j.when.as_deref().and_then(|w| parse_local(w, tz));
+            let at = j
+                .when
+                .as_deref()
+                .and_then(|w| parse_local(w, tz))
+                .map(reconcile);
             let rule = j.rule.clone().filter(|r| match validate_rule(r) {
                 Ok(()) => true,
                 Err(e) => {
@@ -250,6 +275,91 @@ pub(crate) fn parse_local(s: &str, tz: chrono_tz::Tz) -> Option<i64> {
     }
 }
 
+/// The weekday a note names, in any of the ten prompt languages.
+///
+/// `None` when it names none, and `None` when it names two different ones —
+/// "Montag oder Freitag" is a question, not a date. Whole words only: the
+/// text is split on anything that is not a letter, digit or hyphen, so
+/// "sundays" is not "sunday" and "monday-ish" is not a date either. The
+/// hyphen stays a word character for the Portuguese "sexta-feira".
+pub(crate) fn weekday_named(text: &str) -> Option<chrono::Weekday> {
+    use chrono::Weekday::*;
+    #[rustfmt::skip]
+    const NAMES: &[(&str, chrono::Weekday)] = &[
+        ("monday", Mon), ("montag", Mon), ("lunes", Mon), ("lundi", Mon), ("lunedì", Mon),
+        ("lunedi", Mon), ("maandag", Mon), ("poniedziałek", Mon), ("segunda-feira", Mon),
+        ("segunda", Mon), ("понедельник", Mon), ("pazartesi", Mon),
+        ("tuesday", Tue), ("dienstag", Tue), ("martes", Tue), ("mardi", Tue), ("martedì", Tue),
+        ("martedi", Tue), ("dinsdag", Tue), ("wtorek", Tue), ("terça-feira", Tue), ("terça", Tue),
+        ("вторник", Tue), ("salı", Tue),
+        ("wednesday", Wed), ("mittwoch", Wed), ("miércoles", Wed), ("miercoles", Wed),
+        ("mercredi", Wed), ("mercoledì", Wed), ("mercoledi", Wed), ("woensdag", Wed), ("środa", Wed),
+        ("quarta-feira", Wed), ("quarta", Wed), ("среда", Wed), ("çarşamba", Wed),
+        ("thursday", Thu), ("donnerstag", Thu), ("jueves", Thu), ("jeudi", Thu), ("giovedì", Thu),
+        ("giovedi", Thu), ("donderdag", Thu), ("czwartek", Thu), ("quinta-feira", Thu),
+        ("quinta", Thu), ("четверг", Thu), ("perşembe", Thu),
+        ("friday", Fri), ("freitag", Fri), ("viernes", Fri), ("vendredi", Fri), ("venerdì", Fri),
+        ("venerdi", Fri), ("vrijdag", Fri), ("piątek", Fri), ("sexta-feira", Fri), ("sexta", Fri),
+        ("пятница", Fri), ("cuma", Fri),
+        ("saturday", Sat), ("samstag", Sat), ("sonnabend", Sat), ("sábado", Sat), ("sabado", Sat),
+        ("samedi", Sat), ("sabato", Sat), ("zaterdag", Sat), ("sobota", Sat), ("суббота", Sat),
+        ("cumartesi", Sat),
+        ("sunday", Sun), ("sonntag", Sun), ("domingo", Sun), ("dimanche", Sun), ("domenica", Sun),
+        ("zondag", Sun), ("niedziela", Sun), ("воскресенье", Sun), ("pazar", Sun),
+    ];
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '-')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut found: Option<chrono::Weekday> = None;
+    for (name, day) in NAMES {
+        if words.iter().any(|w| w == name) {
+            if found.is_some_and(|f| f != *day) {
+                return None;
+            }
+            found = Some(*day);
+        }
+    }
+    found
+}
+
+/// The instant the model resolved, moved onto the weekday the note names.
+///
+/// The model does the calendar arithmetic and gets it wrong by a day often
+/// enough — "Freitag" on a Wednesday came back as the Saturday. The note
+/// itself is the stronger witness: when it names a weekday and the resolved
+/// instant falls on another, the date becomes the first such weekday after
+/// the capture, at the time of day the model resolved. A weekday that is the
+/// capture's own day means next week. `at` unchanged when the two agree or
+/// the zone cannot place either instant.
+pub(crate) fn onto_named_weekday(
+    at: i64,
+    named: chrono::Weekday,
+    now: i64,
+    tz: chrono_tz::Tz,
+) -> i64 {
+    use chrono::{Datelike, Duration, TimeZone};
+    let Some(local) = tz.timestamp_opt(at, 0).single() else {
+        return at;
+    };
+    if local.weekday() == named {
+        return at;
+    }
+    let Some(today) = tz.timestamp_opt(now, 0).single().map(|d| d.date_naive()) else {
+        return at;
+    };
+    let ahead = (i64::from(named.num_days_from_monday())
+        - i64::from(today.weekday().num_days_from_monday()))
+    .rem_euclid(7);
+    let ahead = if ahead == 0 { 7 } else { ahead };
+    let date = today + Duration::days(ahead);
+    tz.from_local_datetime(&date.and_time(local.time()))
+        .single()
+        .map(|d| d.timestamp())
+        .unwrap_or(at)
+}
+
 /// The three wall-clock spellings, with a bare date meaning `DEFAULT_HOUR`.
 fn naive(s: &str) -> Option<chrono::NaiveDateTime> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
@@ -285,6 +395,60 @@ mod tests {
     };
     use crate::jobs::test_support::drain;
     use async_trait::async_trait;
+
+    #[test]
+    fn a_weekday_is_read_in_any_of_the_ten_languages_and_only_when_unambiguous() {
+        use chrono::Weekday;
+        assert_eq!(
+            weekday_named("erinnere mich an den Termin, Freitag 13:45 uhr."),
+            Some(Weekday::Fri)
+        );
+        assert_eq!(
+            weekday_named("call the dentist on Tuesday"),
+            Some(Weekday::Tue)
+        );
+        assert_eq!(weekday_named("rappelle-moi jeudi"), Some(Weekday::Thu));
+        assert_eq!(weekday_named("cuma günü toplantı"), Some(Weekday::Fri));
+        assert_eq!(weekday_named("pazartesi sabah"), Some(Weekday::Mon));
+        assert_eq!(
+            weekday_named("lembra-me na sexta-feira"),
+            Some(Weekday::Fri)
+        );
+        // Two different days named: no single answer.
+        assert_eq!(weekday_named("Montag oder Freitag"), None);
+        // No day named.
+        assert_eq!(weekday_named("morgen um 9"), None);
+        // A weekday inside another word is not a weekday.
+        assert_eq!(weekday_named("the monday-ish feeling"), None);
+        assert_eq!(weekday_named("sundays"), None);
+    }
+
+    #[test]
+    fn a_resolved_date_is_moved_onto_the_named_weekday() {
+        use chrono::{TimeZone, Weekday};
+        let tz = chrono_tz::Europe::Berlin;
+        let now = tz
+            .with_ymd_and_hms(2026, 9, 2, 14, 43, 0)
+            .unwrap()
+            .timestamp(); // Wednesday
+        let sat = tz
+            .with_ymd_and_hms(2026, 9, 5, 13, 45, 0)
+            .unwrap()
+            .timestamp();
+        let fri = tz
+            .with_ymd_and_hms(2026, 9, 4, 13, 45, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(onto_named_weekday(sat, Weekday::Fri, now, tz), fri);
+        // Already right: untouched.
+        assert_eq!(onto_named_weekday(fri, Weekday::Fri, now, tz), fri);
+        // Named the day of capture itself: next week, not a past hour today.
+        let next_wed = tz
+            .with_ymd_and_hms(2026, 9, 9, 13, 45, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(onto_named_weekday(sat, Weekday::Wed, now, tz), next_wed);
+    }
 
     /// A synthesizer whose judged reply is set by the test after it knows the
     /// ids it wants to link to.
