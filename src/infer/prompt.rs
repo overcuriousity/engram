@@ -92,6 +92,11 @@ time:
   {"artifact_id":"...","reason":"..."} using ONLY ids shown there, with a
   one-line reason. Empty when nothing shown relates.
 
+The judgement is not an artifact. Never write an artifact that describes the
+note's intent, restates its dates, or names its relation to a neighbor: those
+belong in "moment", "events" and "links" alone. A note of one or two sentences
+yields exactly one artifact, in the language the note is written in.
+
 With no JUDGE block, reply with "artifacts" alone."#;
 
 /// `SYNTHESIZER_SYSTEM` in DE. See `infer::lang`.
@@ -176,6 +181,11 @@ INPUT als Notiz in der Zeit:
   ids und mit einer einzeiligen Begründung. Leer, wenn nichts Gezeigtes in
   Beziehung steht.
 
+Das Urteil ist kein Artefakt. Schreibe nie ein Artefakt, das die Absicht der
+Notiz beschreibt, ihre Daten wiederholt oder ihre Beziehung zu einem Nachbarn
+benennt: das gehört allein in "moment", "events" und "links". Eine Notiz von
+ein oder zwei Sätzen ergibt genau ein Artefakt, in der Sprache der Notiz.
+
 Ohne JUDGE-Block antworte allein mit "artifacts"."#;
 
 /// `SYNTHESIZER_SYSTEM` in ES. See `infer::lang`.
@@ -258,6 +268,11 @@ el tiempo:
 - links: relaciones con entradas del bloque NEIGHBORS, como
   {"artifact_id":"...","reason":"..."}, usando SOLO los ids allí mostrados, con
   un motivo de una línea. Vacío cuando nada de lo mostrado guarda relación.
+
+El juicio no es un artefacto. Nunca escribas un artefacto que describa la
+intención de la nota, repita sus fechas o nombre su relación con un vecino:
+eso va solo en "moment", "events" y "links". Una nota de una o dos frases
+produce exactamente un artefacto, en el idioma de la nota.
 
 Sin bloque JUDGE, responde solo con "artifacts"."#;
 
@@ -344,6 +359,11 @@ note dans le temps :
   figurent, avec une raison d'une ligne. Vide quand rien de ce qui est montré
   n'est en relation.
 
+Le jugement n'est pas un artefact. N'écris jamais un artefact qui décrit
+l'intention de la note, répète ses dates ou nomme sa relation à un voisin :
+cela relève uniquement de "moment", "events" et "links". Une note d'une ou
+deux phrases donne exactement un artefact, dans la langue de la note.
+
 Sans bloc JUDGE, réponds avec "artifacts" seul."#;
 
 /// `SYNTHESIZER_SYSTEM` in IT. See `infer::lang`.
@@ -428,6 +448,11 @@ una nota nel tempo:
   motivazione di una riga. Vuoto quando nulla di ciò che è mostrato è in
   relazione.
 
+Il giudizio non è un artefatto. Non scrivere mai un artefatto che descriva
+l'intento della nota, ne ripeta le date o ne nomini la relazione con un
+vicino: questo spetta solo a "moment", "events" e "links". Una nota di una o
+due frasi produce esattamente un artefatto, nella lingua della nota.
+
 Senza blocco JUDGE, rispondi con "artifacts" da solo."#;
 
 /// `SYNTHESIZER_SYSTEM` in NL. See `infer::lang`.
@@ -511,6 +536,11 @@ notitie in de tijd:
   {"artifact_id":"...","reason":"..."}, ALLEEN met de daar getoonde ids, met een
   reden van één regel. Leeg als niets van het getoonde verband houdt.
 
+Het oordeel is geen artefact. Schrijf nooit een artefact dat de bedoeling van
+de notitie beschrijft, haar data herhaalt of haar relatie tot een buur noemt:
+dat hoort alleen in "moment", "events" en "links". Een notitie van één of
+twee zinnen levert precies één artefact op, in de taal van de notitie.
+
 Zonder JUDGE-blok antwoord je alleen met "artifacts"."#;
 
 /// `SYNTHESIZER_SYSTEM` in PL. See `infer::lang`.
@@ -590,6 +620,11 @@ poziomu — „moment", „events", „links" — oceniając INPUT jako notatkę
 - links: relacje do wpisów bloku NEIGHBORS, w postaci
   {"artifact_id":"...","reason":"..."}, WYŁĄCZNIE z pokazanymi tam id i z
   jednowierszowym uzasadnieniem. Puste, gdy nic z pokazanego nie jest powiązane.
+
+Ocena nie jest artefaktem. Nigdy nie pisz artefaktu opisującego intencję
+notatki, powtarzającego jej daty ani nazywającego jej związek z sąsiadem: to
+należy wyłącznie do "moment", "events" i "links". Notatka z jednego lub dwóch
+zdań daje dokładnie jeden artefakt, w języku notatki.
 
 Bez bloku JUDGE odpowiadaj samym „artifacts"."#;
 
@@ -673,6 +708,11 @@ tempo:
   {"artifact_id":"...","reason":"..."}, usando APENAS os ids ali mostrados, com
   um motivo de uma linha. Vazio quando nada do que é mostrado se relaciona.
 
+O julgamento não é um artefato. Nunca escreva um artefato que descreva a
+intenção da nota, repita as suas datas ou nomeie a sua relação com um vizinho:
+isso pertence apenas a "moment", "events" e "links". Uma nota de uma ou duas
+frases produz exatamente um artefato, na língua da nota.
+
 Sem bloco JUDGE, responde apenas com "artifacts"."#;
 
 /// `SYNTHESIZER_SYSTEM` in RU. See `infer::lang`.
@@ -755,6 +795,11 @@ pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захв�
   {"artifact_id":"...","reason":"..."}, ТОЛЬКО с показанными там id и с
   однострочным обоснованием. Пусто, когда ничто из показанного не связано.
 
+Суждение — не артефакт. Никогда не пиши артефакт, который описывает намерение
+заметки, повторяет её даты или называет её связь с соседом: это место только
+для "moment", "events" и "links". Заметка из одного-двух предложений даёт
+ровно один артефакт, на языке заметки.
+
 Без блока JUDGE отвечай одним лишь "artifacts"."#;
 
 /// `SYNTHESIZER_SYSTEM` in TR. See `infer::lang`.
@@ -833,6 +878,11 @@ değerlendir:
   {"artifact_id":"...","reason":"..."} biçiminde, YALNIZCA orada gösterilen
   id'leri kullanarak ve tek satırlık bir gerekçeyle. Gösterilenlerden hiçbiri
   ilişkili değilse boş.
+
+Yargı bir artefakt değildir. Notun niyetini anlatan, tarihlerini yineleyen ya
+da bir komşuyla ilişkisini adlandıran bir artefakt asla yazma: bunlar yalnızca
+"moment", "events" ve "links" içindir. Bir ya da iki cümlelik bir not, notun
+dilinde tam olarak bir artefakt verir.
 
 JUDGE bloğu yoksa yalnızca "artifacts" ile yanıtla."#;
 
@@ -2538,6 +2588,29 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_language_says_the_judgement_is_not_an_artifact() {
+        use crate::infer::lang::Lang;
+        let phrase = [
+            (Lang::En, "The judgement is not an artifact"),
+            (Lang::De, "Das Urteil ist kein Artefakt"),
+            (Lang::Es, "El juicio no es un artefacto"),
+            (Lang::Fr, "Le jugement n'est pas un artefact"),
+            (Lang::It, "Il giudizio non è un artefatto"),
+            (Lang::Nl, "Het oordeel is geen artefact"),
+            (Lang::Pl, "Ocena nie jest artefaktem"),
+            (Lang::Pt, "O julgamento não é um artefato"),
+            (Lang::Ru, "Суждение — не артефакт"),
+            (Lang::Tr, "Yargı bir artefakt değildir"),
+        ];
+        for (lang, p) in phrase {
+            assert!(
+                synthesizer_system(lang).contains(p),
+                "{lang:?} prompt lacks the one-artifact rule"
+            );
+        }
+    }
 
     /// An empty list is the common answer and must be readable as "I have
     /// enough", never as a query to run.
