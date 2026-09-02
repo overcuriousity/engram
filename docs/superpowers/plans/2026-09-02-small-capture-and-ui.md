@@ -1180,11 +1180,9 @@ git commit -m "fix(idle): the last-kept link is one line"
 Run: `cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`
 Expected: clean.
 
-Ran 2026-09-02: `cargo fmt --all -- --check` clean, `cargo test --locked` clean
-(2360 passed, 0 failed). Clippy was not run here — this machine carries Fedora's
-system Rust without the `clippy` component and without `rustup` to add it, so
-`cargo clippy` reports `no such command`. CI is the lint of record until the
-package is installed.
+Ran 2026-09-02, all three clean: `cargo fmt --all -- --check`,
+`cargo clippy --all-targets --locked -- -D warnings` (exit 0, no warnings), and
+`cargo test --locked` (2360 passed, 0 failed).
 
 - [ ] **Step 2: Reproduce the original capture locally**
 
