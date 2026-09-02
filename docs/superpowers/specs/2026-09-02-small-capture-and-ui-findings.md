@@ -67,3 +67,36 @@ Insights + Settings; a Browse tab contradicts the documented design.
   templates or CSS; needs a browser inspection.
 - Corpus page half-width source column: the band grid is deliberate
   ("a band is as tall as its source").
+
+## What the branch answered
+
+Every finding above is addressed by the plan at
+`docs/superpowers/plans/2026-09-02-small-capture-and-ui.md`, with one
+exception recorded below.
+
+Bugs 1 and 5 are answered by the artifact allowance in `src/jobs/window.rs`
+(one artifact per thirty input tokens, located artifacts kept first) and by
+the paragraph added to all ten system prompts saying the judgement is not an
+artifact. Bug 2 is answered by the tie rule in `covered_by`, which now
+prefers a placed span over the whole-window fallback before falling back to
+the lowest ordinal. Bug 3 is answered by `weekday_named` and
+`onto_named_weekday` in `src/jobs/judgement.rs`: a weekday the note names
+moves the model's resolved instant onto that weekday, and the move is logged
+at warn.
+
+Bug 4 is **not** addressed, by the operator's decision on 2026-09-02. The
+capture language stays what the Settings choice or the browser's
+`Accept-Language` says. A detector reading the text would be a third,
+arbitrary source of the answer and one more thing for a reader to hold in
+their head. The cross-language half of bug 2 stands with it: a German passage
+and an English artifact still fail the verbatim-line rule, and only the tie
+rule above makes the vector check reachable at all.
+
+Each UI finding has its own commit, in the order listed: the verb accent and
+the grey disabled verb, the fading cloud and the painted topbar, the phone
+chips and the idle bar in the flow, the loose count in the rail head, the due
+sentence on the row, the empty base introducing itself once, the corpus
+page's coverage line and passage title, the offer card's sentence, and the
+one-line idle foot.
+
+The deferred items above stay deferred; nothing on this branch touched them.
