@@ -561,10 +561,16 @@ pub(crate) fn fate_echo(
             detail: "captured verbatim, then rewritten into structured artifacts".into(),
         }
     } else {
-        let windows = tokens.div_ceil(budget);
+        // The splitter's own answer, not arithmetic beside it. A
+        // `MarkdownSplitter` will not cut inside a paragraph unless it has to,
+        // so ten paragraphs of six tenths of a budget each are ten windows and
+        // `tokens.div_ceil(budget)` promised six — under-reporting by up to
+        // half on ordinary prose, on the one line whose whole job is to say
+        // what capture is about to do.
+        let windows = crate::infer::split::split_into_segments(q, &core.counter, budget).len();
         IntentEchoTemplate {
             kind: "large paste",
-            detail: format!("stored verbatim in ~{windows} windows; synthesis comes with use"),
+            detail: format!("stored verbatim in {windows} windows; synthesis comes with use"),
         }
     }
 }
@@ -731,8 +737,12 @@ pub(crate) fn ago(then: i64) -> String {
 /// A due time relative to now, either way: "in 2 h", "in 3 days", "1 h ago".
 /// Hours under a day, days from there; a reminder's precision.
 pub(crate) fn ago_or_ahead(at: i64) -> String {
-    let delta = at - crate::store::now();
-    let (ahead, span) = (delta >= 0, delta.abs());
+    // Saturating, and `abs` on the saturated value: `i64::MIN.abs()` panics
+    // under overflow checks, and a row is not a place to find that out. The
+    // door refuses such an instant (`api::set_moment`); a row already stored
+    // is still drawn.
+    let delta = at.saturating_sub(crate::store::now());
+    let (ahead, span) = (delta >= 0, delta.saturating_abs());
     let words = match span {
         s if s < 3_600 => "under an hour".to_string(),
         s if s < 86_400 => format!("{} h", s / 3_600),
@@ -4916,6 +4926,33 @@ mod tests {
         assert!(html.contains(r#"id="intent-echo""#), "{html}");
         assert!(html.contains("large paste"), "{html}");
         assert!(html.contains("verbatim"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_echo_counts_the_windows_the_splitter_will_actually_make() {
+        // `tokens.div_ceil(budget)` is arithmetic the splitter does not
+        // perform: it will not cut inside a paragraph unless forced, so
+        // paragraphs that each sit under the budget are each their own window
+        // and the promise was short by up to half.
+        let core = crate::core::test_support::test_core().await;
+        let lang = crate::infer::lang::Lang::En;
+        let budget = crate::jobs::synthesize::segment_budget(&core, lang).max(1);
+        let para = "filler words ".repeat(budget * 6 / 10);
+        let text = std::iter::repeat_n(para.trim(), 10)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let echo = fate_echo(&core, &text, lang);
+        assert_eq!(echo.kind, "large paste");
+        let windows = crate::infer::split::split_into_segments(&text, &core.counter, budget).len();
+        assert!(
+            echo.detail.contains(&format!("in {windows} windows")),
+            "the echo promises what the splitter does: {} against {windows}",
+            echo.detail
+        );
+        assert!(
+            windows > core.counter.count(&text).div_ceil(budget),
+            "the fixture must be one the old arithmetic under-reported"
+        );
     }
 
     #[tokio::test]

@@ -748,8 +748,16 @@ impl Store {
     pub async fn unjudge(&self, event_id: &str, by: Labeller) -> Result<()> {
         Self::judged_one(
             sqlx::query(
+                // `skips` goes back with the verdict. `dealable!` excludes a
+                // skipped event, so a search skipped once, judged later and
+                // then undone was `judged_at IS NULL` — outstanding — and
+                // still excluded from `pending_count` and `Stats::pending`
+                // for ever: genuinely waiting and invisible on Settings and
+                // Insights. An undo puts the row back where it was before
+                // anybody answered it.
                 "UPDATE search_events
-                 SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = NULL
+                 SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = NULL,
+                     skips = 0
                  WHERE id = ? AND judged_by IS ?",
             )
             .bind(event_id)
@@ -1881,6 +1889,25 @@ mod tests {
         store.skip_event(&id).await.unwrap();
         let s = store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.pending, s.judged), (0, 0), "{s:?}");
+    }
+
+    #[tokio::test]
+    async fn undoing_a_verdict_on_a_skipped_search_puts_it_back_in_the_waiting_figure() {
+        // Skipped once, judged later, then undone: `judged_at` went back to
+        // NULL while `skips` stayed, and `dealable!` excludes a skipped event
+        // — so the search was outstanding and invisible on Settings and
+        // Insights at the same time, for ever.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "not sure yet", &["a"]).await;
+        store.skip_event(&id).await.unwrap();
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 0);
+        store.judge_hit(&id, "a", Labeller::Deck).await.unwrap();
+        store.unjudge(&id, Labeller::Deck).await.unwrap();
+        assert_eq!(
+            store.pending_count(0.0).await.unwrap(),
+            1,
+            "an undo puts the row back where it was before anybody answered"
+        );
     }
 
     #[tokio::test]

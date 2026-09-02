@@ -1884,6 +1884,11 @@ async fn moment_unsnooze(tenant: Tenant, Path(id): Path<String>) -> Result<Statu
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The instants a moment may name: the range a calendar year can be spelled
+/// in, which is also the range every reader of a moment can do arithmetic in.
+const YEAR_ONE: i64 = -62_135_596_800;
+const END_OF_9999: i64 = 253_402_300_799;
+
 #[derive(serde::Deserialize)]
 pub struct NewMomentBody {
     pub at: i64,
@@ -1910,6 +1915,18 @@ async fn set_moment(
     };
     if let Some(rule) = b.rule.as_deref() {
         crate::core::moments::validate_rule(rule).map_err(Error::Validation)?;
+    }
+    // As strictly as `kind`, `rule` and `tz` below. `at` was taken as given,
+    // and `i64::MIN` is a number a JSON body may carry: the band then computed
+    // `at - now` and took its `abs()` when the row was drawn — a panic under
+    // overflow checks, and "in 106751991167300 days" without them.
+    if chrono::DateTime::from_timestamp(b.at, 0).is_none()
+        || !(YEAR_ONE..=END_OF_9999).contains(&b.at)
+    {
+        return Err(Error::Validation(format!(
+            "at={}: seconds since the epoch, within the years 1 to 9999",
+            b.at
+        )));
     }
     // As strictly as `kind` and `rule` beside it. A name that does not parse
     // fell through to UTC and stayed on the row, so a typo silently moved every
@@ -5061,6 +5078,56 @@ mod patch_tests {
             core.store.get_corpus(&id).await.unwrap().metadata["tz"],
             "Europe/Berlin"
         );
+    }
+
+    #[tokio::test]
+    async fn setting_a_moment_refuses_an_instant_no_reader_can_do_arithmetic_in() {
+        // `at` was taken as given. `i64::MIN` is a number a JSON body may
+        // carry, and the band computed `at - now` and took its `abs()` when
+        // the row was drawn: a panic under overflow checks, and nonsense —
+        // "in 106751991167300 days" — without them.
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+
+        for at in [i64::MIN, i64::MAX, -62_135_596_801i64, 253_402_300_800i64] {
+            let res = app
+                .clone()
+                .oneshot(post_json(
+                    &format!("/api/v1/artifacts/{aid}/moments"),
+                    &token,
+                    serde_json::json!({ "at": at }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "at={at}");
+        }
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "and nothing was written"
+        );
+        // A date somebody actually means still lands, past ones included.
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({ "at": -2_208_988_800i64, "kind": "event" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]

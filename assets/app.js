@@ -2276,6 +2276,15 @@
       if (wasRefine(e)) return;
       failedSwap(e.detail.target, null);
     });
+    // Out-of-band content arrives on its own event, and the day link is only
+    // ever delivered that way: `_idle_foot.html` is swapped `hx-swap-oob`, so
+    // `htmx:afterSwap` never sees it. Unvisited, the anchor keeps the UTC date
+    // the server wrote into the path and carries no `?tz=` — east of Greenwich
+    // every capture after local midnight linked to the previous day, and the
+    // entries typed on that page were stamped with it.
+    document.body.addEventListener('htmx:oobAfterSwap', function (e) {
+      zoneDayLinks(e.target);
+    });
     document.body.addEventListener('htmx:afterSwap', function (e) {
       // The offer's own fetch can land after the first keystroke has already
       // dismissed it. Swapping it back in then would be exactly the flicker the
