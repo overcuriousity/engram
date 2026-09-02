@@ -194,6 +194,22 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         }
     }
 
+    // The floor under the prompt's "a short note is one artifact". Logged at
+    // info like the context drop above: a rising count is the configured
+    // model ignoring the prompt, and a number in the journal beats a base
+    // full of restated judgements.
+    let allowance = artifact_allowance(window_tokens);
+    if chunks.len() > allowance {
+        tracing::info!(
+            corpus_id,
+            window = idx,
+            proposed = chunks.len(),
+            allowance,
+            "more artifacts than the window can carry; keeping the located ones"
+        );
+        chunks = within_allowance(chunks, &text, allowance);
+    }
+
     // The span is ours to compute, against the window's own text. Computed
     // beside the chunks rather than written back over `corpus_lines`: that
     // field is the model's claim, and the resolved span is what became of it —
@@ -623,6 +639,38 @@ pub(crate) async fn write_segment_artifacts(
         }
     }
     core.store.insert_artifacts(corpus_id, &new).await
+}
+
+/// The most artifacts a window of `input_tokens` may yield.
+///
+/// One per thirty tokens, never fewer than one. A 9B model told "if a passage
+/// covers three techniques, emit three" and then handed a JUDGE block naming
+/// three things wrote a one-sentence reminder up as six artifacts, four of
+/// them restating the judgement. The prompt now forbids that; this is the
+/// floor under the prompt, because a prompt is a request and a truncation is
+/// not. Thirty is generous: a three-line bug report of seventy tokens still
+/// gets two, and a chapter gets a hundred.
+pub(crate) fn artifact_allowance(input_tokens: usize) -> usize {
+    (input_tokens / 30).max(1)
+}
+
+/// The artifacts that fit the allowance, located ones first.
+///
+/// When the model over-delivers, what is kept is what can be traced to the
+/// window: an artifact whose text locates verbatim in the source is evidence,
+/// a rewrite is a claim. Among equals the model's own order stands, which is
+/// what a stable sort gives.
+pub(crate) fn within_allowance(
+    mut chunks: Vec<crate::infer::ProposedArtifact>,
+    window: &str,
+    allowance: usize,
+) -> Vec<crate::infer::ProposedArtifact> {
+    if chunks.len() <= allowance {
+        return chunks;
+    }
+    chunks.sort_by_key(|c| crate::infer::verify::locate_span(&c.text, window, 1).is_none());
+    chunks.truncate(allowance);
+    chunks
 }
 
 /// Did this artifact come from a context block rather than from the window?
@@ -1083,6 +1131,45 @@ mod tests {
             &ctx,
             &[]
         ));
+    }
+
+    #[test]
+    fn the_allowance_is_one_artifact_per_thirty_tokens_and_never_zero() {
+        assert_eq!(artifact_allowance(0), 1);
+        assert_eq!(artifact_allowance(20), 1);
+        assert_eq!(artifact_allowance(29), 1);
+        assert_eq!(artifact_allowance(70), 2);
+        assert_eq!(artifact_allowance(3000), 100);
+    }
+
+    #[test]
+    fn over_allowance_keeps_located_artifacts_first_then_the_models_order() {
+        let window = "erinnere mich an den Gastroentereologentermin, Freitag 13:45 uhr.";
+        let art = |text: &str| crate::infer::ProposedArtifact {
+            text: text.into(),
+            title: None,
+            category: None,
+            tags: vec![],
+            corpus_lines: None,
+            caveats: vec![],
+            pinned: false,
+        };
+        let chunks = vec![
+            art("The note references a specific future event on Friday at 13:45."),
+            art("erinnere mich an den Gastroentereologentermin, Freitag 13:45 uhr."),
+            art("The reminder is set for Friday, 2026-09-05 at 13:45."),
+        ];
+        let kept = within_allowance(chunks, window, 1);
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].text.starts_with("erinnere mich"));
+
+        // Under the allowance nothing moves.
+        let chunks = vec![art("b"), art("a")];
+        let kept = within_allowance(chunks, window, 5);
+        assert_eq!(
+            kept.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
     }
 
     /// The NEIGHBORS block is on the prompt and was on no guard. A neighbour is
