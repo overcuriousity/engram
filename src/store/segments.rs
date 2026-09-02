@@ -292,6 +292,18 @@ impl Store {
         Ok(())
     }
 
+    /// Does a write to this window append rather than replace?
+    ///
+    /// The re-read mark or a verbatim state, and both readers must agree.
+    /// `jobs::window::run` read the two together while `write_segment_artifacts`
+    /// read only the mark, so a verbatim window whose mark was unset took the
+    /// replacing branch and deleted the passages the promotion exists to keep —
+    /// while the caller went on to embed and supersede as if they stood.
+    pub async fn segment_write_appends(&self, corpus_id: &str, idx: i64) -> Result<bool> {
+        Ok(self.segment_keeps_artifacts(corpus_id, idx).await?
+            || self.segment_state(corpus_id, idx).await? == Some(SegmentState::Verbatim))
+    }
+
     /// Is this window mid-re-read, so that a write appends rather than replaces?
     pub async fn segment_keeps_artifacts(&self, corpus_id: &str, idx: i64) -> Result<bool> {
         Ok(sqlx::query_scalar::<_, i64>(

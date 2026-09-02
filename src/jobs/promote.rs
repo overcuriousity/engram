@@ -161,7 +161,27 @@ async fn corroborated_by_vector(core: &Core, artifact_id: &str, passage_id: &str
     }
     let dense = |id: String| async move {
         match core.vectors.dense_of(&id).await {
-            Ok(v) => v,
+            Ok(Some(v)) => Some(v),
+            // Not "no vector, no claim": the passage's point is written by the
+            // corpus embed job, which sits at the same class, attempts and seq
+            // as the window job that reaches here — only rowid separates them,
+            // and with more than one worker they are claimed at once. The
+            // ordering that made this work was incidental, and nothing re-runs
+            // `supersede_covered` for a window already `done`, so a point that
+            // was merely late left the passage standing beside the artifact
+            // written from it for good. Embedded here, the way
+            // `neighbor_context` already embeds its seed passage inline.
+            Ok(None) => {
+                if let Err(e) = crate::jobs::embed::run(core, &id).await {
+                    tracing::warn!(
+                        artifact_id = %id,
+                        error = %e,
+                        "could not embed while judging a promotion; leaving the passage in results"
+                    );
+                    return None;
+                }
+                core.vectors.dense_of(&id).await.ok().flatten()
+            }
             Err(e) => {
                 tracing::warn!(
                     artifact_id = %id,
@@ -954,6 +974,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_verbatim_window_keeps_its_passages_without_the_mark() {
+        // `jobs::window::run` reads the mark *or* the verbatim state and goes
+        // on to embed and supersede on that answer; the writer used to read
+        // only the mark. With the mark spent — which is what `undo_promotion`
+        // leaves — the write took the replacing branch and deleted the
+        // passages the promotion exists to keep.
+        let (core, corpus, passages, _written) = promoted_fixture().await;
+        core.store.reset_segment(&corpus, 0, false).await.unwrap();
+        core.store
+            .set_segment_state(
+                &corpus,
+                0,
+                crate::store::segments::SegmentState::Verbatim,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !core
+                .store
+                .segment_keeps_artifacts(&corpus, 0)
+                .await
+                .unwrap(),
+            "the mark is spent; the state is the only witness left"
+        );
+        crate::jobs::window::write_segment_artifacts(&core, &corpus, 0, vec![])
+            .await
+            .unwrap();
+        let live = core
+            .store
+            .artifact_ids_for_segment(&corpus, 0)
+            .await
+            .unwrap();
+        for p in &passages {
+            assert!(
+                live.contains(&p.id),
+                "a verbatim passage was deleted: {p:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_re_run_under_keep_artifacts_writes_nothing_twice() {
         let (core, corpus, _passages, written) = promoted_fixture().await;
         // `write_segment_artifacts` with keep set and non-passage rows already
@@ -1180,6 +1242,56 @@ mod tests {
         for p in &passages {
             assert!(core.store.get_artifact(&p.id).await.unwrap().in_results());
         }
+    }
+
+    /// A passage whose point has not landed yet is not a passage that fails
+    /// the cosine — it is one nobody has measured. The corpus embed job and
+    /// this window's job share a class, an attempts count and a seq, so with
+    /// more than one worker they run at once; and nothing re-runs
+    /// `supersede_covered` for a `done` window, so "not yet embedded" used to
+    /// mean "left standing beside its replacement for good".
+    #[tokio::test]
+    async fn a_passage_with_no_point_yet_is_embedded_rather_than_written_off() {
+        let (core, corpus, passages, _written) = promoted_fixture().await;
+        let rewrite = core
+            .store
+            .insert_artifacts(
+                &corpus,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 9,
+                    text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
+                    corpus_span: Some(sp(3, 4)),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        embed_as(&core, &rewrite[0].id, &corpus, same_document().0).await;
+        assert!(
+            core.vectors
+                .dense_of(&passages[1].id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the fixture must start with the passage unembedded"
+        );
+
+        supersede_covered(&core, &corpus, 0, &rewrite, 2_000)
+            .await
+            .unwrap();
+
+        assert!(
+            core.vectors
+                .dense_of(&passages[1].id)
+                .await
+                .unwrap()
+                .is_some(),
+            "the passage was judged against a point nobody had written"
+        );
     }
 
     /// Above 1.0 is how the key says "verbatim only", and it has to reach the

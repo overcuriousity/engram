@@ -226,8 +226,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // superseded rather than deleted. The stored flag covers the armed path;
     // the state covers a window run directly, so no route through here can
     // ever throw verbatim text away.
-    let keep = core.store.segment_keeps_artifacts(corpus_id, idx).await?
-        || w.state == SegmentState::Verbatim;
+    let keep = core.store.segment_write_appends(corpus_id, idx).await?;
     let written =
         write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks, spans)).await?;
     flag_unverified(core, &written, &text).await?;
@@ -622,9 +621,12 @@ pub(crate) async fn write_segment_artifacts(
     new: Vec<NewArtifact>,
 ) -> Result<Vec<crate::store::artifacts::Chunk>> {
     let _corpus = core.corpus_lock(corpus_id).await;
+    // The same question `run` asks, asked the same way: the mark *or* a
+    // verbatim state. Read as the mark alone, this deleted a promotion's
+    // passages out from under a caller that had decided to keep them.
     let keep = core
         .store
-        .segment_keeps_artifacts(corpus_id, segment_idx)
+        .segment_write_appends(corpus_id, segment_idx)
         .await?;
     if keep {
         // A promotion re-run: the process died between the insert and `done`.
