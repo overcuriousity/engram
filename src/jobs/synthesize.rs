@@ -1062,9 +1062,11 @@ mod tests {
         let out = core.ingest("one\n\ntwo", "web", None).await.unwrap();
         segment_all(&core, &out.id).await;
         segment_all(&core, &out.id).await;
-        // Three live rows — two synthesized artifacts and the joint passage
-        // no single one of them majority-covers — and, run twice, still
-        // three: what must not double is what a reader can be handed.
+        // Two live rows — one synthesized artifact and the passage it does
+        // not majority-cover. "one\n\ntwo" is eight characters, so the
+        // window's allowance is one artifact and neither proposal is short
+        // enough to locate as evidence. Run twice, still two: what must not
+        // double is what a reader can be handed.
         assert_eq!(
             core.store
                 .artifacts_for_corpus(&out.id)
@@ -1073,7 +1075,7 @@ mod tests {
                 .iter()
                 .filter(|c| c.in_results())
                 .count(),
-            3,
+            2,
             "a retried segment job must not double the chunks"
         );
     }

@@ -660,6 +660,12 @@ pub(crate) fn artifact_allowance(input_tokens: usize) -> usize {
 /// window: an artifact whose text locates verbatim in the source is evidence,
 /// a rewrite is a claim. Among equals the model's own order stands, which is
 /// what a stable sort gives.
+///
+/// The allowance never cuts into the evidence. Every located artifact is
+/// kept even when there are more of them than the allowance permits — a
+/// window that really does reproduce five of its own passages has said so
+/// five times — and the allowance decides only how many rewrites ride along
+/// behind them.
 pub(crate) fn within_allowance(
     mut chunks: Vec<crate::infer::ProposedArtifact>,
     window: &str,
@@ -669,7 +675,11 @@ pub(crate) fn within_allowance(
         return chunks;
     }
     chunks.sort_by_key(|c| crate::infer::verify::locate_span(&c.text, window, 1).is_none());
-    chunks.truncate(allowance);
+    let located = chunks
+        .iter()
+        .filter(|c| crate::infer::verify::locate_span(&c.text, window, 1).is_some())
+        .count();
+    chunks.truncate(allowance.max(located));
     chunks
 }
 
@@ -1162,6 +1172,17 @@ mod tests {
         let kept = within_allowance(chunks, window, 1);
         assert_eq!(kept.len(), 1);
         assert!(kept[0].text.starts_with("erinnere mich"));
+
+        // The evidence is never cut: three located artifacts survive an
+        // allowance of one, and only the rewrites behind them are dropped.
+        let chunks = vec![
+            art("The reminder is set for Friday, 2026-09-05 at 13:45."),
+            art("erinnere mich an den Gastroentereologentermin,"),
+            art("Freitag 13:45 uhr."),
+        ];
+        let kept = within_allowance(chunks, window, 1);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|c| !c.text.starts_with("The reminder")));
 
         // Under the allowance nothing moves.
         let chunks = vec![art("b"), art("a")];
