@@ -282,9 +282,11 @@
      readily as for a visible one, so an offer rendered onto a page that
      arrived with results would fetch itself, write a `recommended_shown` row
      and be seen by nobody — inflating the denominator of the one hit rate this
-     area is measured by. app.js *removes* this one on the first keystroke
-     rather than hiding it, for the same reason: an offer computed for one
-     situation, reappearing in another, is a second impression nobody had. #}
+     area is measured by. The same accounting is why app.js drops an offer
+     that *lands* after the keystroke that dismissed it: that card was never on
+     screen, and counting it would put a population that could not click into
+     the same denominator. An offer that did arrive in time is only hidden with
+     the column, and comes back with it when the box is emptied. #}
   {% if recommend && idle_state %}
   <div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
        hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>

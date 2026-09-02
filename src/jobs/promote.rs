@@ -130,6 +130,10 @@ pub fn covered_by<'a>(
 /// from. Separating passages of a single document is a far weaker claim than
 /// asserting two texts agree.
 ///
+/// Reached only for an artifact whose span placed it in the window — see the
+/// comment in `supersede_covered`. Against the whole-window fallback this
+/// would be measuring something else entirely.
+///
 /// Free: both points are already in the store — the passages were embedded at
 /// capture, and `embed_written` embedded the artifacts before this was
 /// called — so this is two reads and an arithmetic mean. No model call.
@@ -207,7 +211,35 @@ pub async fn supersede_covered(
     // Two hits for one note, every time, on every capture that was not code.
     // The second way is the meaning: the two vectors are both already stored
     // by the time this runs, so corroboration is two reads and a cosine.
+    //
+    // And the meaning is only read where the span placed the artifact at all.
+    // That is what `SpanSource::Unplaced` marks and the whole of what it is
+    // for here. The two-part rule reads as one question asked twice — *which
+    // passage of this window is this artifact?* — and the cosine answers it
+    // only because the span already narrowed the window to a neighbourhood.
+    // Take that away, which is exactly what the fallback does, and the
+    // question the cosine is left answering is *are these two texts about the
+    // same subject?* — to which two passages of one document, sharing their
+    // topic and their vocabulary, answer yes at a similarity over any
+    // threshold worth setting. Then every passage of the window is
+    // majority-covered by the one sweeping artifact and every one of them is
+    // hidden by a number that was never about them. So an unplaced span keeps
+    // the verbatim rule and nothing else: a line of the passage has to appear
+    // in the artifact.
+    //
+    // `Claimed` is thin, and it stays: the model naming lines 3–4 out of a
+    // sixty-line window is a claim that can be wrong but is still *about*
+    // those lines, and it is the ordinary outcome for the paraphrase this path
+    // was built for — the rewrite that copies no line is precisely the one
+    // `locate_span` cannot place. Refusing it would leave the cosine reachable
+    // only where the verbatim rule had already answered.
     let text_of = |id: &str| rows.iter().find(|c| c.id == id).map(|c| c.text.as_str());
+    let placed = |id: &str| {
+        artifacts
+            .iter()
+            .find(|(aid, _, _)| aid == id)
+            .is_some_and(|(_, _, span)| span.places_the_artifact())
+    };
     let mut pairs: Vec<(&str, &str)> = Vec::new();
     for (p, a) in covered_by(&passages, &artifacts) {
         let (Some(passage_text), Some(artifact_text)) = (
@@ -217,7 +249,7 @@ pub async fn supersede_covered(
             continue;
         };
         if crate::infer::verify::locate_span(artifact_text, passage_text, 1).is_some()
-            || corroborated_by_vector(core, a, p).await
+            || (placed(a) && corroborated_by_vector(core, a, p).await)
         {
             pairs.push((p, a));
         }
@@ -598,11 +630,31 @@ mod tests {
 
     use crate::store::artifacts::CorpusSpan;
 
+    /// A span the splitter found: the ordinary case, and what a passage always
+    /// has.
     fn sp(a: i64, b: i64) -> CorpusSpan {
-        CorpusSpan {
-            start_line: a,
-            end_line: b,
-        }
+        CorpusSpan::located(a, b)
+    }
+
+    /// The paraphrase's ordinary case: the model named lines, nothing checked
+    /// them.
+    fn claimed(a: i64, b: i64) -> CorpusSpan {
+        CorpusSpan::claimed(a, b)
+    }
+
+    /// Nothing placed it — the whole-window fallback.
+    fn unplaced(a: i64, b: i64) -> CorpusSpan {
+        CorpusSpan::unplaced(a, b)
+    }
+
+    /// Two passages of one document, as an embedder actually places them:
+    /// close, because they share a subject and its vocabulary — nowhere near
+    /// the orthogonal pair a synthetic `[1,0]` / `[0,1]` suggests. `cos` here
+    /// is 0.8, over `traceable_min`'s 0.75 and under anything a real
+    /// paraphrase of the passage itself would score.
+    fn same_document() -> (Vec<f32>, Vec<f32>) {
+        let t: f32 = 0.8f32.acos();
+        (vec![1.0, 0.0], vec![t.cos(), t.sin()])
     }
 
     #[test]
@@ -997,12 +1049,14 @@ mod tests {
         }
     }
 
-    /// The guard the cosine must not weaken.
+    /// The cosine's own floor: a span the model only claimed, over text the
+    /// artifact says nothing about and scores nothing against. The verbatim
+    /// rule caught this and so must the meaning.
     ///
-    /// A span the model only guessed at, over text the artifact says nothing
-    /// about. The verbatim rule caught this and so must the meaning: promotion
-    /// is allowed to fail only in the direction that leaves verbatim text
-    /// standing.
+    /// What this does *not* test is the floor being high enough, and no test
+    /// with two orthogonal vectors can: see
+    /// `a_whole_window_fallback_hides_nothing_however_similar` for the
+    /// similarity a real pair of passages out of one document reaches.
     #[tokio::test]
     async fn a_rewrite_about_something_else_leaves_the_passage_standing() {
         let (core, corpus, passages, _written) = promoted_fixture().await;
@@ -1013,7 +1067,7 @@ mod tests {
                 &[crate::store::artifacts::NewArtifact {
                     ordinal: 9,
                     text: "an entirely different sentence about nothing here".into(),
-                    corpus_span: Some(sp(3, 4)),
+                    corpus_span: Some(claimed(3, 4)),
                     title: None,
                     category: None,
                     tags: vec![],
@@ -1030,6 +1084,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+        for p in &passages {
+            assert!(core.store.get_artifact(&p.id).await.unwrap().in_results());
+        }
+    }
+
+    /// The fallback span, whole and entire: the failure a paraphrasing model
+    /// produces on its own.
+    ///
+    /// `resolve_span` found nothing of the artifact in the window and handed it
+    /// the window — so every passage in it is majority-covered by this one
+    /// artifact, and there is nothing left between the passages and being
+    /// hidden but the cosine. At the similarity passages of one document
+    /// actually score against each other, which is over the threshold and
+    /// nothing like the orthogonal pair a synthetic fixture suggests, all
+    /// three stay: the artifact was never placed, so the number is not about
+    /// them.
+    #[tokio::test]
+    async fn a_whole_window_fallback_hides_nothing_however_similar() {
+        let (core, corpus, passages, _written) = promoted_fixture().await;
+        let sweeping = core
+            .store
+            .insert_artifacts(
+                &corpus,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 9,
+                    text: "A rewrite of the whole note, in the model's own words.".into(),
+                    corpus_span: Some(unplaced(1, 6)),
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: Some(0),
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let (artifact_v, passage_v) = same_document();
+        assert!(
+            crate::vector::cosine(&artifact_v, &passage_v) > core.promote.traceable_min,
+            "the fixture has to clear the threshold, or it proves nothing"
+        );
+        embed_as(&core, &sweeping[0].id, &corpus, artifact_v).await;
+        for p in &passages {
+            embed_as(&core, &p.id, &corpus, passage_v.clone()).await;
+        }
+        assert_eq!(
+            covered_by(
+                &passages
+                    .iter()
+                    .map(|p| (p.id.clone(), p.corpus_span.clone().unwrap()))
+                    .collect::<Vec<_>>(),
+                &[(sweeping[0].id.clone(), 9, unplaced(1, 6))],
+            )
+            .len(),
+            3,
+            "the span covers all three; only the guard may stop it"
+        );
+        assert_eq!(
+            supersede_covered(&core, &corpus, 0, &sweeping, 2_000)
+                .await
+                .unwrap(),
+            0
+        );
         for p in &passages {
             assert!(core.store.get_artifact(&p.id).await.unwrap().in_results());
         }

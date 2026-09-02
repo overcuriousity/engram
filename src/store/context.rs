@@ -429,6 +429,7 @@ mod tests {
                     corpus_span: Some(CorpusSpan {
                         start_line: 1,
                         end_line: 2,
+                        source: crate::store::artifacts::SpanSource::Located,
                     }),
                     caveats: vec![],
                     title: Some("t".into()),

@@ -3110,6 +3110,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: 1,
                 end_line: 2,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: None,
             category: None,

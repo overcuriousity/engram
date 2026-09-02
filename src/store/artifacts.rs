@@ -125,6 +125,80 @@ impl Provenance {
 pub struct CorpusSpan {
     pub start_line: i64,
     pub end_line: i64,
+    /// How these lines came to be these lines.
+    ///
+    /// Every span addresses the document the same way and renders the same,
+    /// and for showing an artifact beside its source that is all anyone needs.
+    /// It stops being all anyone needs the moment a span is read as *evidence*
+    /// — `promote::supersede_covered` takes verbatim passages out of results on
+    /// the strength of one — because the three roads through
+    /// `window::resolve_span` do not carry the same weight, and the third
+    /// carries none.
+    ///
+    /// Absent is `Unplaced`: a span written before this key existed says
+    /// nothing about where it came from, and not knowing has to fail in the
+    /// direction that leaves the verbatim passage standing.
+    #[serde(default)]
+    pub source: SpanSource,
+}
+
+/// What placed an artifact at its lines. See `CorpusSpan::source`.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SpanSource {
+    /// The artifact's own words were found in the window's text at exactly
+    /// these lines. A passage is `Located` by construction: it was cut from
+    /// them. The strongest of the three, and the only one that survives a
+    /// paraphrase reflowing hard-wrapped source.
+    Located,
+    /// The model answered with `corpus_lines` and nothing verified it. Weak —
+    /// it is omitted more often than given, and a model that guesses guesses
+    /// per artifact — but it is still a claim about *which* lines, which is
+    /// the one thing being asked of it.
+    Claimed,
+    /// Nothing placed it. `locate_span` found none of the artifact in the
+    /// window and the model offered no usable hint, so the span became the
+    /// whole window: an address that is true of every artifact in it and
+    /// distinguishes none of them. What a heavily paraphrasing model hands
+    /// every artifact it writes.
+    #[default]
+    Unplaced,
+}
+
+impl CorpusSpan {
+    /// The artifact's words are at these lines; something checked.
+    pub fn located(start_line: i64, end_line: i64) -> Self {
+        Self {
+            start_line,
+            end_line,
+            source: SpanSource::Located,
+        }
+    }
+
+    /// The model says the artifact's lines are these.
+    pub fn claimed(start_line: i64, end_line: i64) -> Self {
+        Self {
+            start_line,
+            end_line,
+            source: SpanSource::Claimed,
+        }
+    }
+
+    /// Nobody placed it; these are the lines it fell back to.
+    pub fn unplaced(start_line: i64, end_line: i64) -> Self {
+        Self {
+            start_line,
+            end_line,
+            source: SpanSource::Unplaced,
+        }
+    }
+
+    /// Whether the span says anything about *which* lines in its window —
+    /// which is what separates a span that can corroborate a claim from one
+    /// that is true of the whole window and every artifact in it.
+    pub fn places_the_artifact(&self) -> bool {
+        self.source != SpanSource::Unplaced
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1649,6 +1723,7 @@ mod tests {
             corpus_span: Some(CorpusSpan {
                 start_line: 1,
                 end_line: 4,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             caveats: vec![],
             title: Some(format!("title {ord}")),

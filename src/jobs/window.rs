@@ -10,7 +10,7 @@
 
 use crate::core::Core;
 use crate::error::{Error, Result};
-use crate::store::artifacts::{CorpusSpan, NewArtifact};
+use crate::store::artifacts::{CorpusSpan, NewArtifact, SpanSource};
 use crate::store::jobs::MAX_ATTEMPTS;
 use crate::store::segments::SegmentState;
 
@@ -90,7 +90,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // over, and `text_with_no_structure_still_splits_within_budget` asserts
     // the same bound. What must never happen is unbounded — the corpus that
     // came back fifteen times its budget.
-    let window_budget = super::synthesize::segment_budget(core);
+    let window_budget = super::synthesize::segment_budget(core, lang);
     let window_tokens = core.counter.count(&text);
     debug_assert!(
         window_tokens <= window_budget * 2,
@@ -190,11 +190,16 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         }
     }
 
-    // The span is ours to compute, against the window's own text.
+    // The span is ours to compute, against the window's own text. Computed
+    // beside the chunks rather than written back over `corpus_lines`: that
+    // field is the model's claim, and the resolved span is what became of it —
+    // one of them is evidence and the other is not, so they stopped being the
+    // same value.
     let body: String = text.clone();
-    for c in &mut chunks {
-        c.corpus_lines = Some(resolve_span(&c.text, &body, &w, c.corpus_lines));
-    }
+    let spans: Vec<CorpusSpan> = chunks
+        .iter()
+        .map(|c| resolve_span(&c.text, &body, &w, c.corpus_lines))
+        .collect();
 
     // A verbatim window read by the model is definitionally a promotion:
     // its passages are the index until the artifacts land, and they are
@@ -204,7 +209,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     let keep = core.store.segment_keeps_artifacts(corpus_id, idx).await?
         || w.state == SegmentState::Verbatim;
     let written =
-        write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks)).await?;
+        write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks, spans)).await?;
     flag_unverified(core, &written, &text).await?;
     // What is actually searchable afterwards. On a promotion that is what
     // `embed_written` hands back and not what was written: an oversize artifact
@@ -495,26 +500,46 @@ async fn build_judge_ask(
 /// `body` is the window's own text: the model numbered its lines from the top
 /// of what it was shown, so a hinted line k is source line
 /// `start_line + k - 1`.
+///
+/// Which of the three roads was taken comes back with the answer, in
+/// `CorpusSpan::source`. All three produce lines that address the same
+/// document and render the same; they are not worth the same as evidence, and
+/// `promote` reads the difference before it hides a verbatim passage.
 pub(crate) fn resolve_span(
     artifact: &str,
     body: &str,
     w: &crate::store::segments::Segment,
     hint: Option<(i64, i64)>,
-) -> (i64, i64) {
+) -> CorpusSpan {
     let shift = w.start_line - 1;
     let hinted = hint.map(|(a, b)| (a + shift, b + shift));
-    let span = crate::infer::verify::locate_span(artifact, body, w.start_line)
-        .or(hinted)
-        .unwrap_or((w.start_line, w.end_line));
-    // A span outside its own window would render as the wrong text.
+    let found = crate::infer::verify::locate_span(artifact, body, w.start_line);
+    let (span, source) = match (found, hinted) {
+        (Some(s), _) => (s, SpanSource::Located),
+        (None, Some(h)) => (h, SpanSource::Claimed),
+        (None, None) => ((w.start_line, w.end_line), SpanSource::Unplaced),
+    };
+    // A span outside its own window would render as the wrong text. What the
+    // clamp does to the *source* is the point: lines it had to move are no
+    // longer the ones anybody claimed, so a hint pointing outside the window
+    // comes back placing nothing rather than placing an artifact at whichever
+    // edge it was dragged to.
     let clamped = (
         span.0.clamp(w.start_line, w.end_line),
         span.1.clamp(w.start_line, w.end_line),
     );
     if clamped.0 <= clamped.1 {
-        clamped
+        CorpusSpan {
+            start_line: clamped.0,
+            end_line: clamped.1,
+            source: if clamped == span {
+                source
+            } else {
+                SpanSource::Unplaced
+            },
+        }
     } else {
-        (w.start_line, w.end_line)
+        CorpusSpan::unplaced(w.start_line, w.end_line)
     }
 }
 
@@ -668,17 +693,20 @@ pub(crate) async fn flag_unverified(
 pub(crate) fn proposed_to_new(
     segment_idx: i64,
     proposed: Vec<crate::infer::ProposedArtifact>,
+    spans: Vec<CorpusSpan>,
 ) -> Vec<NewArtifact> {
+    // Positional, so they have to be the same list: `spans` is built by
+    // mapping over the chunks after the context-block drop, and nothing may
+    // filter between.
+    debug_assert_eq!(proposed.len(), spans.len());
+    let mut spans = spans.into_iter();
     proposed
         .into_iter()
         .enumerate()
         .map(|(i, p)| NewArtifact {
             ordinal: i as i64,
             text: p.text,
-            corpus_span: p.corpus_lines.map(|(a, b)| CorpusSpan {
-                start_line: a,
-                end_line: b,
-            }),
+            corpus_span: spans.next(),
             title: p.title,
             category: p.category,
             tags: p.tags,
@@ -974,9 +1002,12 @@ mod tests {
     #[test]
     fn an_unlocatable_artifact_reads_the_hint_against_the_window() {
         let w = window(50, 60);
+        // The lines are the hint's, shifted onto the document — and they come
+        // back marked as what they are: a claim, which places the artifact
+        // without verifying it.
         assert_eq!(
             resolve_span("unlocatable", "a\nb", &w, Some((2, 3))),
-            (51, 52)
+            CorpusSpan::claimed(51, 52)
         );
     }
 
@@ -987,7 +1018,7 @@ mod tests {
         let body = "first body line\nsecond body line";
         assert_eq!(
             resolve_span("second body line", body, &w, Some((9, 9))),
-            (51, 51)
+            CorpusSpan::located(51, 51)
         );
     }
 
@@ -996,9 +1027,12 @@ mod tests {
         let w = window(50, 60);
         assert_eq!(
             resolve_span("unlocatable", "a\nb", &w, Some((-3, -3))),
-            (50, 50)
+            CorpusSpan::unplaced(50, 50)
         );
-        assert_eq!(resolve_span("unlocatable", "a\nb", &w, None), (50, 60));
+        assert_eq!(
+            resolve_span("unlocatable", "a\nb", &w, None),
+            CorpusSpan::unplaced(50, 60)
+        );
     }
 
     #[test]

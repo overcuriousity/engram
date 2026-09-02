@@ -2741,6 +2741,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: from,
                 end_line: to,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some("Recovery".into()),
             category: None,
@@ -2830,6 +2831,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: line,
                 end_line: line,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some(title.into()),
             category: None,

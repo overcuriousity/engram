@@ -528,16 +528,25 @@ pub(crate) fn render_echo(t: &IntentEchoTemplate) -> String {
 /// What capture will do with the box, said before it is pressed.
 ///
 /// Pure local arithmetic on the same counter and budget the size fork uses —
-/// exact, no model call, no store read — riding the search response the box
-/// already makes on every keystroke at a 120ms debounce.
-pub(crate) fn fate_echo(core: &crate::core::Core, q: &str) -> IntentEchoTemplate {
+/// exact, no model call — riding the search response the box already makes on
+/// every keystroke at a 120ms debounce.
+///
+/// `lang` because the budget is not one number: the window is what is left of
+/// the synthesizer's context after its system prompt, and the ten prompts do
+/// not cost the same. Told in English, the fork would promise one window for a
+/// Russian paste that will actually be cut into two.
+pub(crate) fn fate_echo(
+    core: &crate::core::Core,
+    q: &str,
+    lang: crate::infer::lang::Lang,
+) -> IntentEchoTemplate {
     if q.trim().is_empty() {
         return IntentEchoTemplate {
             kind: "",
             detail: String::new(),
         };
     }
-    let budget = crate::jobs::synthesize::segment_budget(core).max(1);
+    let budget = crate::jobs::synthesize::segment_budget(core, lang).max(1);
     let tokens = core.counter.count(q);
     if tokens <= budget {
         IntentEchoTemplate {
@@ -1284,8 +1293,13 @@ pub(crate) async fn search_results(
     // requests and cannot carry the session this one came in on, which is the
     // whole of what keeps the sitting at the web door.
     identity: crate::auth::Identity,
+    headers: axum::http::HeaderMap,
     Query(p): Query<UiSearchParams>,
 ) -> Result<Response> {
+    // Resolved once, at the top: the fate echo needs it on both roads out of
+    // here, and by the time the second one renders the subject has been moved
+    // into the recall.
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     // Clearing the box fires a request with an empty query. That is not an
     // error, and it is not "No matches." either — an empty ResultsTemplate
     // rendered exactly that, which is a claim about a base nobody searched.
@@ -1307,7 +1321,7 @@ pub(crate) async fn search_results(
         // still worth a line: this is exactly the paste the size fork will
         // store verbatim, and the echo is what says so before Capture.
         if !p.q.trim().is_empty() {
-            t.echo = render_echo(&fate_echo(&tenant.core, &p.q));
+            t.echo = render_echo(&fate_echo(&tenant.core, &p.q, lang));
         }
         return Ok(HtmlTemplate(t).into_response());
     }
@@ -1410,7 +1424,7 @@ pub(crate) async fn search_results(
         .into_iter()
         .map(|h| render_hit(0, h, &titles, explain))
         .collect();
-    let echo = render_echo(&fate_echo(&tenant.core, &q));
+    let echo = render_echo(&fate_echo(&tenant.core, &q, lang));
     let mut res = HtmlTemplate(ResultsTemplate {
         // Only when *every* result is loose. One weak hit at the bottom of a
         // good list is ordinary — it is the tail of any ranking — and saying
@@ -2638,7 +2652,9 @@ fn push_url(field: &str, raw: &str) -> Result<()> {
         )));
     }
     if u.host().is_none() {
-        return Err(Error::Validation(format!("{field}: that URL names no host")));
+        return Err(Error::Validation(format!(
+            "{field}: that URL names no host"
+        )));
     }
     Ok(())
 }
@@ -10347,6 +10363,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: a,
                 end_line: z,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some(format!("artifact {ord}")),
             category: None,
@@ -10678,6 +10695,7 @@ mod tests {
             corpus_span: Some(CorpusSpan {
                 start_line: a,
                 end_line: z,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some(format!("artifact {ord}")),
             category: None,
@@ -11594,6 +11612,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: 1,
                 end_line: 2,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: None,
             category: None,
@@ -11657,6 +11676,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: 1,
                 end_line: 1,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: None,
             category: None,

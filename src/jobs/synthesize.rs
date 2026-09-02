@@ -7,9 +7,17 @@ use crate::store::jobs::Stage;
 use crate::store::segments::SegmentState;
 
 /// Tokens consumed by the system prompt and scaffolding. Measured from the
-/// real prompt rather than guessed.
-pub(super) fn prompt_overhead(core: &Core) -> usize {
-    core.counter.count(crate::infer::prompt::SYNTHESIZER_SYSTEM) + 200
+/// real prompt rather than guessed — and the real prompt is the one this
+/// corpus's language will actually be sent, not the English constant. The ten
+/// translations are comparable in bytes and not in tokens: Cyrillic, Polish
+/// and Turkish cost markedly more of them per character under the bundled
+/// tokenizer, so sizing every window against English built a Russian window
+/// larger than the context it had to fit, and the repair turn — system prompt
+/// plus the user prompt twice — overflowed before the first call did.
+pub(super) fn prompt_overhead(core: &Core, lang: crate::infer::lang::Lang) -> usize {
+    core.counter
+        .count(crate::infer::prompt::synthesizer_system(lang))
+        + 200
 }
 
 /// The `Synthesize` stage: the verbatim capture, for every corpus.
@@ -24,8 +32,8 @@ pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
 /// The window budget, derived from the synthesizer's context: the unit
 /// promotion reads, what coverage is measured against, and the line the size
 /// fork asks about.
-pub fn segment_budget(core: &Core) -> usize {
-    segment_tokens(core.synthesizer.budget(), prompt_overhead(core))
+pub fn segment_budget(core: &Core, lang: crate::infer::lang::Lang) -> usize {
+    segment_tokens(core.synthesizer.budget(), prompt_overhead(core, lang))
 }
 
 /// Measure how much of a corpus survived into its artifacts, and store it.
@@ -272,6 +280,42 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::store::corpora::CorpusStatus;
 
+    /// The window is what is left of the synthesizer's context once its system
+    /// prompt is in it, so the budget is not one number.
+    ///
+    /// The ten translations are comparable in bytes and not in tokens — the
+    /// tokenizer was trained on text that is mostly English, and a language
+    /// written in another script pays for it per character — so sizing every
+    /// corpus against `SYNTHESIZER_SYSTEM` built a Russian window larger than
+    /// the context it had to fit in. That failure is silent until the call,
+    /// and the repair turn, which re-sends the system prompt plus the user
+    /// prompt twice, hits the ceiling before the first call does.
+    #[tokio::test]
+    async fn the_window_is_measured_against_the_prompt_its_language_will_be_sent() {
+        let core = test_core().await;
+        for l in crate::infer::lang::Lang::ALL {
+            assert_eq!(
+                prompt_overhead(&core, l),
+                core.counter
+                    .count(crate::infer::prompt::synthesizer_system(l))
+                    + 200,
+                "{} was measured against another language's prompt",
+                l.tag()
+            );
+        }
+        // And the difference is real, not a distinction that reads the same
+        // either way. Measured here on the estimator every test runs on, which
+        // counts characters: the ten prompts already differ by that much. The
+        // gap this exists for is the wider one a real tokenizer opens on top,
+        // where a Cyrillic or a Turkish character costs more than one token's
+        // share and the estimator cannot see it.
+        assert_ne!(
+            prompt_overhead(&core, crate::infer::lang::Lang::Ru),
+            prompt_overhead(&core, crate::infer::lang::Lang::En),
+            "the Russian prompt and the English one measured the same"
+        );
+    }
+
     #[tokio::test]
     async fn re_planning_does_not_wind_back_a_queued_windows_attempts() {
         // A plan job outlives the units it arms: killed after planning, its row
@@ -421,7 +465,7 @@ mod tests {
         // spins against the endpoint forever, and a debug_assert turns that
         // into a test failure instead of a production incident.
         let core = crate::core::test_support::test_core().await;
-        let budget = segment_budget(&core);
+        let budget = segment_budget(&core, crate::infer::lang::Lang::En);
 
         let lines: Vec<String> = (0..400)
             .map(|i| format!("body line {i} with enough words to cost real tokens"))
@@ -624,7 +668,12 @@ mod tests {
     }
 
     fn segment_count(core: &crate::core::Core, body: &str) -> usize {
-        crate::infer::split::split_into_segments(body, &core.counter, segment_budget(core)).len()
+        crate::infer::split::split_into_segments(
+            body,
+            &core.counter,
+            segment_budget(core, crate::infer::lang::Lang::En),
+        )
+        .len()
     }
 
     #[tokio::test]

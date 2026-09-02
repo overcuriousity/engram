@@ -971,9 +971,11 @@
     var box = document.querySelector('textarea[name="q"]');
     if (!box) return;
     // Not `{ once: true }`. The column comes back when the box is emptied, so
-    // this is a transition and not a one-way dismissal — the offer inside it
-    // is the only part that goes for good, which is what `offerDismissed`
-    // records.
+    // this is a transition and not a one-way dismissal: the offer is hidden
+    // with the column and returns with it. What `offerDismissed` records is
+    // narrower — that a keystroke has happened — so that an offer whose fetch
+    // lands *after* it can be dropped by `dropOffer` instead of appearing over
+    // a query nobody asked it about.
     box.addEventListener('input', function () {
       if (box.value.trim()) {
         offerDismissed = true;

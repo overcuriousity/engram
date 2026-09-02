@@ -293,6 +293,7 @@ async fn ingest(
         .core
         .ingest_capture(
             crate::core::ingest::Capture::new(text, origin)
+                .with_lang(lang)
                 .with_title(title)
                 .with_source_url(parsed_url.map(|u| u.to_string())),
         )
@@ -558,6 +559,7 @@ async fn capture(
                     .ingest_capture(
                         crate::core::ingest::Capture::new(text, time.origin)
                             .from_channel(time.channel)
+                            .with_lang(lang)
                             .with_title(q.title)
                             .with_note(q.note)
                             .with_tz(time.tz)
@@ -631,6 +633,7 @@ async fn capture(
                     .core
                     .ingest_capture(
                         crate::core::ingest::Capture::new(text, time.origin)
+                            .with_lang(lang)
                             .with_title(title.clone())
                             .with_note(note.clone())
                             .with_tz(time.tz.clone())
@@ -4164,6 +4167,81 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(stored.title_hint.as_deref(), Some("A title"));
+    }
+
+    /// Every door that takes text stamps the language it will be read in.
+    ///
+    /// One test over all three because the omission is invisible per door:
+    /// `with_lang` is a builder, so a branch that forgets it compiles, stores
+    /// the text, answers 201, and is only wrong six jobs later when the window
+    /// job reads `of_corpus` and gets English. Each of these three had
+    /// resolved `lang` at the top of its handler and then dropped it on one
+    /// arm while a sibling arm passed it.
+    #[tokio::test]
+    async fn every_door_that_takes_text_stamps_the_language() {
+        let (app, token, core) = app_token_and_core().await;
+        core.store
+            .control
+            .set_lang("user-1", Some(crate::infer::lang::Lang::De))
+            .await
+            .unwrap();
+        let id_of = |v: serde_json::Value| v["id"].as_str().unwrap().to_string();
+
+        // The JSON door, on its `text` arm — the `url` arm already passed it.
+        let ingested = id_of(
+            json_of(
+                app.clone()
+                    .oneshot(post_json(
+                        "/api/v1/corpora",
+                        &token,
+                        serde_json::json!({"text": "eine notiz durch die json-tür"}),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
+        // The raw-body door, on the arm that is prose rather than a link.
+        let raw = id_of(
+            json_of(
+                app.clone()
+                    .oneshot(raw_post(
+                        "/api/v1/capture",
+                        &token,
+                        "text/plain",
+                        "eine notiz durch die rohe tür".as_bytes(),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
+        // The multipart door, on its `text` field — the `url` field and the
+        // file parts already passed it.
+        let shared = id_of(
+            json_of(
+                app.clone()
+                    .oneshot(multipart(
+                        "/api/v1/capture",
+                        &token,
+                        &[("text", "eine notiz durch die teilen-tür")],
+                        &[],
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
+
+        for id in [&ingested, &raw, &shared] {
+            let stored = core.store.get_corpus(id).await.unwrap();
+            assert_eq!(
+                crate::infer::lang::of_corpus(&stored.metadata),
+                crate::infer::lang::Lang::De,
+                "{} was stored to be read in English",
+                stored.raw_text
+            );
+        }
     }
 
     #[tokio::test]

@@ -606,6 +606,14 @@ activation_above = 3.0
 # passage of that window. Set it to separate passages of one document from each
 # other, not to assert that two texts agree.
 #
+# Read only where the artifact's span placed it in the window — the splitter
+# found its words at those lines, or the model named them. Where nothing placed
+# it and the span fell back to the whole window, no similarity supersedes
+# anything at any setting: that span covers every passage in the window at once,
+# so the cosine would no longer be asking which passage the artifact is, only
+# whether two passages of one document are about the same subject — which they
+# are.
+#
 # Above 1.0 switches the check off: only a verbatim line then supersedes
 # anything, which is how it behaved before.
 traceable_min = 0.75

@@ -252,6 +252,7 @@ async fn page(
 async fn entry(
     tenant: Tenant,
     Path(date): Path<String>,
+    headers: HeaderMap,
     Form(f): Form<EntryForm>,
 ) -> Result<Response> {
     // The date is a date, exactly as `page` demands — and for both of the
@@ -277,8 +278,13 @@ async fn entry(
     if f.text.trim().is_empty() {
         return Ok(Redirect::to(&back).into_response());
     }
+    // The journal is a door like any other, and a diary is the text most
+    // likely to be written in the writer's own language: without the stamp a
+    // German entry was synthesized against the English system prompt.
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let mut c = Capture::new(&f.text, ORIGIN_JOURNAL)
         .from_channel(crate::core::ingest::ORIGIN_WEB)
+        .with_lang(lang)
         .with_tz(Some(tz_name));
     c.metadata["day"] = serde_json::Value::String(date.clone());
     tenant.core.ingest_capture(c).await?;
@@ -610,6 +616,37 @@ mod tests {
         ] {
             assert!(html.contains(s), "{s}");
         }
+    }
+
+    /// The journal is the door most likely to be written in the writer's own
+    /// language, and for a while it was the one door that stamped none: a
+    /// German diary entry was synthesized against the English system prompt
+    /// however Settings was set.
+    #[tokio::test]
+    async fn a_journal_entry_is_stamped_with_the_language_it_will_be_read_in() {
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/day/2026-08-30/entry")
+                    .header("cookie", &cookie)
+                    .header("accept-language", "de-DE,de;q=0.9,en;q=0.8")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "text=Heute+war+ein+langer+Tag.&tz=Europe/Berlin",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(
+            crate::infer::lang::of_corpus(&stored.metadata),
+            crate::infer::lang::Lang::De
+        );
     }
 
     #[tokio::test]

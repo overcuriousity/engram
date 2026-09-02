@@ -162,7 +162,10 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     let windows = split_into_segments(
         &src.raw_text,
         &core.counter,
-        super::synthesize::segment_budget(core),
+        // Against the prompt this corpus will be synthesized with: the split
+        // decides how much text one call is handed, so it has to be measured
+        // against the same overhead that call will carry.
+        super::synthesize::segment_budget(core, crate::infer::lang::of_corpus(&src.metadata)),
     );
     if windows.is_empty() {
         tracing::warn!(corpus_id, "source has no usable text");
@@ -203,10 +206,9 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
             .map(|(i, p)| NewArtifact {
                 ordinal: i as i64,
                 text: p.text,
-                corpus_span: Some(CorpusSpan {
-                    start_line: p.start_line,
-                    end_line: p.end_line,
-                }),
+                // Found, not claimed: a passage *is* these lines — it was cut
+                // from them, and its text is theirs verbatim.
+                corpus_span: Some(CorpusSpan::located(p.start_line, p.end_line)),
                 title: p.title,
                 category: None,
                 tags: vec![],

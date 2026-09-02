@@ -2477,10 +2477,32 @@ Rules:
 - You may be given context about the capture: a note from the person who took it, when and where it was taken, the device. Where it is relevant, weave it in naturally so the text can be found again by it — as a short opening line or where it explains the content — but do not repeat it mechanically or invent detail around it.
 - Output markdown only. No preamble, no closing remarks, no mention of these instructions."#;
 
-/// The user turn's text part for `Describer::describe`: the note first, then
-/// the facts the file carried, each only when present.
+/// The user turn's text part for `Describer::describe`: the language first,
+/// then the note, then the facts the file carried, each only when present.
+///
+/// The language rides here rather than in a translated `DESCRIBE_SYSTEM`
+/// because what a description of an image has to say about language is not
+/// the same thing a synthesis does. A described image *becomes* the corpus's
+/// `raw_text` — it is the verbatim the operator reads as the source — and it
+/// is two texts at once: the transcription of whatever is written in the
+/// image, which belongs to the image and must not be translated by anybody,
+/// and the describer's own prose about it, which belongs to the reader. Nine
+/// mechanical translations of the system prompt would have said nothing about
+/// which is which; this line says it once, and a tenth language is one more
+/// endonym away.
 pub fn describe_context(metadata: &serde_json::Value) -> String {
     let mut lines: Vec<String> = Vec::new();
+    let lang = crate::infer::lang::of_corpus(metadata);
+    if lang != crate::infer::lang::Lang::En {
+        lines.push(format!(
+            "Write your description in {} ({}). Text that is visible in the image \
+             is still transcribed exactly as it appears there, in whatever language \
+             it is written in — only your own prose is in {}.",
+            lang.endonym(),
+            lang.tag(),
+            lang.endonym()
+        ));
+    }
     if let Some(note) = metadata["note"].as_str().filter(|n| !n.trim().is_empty()) {
         // The stored note is whole; this is the copy that costs tokens, and it
         // leads the prompt — so it is the one place a long one does damage.
@@ -3603,6 +3625,41 @@ mod tests {
         assert!(!bare.contains("taken"), "{bare}");
         assert!(!bare.contains("GPS"), "{bare}");
         assert!(bare.contains("Read the image"), "{bare}");
+    }
+
+    /// A described image *becomes* the corpus — its description is the
+    /// `raw_text` the operator reads as the source and passages are split from
+    /// — so a German account's photo read in English left the stamp governing
+    /// only what came after the source was already the wrong language.
+    ///
+    /// And the instruction has two halves, which is why it is a line in the
+    /// user turn rather than nine translations of the system prompt: the
+    /// transcription belongs to the image and must survive in whatever
+    /// language is written there, while the prose about it belongs to the
+    /// reader.
+    #[test]
+    fn a_description_is_written_in_the_language_the_capture_was_stamped_with() {
+        let de = describe_context(&serde_json::json!({ "lang": "de" }));
+        assert!(
+            de.starts_with("Write your description in Deutsch (de)."),
+            "{de}"
+        );
+        assert!(
+            de.contains("transcribed exactly as it appears"),
+            "the transcription must not be swept along: {de}"
+        );
+
+        // English is the default everywhere and says nothing extra: the system
+        // prompt is already in it, and a line repeating that is tokens for
+        // nothing on every image capture that never set a language.
+        for m in [
+            serde_json::json!({ "lang": "en" }),
+            serde_json::json!({}),
+            serde_json::json!({ "lang": "kl" }),
+        ] {
+            let ctx = describe_context(&m);
+            assert!(!ctx.contains("Write your description in"), "{ctx}");
+        }
     }
 
     #[test]
