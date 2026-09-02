@@ -108,6 +108,10 @@ pub struct PdfCapture {
     pub filename: Option<String>,
     pub title_hint: Option<String>,
     pub note: Option<String>,
+    /// Which of the ten system prompts this document's reading is made with.
+    /// See `infer::lang`; `Lang::default()` is English, which is what every
+    /// door that knows no language sends.
+    pub lang: crate::infer::lang::Lang,
 }
 
 /// One image, whichever door it arrived through.
@@ -117,6 +121,10 @@ pub struct ImageCapture {
     pub filename: Option<String>,
     pub title_hint: Option<String>,
     pub note: Option<String>,
+    /// Which of the ten system prompts this document's reading is made with.
+    /// See `infer::lang`; `Lang::default()` is English, which is what every
+    /// door that knows no language sends.
+    pub lang: crate::infer::lang::Lang,
 }
 
 /// One capture, whichever door it arrived through.
@@ -176,6 +184,19 @@ impl Capture {
         if let Some(t) = tz.filter(|t| !t.trim().is_empty()) {
             self.metadata["tz"] = serde_json::Value::String(t);
         }
+        self
+    }
+
+    /// The language the reading of this text is instructed in.
+    ///
+    /// Stamped here, at the door, and not read from the account when the job
+    /// runs: a job holds a `Core`, a `Core` is cached per tenant in a
+    /// fixed-size LRU and knows no subject, and a setting that only takes
+    /// effect on eviction is a setting nobody can trust. On the corpus it is
+    /// also the more truthful place — this is the language the capture was
+    /// made in, which is what the reading should follow.
+    pub fn with_lang(mut self, lang: crate::infer::lang::Lang) -> Self {
+        self.metadata["lang"] = serde_json::Value::String(lang.tag().to_string());
         self
     }
 
@@ -271,6 +292,7 @@ impl Core {
         url: &url::Url,
         title: Option<String>,
         note: Option<String>,
+        lang: crate::infer::lang::Lang,
     ) -> Result<IngestOutcome> {
         use crate::core::fetch::Fetched;
         let source_url = Some(url.to_string());
@@ -288,6 +310,7 @@ impl Core {
                 // first *section* of the article.
                 self.ingest_capture(
                     Capture::new(page.markdown, ORIGIN_FETCH)
+                        .with_lang(lang)
                         .with_title(title.or(page.title))
                         .with_note(note)
                         .with_source_url(source_url),
@@ -301,6 +324,7 @@ impl Core {
                         filename: url_filename(url),
                         title_hint: title,
                         note,
+                        lang,
                     },
                     source_url,
                 )
@@ -313,6 +337,7 @@ impl Core {
                         filename: url_filename(url),
                         title_hint: title,
                         note,
+                        lang,
                     },
                     source_url,
                 )
@@ -535,6 +560,7 @@ impl Core {
         title: Option<String>,
         note: Option<String>,
         origin: &str,
+        lang: crate::infer::lang::Lang,
     ) -> Result<IngestOutcome> {
         if bytes.starts_with(b"%PDF-") {
             return self
@@ -543,6 +569,7 @@ impl Core {
                     filename,
                     title_hint: title,
                     note,
+                    lang,
                 })
                 .await;
         }
@@ -553,6 +580,7 @@ impl Core {
                     filename,
                     title_hint: title,
                     note,
+                    lang,
                 })
                 .await;
         }
@@ -571,6 +599,7 @@ impl Core {
         })?;
         self.ingest_capture(
             Capture::new(text, origin)
+                .with_lang(lang)
                 .with_title(title)
                 .with_note(note)
                 .with_file(filename.as_deref(), size, "text/plain"),
@@ -594,6 +623,7 @@ impl Core {
             filename,
             title_hint,
             note,
+            lang,
         } = c;
         // The ceiling, imposed here rather than at each door.
         //
@@ -628,6 +658,12 @@ impl Core {
             file["name"] = serde_json::Value::String(n.to_string());
         }
         let mut metadata = serde_json::json!({ "file": file });
+        // The same key `Capture::with_lang` writes, and it has to be written
+        // here too: a PDF and an image never pass through `Capture` at all —
+        // they are stored attached, with metadata assembled by hand — so the
+        // stamp the reading job looks for would simply be missing, and every
+        // extracted or described document came back in English.
+        metadata["lang"] = serde_json::json!(lang.tag());
         let note = clean_note(note);
         if let Some(n) = &note {
             metadata["note"] = serde_json::json!(n);
@@ -690,6 +726,7 @@ impl Core {
             filename,
             title_hint,
             note,
+            lang,
         } = c;
         // The ceiling, imposed here rather than at each door — see
         // `ingest_pdf_from`. Checked before the hash and long before the
@@ -738,6 +775,12 @@ impl Core {
         if prepared.exif.as_object().is_some_and(|o| !o.is_empty()) {
             metadata["exif"] = prepared.exif.clone();
         }
+        // The same key `Capture::with_lang` writes, and it has to be written
+        // here too: a PDF and an image never pass through `Capture` at all —
+        // they are stored attached, with metadata assembled by hand — so the
+        // stamp the reading job looks for would simply be missing, and every
+        // extracted or described document came back in English.
+        metadata["lang"] = serde_json::json!(lang.tag());
         let note = clean_note(note);
         if let Some(n) = &note {
             metadata["note"] = serde_json::Value::String(n.clone());
@@ -1668,7 +1711,14 @@ mod tests {
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
         png.resize(2 * 1024 * 1024, 0);
         let err = core
-            .ingest_file(png, Some("photo.png".into()), None, None, "share")
+            .ingest_file(
+                png,
+                Some("photo.png".into()),
+                None,
+                None,
+                "share",
+                crate::infer::lang::Lang::default(),
+            )
             .await
             .expect_err("an oversize image is refused");
         assert!(err.to_string().contains("1 MB limit"), "{err}");
@@ -1676,7 +1726,14 @@ mod tests {
         let mut pdf = b"%PDF-1.7\n".to_vec();
         pdf.resize(3 * 1024 * 1024, 0);
         let err = core
-            .ingest_file(pdf, Some("book.pdf".into()), None, None, "share")
+            .ingest_file(
+                pdf,
+                Some("book.pdf".into()),
+                None,
+                None,
+                "share",
+                crate::infer::lang::Lang::default(),
+            )
             .await
             .expect_err("an oversize PDF is refused");
         assert!(err.to_string().contains("2 MB limit"), "{err}");
@@ -1685,7 +1742,14 @@ mod tests {
         // refuses text over 8 MB and a `file` part used to sail past it.
         let text = vec![b'a'; MAX_TEXT_BYTES + 1];
         let err = core
-            .ingest_file(text, Some("notes.txt".into()), None, None, "share")
+            .ingest_file(
+                text,
+                Some("notes.txt".into()),
+                None,
+                None,
+                "share",
+                crate::infer::lang::Lang::default(),
+            )
             .await
             .expect_err("an oversize text file is refused");
         assert!(err.to_string().contains("8 MB limit"), "{err}");
@@ -1711,7 +1775,12 @@ mod tests {
         let core = test_core().await;
         let u = url::Url::parse(&format!("{}/page", server.uri())).unwrap();
         let out = core
-            .ingest_url(&u, None, Some("from the agent".into()))
+            .ingest_url(
+                &u,
+                None,
+                Some("from the agent".into()),
+                crate::infer::lang::Lang::default(),
+            )
             .await
             .unwrap();
         let c = core.store.get_corpus(&out.id).await.unwrap();
@@ -1735,7 +1804,10 @@ mod tests {
             .await;
         let core = test_core().await;
         let u = url::Url::parse(&format!("{}/papers/plan.pdf", server.uri())).unwrap();
-        let out = core.ingest_url(&u, None, None).await.unwrap();
+        let out = core
+            .ingest_url(&u, None, None, crate::infer::lang::Lang::default())
+            .await
+            .unwrap();
         assert_eq!(out.status, CorpusStatus::Extracting);
         let c = core.store.get_corpus(&out.id).await.unwrap();
         assert_eq!(c.origin, ORIGIN_PDF);
@@ -1753,6 +1825,7 @@ mod tests {
             filename: Some("plan.pdf".into()),
             title_hint: None,
             note: Some("the quarterly plan".into()),
+            lang: crate::infer::lang::Lang::default(),
         }
     }
 
@@ -1814,6 +1887,7 @@ mod tests {
                 None,
                 None,
                 "cli",
+                crate::infer::lang::Lang::default(),
             )
             .await
             .expect("text file");
@@ -1830,6 +1904,7 @@ mod tests {
                 None,
                 None,
                 "share",
+                crate::infer::lang::Lang::default(),
             )
             .await
             .expect("image file");
@@ -1840,7 +1915,14 @@ mod tests {
         );
 
         let refused = core
-            .ingest_file(vec![0xff, 0xfe, 0x00], None, None, None, "cli")
+            .ingest_file(
+                vec![0xff, 0xfe, 0x00],
+                None,
+                None,
+                None,
+                "cli",
+                crate::infer::lang::Lang::default(),
+            )
             .await;
         assert!(
             refused.is_err(),
@@ -1864,6 +1946,7 @@ mod tests {
             filename: None,
             title_hint: None,
             note: None,
+            lang: crate::infer::lang::Lang::default(),
         }
     }
 
@@ -1999,6 +2082,7 @@ mod tests {
                 filename: None,
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();
@@ -2013,6 +2097,7 @@ mod tests {
                 filename: None,
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();
@@ -2029,6 +2114,7 @@ mod tests {
                 filename: Some("photo.jpg".into()),
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap()
@@ -2873,6 +2959,7 @@ mod tests {
                 filename: Some("IMG_1.png".into()),
                 title_hint: None,
                 note: Some("  the kitchen whiteboard ".into()),
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();
@@ -2921,6 +3008,7 @@ mod tests {
                 filename: None,
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap_err();
@@ -2938,6 +3026,7 @@ mod tests {
                 filename: Some("x.jpg".into()),
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap_err();
@@ -3079,6 +3168,7 @@ mod tests {
                 filename: Some("lease.pdf".into()),
                 title_hint: None,
                 note: Some("  scan of the Reinhardt lease, break clause is p.3  ".into()),
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();
@@ -3109,6 +3199,7 @@ mod tests {
                 filename: Some("IMG_9.png".into()),
                 title_hint: None,
                 note: Some("front of the router".into()),
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();
@@ -3169,6 +3260,7 @@ mod tests {
                 filename: Some("scan.pdf".into()),
                 title_hint: None,
                 note: Some("the survey nobody can OCR".into()),
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();
@@ -3196,6 +3288,7 @@ mod tests {
                 filename: Some("plan.pdf".into()),
                 title_hint: None,
                 note: Some("the quarterly plan".into()),
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();
@@ -3205,6 +3298,7 @@ mod tests {
                 filename: Some("plan.pdf".into()),
                 title_hint: None,
                 note: Some("a second thought about it".into()),
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();
@@ -3232,6 +3326,7 @@ mod tests {
                 filename: Some("lease.pdf".into()),
                 title_hint: None,
                 note: Some("break clause is p.3".into()),
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap();

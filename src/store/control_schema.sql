@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS users (
   -- "token"}, "unifiedpush": {"endpoint"}}. '{}' means nowhere, and the
   -- Remind unit is never armed for this user.
   notify       TEXT NOT NULL DEFAULT '{}',
+  -- Which of the ten languages this account's captures are read in. '' means
+  -- automatic: the browser's Accept-Language decides, per capture, which is
+  -- what an account that has never opened Settings gets. The resolved value is
+  -- stamped onto each corpus at capture — see `Capture::with_lang` — because a
+  -- background job holds a cached `Core` that knows no subject and could not
+  -- read this column when it matters.
+  lang         TEXT NOT NULL DEFAULT '',
   created_at   INTEGER NOT NULL
 );
 

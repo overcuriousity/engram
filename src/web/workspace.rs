@@ -361,7 +361,14 @@ struct CapturedTemplate {
     entry: bool,
 }
 
-async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Response> {
+async fn capture_submit(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Form(f): Form<CaptureForm>,
+) -> Result<Response> {
+    // Which of the ten the reading of this text is instructed in: the account
+    // setting, or this browser's `Accept-Language` where it is on automatic.
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     // An answer the operator chose to keep is still a paste, and is stored as
     // one — the same pipeline, the same synthesis, no special case downstream.
     // What differs is only the trace: the origin says a model wrote it, and the
@@ -394,7 +401,11 @@ async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Re
     };
     let out = tenant
         .core
-        .ingest_capture(capture.with_tz(viewer_zone(f.tz.as_deref())))
+        .ingest_capture(
+            capture
+                .with_lang(lang)
+                .with_tz(viewer_zone(f.tz.as_deref())),
+        )
         .await?;
     let entry = tenant
         .core
@@ -1205,12 +1216,21 @@ mod tests {
         );
     }
 
-    /// The gap between "captured" and "searchable" is a background job, and it
-    /// was invisible: a one-line receipt, then silence, then a search that
-    /// finds nothing. The queue fragment already reports the work and already
-    /// stops polling when it settles — it was only ever rendered on Insights.
+    /// An ordinary capture answers with nothing to render.
+    ///
+    /// It used to answer with three blocks: a receipt line, a sentence saying
+    /// what "segmenting 3/7" counts towards, and `_queue.html` polling itself.
+    /// They landed in `#capture-result`, a child of `.region-bar` — and on a
+    /// phone that bar is fixed to the bottom of the viewport with no height
+    /// bound, so it grew past the top of the screen and took the textarea with
+    /// it. Nothing scrolls a fixed element back.
+    ///
+    /// The acknowledgment is the "last kept" line in `_idle_foot.html`, which
+    /// the same `submit` that refreshes the rail swaps out of band. It names
+    /// the capture and links to it; a second line directly above the box was
+    /// never carrying anything it did not.
     #[tokio::test]
-    async fn the_capture_receipt_shows_the_work_that_is_still_running() {
+    async fn an_ordinary_capture_writes_nothing_over_the_box() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let res = app
@@ -1228,49 +1248,18 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let html = body_of(res).await;
         assert!(
-            html.contains(r#"hx-get="/ui/queue""#),
-            "the receipt fetches the queue that reports the work"
-        );
-        assert!(
-            html.contains(r#"hx-trigger="load""#),
-            "on load, so the progress is there without a second press"
+            html.trim().is_empty(),
+            "an ordinary capture still writes into the bar the box lives in: {html}"
         );
     }
 
-    /// The receipt now shows the queue, and the queue speaks in statuses — a
-    /// row reading "segmenting 3/7" over a paste is the first thing a new
-    /// reader sees and the last thing they can interpret. A tooltip would not
-    /// reach them: the camera path is the phone's, and a phone has no hover.
+    /// The two things that are not receipts still answer.
+    ///
+    /// A duplicate and a parked near-duplicate are states the operator cannot
+    /// learn any other way — a phone has no other surface that would say it —
+    /// and they are the reason this fragment still exists at all.
     #[tokio::test]
-    async fn the_receipt_says_what_the_work_below_it_means() {
-        let core = crate::core::test_support::test_core().await;
-        let (app, cookie) = app_with_cookie(core).await;
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/ui/capture")
-                    .header("cookie", &cookie)
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("text=LevelDB+tombstones+survive+compaction."))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let html = body_of(res).await;
-        assert!(
-            html.contains("searchable once it settles"),
-            "the receipt says what the row under it is counting towards: {html}"
-        );
-    }
-
-    /// A capture that stored nothing must not promise that something is being
-    /// read. Both the "searchable once it settles" line and the queue it polls
-    /// sat outside the branch, so a duplicate said "nothing was processed a
-    /// second time" and then, in the next sentence, that it was being read —
-    /// over a queue row that would sit parked at zero artifacts forever.
-    #[tokio::test]
-    async fn a_receipt_for_a_paste_nothing_processed_promises_no_processing() {
+    async fn a_capture_nothing_processed_still_says_so() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let post = |app: axum::Router, cookie: String| async move {
@@ -1290,24 +1279,88 @@ mod tests {
             body_of(res).await
         };
 
-        let first = post(app.clone(), cookie.clone()).await;
-        assert!(
-            first.contains("searchable once it settles") && first.contains(r#"hx-get="/ui/queue""#),
-            "the ordinary path still reports the work it started: {first}"
-        );
-
+        assert!(post(app.clone(), cookie.clone()).await.trim().is_empty());
         let again = post(app, cookie).await;
         assert!(
             again.contains("nothing was processed a second time"),
             "the second paste of the same text is a duplicate: {again}"
         );
-        assert!(
-            !again.contains("searchable once it settles"),
-            "and a duplicate must not say it is being read: {again}"
+        // And it still never promises reading it is not doing.
+        assert!(!again.contains("searchable once it settles"));
+        assert!(!again.contains(r#"hx-get="/ui/queue""#));
+    }
+
+    /// The whole of the language path, from the browser to the corpus.
+    ///
+    /// The setting is stamped at the door and never read at the job, because a
+    /// job holds a `Core` cached per tenant in a fixed-size LRU that knows no
+    /// subject: a setting that only took effect on eviction would be a setting
+    /// nobody could trust. So what the reading is instructed in is on the
+    /// corpus, and this is where it gets there.
+    #[tokio::test]
+    async fn a_capture_is_stamped_with_the_language_it_will_be_read_in() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let post = |app: axum::Router, cookie: String, text: &'static str, accept: &'static str| async move {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/ui/capture")
+                        .header("cookie", &cookie)
+                        .header("accept-language", accept)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(format!("text={text}")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        };
+
+        // On automatic — which is every account that has never opened Settings
+        // — the browser decides, and a regional tag is still its language.
+        post(
+            app.clone(),
+            cookie.clone(),
+            "eine+deutsche+notiz",
+            "de-DE,de;q=0.9,en;q=0.8",
+        )
+        .await;
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(
+            crate::infer::lang::of_corpus(&stored.metadata),
+            crate::infer::lang::Lang::De
         );
-        assert!(
-            !again.contains(r#"hx-get="/ui/queue""#),
-            "nor poll a queue that will never move for it: {again}"
+
+        // The account setting overrides the browser: somebody reading a German
+        // page in an English browser still wants their base in German.
+        core.store
+            .control
+            .set_lang(
+                crate::store::TEST_SUBJECT,
+                Some(crate::infer::lang::Lang::Fr),
+            )
+            .await
+            .unwrap();
+        post(app.clone(), cookie.clone(), "une+autre+note", "en-GB").await;
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(
+            crate::infer::lang::of_corpus(&stored.metadata),
+            crate::infer::lang::Lang::Fr
+        );
+
+        // And a language outside the ten is English rather than a refusal.
+        core.store
+            .control
+            .set_lang(crate::store::TEST_SUBJECT, None)
+            .await
+            .unwrap();
+        post(app, cookie, "a+third+note", "ja").await;
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(
+            crate::infer::lang::of_corpus(&stored.metadata),
+            crate::infer::lang::Lang::En
         );
     }
 

@@ -218,8 +218,10 @@ use crate::core::extract::extract;
 
 async fn ingest(
     tenant: Tenant,
+    headers: axum::http::HeaderMap,
     Json(req): Json<IngestRequest>,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let supplied = [
         req.text.is_some(),
         req.html.is_some(),
@@ -274,7 +276,7 @@ async fn ingest(
         // the same way it does for the MCP door. 202 when what it stored is
         // still to be read, as the upload doors answer.
         let u = parsed_url.as_ref().expect("one-of check guarantees a url");
-        let out = tenant.core.ingest_url(u, title, None).await?;
+        let out = tenant.core.ingest_url(u, title, None, lang).await?;
         let code = match (&out.status, out.duplicate) {
             (_, true) => StatusCode::OK,
             (
@@ -520,6 +522,7 @@ async fn capture(
     req: axum::extract::Request,
 ) -> Result<Response> {
     use axum::extract::FromRequest;
+    let lang = crate::web::state::capture_lang(&tenant, req.headers()).await;
     let content_type = req
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
@@ -547,7 +550,7 @@ async fn capture(
                 // The body is one link, so this is a fetch and not a capture
                 // of what was sent. See `refuse_time_fields`.
                 refuse_time_fields(q.tz.as_deref(), q.origin.as_deref(), q.intent.as_deref())?;
-                tenant.core.ingest_url(&u, q.title, q.note).await?
+                tenant.core.ingest_url(&u, q.title, q.note, lang).await?
             }
             None => {
                 tenant
@@ -619,7 +622,7 @@ async fn capture(
             out.push(
                 tenant
                     .core
-                    .ingest_url(&u, title.clone(), note.clone())
+                    .ingest_url(&u, title.clone(), note.clone(), lang)
                     .await?,
             );
         } else if let Some(text) = fields.remove("text") {
@@ -647,6 +650,7 @@ async fn capture(
                         title.clone(),
                         note.clone(),
                         ORIGIN_WEB,
+                        lang,
                     )
                     .await?,
             );
@@ -705,7 +709,7 @@ async fn capture(
         refuse_time_fields(q.tz.as_deref(), q.origin.as_deref(), q.intent.as_deref())?;
         let out = tenant
             .core
-            .ingest_file(bytes.to_vec(), None, q.title, q.note, ORIGIN_WEB)
+            .ingest_file(bytes.to_vec(), None, q.title, q.note, ORIGIN_WEB, lang)
             .await?;
         return Ok((code_for(&out), Json(out)).into_response());
     }
@@ -814,8 +818,10 @@ async fn read_upload(
 /// A PDF is stored and queued; the reading happens in `Stage::Extract`.
 async fn upload(
     tenant: Tenant,
+    headers: axum::http::HeaderMap,
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let parts = read_upload(multipart, "file", &["note"]).await?;
     let Some(FilePart {
         filename,
@@ -875,6 +881,7 @@ async fn upload(
                 .core
                 .ingest_capture(
                     crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD)
+                        .with_lang(lang)
                         .with_note(note)
                         .with_file(filename.as_deref(), size, "text/plain"),
                 )
@@ -894,6 +901,7 @@ async fn upload(
                     filename,
                     title_hint: None,
                     note,
+                    lang,
                 })
                 .await?;
             // 202, not 201: stored, but the extraction — the part that makes it
@@ -919,8 +927,10 @@ enum Kind {
 /// bytes are validated and stored here; the reading happens in a job.
 async fn upload_image(
     tenant: Tenant,
+    headers: axum::http::HeaderMap,
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let mut parts = read_upload(multipart, "image", &["note", "title_hint"]).await?;
     let Some(FilePart {
         filename, bytes, ..
@@ -935,6 +945,7 @@ async fn upload_image(
             filename,
             title_hint: parts.fields.remove("title_hint"),
             note: parts.fields.remove("note"),
+            lang,
         })
         .await?;
     // 202, not 201: stored, but the reading — the part that makes it a corpus
@@ -2846,6 +2857,7 @@ pub(crate) mod tests {
                 filename: Some("plan.pdf".into()),
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap()
@@ -2879,6 +2891,7 @@ pub(crate) mod tests {
                 filename: Some("plan.pdf".into()),
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap()

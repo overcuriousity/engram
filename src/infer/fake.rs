@@ -220,7 +220,12 @@ impl Synthesizer for FakeSynthesizer {
     /// Deterministic and obviously synthetic, so a test can assert on it. A
     /// configured failure applies here too: naming is a model call like any
     /// other, and the caller has to survive it failing.
-    async fn title(&self, text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
+    async fn title(
+        &self,
+        text: &str,
+        _artifact_titles: &[String],
+        _lang: crate::infer::lang::Lang,
+    ) -> Result<Option<String>> {
         if let Some(m) = &self.fail_with {
             return Err(self.refusal("title", m.clone()));
         }

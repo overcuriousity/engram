@@ -108,6 +108,7 @@ mod tests {
             filename: Some("plan.pdf".into()),
             title_hint: None,
             note: None,
+            lang: crate::infer::lang::Lang::default(),
         })
         .await
         .unwrap()

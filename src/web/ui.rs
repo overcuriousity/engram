@@ -904,6 +904,21 @@ struct SettingsTemplate {
     /// one, because that is the name a person recognises as theirs; the
     /// subject otherwise, because a stable identifier beats no answer.
     account: String,
+    /// Every language a capture can be read in, with the one currently chosen
+    /// marked. Built here rather than iterated in the template so the "follow
+    /// the browser" row and the ten sit in one list in one order.
+    langs: Vec<LangRow>,
+    /// What the browser would choose, named beside the automatic row: "follow
+    /// this browser" says nothing about what that would mean today.
+    browser_lang: &'static str,
+}
+
+/// One row of the language control.
+pub struct LangRow {
+    /// The stored value: a tag, or `""` for automatic.
+    pub value: &'static str,
+    pub label: &'static str,
+    pub selected: bool,
 }
 
 pub struct SourceRow {
@@ -2497,7 +2512,23 @@ async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
 /// from the same quiet line under Capture, and no more advertised than
 /// Housekeeping is: neither belongs in a top row that is three destinations
 /// wide on purpose.
-async fn settings(tenant: Tenant) -> Result<Response> {
+async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Response> {
+    let chosen = tenant.core.store.control.lang(&tenant.user.subject).await?;
+    let browser = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .map(crate::infer::lang::Lang::from_accept_language)
+        .unwrap_or_default();
+    let mut langs = vec![LangRow {
+        value: "",
+        label: "Automatic — follow this browser",
+        selected: chosen.is_none(),
+    }];
+    langs.extend(crate::infer::lang::Lang::ALL.iter().map(|l| LangRow {
+        value: l.tag(),
+        label: l.endonym(),
+        selected: chosen == Some(*l),
+    }));
     let notify = tenant
         .core
         .store
@@ -2536,6 +2567,8 @@ async fn settings(tenant: Tenant) -> Result<Response> {
             .email
             .clone()
             .unwrap_or_else(|| tenant.user.subject.clone()),
+        langs,
+        browser_lang: browser.endonym(),
     })
     .into_response())
 }
@@ -2613,6 +2646,34 @@ fn push_url(field: &str, raw: &str) -> Result<()> {
 /// Save the channels. A blank token keeps the stored one while the url stays;
 /// a blank url or endpoint switches that channel off. Saving re-arms the
 /// Remind unit, because a channel just configured is what makes it worth arming.
+#[derive(serde::Deserialize)]
+struct LangForm {
+    #[serde(default)]
+    lang: String,
+}
+
+/// Choose the language captures are read in, or clear it back to automatic.
+///
+/// It changes nothing already stored: a corpus carries the language it was
+/// captured in, and re-reading old documents under a new setting would rewrite
+/// artifacts nobody asked to have rewritten. What it changes is the next
+/// capture.
+async fn save_lang(tenant: Tenant, Form(f): Form<LangForm>) -> Result<Response> {
+    let chosen = match f.lang.trim() {
+        "" => None,
+        tag => Some(crate::infer::lang::Lang::parse(tag).ok_or_else(|| {
+            crate::error::Error::Validation(format!("lang: `{tag}` is not one of the ten"))
+        })?),
+    };
+    tenant
+        .core
+        .store
+        .control
+        .set_lang(&tenant.user.subject, chosen)
+        .await?;
+    Ok(Redirect::to("/ui/settings").into_response())
+}
+
 async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> Result<Response> {
     let control = &tenant.core.store.control;
     let stored = control.notify(&tenant.user.subject).await?;
@@ -3440,6 +3501,7 @@ pub fn ui_router() -> Router<AppState> {
             get(|_: Tenant| async { Redirect::to("/ui/insights") }),
         )
         .route("/ui/settings", get(settings))
+        .route("/ui/settings/lang", post(save_lang))
         .route("/ui/settings/notify", post(save_notify))
         .route("/ui/settings/notify/test", post(test_notify))
         .route("/ui/ops/tokens", post(mint_token))
@@ -3593,6 +3655,12 @@ mod tests {
             tokens,
             feedback: None,
             asks: None,
+            langs: vec![LangRow {
+                value: "",
+                label: "Automatic — follow this browser",
+                selected: true,
+            }],
+            browser_lang: "English",
         })
         .unwrap()
     }
@@ -5230,6 +5298,7 @@ mod tests {
                 filename: Some("plan.pdf".into()),
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap()
@@ -5345,6 +5414,7 @@ mod tests {
             filename: Some("plan.pdf".into()),
             title_hint: None,
             note: None,
+            lang: crate::infer::lang::Lang::default(),
         })
         .await
         .unwrap();
@@ -5363,6 +5433,7 @@ mod tests {
             filename: Some("p.png".into()),
             title_hint: None,
             note: None,
+            lang: crate::infer::lang::Lang::default(),
         })
         .await
         .unwrap()
@@ -6320,7 +6391,13 @@ mod tests {
             .insert_moment(&crate::store::moments::NewMoment {
                 artifact_id: c.clone(),
                 kind: crate::store::moments::Kind::Due,
-                at: Some(crate::store::now() + 30 * 86_400),
+                // An hour of slack on top of the thirty days. `ago_or_ahead`
+                // divides by 86_400 and floors, so an exact multiple reads as
+                // "29 days" the moment one second passes between this row
+                // being written and the page rendering it — which is a second
+                // the full suite spends often enough to fail here and nowhere
+                // when the test runs alone.
+                at: Some(crate::store::now() + 30 * 86_400 + 3_600),
                 tz: "UTC".into(),
                 rule: None,
                 source: crate::store::moments::Source::Set,
@@ -7448,8 +7525,11 @@ mod tests {
         // fragment is `ArtifactDetailFragment { d: ArtifactDetail }` and
         // building an ArtifactDetail by hand is thirty lines of scaffolding to
         // check for three words. The words are the whole change.
+        //
+        // The words themselves are `the_pane_controls_name_the_question_they
+        // _answer`'s subject; this is only that each control has one.
         let tpl = include_str!("templates/_artifact_detail.html");
-        for word in ["Verified", "Hide", "Delete"] {
+        for word in ["Still accurate", "Hide from results", "Delete"] {
             assert!(
                 tpl.contains(&format!("<span>{word}</span>")),
                 "the {word} control has no label"
@@ -7490,6 +7570,59 @@ mod tests {
             !css.contains(".rail-past { opacity: 0.55; }"),
             "past-cliff results are still dimmed below the contrast floor"
         );
+    }
+
+    /// The two controls in the pane say which question they answer.
+    ///
+    /// "Verified" sat a few lines above *Was this what you were looking for?*
+    /// and its Yes, and read as the same question asked twice. They are not:
+    /// Yes labels the search — this query found the right artifact — and feeds
+    /// recall; this one labels the artifact — the text is still accurate — and
+    /// resets the age that search's recency term reads in place of
+    /// `created_at`. "Hide" carried what it hides from, and that the artifact
+    /// survives it, only in a `title`, which a phone never shows.
+    #[test]
+    fn the_pane_controls_name_the_question_they_answer() {
+        let html = include_str!("templates/_artifact_detail.html");
+        assert!(
+            html.contains("<span>Still accurate</span>"),
+            "the confirm control still reads as an answer about the search"
+        );
+        assert!(
+            html.contains("<span>Hide from results</span>"),
+            "the hide control still says only `Hide`"
+        );
+        // And the search bar it sits over is unchanged: that one is right, and
+        // the confusion was never its half.
+        let bar = include_str!("templates/_search_verdict.html");
+        assert!(bar.contains("Was this what you were looking for?"));
+    }
+
+    /// The offer is hidden by a keystroke, never destroyed by one.
+    ///
+    /// It used to be removed, on the argument that it is a measured impression
+    /// and one reappearing in a new situation would be a second impression
+    /// nobody had. `confirmOffer` runs on `htmx:afterSwap` and nowhere else,
+    /// so that argument is false: the impression is written once, when the
+    /// fragment arrives, and hiding a card already on screen writes nothing.
+    /// What the removal did was destroy the card on the first keystroke, after
+    /// which the idle column came back without it for the rest of the session.
+    ///
+    /// The race it was reaching for is handled where it happens: an offer
+    /// whose fetch lands after the keystroke was never seen, and `dropOffer`
+    /// on the swap refuses to count it.
+    #[test]
+    fn a_keystroke_hides_the_offer_and_does_not_destroy_it() {
+        let js = include_str!("../../assets/app.js");
+        let start = js.find("function hideIdle()").expect("no hideIdle");
+        let body = &js[start..start + 260];
+        assert!(
+            !body.contains("area.remove()"),
+            "hideIdle still destroys the offer instead of hiding it: {body}"
+        );
+        // And the one case that must still drop it stays.
+        assert!(js.contains("function dropOffer()"));
+        assert!(js.contains("if (offerDismissed) dropOffer();"));
     }
 
     #[test]
@@ -7796,28 +7929,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capturing_text_stores_it_and_says_so() {
-        // One line of receipt, with the link to what was stored. The queue
-        // that used to repeat this fragment lives on Insights now, so an
-        // empty answer left the box clearing itself with no acknowledgment —
-        // indistinguishable from data loss.
+    async fn capturing_text_stores_it_and_the_idle_line_says_so() {
+        // The press answers with nothing, and that is the point: everything it
+        // used to write went into `#capture-result`, which lives inside the
+        // bar that is fixed to the bottom of a phone's screen — so the answer
+        // to a capture pushed the box out of the viewport.
+        //
+        // A box that empties itself with no acknowledgment would be
+        // indistinguishable from data loss, so the acknowledgment has to be
+        // somewhere. It is the "last kept" line of `_idle_foot.html`, which
+        // names the capture and links to it, and which the same `submit` that
+        // refreshes the rail swaps out of band.
         let (app, cookie, core) = app_session_and_core().await;
         let res = app
+            .clone()
             .oneshot(form("/ui/capture", &cookie, "text=a+new+procedure"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let html = body_of(res).await;
-        assert!(html.contains("Captured"), "{html}");
-        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
         assert!(
-            html.contains(&format!("/ui/corpora/{}", stored.id)),
-            "the receipt links what it stored: {html}"
+            html.trim().is_empty(),
+            "the press still writes over the box it cleared: {html}"
         );
-        assert_eq!(
-            core.store.list_corpora(10, 0).await.unwrap().len(),
-            1,
-            "the capture itself still landed"
+
+        let stored = core.store.list_corpora(10, 0).await.unwrap();
+        assert_eq!(stored.len(), 1, "the capture itself still landed");
+        let idle = get_body(&app, &cookie, "/ui").await;
+        assert!(
+            idle.contains(&format!("/ui/corpora/{}", stored[0].id)),
+            "and nothing names what was last kept: {idle}"
         );
     }
 

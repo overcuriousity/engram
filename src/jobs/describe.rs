@@ -111,6 +111,7 @@ mod tests {
             filename: Some("p.png".into()),
             title_hint: None,
             note: note.map(str::to_string),
+            lang: crate::infer::lang::Lang::default(),
         })
         .await
         .unwrap()

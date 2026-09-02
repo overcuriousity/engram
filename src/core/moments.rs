@@ -411,18 +411,11 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
 /// entry is read: `de-DE,de;q=0.9,en;q=0.8` is a reader who wants German, and
 /// weighing the rest to discover that is arithmetic for nothing.
 pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
-    let want = accept_language
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .split('-')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+    // The same reading `infer::lang` gives the header, and deliberately the
+    // same one: the examples this table teaches and the language the
+    // synthesizer is instructed in are one decision, and two parsers over one
+    // header is two places for a `de-DE` to stop being German.
+    let want = crate::infer::lang::primary_subtag(accept_language);
     let pick = |intent: Intent| -> &'static str {
         let of = |lang: &str| {
             PROTOTYPES

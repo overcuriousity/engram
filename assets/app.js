@@ -890,9 +890,19 @@
   // box, the idle state is correct again, and there was no `#due` left in the
   // document for the band to swap into.
   //
-  // The offer is the one thing still genuinely removed. It is a measured
-  // impression — see `confirmOffer` — and an offer computed for one situation
-  // that reappears in another is a second impression nobody had.
+  // The offer used to be removed here rather than hidden with the rest, on the
+  // argument that it is a measured impression and an offer reappearing in a
+  // new situation would be a second one nobody had. That argument does not
+  // hold: `confirmOffer` runs on `htmx:afterSwap` and nowhere else, so the
+  // impression is written exactly once, when the fragment arrives, and
+  // hiding a card that is already on screen writes nothing at all. What the
+  // removal did instead was destroy the card on the first keystroke — after
+  // which the column came back without it for the rest of the session, and a
+  // capture left a page that was not the page it started as.
+  //
+  // The race it was reaching for is real and is handled where it happens: an
+  // offer whose fetch lands *after* the keystroke was never seen, and
+  // `dropOffer` on the swap is what refuses to count it.
   //
   // The three regions move together because they are one statement about what
   // the page is doing: with an intent expressed there is a rail and a pane and
@@ -900,8 +910,6 @@
   function hideIdle() {
     var idle = document.getElementById('idle');
     if (idle) idle.hidden = true;
-    var area = document.getElementById('context-offer');
-    if (area) area.remove();
     show('rail', true);
     show('pane', true);
     show('kind-row', true);
@@ -925,11 +933,11 @@
     if (el) el.hidden = !on;
   }
 
-  // The offer alone, for the fetch that lands after the keystroke that
-  // dismissed it. Not `hideIdle`: by the time a slow offer arrives the box may
-  // be empty again and the column back on screen, and taking the column away
-  // because a stale offer turned up is the flicker the removal exists to
-  // prevent.
+  // The offer alone, and for exactly one case: the fetch that lands after the
+  // keystroke that dismissed it. That card was never on screen, so counting it
+  // as shown would put a population that structurally could not click into the
+  // denominator of the hit rate. An offer that *did* arrive in time is not
+  // touched here — it is hidden with the column and comes back with it.
   function dropOffer() {
     var area = document.getElementById('context-offer');
     if (area) area.remove();

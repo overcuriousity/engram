@@ -548,6 +548,10 @@ impl HttpSynthesizer {
     /// and the parse differ.
     async fn run_segment(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
         let judged = input.judge.is_some();
+        // Fixed for both calls of this segment, the repair included: a repair
+        // that changed language would be a second system prompt over the first
+        // one's reply.
+        let system = prompt::synthesizer_system(input.lang);
         let user = prompt::user_prompt(
             input.core,
             1,
@@ -575,7 +579,7 @@ impl HttpSynthesizer {
         let first = self
             .chat(
                 json!([
-                    {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
+                    {"role":"system","content": system},
                     {"role":"user","content": user}
                 ]),
                 Some(schema()),
@@ -590,7 +594,7 @@ impl HttpSynthesizer {
                 tracing::warn!(error = %e, "synthesizer returned unparsable output; repairing");
                 let repair = prompt::repair_prompt(&first, &e.to_string());
                 let messages = json!([
-                    {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
+                    {"role":"system","content": system},
                     {"role":"user","content": user},
                     {"role":"assistant","content": first},
                     {"role":"user","content": repair}
@@ -638,11 +642,16 @@ impl Synthesizer for HttpSynthesizer {
         self.budget
     }
 
-    async fn title(&self, text: &str, artifact_titles: &[String]) -> Result<Option<String>> {
+    async fn title(
+        &self,
+        text: &str,
+        artifact_titles: &[String],
+        lang: crate::infer::lang::Lang,
+    ) -> Result<Option<String>> {
         let out = self
             .chat(
                 json!([
-                    {"role":"system","content": prompt::TITLE_SYSTEM},
+                    {"role":"system","content": prompt::title_system(lang)},
                     {"role":"user","content": prompt::title_prompt(text, artifact_titles)}
                 ]),
                 None,
@@ -1425,6 +1434,7 @@ mod tests {
 
     fn window(text: &str) -> SegmentInput<'_> {
         SegmentInput {
+            lang: crate::infer::lang::Lang::En,
             core: text,
             context: &EMPTY_CONTEXT,
             judge: None,
@@ -1581,7 +1591,7 @@ mod tests {
         // call would constrain a one-line title into a JSON object.
         let server = echoing_server("A Good Title").await;
         let t = HttpSynthesizer::new(&synthesize_cfg(server.uri()))
-            .title("some text", &[])
+            .title("some text", &[], crate::infer::lang::Lang::En)
             .await
             .unwrap();
 
@@ -1693,7 +1703,15 @@ mod tests {
         // A long unparsable reply. The repair prompt carries it twice — once as
         // the assistant turn, once quoted back in the repair instruction — so
         // this leaves the window with less room than the configured ceiling.
-        let long_prose = "sorry, here is prose ".repeat(533);
+        //
+        // With slack, deliberately. At 533 the repair prompt cleared the
+        // `max_output_tokens` line below by nine tokens, which made this test a
+        // measurement of the system prompt's length: a line removed from
+        // `SYNTHESIZER_SYSTEM` dropped it under and failed a test about the
+        // repair's arithmetic. The subject here is that arithmetic, so the
+        // fixture is sized to be plainly over the line rather than exactly on
+        // it.
+        let long_prose = "sorry, here is prose ".repeat(700);
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

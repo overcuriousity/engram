@@ -102,3 +102,31 @@ impl AppState {
 pub fn ask_enabled(t: &crate::tenants::Tenant) -> bool {
     t.core.asks()
 }
+
+/// Which of the ten a capture made through this request is read in.
+///
+/// The account's setting decides, and where it is unset — which is the default,
+/// and what every account that has never opened Settings has — the browser
+/// does, through `Accept-Language`. A door with neither answers English, like
+/// everything else that does not know.
+///
+/// Resolved here, at the door, and stamped onto the corpus: a background job
+/// holds a `Core` cached per tenant in a fixed-size LRU and knows no subject,
+/// so it could not read the account column when it matters. See
+/// `core::ingest::Capture::with_lang`.
+pub async fn capture_lang(
+    tenant: &crate::tenants::Tenant,
+    headers: &axum::http::HeaderMap,
+) -> crate::infer::lang::Lang {
+    use crate::infer::lang::Lang;
+    // A control database that cannot be read is not a reason to refuse a
+    // capture: the text matters more than the language it is read in.
+    if let Ok(Some(set)) = tenant.core.store.control.lang(&tenant.user.subject).await {
+        return set;
+    }
+    headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .map(Lang::from_accept_language)
+        .unwrap_or_default()
+}

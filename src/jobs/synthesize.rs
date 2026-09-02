@@ -161,7 +161,13 @@ pub async fn run_title(core: &Core, corpus_id: &str) -> Result<()> {
 
     let synth = &core.synthesizer;
     let permit = core.gate.background().await;
-    let named = synth.title(&src.raw_text, &titles).await;
+    let named = synth
+        .title(
+            &src.raw_text,
+            &titles,
+            crate::infer::lang::of_corpus(&src.metadata),
+        )
+        .await;
     permit.finished();
     match named {
         Ok(Some(t)) => {

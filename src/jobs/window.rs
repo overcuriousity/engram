@@ -61,6 +61,10 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // the same call that rewrites it — intent, events, links — against the
     // base's nearest artifacts. A multi-window corpus is not: a manual's
     // window is not a reminder, and its links wait for the sweeps.
+    // Which of the ten system prompts this window's calls are made with. Off
+    // the corpus, because that is where the door stamped it.
+    let lang = crate::infer::lang::of_corpus(&core.store.get_corpus(corpus_id).await?.metadata);
+
     let judging = all.len() == 1;
     let neighbors = if judging {
         neighbor_context(core, corpus_id, idx).await
@@ -108,6 +112,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             core: &text,
             context: &ctx,
             judge: ask.as_ref(),
+            lang,
         })
         .await;
     permit.finished();
@@ -146,6 +151,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
                 core: &text,
                 context: &ctx,
                 judge: ask.as_ref(),
+                lang,
             })
             .await;
         permit.finished();

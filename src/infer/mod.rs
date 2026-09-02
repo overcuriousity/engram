@@ -3,6 +3,7 @@ pub mod context;
 pub mod facts;
 pub mod fake;
 pub mod gate;
+pub mod lang;
 pub mod openai;
 pub mod prompt;
 pub mod split;
@@ -100,6 +101,13 @@ pub struct SegmentInput<'a> {
     /// `Some` on the judged capture path: the same call also reads intent,
     /// events, and links. `None` for a promotion's window.
     pub judge: Option<&'a JudgeAsk>,
+    /// Which of the ten system prompts this call is made with.
+    ///
+    /// Carried per call rather than held on the synthesizer, because it is a
+    /// property of the document and not of the endpoint: one base holds a
+    /// German note and an English paper, and the language each was captured in
+    /// is stamped on its corpus. See `infer::lang`.
+    pub lang: crate::infer::lang::Lang,
 }
 
 #[async_trait]
@@ -123,7 +131,12 @@ pub trait Synthesizer: Send + Sync {
     /// leaves the corpus unnamed rather than inventing a name for it. Defaulted
     /// rather than required because most implementations of this trait are test
     /// doubles that have no opinion about titles.
-    async fn title(&self, _text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
+    async fn title(
+        &self,
+        _text: &str,
+        _artifact_titles: &[String],
+        _lang: crate::infer::lang::Lang,
+    ) -> Result<Option<String>> {
         Ok(None)
     }
 }

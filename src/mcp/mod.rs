@@ -312,6 +312,26 @@ impl CoreSource {
             CoreSource::Tenant(tenants, subject) => Ok(tenants.get(subject).await?.core),
         }
     }
+
+    /// Which of the ten a capture through this door is read in.
+    ///
+    /// The account setting alone: MCP is a program talking to a program and
+    /// sends no `Accept-Language`, so there is no browser to fall back to and
+    /// the fallback is English. A control database that will not answer is not
+    /// a reason to refuse the capture.
+    async fn lang(&self, core: &Core) -> crate::infer::lang::Lang {
+        match self {
+            CoreSource::Fixed(_) => Default::default(),
+            CoreSource::Tenant(_, subject) => core
+                .store
+                .control
+                .lang(subject)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -484,9 +504,11 @@ impl PkdbTools {
             Ok(t) => t,
             Err(e) => return format!("Ingest failed: {e}"),
         };
+        let lang = self.source.lang(&core).await;
         let outcome = if let Some(text) = p.text {
             core.ingest_capture(
                 Capture::new(text, time.origin)
+                    .with_lang(lang)
                     .from_channel(time.channel)
                     .with_title(p.title)
                     .with_note(p.note)
@@ -496,14 +518,14 @@ impl PkdbTools {
             .await
         } else if let Some(raw) = p.url {
             match url::Url::parse(&raw) {
-                Ok(u) => core.ingest_url(&u, p.title, p.note).await,
+                Ok(u) => core.ingest_url(&u, p.title, p.note, lang).await,
                 Err(e) => Err(Error::Validation(format!("url: {e}"))),
             }
         } else {
             let encoded = p.file_base64.expect("the one-of check");
             match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
                 Ok(bytes) => {
-                    core.ingest_file(bytes, p.filename, p.title, p.note, ORIGIN_MCP)
+                    core.ingest_file(bytes, p.filename, p.title, p.note, ORIGIN_MCP, lang)
                         .await
                 }
                 Err(e) => Err(Error::Validation(format!("file_base64 is not base64: {e}"))),
