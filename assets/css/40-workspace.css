@@ -1021,7 +1021,13 @@ body { overflow-x: hidden; }
 /* An empty base prints no foot at all — the hint under the box says the one
    thing there is to say — and an empty paragraph would still take its margin. */
 .idle-foot:empty { display: none; }
-.idle-foot a { color: inherit; }
+/* The last kept note is a link, and a note's first line can be a paragraph.
+   One line, cut with an ellipsis; the title on the far side is the same
+   text in full. */
+.idle-foot a {
+  color: inherit; display: inline-block; max-width: 20rem; vertical-align: bottom;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* The chip row is revealed by app.js on the first keystroke. `display: contents`
    so the wrapper adds no box of its own: the label and the chips go on being
