@@ -627,6 +627,13 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
     if !has_freq {
         return Err("FREQ is required".into());
     }
+    // BYDAY under YEARLY expands to every such weekday of the year, which is
+    // a rule nobody means and which the ordinals the subset refuses are what
+    // would narrow. Every other pairing `next_after` honours; this one is
+    // refused here rather than silently ignored there.
+    if !r.by_day.is_empty() && r.freq == Freq::Yearly {
+        return Err("BYDAY under FREQ=YEARLY is outside the subset".into());
+    }
     Ok(r)
 }
 
@@ -675,7 +682,13 @@ pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
     for _ in 0..(366 * 4 * r.interval as usize + 1) {
         date += chrono::Duration::days(1);
         let hit = match r.freq {
-            Freq::Daily => (date - origin).num_days() % r.interval as i64 == 0,
+            // BYDAY narrows a daily rule rather than expanding it (RFC 5545):
+            // "every weekday at 9" is FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR, and
+            // read without the filter it fired on Saturday too.
+            Freq::Daily => {
+                (date - origin).num_days() % r.interval as i64 == 0
+                    && (r.by_day.is_empty() || r.by_day.contains(&date.weekday()))
+            }
             Freq::Weekly => {
                 let own = [origin.weekday()];
                 let days: &[Weekday] = if r.by_day.is_empty() { &own } else { &r.by_day };
@@ -690,14 +703,25 @@ pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
                 days.contains(&date.weekday()) && weeks % r.interval as i64 == 0
             }
             Freq::Monthly => {
-                let dom = r.by_month_day.unwrap_or(origin.day());
                 let months = (date.year() - origin.year()) * 12
                     + (date.month() as i32 - origin.month() as i32);
-                date.day() == dom && months % r.interval as i32 == 0
+                // BYDAY with no ordinal names every such weekday of the month
+                // — "every Monday" as a monthly rule — and with BYMONTHDAY
+                // beside it the two are an intersection. Only when neither is
+                // given does the origin's day-of-month stand in.
+                let day = match (r.by_month_day, r.by_day.is_empty()) {
+                    (Some(dom), _) => date.day() == dom,
+                    (None, false) => true,
+                    (None, true) => date.day() == origin.day(),
+                };
+                day && (r.by_day.is_empty() || r.by_day.contains(&date.weekday()))
+                    && months % r.interval as i32 == 0
             }
+            // BYMONTHDAY moves a yearly rule off the origin's day within the
+            // origin's month; BYDAY is refused for YEARLY in `parse_rule`.
             Freq::Yearly => {
                 date.month() == origin.month()
-                    && date.day() == origin.day()
+                    && date.day() == r.by_month_day.unwrap_or(origin.day())
                     && (date.year() - origin.year()) % r.interval as i32 == 0
             }
         };
@@ -1088,6 +1112,68 @@ mod tests {
         .unwrap();
         let next = next_after("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO", wed, berlin()).unwrap();
         assert_eq!(local(next), "2026-09-14 09:00");
+    }
+
+    #[test]
+    fn byday_narrows_a_daily_rule_instead_of_being_ignored() {
+        // "every weekday at 9" is the natural answer to a note that says so,
+        // and the parser took the BYDAY while `next_after` read past it: the
+        // Friday occurrence armed Saturday.
+        let fri = berlin()
+            .with_ymd_and_hms(2026, 9, 4, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            local(next_after("FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", fri, berlin()).unwrap()),
+            "2026-09-07 09:00",
+            "the weekend is skipped, not fired through"
+        );
+    }
+
+    #[test]
+    fn byday_under_monthly_names_every_such_weekday_of_the_month() {
+        // No BYMONTHDAY beside it: the origin's day-of-month must not stand
+        // in, or the rule fires only when the two happen to coincide.
+        let mon = berlin()
+            .with_ymd_and_hms(2026, 9, 7, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            local(next_after("FREQ=MONTHLY;BYDAY=MO", mon, berlin()).unwrap()),
+            "2026-09-14 09:00"
+        );
+    }
+
+    #[test]
+    fn monthly_with_both_parts_is_their_intersection() {
+        // BYMONTHDAY=13 and BYDAY=SU: the next 13th that is a Sunday.
+        let at = berlin()
+            .with_ymd_and_hms(2026, 9, 13, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            local(next_after("FREQ=MONTHLY;BYMONTHDAY=13;BYDAY=SU", at, berlin()).unwrap()),
+            "2026-12-13 09:00"
+        );
+    }
+
+    #[test]
+    fn bymonthday_moves_a_yearly_rule_off_the_origin_day() {
+        let at = berlin()
+            .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            local(next_after("FREQ=YEARLY;BYMONTHDAY=15", at, berlin()).unwrap()),
+            "2027-08-15 09:00"
+        );
+    }
+
+    #[test]
+    fn byday_under_yearly_is_refused_rather_than_ignored() {
+        assert!(validate_rule("FREQ=YEARLY;BYDAY=MO").is_err());
+        assert!(validate_rule("FREQ=DAILY;BYDAY=MO").is_ok());
+        assert!(validate_rule("FREQ=MONTHLY;BYDAY=MO").is_ok());
     }
 
     #[test]
