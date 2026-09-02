@@ -97,8 +97,9 @@ fn overlap(a: &CorpusSpan, b: &CorpusSpan) -> i64 {
 /// a **majority** of the passage's lines — per artifact, not cumulative,
 /// because `supersede` names one winner and a passage hidden behind an
 /// artifact holding a third of it sends the reader to the wrong text. Best
-/// overlap wins; a tie goes to the lowest ordinal. Everything else stays
-/// active, verbatim, in results: promotion can only ever improve coverage.
+/// overlap wins. Ties on overlap go to a placed span, then to the lowest
+/// ordinal. Everything else stays active, verbatim, in results: promotion can
+/// only ever improve coverage.
 pub fn covered_by<'a>(
     passages: &'a [(String, CorpusSpan)],
     artifacts: &'a [(String, i64, CorpusSpan)],
@@ -106,12 +107,23 @@ pub fn covered_by<'a>(
     let mut out = Vec::new();
     for (pid, ps) in passages {
         let len = ps.end_line - ps.start_line + 1;
+        // Best overlap; among equals a placed span before an unplaced one,
+        // because an unplaced span is the whole-window fallback and says
+        // nothing about *which* passage — and `supersede_covered` will not
+        // read the vector for it. Then the lowest ordinal.
         let best = artifacts
             .iter()
-            .map(|(aid, ord, asp)| (overlap(ps, asp), *ord, aid.as_str()))
-            .filter(|(ov, _, _)| 2 * ov > len)
-            .max_by(|x, y| x.0.cmp(&y.0).then(y.1.cmp(&x.1)));
-        if let Some((_, _, aid)) = best {
+            .map(|(aid, ord, asp)| {
+                (
+                    overlap(ps, asp),
+                    asp.places_the_artifact(),
+                    *ord,
+                    aid.as_str(),
+                )
+            })
+            .filter(|(ov, _, _, _)| 2 * ov > len)
+            .max_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then(y.2.cmp(&x.2)));
+        if let Some((_, _, _, aid)) = best {
             out.push((pid.as_str(), aid));
         }
     }
@@ -681,6 +693,24 @@ mod tests {
             ("y".to_string(), 2, sp(1, 20)),
         ];
         assert_eq!(covered_by(&passages, &arts), vec![("p", "y")]);
+    }
+
+    #[test]
+    fn on_equal_overlap_a_placed_artifact_beats_an_unplaced_one_whatever_its_ordinal() {
+        let passages = vec![("p".to_string(), sp(1, 1))];
+        // Ordinal 1 is unplaced — the fallback span that covers the whole
+        // window and locates nothing. Ordinal 2 is a claim about line 1.
+        let arts = vec![
+            ("u".to_string(), 1, CorpusSpan::unplaced(1, 1)),
+            ("c".to_string(), 2, CorpusSpan::claimed(1, 1)),
+        ];
+        assert_eq!(covered_by(&passages, &arts), vec![("p", "c")]);
+        // Two placed: the lowest ordinal still wins.
+        let arts = vec![
+            ("y".to_string(), 3, CorpusSpan::claimed(1, 1)),
+            ("x".to_string(), 2, CorpusSpan::claimed(1, 1)),
+        ];
+        assert_eq!(covered_by(&passages, &arts), vec![("p", "x")]);
     }
 
     /// A verbatim corpus of three passages (lines 1–2, 3–4, 5–6 of one
