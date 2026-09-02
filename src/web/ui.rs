@@ -464,7 +464,14 @@ fn artifact_html(c: &crate::store::artifacts::Chunk) -> String {
 fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
     ArtifactView {
         id: c.id.clone(),
-        title: artifact_title(c),
+        // A passage has no title by design and its first line is its body:
+        // shown as both, the card said everything twice.
+        title: if c.provenance == crate::store::artifacts::Provenance::Passage && c.title.is_none()
+        {
+            String::new()
+        } else {
+            artifact_title(c)
+        },
         html: artifact_html(c),
         text: c.text.clone(),
         tags: c.tags.clone(),
@@ -2035,6 +2042,17 @@ async fn corpus_detail(
     // line claimed, and following that warning has to land somewhere that
     // explains itself rather than on a page with nothing marked.
     let coverage = s.coverage.map(|c| format!("{:.0}%", c * 100.0));
+    // A verbatim capture's passages *are* the wording, so the measure is
+    // 100% by construction and says nothing. Stated only once something was
+    // written from the source.
+    let coverage = if chunks
+        .iter()
+        .all(|c| c.provenance == crate::store::artifacts::Provenance::Passage)
+    {
+        None
+    } else {
+        coverage
+    };
     let image = s.origin == crate::core::ingest::ORIGIN_IMAGE;
     let pdf = s.origin == crate::core::ingest::ORIGIN_PDF;
     let unread = (image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty()))
