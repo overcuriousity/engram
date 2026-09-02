@@ -451,12 +451,25 @@ pub struct HttpSynthesizer {
     max_artifact_tokens: usize,
     reasoning_effort: Option<String>,
     structured_output: bool,
+    /// What a prompt costs, counted the way the windowing side counts it.
+    ///
+    /// Not `TokenCounter::default()`. The estimator and the bundled tokenizer
+    /// agree closely on English and do not agree at all on Cyrillic, Polish or
+    /// Turkish — the reason `synthesize.rs` sizes windows per language. Once
+    /// `WindowContext::build` and `segment_budget` moved to the real
+    /// tokenizer, a Russian window sized to N real tokens was *estimated* here
+    /// at roughly 0.6N, `ceiling_for_prompt` handed back the difference as room
+    /// to answer in, and the endpoint answered 400. `checked_ceiling_for_prompt`
+    /// could not catch it either: it shared the undercount.
+    counter: std::sync::Arc<crate::infer::budget::TokenCounter>,
 }
 
 /// What a chat message list costs as a prompt: the text of every `content`,
 /// which is everything an endpoint counts that this side controls.
-fn message_tokens(messages: &serde_json::Value) -> usize {
-    let counter = crate::infer::budget::TokenCounter::default();
+fn message_tokens(
+    messages: &serde_json::Value,
+    counter: &crate::infer::budget::TokenCounter,
+) -> usize {
     messages
         .as_array()
         .map(|ms| {
@@ -492,7 +505,16 @@ impl HttpSynthesizer {
             max_artifact_tokens: 1024,
             reasoning_effort: cfg.reasoning_effort.clone(),
             structured_output: cfg.structured_output,
+            counter: Default::default(),
         }
+    }
+
+    /// The tokenizer the rest of the system budgets with, handed over during
+    /// wiring. Without it this side falls back to the estimator, which is what
+    /// every test runs on and what an install with no loadable tokenizer gets.
+    pub fn with_counter(mut self, c: std::sync::Arc<crate::infer::budget::TokenCounter>) -> Self {
+        self.counter = c;
+        self
     }
 
     /// Caps chunk size so the embedder never receives an oversized chunk.
@@ -512,7 +534,7 @@ impl HttpSynthesizer {
         messages: serde_json::Value,
         schema: Option<(&str, serde_json::Value)>,
     ) -> Result<String> {
-        let spent = message_tokens(&messages);
+        let spent = message_tokens(&messages, &self.counter);
         let mut body = json!({
             "messages": messages,
             "temperature": 0.2,
@@ -608,7 +630,7 @@ impl HttpSynthesizer {
                 // what happens when the repair fails in any case.
                 if crate::infer::budget::checked_ceiling_for_prompt(
                     self.budget.context_tokens,
-                    message_tokens(&messages),
+                    message_tokens(&messages, &self.counter),
                     self.budget.max_output_tokens,
                 )
                 .is_none()
@@ -994,9 +1016,19 @@ pub struct HttpCompleter {
     /// format so the endpoint constrains decoding. `None` for the ask role,
     /// whose answer is prose for a person to read.
     response_schema: Option<(&'static str, serde_json::Value)>,
+    /// See `HttpSynthesizer::counter` — the same disagreement, on the path
+    /// that carries whole artifacts into a judge call.
+    counter: std::sync::Arc<crate::infer::budget::TokenCounter>,
 }
 
 impl HttpCompleter {
+    /// The tokenizer the rest of the system budgets with, handed over during
+    /// wiring.
+    pub fn with_counter(mut self, c: std::sync::Arc<crate::infer::budget::TokenCounter>) -> Self {
+        self.counter = c;
+        self
+    }
+
     pub fn new(cfg: &AskRole) -> Self {
         Self {
             ep: Endpoint::new(
@@ -1011,6 +1043,7 @@ impl HttpCompleter {
             max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: None,
+            counter: Default::default(),
         }
     }
 
@@ -1116,6 +1149,7 @@ impl HttpCompleter {
             response_schema: cfg
                 .structured_output
                 .then_some(("need", prompt::plan_schema())),
+            counter: Default::default(),
         }
     }
 
@@ -1133,6 +1167,7 @@ impl HttpCompleter {
             max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: cfg.structured_output.then_some(schema),
+            counter: Default::default(),
         }
     }
 }
@@ -1153,8 +1188,7 @@ impl Completer for HttpCompleter {
     /// same structurally impossible request forever. `InferenceRejected` is
     /// permanent, which is what a prompt too large for its window is.
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        let counter = crate::infer::budget::TokenCounter::default();
-        let spent = counter.count(system) + counter.count(user);
+        let spent = self.counter.count(system) + self.counter.count(user);
         let Some(ceiling) = crate::infer::budget::checked_ceiling_for_prompt(
             self.context_tokens,
             spent,
@@ -1745,7 +1779,7 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2, "the repair call was not made");
         let repair: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-        let prompt = message_tokens(&repair["messages"]);
+        let prompt = message_tokens(&repair["messages"], &Default::default());
         let ceiling = repair["max_tokens"].as_u64().expect("a ceiling is sent") as usize;
         assert!(
             prompt > cfg.max_output_tokens,

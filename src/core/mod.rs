@@ -284,11 +284,22 @@ impl Core {
         let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
 
         let synth = &cfg.infer.synthesize;
+        // Built before the roles, not inside the struct literal, because the
+        // request side has to budget with the same counter the windowing side
+        // sizes with. Two counters that disagree is a prompt sized to N real
+        // tokens and estimated at 0.6N — room the endpoint does not have, and a
+        // non-retryable 400 on every sweep. See `HttpSynthesizer::counter`.
+        let counter = Arc::new(TokenCounter::load(
+            cfg.infer.tokenizer.as_deref(),
+            std::path::Path::new(&cfg.store.dir),
+        ));
         Core {
             store,
             vectors,
             synthesizer: Arc::new(
-                HttpSynthesizer::new(synth).with_max_artifact_tokens(max_artifact_tokens),
+                HttpSynthesizer::new(synth)
+                    .with_max_artifact_tokens(max_artifact_tokens)
+                    .with_counter(counter.clone()),
             ),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
             reranker: cfg
@@ -302,19 +313,29 @@ impl Core {
                 .as_ref()
                 .map(|r| r.apply.clone())
                 .unwrap_or_default(),
-            completer: cfg
-                .infer
-                .ask
-                .as_ref()
-                .map(|a| Arc::new(HttpCompleter::new(a)) as Arc<dyn Completer>),
-            judge: Some(Arc::new(HttpCompleter::for_judging(synth))),
-            link_judge: Some(Arc::new(HttpCompleter::for_link_judging(synth))),
-            gap_namer: Some(Arc::new(HttpCompleter::for_gap_naming(synth))),
-            reaper: Some(Arc::new(HttpCompleter::for_reaping(synth))),
-            generator: Some(Arc::new(HttpCompleter::for_generating(synth))),
+            completer: cfg.infer.ask.as_ref().map(|a| {
+                Arc::new(HttpCompleter::new(a).with_counter(counter.clone())) as Arc<dyn Completer>
+            }),
+            judge: Some(Arc::new(
+                HttpCompleter::for_judging(synth).with_counter(counter.clone()),
+            )),
+            link_judge: Some(Arc::new(
+                HttpCompleter::for_link_judging(synth).with_counter(counter.clone()),
+            )),
+            gap_namer: Some(Arc::new(
+                HttpCompleter::for_gap_naming(synth).with_counter(counter.clone()),
+            )),
+            reaper: Some(Arc::new(
+                HttpCompleter::for_reaping(synth).with_counter(counter.clone()),
+            )),
+            generator: Some(Arc::new(
+                HttpCompleter::for_generating(synth).with_counter(counter.clone()),
+            )),
             planner: cfg.infer.ask.as_ref().and_then(|a| {
-                a.plan
-                    .then(|| Arc::new(HttpCompleter::for_plan(&a.plan_on())) as Arc<dyn Completer>)
+                a.plan.then(|| {
+                    Arc::new(HttpCompleter::for_plan(&a.plan_on()).with_counter(counter.clone()))
+                        as Arc<dyn Completer>
+                })
             }),
             describer: cfg
                 .infer
@@ -322,10 +343,7 @@ impl Core {
                 .as_ref()
                 .map(|v| Arc::new(HttpDescriber::new(v, Some(synth))) as Arc<dyn Describer>),
             chunk_tokens: cfg.infer.embed.effective_chunk_tokens(),
-            counter: Arc::new(TokenCounter::load(
-                cfg.infer.tokenizer.as_deref(),
-                std::path::Path::new(&cfg.store.dir),
-            )),
+            counter,
             background: Arc::new(Background::default()),
             clock: crate::core::context::Clock::System,
             query_cache: working.query_cache,

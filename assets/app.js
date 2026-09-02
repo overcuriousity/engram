@@ -535,6 +535,15 @@
       e.preventDefault();
       var q = box.value;
       if (!q.trim()) return;
+      // The three regions move with the act, and an ask is an act. Bound to
+      // the keystroke alone this never ran on the ask door: `/ui/ask?q=…`
+      // renders `idle_state` true — the box arrives filled and nothing is
+      // going to search — so `#rail` and `#pane` carry `hidden`, and the
+      // stylesheet's `.pane[hidden]{display:none}` means the answer streamed
+      // into a collapsed pane. The reader watched a spinner and then nothing.
+      // The door pre-fills the box server-side, so no `input` event was ever
+      // coming to reveal them.
+      hideIdle();
       // A second ask supersedes the first at every stage, which `stop()` on its
       // own does not achieve: it closes a stream that is already open, and two
       // submits made before the first POST resolves open two streams, the
@@ -2122,8 +2131,14 @@
   // instant it is sent.
   var HEAT_WINDOW = 6 * 3600;
 
+  // Whole seconds. `dueTick` works from `Date.now() / 1000`, which is
+  // fractional, and every branch below the first floors its unit on the way to
+  // a number — this one did not, so the last minute before a reminder counted
+  // down as `in 45.372s` and re-jittered on every tick, and the minute after
+  // read `3.128s overdue`. The server's `due_words` is integer arithmetic, so
+  // the row was correct until the client timer took it over.
   function spanWords(secs) {
-    var s = Math.max(0, secs);
+    var s = Math.max(0, Math.floor(secs));
     if (s < 60) return s + 's';
     var m = Math.floor(s / 60);
     if (m < 60) return m + 'm';

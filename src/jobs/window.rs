@@ -173,9 +173,13 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
 
     let judgement = reply.judgement.take();
     let mut chunks = reply.artifacts;
-    if !ctx.is_empty() {
+    let neighbor_texts: Vec<&str> = ask
+        .as_ref()
+        .map(|a| a.neighbors.iter().map(|n| n.text.as_str()).collect())
+        .unwrap_or_default();
+    if !ctx.is_empty() || !neighbor_texts.is_empty() {
         let before = chunks.len();
-        chunks.retain(|c| !from_context_only(&c.text, &text, &ctx));
+        chunks.retain(|c| !from_context_only(&c.text, &text, &ctx, &neighbor_texts));
         let dropped = before - chunks.len();
         if dropped > 0 {
             // A rising count here means the configured model is ignoring the
@@ -630,15 +634,26 @@ pub(crate) async fn write_segment_artifacts(
 /// properly; located nowhere, keep — that is an artifact the model reworded
 /// hard, which flag_unverified has always handled and which must not start
 /// silently disappearing.
+///
+/// `neighbors` are checked alongside the context blocks and are not optional.
+/// The prompt labels that block "context only" like the rest, but neighbour
+/// text lives on `JudgeAsk`, not on `WindowContext`, so `blocks()` never sees
+/// it — and at the shipped `context_neighbor_tokens = 1024` it is the largest
+/// context block on the prompt, larger than the opening and the overlap
+/// together. The one block with no structural guard was the one most worth
+/// guarding: a neighbour is an artifact the base already holds, so a model
+/// restating one writes a second copy of it.
 pub(crate) fn from_context_only(
     text: &str,
     core_text: &str,
     ctx: &crate::infer::context::WindowContext,
+    neighbors: &[&str],
 ) -> bool {
     if crate::infer::verify::locate_span(text, core_text, 1).is_some() {
         return false;
     }
     ctx.blocks()
+        .chain(neighbors.iter().copied())
         .any(|b| crate::infer::verify::locate_span(text, b, 1).is_some())
 }
 
@@ -1050,20 +1065,53 @@ mod tests {
         assert!(!from_context_only(
             "the window says something quite specific here",
             core_text,
-            &ctx
+            &ctx,
+            &[]
         ));
         // Drawn from a context block and nowhere in the window: drop.
         assert!(from_context_only(
             "the following window describes another procedure",
             core_text,
-            &ctx
+            &ctx,
+            &[]
         ));
         // Located nowhere at all — a heavily reworded artifact. Keep it, so it
         // reaches flag_unverified the way it does today instead of vanishing.
         assert!(!from_context_only(
             "an entirely reworded statement about unrelated matters",
             core_text,
-            &ctx
+            &ctx,
+            &[]
+        ));
+    }
+
+    /// The NEIGHBORS block is on the prompt and was on no guard. A neighbour is
+    /// an artifact the base already holds, so restating one is a duplicate of
+    /// something already stored — the exact outcome this check exists to stop.
+    #[test]
+    fn an_artifact_restating_a_neighbour_is_recognised() {
+        use crate::infer::context::WindowContext;
+
+        let core_text = "the window says something quite specific here";
+        let ctx = WindowContext {
+            opening: None,
+            before: None,
+            after: None,
+        };
+        let neighbors = ["PUID is Microsoft's per-user identifier for a licence"];
+
+        assert!(from_context_only(
+            "PUID is Microsoft's per-user identifier for a licence",
+            core_text,
+            &ctx,
+            &neighbors
+        ));
+        // The window still wins: material in both places belongs to the window.
+        assert!(!from_context_only(
+            "the window says something quite specific here",
+            core_text,
+            &ctx,
+            &neighbors
         ));
     }
 

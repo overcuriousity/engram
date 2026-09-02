@@ -201,7 +201,19 @@ impl Capture {
     }
 
     /// A door that already knows this is a reminder (`engram -r`, `?intent=`)
-    /// says so, and the stage skips the classifier.
+    /// says so, and the judged synthesis call is told — `JUDGE` carries "the
+    /// capture door says this is: remind".
+    ///
+    /// A hint and not an override: the model reads the sentence and decides,
+    /// the same as for a capture that arrived with no door. What the hint does
+    /// buy is `judgement`'s undated branch — a forced reminder the model dates
+    /// nowhere is still armed, undated, for the band to ask about, where an
+    /// unforced one would be left as an ordinary capture. It does not skip a
+    /// classifier; there is no longer a classifier to skip.
+    ///
+    /// The one thing the door does decide is size. Only a single-window corpus
+    /// is judged at all, so a forced reminder over text that would split is
+    /// refused outright — see `refuse_a_reminder_too_large_to_judge`.
     /// The channel a capture arrived through, for a door that also asked for
     /// `journal`.
     ///
@@ -346,6 +358,38 @@ impl Core {
         }
     }
 
+    /// A door asking for a reminder over text too large to be judged as one.
+    ///
+    /// The judged synthesis call — the only reader of intent there is since the
+    /// reshape — runs on single-window corpora alone (`jobs::window`, `judging
+    /// = all.len() == 1`). A capture that splits is read window by window and
+    /// never judged, so `engram -r` over a long note used to embed the whole
+    /// thing, answer with a corpus id, and arm nothing: the operator asked for
+    /// a reminder, paid for the synthesis and the vectors, and got a document.
+    ///
+    /// Refused at the door rather than accepted and quietly downgraded, and
+    /// refused *before* the insert so nothing is stored or embedded. A reminder
+    /// is a sentence; a manual is a capture, and `-c` is the verb for it.
+    fn refuse_a_reminder_too_large_to_judge(&self, c: &Capture) -> Result<()> {
+        let remind = crate::core::moments::Intent::Remind;
+        if c.metadata["intent"].as_str() != Some(remind.as_str()) {
+            return Ok(());
+        }
+        let lang = crate::infer::lang::of_corpus(&c.metadata);
+        let budget = crate::jobs::synthesize::segment_budget(self, lang);
+        let windows = crate::infer::split::split_into_segments(&c.text, &self.counter, budget);
+        if windows.len() <= 1 {
+            return Ok(());
+        }
+        Err(Error::Validation(format!(
+            "a reminder is read in one pass, and this text is {} tokens against a window of \
+             {budget} — it would be split into {} and never judged. Capture it with `engram -c` \
+             and set the reminder on a sentence.",
+            self.counter.count(&c.text),
+            windows.len(),
+        )))
+    }
+
     /// The same thing, for a door that also knows where the text was read.
     pub async fn ingest_capture(&self, c: Capture) -> Result<IngestOutcome> {
         // A door that says "this is a journal entry" is taken at its word,
@@ -365,6 +409,7 @@ impl Core {
         if text.trim().is_empty() {
             return Err(Error::Validation("text is empty".into()));
         }
+        self.refuse_a_reminder_too_large_to_judge(&c)?;
 
         if let Some(existing) = self.store.find_by_hash(&content_hash(text)).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate ingest, returning existing source");
@@ -932,6 +977,14 @@ impl Core {
         }
         self.reopen_the_pairs_that_were_waiting_on(artifact_id)
             .await;
+        // `uncovered` (src/core/moments.rs) filters `a.status = 'active'`, so
+        // an artifact hidden by dedupe takes its open reminder out of the
+        // Remind unit's sight — and if it was the only one owed, the unit
+        // disarms itself. Bringing the artifact back has to bring the arming
+        // back with it, or that reminder is never pushed at any rung again.
+        // Every other path that moves a moment or its artifact calls this;
+        // this one was the hole.
+        self.store.rearm_remind().await?;
         tracing::info!(artifact_id, "restored a superseded artifact to search");
         Ok(())
     }
@@ -1163,7 +1216,26 @@ impl Core {
     /// press finishes the job.
     pub async fn reactivate(&self, id: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
-        if self.store.get_artifact(id).await?.superseded_by.is_some() {
+        let art = self.store.get_artifact(id).await?;
+        // A reaped artifact comes back from the graveyard or not at all: its
+        // text was wiped and its point deleted, so the ordinary path would
+        // publish an empty row and write a payload onto a point that no longer
+        // exists. The text is restored first, then the row is moved, then the
+        // point is rebuilt by `Embed` — which writes the whole payload, status
+        // included, so there is no `set_lifecycle` to make here and nothing for
+        // the drift repair to finish.
+        if art.reaped_at.is_some() && self.store.exhume(id).await? {
+            self.store
+                .set_artifact_status(id, ArtifactStatus::Active)
+                .await?;
+            self.store.set_superseded_by(id, None).await?;
+            self.store.enqueue(Stage::Embed, "artifact", id).await?;
+            self.reopen_the_pairs_that_were_waiting_on(id).await;
+            self.store.rearm_remind().await?;
+            tracing::info!(artifact_id = id, "exhumed a reaped artifact");
+            return Ok(());
+        }
+        if art.superseded_by.is_some() {
             return self.unsupersede_locked(id).await;
         }
         // As in `unsupersede`: payload first, so the marker has to go first.
@@ -1178,6 +1250,10 @@ impl Core {
             .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
             .await?;
         self.reopen_the_pairs_that_were_waiting_on(id).await;
+        // Same reason as `unsupersede_locked`: the Remind unit only sees
+        // moments on active artifacts, and an artifact coming back active may
+        // be the one whose reminder disarmed it.
+        self.store.rearm_remind().await?;
         tracing::info!(artifact_id = id, "reactivated an artifact");
         Ok(())
     }
@@ -3462,6 +3538,42 @@ mod tests {
             1,
             "and it is a reminder"
         );
+    }
+
+    /// A reminder is read in one pass or not at all.
+    ///
+    /// Only a single-window corpus reaches the judged synthesis call
+    /// (`jobs::window`), so `engram -r` over a long note was synthesized window
+    /// by window, embedded whole, answered with a corpus id — and armed
+    /// nothing. Refused at the door instead, before anything is stored.
+    #[tokio::test]
+    async fn a_reminder_too_large_to_be_judged_is_refused_at_the_door() {
+        let core = test_core().await;
+        let long = "Der Bericht behandelt die Migration im Detail. ".repeat(400);
+        let err = core
+            .ingest_capture(
+                Capture::new(&long, "ui").with_intent(Some(crate::core::moments::Intent::Remind)),
+            )
+            .await
+            .expect_err("a manual is not a reminder");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("engram -c"),
+            "it names the verb that works: {msg}"
+        );
+        assert!(
+            core.store
+                .find_by_hash(&crate::store::corpora::content_hash(&long))
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing stored, nothing embedded"
+        );
+
+        // The same text without the door is an ordinary capture and goes.
+        core.ingest_capture(Capture::new(&long, "ui"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

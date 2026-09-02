@@ -94,6 +94,79 @@ written by the model from a window or a small capture, badged wherever it is
 shown, supersedes the passages it covers without deleting them, and is retired
 with one click.
 
+## What a capture becomes
+
+One endpoint, one box, one `-c`. There is no "new reminder" form and no kind to
+pick: the same synthesis call that structures a capture also reads what it is,
+and everything below comes out of that one pass.
+
+| It becomes | When the text | Where it shows |
+| --- | --- | --- |
+| a **note** | states something | search, Ask, the corpus view |
+| a **reminder** | asks to be reminded | the due band, then a push |
+| a **journal entry** | recounts your day | the day page |
+| an **event** | mentions a date without asking for anything | *Coming up*, and the day page |
+| a **link** | restates or answers a note you already kept | the rail beside both |
+
+A note is the default and the floor: everything captured is one, and the other
+four are things a note additionally *is*. Nothing is filed away from search by
+becoming one of them.
+
+### Phrasing that reads clearly
+
+The reader is a model, not a rule table, so this is guidance and not a syntax.
+What it keys on is the sentence's *stance* — what you are asking of the note —
+not the words in it.
+
+```text
+remind me Friday to send the invoice      → reminder, Friday 09:00
+call the bank tomorrow morning            → reminder, tomorrow 09:00
+every Monday, back up the NAS             → reminder, repeating
+the workshop is on the 14th               → event: a date, nothing owed
+long day, but it built                    → journal entry
+PUID is Microsoft's per-user identifier   → note
+```
+
+Three things are worth knowing:
+
+- **A date is not a reminder.** *The invoice is dated 30 September* mentions a
+  date; *pay the invoice by 30 September* asks for something. The first becomes
+  an event and appears under *Coming up*; only the second wakes your phone.
+- **An unstated time of day is 09:00.** *Friday* means Friday morning. An
+  offset states one: *in three hours* is three hours from now.
+- **Repetition is read as repetition.** *every Monday*, *on the first of the
+  month*, *every second Tuesday until December* all survive as recurring rows.
+  What the model cannot express in that subset degrades to a single reminder
+  rather than being dropped.
+
+Reminders are shown for `time.horizon_hours` before they are due (48 by
+default) and events for `time.coming_up_days` (7). Both are on the band under
+the box.
+
+### Telling the reader up front
+
+Three doors can say what a capture is before the model reads it:
+
+```bash
+engram -r "call the bank tomorrow"   # ?intent=remind
+engram -j "long day, but it built"   # files it as today's entry
+```
+
+`-j` is a filing decision and is taken at the door. `-r` and the API's
+`?intent=remind` are a **hint**: they are put on the prompt — *the capture door
+says this is: remind* — and the model still reads the sentence. What the hint
+buys is a reminder with no date anywhere still being armed, undated, for the
+band to ask you about; an unforced note that names no time stays an ordinary
+note.
+
+A reminder is read in one pass, so `-r` over text long enough to be split into
+several windows is refused rather than quietly stored as a document. Capture it
+with `-c` and set the reminder on a sentence.
+
+If a filing is wrong, say so on the row: *not a reminder* on the band and the
+entry toggle on the day page both record a refusal that survives a re-read, so
+a later re-synthesis does not file it again over you.
+
 ## Three rules
 
 Everything on the issue tracker is weighed against these.
@@ -422,12 +495,14 @@ needing root.
 engram -c notes.pdf                 # capture; `pbpaste | engram` captures a pipe
 engram -s 40 "loop device"          # search, as wide as you ask
 engram -a "how did I mount it?"     # stream an answer
-engram -r "call the bank tomorrow"  # a reminder, dated at capture
+engram -r "call the bank tomorrow"  # a hint that this is a reminder
 engram -j "long day, but it built"  # today's journal entry
 engram --show 3                     # read the third hit of the last search in full
 ```
 
-`--show` also takes a leading piece of an id or a whole one, and the sources
+`-r` and `-j` are hints to the reader, not filings you make yourself — see
+[What a capture becomes](#what-a-capture-becomes). `--show` also takes a leading
+piece of an id or a whole one, and the sources
 under an `-a` answer are numbered as the same kind of list, so the `[9]` an
 answer cites is `engram --show 9`. Exit `1` means nothing was found, so
 `engram -s "x" || …` is a usable branch.

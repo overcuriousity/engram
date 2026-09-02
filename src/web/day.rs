@@ -301,14 +301,34 @@ async fn set_entry(
     let back = headers
         .get("referer")
         .and_then(|v| v.to_str().ok())
-        // Only a path of our own. An absolute URL is somebody else's origin
-        // however much of "/ui/" it contains, and this is a 303 out of an
-        // authenticated route: `https://evil.example/ui/` would be an open
-        // redirect. `//host` is protocol-relative and is a URL, not a path.
-        .filter(|r| r.starts_with('/') && !r.starts_with("//"))
-        .unwrap_or("/ui/day/today")
-        .to_string();
+        .and_then(same_origin_path)
+        .unwrap_or_else(|| "/ui/day/today".to_string());
     Ok(Redirect::to(&back).into_response())
+}
+
+/// The path and query of a `Referer`, and never its origin.
+///
+/// This is a 303 out of an authenticated route, so `https://evil.example/ui/`
+/// must not become a `Location`. What it must also do is *work*: the header a
+/// browser actually sends is an absolute URI, always, so a filter demanding
+/// `starts_with('/')` rejected every real referer and every press fell through
+/// to today — and to UTC today, since the fallback carries no `?tz`. Pressing
+/// "make it an entry" on `/ui/day/2026-08-15?tz=Europe/Berlin` moved the
+/// reader off the day they were reading.
+///
+/// Keeping only path and query answers both: whatever origin wrote the header,
+/// what comes back is a path on this server, so there is no origin left to
+/// redirect to. A relative referer is taken as it stands, minus the
+/// protocol-relative `//host`, which is a URL and not a path.
+fn same_origin_path(referer: &str) -> Option<String> {
+    if let Some(rest) = referer.strip_prefix('/') {
+        return (!rest.starts_with('/')).then(|| referer.to_string());
+    }
+    let u = url::Url::parse(referer).ok()?;
+    Some(match u.query() {
+        Some(q) => format!("{}?{q}", u.path()),
+        None => u.path().to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -388,11 +408,53 @@ mod tests {
             .insert("referer", "https://evil.example/ui/".parse().unwrap());
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let to = res.headers()["location"].to_str().unwrap().to_string();
+        assert!(
+            to.starts_with('/') && !to.starts_with("//"),
+            "an absolute URL keeps its path and loses its origin: {to}"
+        );
+        assert!(!to.contains("evil.example"), "{to}");
+    }
+
+    /// The half the reject-path test hid: the header a browser actually sends
+    /// is absolute, so a filter that only accepted a leading `/` rejected
+    /// every real referer and sent the reader to *UTC* today.
+    #[tokio::test]
+    async fn the_entry_toggle_comes_back_to_the_day_it_was_pressed_on() {
+        let core = test_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Long day.", "ui"))
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let mut req = form(&format!("/ui/corpora/{}/entry", out.id), &cookie, "on=1");
+        req.headers_mut().insert(
+            "referer",
+            "http://localhost:7777/ui/day/2026-08-15?tz=Europe/Berlin"
+                .parse()
+                .unwrap(),
+        );
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             res.headers()["location"],
-            "/ui/day/today",
-            "an absolute URL is somebody else's origin"
+            "/ui/day/2026-08-15?tz=Europe/Berlin"
         );
+    }
+
+    #[test]
+    fn a_referer_keeps_its_path_and_never_its_origin() {
+        assert_eq!(
+            same_origin_path("/ui/day/2026-08-15?tz=UTC").as_deref(),
+            Some("/ui/day/2026-08-15?tz=UTC")
+        );
+        assert_eq!(
+            same_origin_path("https://evil.example/ui/day/today?tz=UTC").as_deref(),
+            Some("/ui/day/today?tz=UTC")
+        );
+        // Protocol-relative is a URL wearing a path's clothes.
+        assert_eq!(same_origin_path("//evil.example/ui/"), None);
+        assert_eq!(same_origin_path("not a url at all"), None);
     }
 
     #[tokio::test]

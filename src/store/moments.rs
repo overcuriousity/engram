@@ -508,13 +508,15 @@ impl Store {
     /// and a `COUNT=5` that ends after three firings because the count is the
     /// rows. One statement decides it instead.
     pub async fn mark_done(&self, id: &str, at: i64) -> Result<bool> {
-        Ok(sqlx::query("UPDATE moments SET done_at = ? WHERE id = ? AND done_at IS NULL")
-            .bind(at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected()
-            > 0)
+        Ok(
+            sqlx::query("UPDATE moments SET done_at = ? WHERE id = ? AND done_at IS NULL")
+                .bind(at)
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                > 0,
+        )
     }
 
     pub async fn undo_done(&self, id: &str) -> Result<()> {

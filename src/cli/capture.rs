@@ -139,6 +139,13 @@ fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
 }
 
 /// One piece of text, sent as the reminder or the entry a verb said it is.
+///
+/// A body that is nothing but a link is refused here rather than sent. The
+/// server reads such a body as a page to fetch, and a fetched page carries none
+/// of the three fields this path sets — `refuse_time_fields` answers with a 400
+/// naming `tz, intent`, which is two fields the operator did not type and one
+/// verb they did. Said in the client, in terms of what they wrote: `-c` is the
+/// verb that captures a link.
 pub async fn run_text(
     e: &Endpoint,
     text: String,
@@ -148,6 +155,17 @@ pub async fn run_text(
     intent: Option<&str>,
     face: &crate::cli::face::Face,
 ) -> Result<String> {
+    if crate::web::api::only_a_url(&text).is_some() {
+        let what = if intent == Some("remind") {
+            "a reminder"
+        } else {
+            "a journal entry"
+        };
+        return Err(Error::Validation(format!(
+            "a link on its own is fetched and read by the server, so it cannot be {what}. \
+             Capture it with `engram -c`, then say what you want remembered about it."
+        )));
+    }
     let http = client()?;
     let tz = local_zone();
     post(
@@ -452,7 +470,14 @@ fn read_target(target: &str) -> Result<Read> {
     let bytes = match std::fs::read(target) {
         Ok(b) => b,
         // A path that misses is an error; a sentence was never a path.
-        Err(e) if looks_like_a_path(target) => {
+        //
+        // Keyed on `NotFound` and not on the error alone: every other kind
+        // says the target *is* a file and could not be read. `engram -c
+        // archive` in a directory holding one answered `EISDIR`, which fell
+        // through here and captured the word "archive" as a note, exit 0 —
+        // and an unreadable file (`EACCES`) did the same. Only "there is
+        // nothing at this name" leaves room for the reading that it was prose.
+        Err(e) if looks_like_a_path(target) || e.kind() != std::io::ErrorKind::NotFound => {
             return Err(Error::Validation(format!("{target}: {e}")));
         }
         Err(_) => return Ok(text(target.as_bytes().to_vec(), "text")),
@@ -558,6 +583,78 @@ mod tests {
         ] {
             assert!(looks_like_a_path(path), "{path}");
         }
+    }
+
+    /// Only "there is nothing at this name" leaves room for the reading that
+    /// the argument was prose. Every other error says the target *is* a file
+    /// and could not be read, and swallowing those captured the word the
+    /// operator typed as a note and exited 0 — `engram -c archive` in a
+    /// directory holding one used to report `archive: Is a directory`.
+    #[test]
+    fn a_target_that_exists_but_cannot_be_read_is_an_error_not_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("archive");
+        std::fs::create_dir(&sub).unwrap();
+        let Err(err) = read_target(sub.to_str().unwrap()) else {
+            panic!("a directory is not prose");
+        };
+        assert!(err.to_string().contains("archive"), "{err}");
+
+        // A path that misses is still an error, and a sentence is still prose.
+        let missing = dir.path().join("no-such-file.txt");
+        assert!(
+            read_target(missing.to_str().unwrap()).is_err(),
+            "a path that misses is an error"
+        );
+        let Ok(read) = read_target("just some words nobody could open") else {
+            panic!("a sentence is a note");
+        };
+        assert_eq!(read.label, "text");
+    }
+
+    /// A body that is one link is read by the server as a page to fetch, and a
+    /// fetched page carries none of the fields this path sets. The server said
+    /// so by naming `tz, intent` — two fields the operator never typed and one
+    /// verb they did.
+    #[tokio::test]
+    async fn a_bare_link_cannot_be_a_reminder_or_an_entry() {
+        let (e, _core) = endpoint().await;
+        for (intent, origin, word) in [
+            (Some("remind"), None, "a reminder"),
+            (None, Some("journal"), "a journal entry"),
+        ] {
+            let err = run_text(
+                &e,
+                "https://example.com/pay-invoice".into(),
+                None,
+                None,
+                origin,
+                intent,
+                &off(),
+            )
+            .await
+            .expect_err("a link is not a sentence");
+            let msg = err.to_string();
+            assert!(msg.contains(word), "{msg}");
+            assert!(
+                msg.contains("engram -c"),
+                "it names the verb that does work: {msg}"
+            );
+            assert!(!msg.contains("tz"), "and not a field nobody typed: {msg}");
+        }
+
+        // Prose that merely opens with a link is prose, and still goes.
+        run_text(
+            &e,
+            "https://example.com/x is the invoice, pay it".into(),
+            None,
+            None,
+            None,
+            Some("remind"),
+            &off(),
+        )
+        .await
+        .expect("a line of prose is a line of prose");
     }
 
     #[tokio::test]

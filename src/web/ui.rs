@@ -11031,6 +11031,54 @@ mod tests {
     /// not that they run. `tests/browser_ask.rs` is the other half, and it
     /// counts the requests a real browser makes — but it needs node and a
     /// headless Chrome, so it cannot be what guards this on every `cargo test`.
+    /// The three regions move with the act, and an ask is an act.
+    ///
+    /// `hideIdle` was bound to the box's `input` event alone, so the ask door —
+    /// `/ui/ask?q=…`, which renders `idle_state` true and pre-fills the box
+    /// server-side, so no keystroke is coming — streamed its answer into a
+    /// `#pane` still carrying `hidden`. The reader saw a spinner and then
+    /// nothing.
+    #[test]
+    fn pressing_ask_reveals_the_regions_the_answer_is_written_into() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        let handler = js
+            .split_once(r#"closest('[data-verb="ask"]')"#)
+            .expect("the ask click handler is gone")
+            .1;
+        let handler = &handler[..handler.find("addEventListener").unwrap_or(handler.len())];
+        assert!(
+            handler.contains("hideIdle();"),
+            "the ask handler does not reveal the rail and the pane: {handler}"
+        );
+        assert!(
+            handler.find("hideIdle();") < handler.find("live.hidden"),
+            "the regions must be revealed before the answer is written into them"
+        );
+    }
+
+    /// `dueTick` works from `Date.now() / 1000`, which is fractional. Every
+    /// branch of `spanWords` but the first floored its unit, so the last minute
+    /// before a reminder read `in 45.372s` and re-jittered on every tick — a
+    /// glitch that appeared exactly when the client timer took the row over
+    /// from the server's integer `due_words`.
+    #[test]
+    fn the_countdown_is_whole_seconds() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        let f = js
+            .split_once("function spanWords(secs) {")
+            .expect("spanWords is gone")
+            .1;
+        let f = &f[..f.find("\n  }").expect("spanWords does not end")];
+        assert!(
+            f.contains("Math.floor(secs)"),
+            "the seconds branch renders a fraction: {f}"
+        );
+    }
+
     #[test]
     fn the_stream_driver_closes_the_event_source_on_every_exit() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");

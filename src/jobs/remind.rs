@@ -295,6 +295,74 @@ mod tests {
         .unwrap()
     }
 
+    /// Restoring an artifact from Ops has to re-arm the unit that its
+    /// disappearance disarmed.
+    ///
+    /// `uncovered` filters `a.status = 'active'`, so an artifact dedupe hides
+    /// takes its open reminder out of the unit's sight; where it was the only
+    /// one owed, the unit disarms itself. `unsupersede` cleared the row and
+    /// re-embedded the artifact and armed nothing, so that reminder was never
+    /// pushed at any rung again. Every other moment-moving write already called
+    /// `rearm_remind`; this path was the hole.
+    #[tokio::test]
+    async fn restoring_a_superseded_artifact_arms_its_reminder_again() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let core = test_core().await;
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({
+                    "gotify": {"url": format!("{}/message", server.uri()), "token": "tok"},
+                }),
+            )
+            .await
+            .unwrap();
+
+        let id = due_at(&core, crate::store::now() + 3_600).await;
+        let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+
+        // Dedupe hides it in favour of another artifact, and the unit has
+        // nothing left to owe.
+        let out = core
+            .ingest_capture(Capture::new("Something else entirely", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let other = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let armed = run_after_of(&core).await;
+        assert!(armed.is_some(), "armed to begin with");
+
+        core.store
+            .set_superseded_by(&aid, Some(&other))
+            .await
+            .unwrap();
+        core.store.rearm_remind().await.unwrap();
+        assert!(
+            run_after_of(&core).await.is_none(),
+            "nothing owed, disarmed"
+        );
+
+        core.unsupersede(&aid).await.unwrap();
+        assert_eq!(
+            run_after_of(&core).await,
+            armed,
+            "the restore brought the arming back with it"
+        );
+    }
+
     #[tokio::test]
     async fn one_channel_refusing_does_not_push_the_other_one_twice() {
         // The retry would re-post to the channel that already took it. A row

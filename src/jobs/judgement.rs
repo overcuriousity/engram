@@ -60,7 +60,11 @@ pub async fn apply(
         let Some(at) = parse_local(e, tz) else {
             continue;
         };
-        match core.store.has_moment_at(anchor_id, Kind::Event, Some(at)).await {
+        match core
+            .store
+            .has_moment_at(anchor_id, Kind::Event, Some(at))
+            .await
+        {
             Ok(true) => continue,
             Ok(false) => {}
             Err(err) => {

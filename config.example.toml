@@ -733,16 +733,6 @@ prime = false
 horizon_hours = 48
 # Dates a note refers to inside this many days are listed under "Coming up".
 coming_up_days = 7
-# The lowest cosine at which an intent prototype may fire. A plain floor, at
-# every base size, and never below 0.70 however low it is set here.
-#
-# What decides is not this number. A note is a reminder or an entry when the
-# nearest intent prototype also beats every one of the ordinary notes the
-# classifier carries as decoys — so "is this nearer a reminder than a plain
-# note" is asked directly, per note, rather than approximated by a threshold.
-# Raise this if ordinary captures are still being read as reminders; the decoys
-# do the work, and this is the backstop.
-intent_at = 0.80
 # An open due reminder lifts a hit, bounded, and the row says so. Extracted
 # dates never lift.
 lift = true

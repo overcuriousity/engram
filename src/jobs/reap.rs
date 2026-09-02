@@ -28,6 +28,15 @@ pub struct Report {
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
+    // Re-read at the top of the pass, not only where the unit is armed.
+    // `periodic_units` (src/jobs/background.rs) gates *arming*, and nothing
+    // disarms a row that is already pending — so switching `[reap] enabled`
+    // off while a unit waited still bought one more full sweep, up to
+    // `max_judged_per_run` burials. `consolidate::run` has always re-checked
+    // its own gate; the one stage that destroys text must not be the exception.
+    if !core.reap.enabled {
+        return Ok(Report::default());
+    }
     let mut report = Report::default();
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
@@ -586,6 +595,33 @@ mod tests {
             "the judge must see both sides: {}",
             prompts[0]
         );
+    }
+
+    /// Switching the sweep off has to stop the sweep, not merely stop arming
+    /// it. `periodic_units` gates arming and nothing disarms an already-pending
+    /// row, so a unit that was waiting when the setting changed still ran once
+    /// — one more full destructive pass, up to `max_judged_per_run` burials.
+    #[tokio::test]
+    async fn a_disabled_sweep_does_not_run_a_unit_that_was_already_pending() {
+        let mut core = test_core().await;
+        core.reaper = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+            ]),
+        ));
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        core.reap.enabled = false;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped, report.rescued), (0, 0, 0));
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().text,
+            "stale duplicate fact",
+            "the one stage that destroys text must re-check its own gate"
+        );
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -120,12 +120,13 @@ pub(crate) struct DueTemplate {
     /// Whether the fold is open. Echoed into the fragment's `hx-vals` so the
     /// next poll comes back the same shape the viewer left it in.
     pub all: bool,
-    /// Seconds until this fragment should ask again, or `None` for "never".
+    /// Seconds until this fragment should ask again. `Option` for the
+    /// template's sake; `refresh_in` always answers, and the floor is the cap.
     ///
-    /// The fragment carries its own trigger, so the swap that reports the last
-    /// pending thing landing is also the swap that stops the polling — the
-    /// contract `_queue.html` already keeps, and the reason an idle page open
-    /// in a background tab costs nothing at all.
+    /// The fragment carries its own trigger, so each swap sets its own next
+    /// interval: two seconds while a capture is still being read, the second a
+    /// reminder lands where one is coming, and five minutes when nothing is —
+    /// because "nothing due" is not "nothing coming". See `refresh_in`.
     pub refresh_in: Option<i64>,
 }
 
@@ -136,8 +137,9 @@ pub(crate) struct DueTemplate {
 /// on a click and nothing is lost.
 pub(crate) const BAND_ROWS: usize = 8;
 
-/// The cap. Further out than this and there is nothing to watch for yet: the
-/// band re-reads on the five and whatever is coming is still minutes away.
+/// The cap, and — since nothing due is not nothing coming — the floor too.
+/// Further out than this and there is nothing to watch for yet: the band
+/// re-reads on the five and whatever is coming is still minutes away.
 const POLL_CAP: i64 = 300;
 /// While a capture is still being read, its reminder does not exist yet. Two
 /// seconds is the gap between "you pressed Capture" and "the band holds it".
@@ -147,15 +149,29 @@ const POLL_QUEUE: i64 = 2;
 /// pipeline. Foreground work only: see `foreground_work_in_flight` for why
 /// "any pending job" was true forever and pinned the band at two seconds.
 /// `next_at` — the next second at which the band's contents change, if any.
+///
+/// Never `None`. `next_at` is derived from `next_due_change`, which filters
+/// `m.kind = 'due'`, while the band also renders "Coming up" from
+/// `event_moments_between` — and, in either column, rows this browser did not
+/// create. With no open reminder there was no `next_at`, no `every` on the
+/// fragment's `hx-trigger`, and the band simply stopped: an event at 09:00 went
+/// on being named "Coming up" all afternoon, and a reminder or event captured
+/// from the CLI, the extension or a second window never appeared until
+/// something else on the page forced a swap. The cap is the floor under all of
+/// it — one cheap read every five minutes, which is what the cap was already
+/// worth when the answer was known.
 pub(crate) fn refresh_in(queue_active: bool, next_at: Option<i64>, now: i64) -> Option<i64> {
     if queue_active {
         return Some(POLL_QUEUE);
     }
-    let ahead = next_at?.saturating_sub(now);
-    // Already past and still open: the row is on screen and nothing further is
-    // coming, so there is nothing to poll for.
+    // Already past and still open: the row is on screen and nothing sooner is
+    // coming, so the cap is the whole answer.
+    let ahead = match next_at {
+        Some(at) => at.saturating_sub(now),
+        None => POLL_CAP,
+    };
     if ahead <= 0 {
-        return None;
+        return Some(POLL_CAP);
     }
     Some(ahead.min(POLL_CAP))
 }
@@ -1458,8 +1474,9 @@ mod tests {
         );
         assert_eq!(
             refresh_in(false, None, 1_000),
-            None,
-            "nothing pending, nothing asked"
+            Some(300),
+            "nothing pending is not nothing coming: the band also shows events, \
+             and rows arrive from doors this page did not open"
         );
         assert_eq!(
             refresh_in(false, Some(1_090), 1_000),
@@ -1473,13 +1490,22 @@ mod tests {
         );
         assert_eq!(
             refresh_in(false, Some(900), 1_000),
-            None,
-            "already past and on screen"
+            Some(300),
+            "already past and on screen, so the cap is the whole answer"
         );
     }
 
+    /// An idle band still polls, at the cap and no faster.
+    ///
+    /// It used to ship no `every` at all, which read as a saving and was a
+    /// defect: the interval comes from `next_due_change`, which filters
+    /// `kind = 'due'`, while the same fragment renders "Coming up" from the
+    /// event moments — so a page holding only events stopped asking and went
+    /// on naming a 09:00 event all afternoon. Reminders and events captured
+    /// from the CLI, the extension or a second window were invisible here
+    /// until something else forced a swap.
     #[tokio::test]
-    async fn an_idle_band_with_nothing_pending_polls_not_at_all() {
+    async fn an_idle_band_polls_no_faster_than_the_cap() {
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let html = body_of(
@@ -1489,8 +1515,8 @@ mod tests {
         )
         .await;
         assert!(
-            !html.contains("every "),
-            "an idle page in a background tab makes no requests: {html}"
+            html.contains("every 300s"),
+            "an idle page asks once every five minutes, and no more often: {html}"
         );
     }
 

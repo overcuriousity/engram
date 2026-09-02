@@ -1390,10 +1390,22 @@ impl Store {
     /// row, so that a failure between the two leaves the artifact listed on Ops
     /// rather than hidden with nothing pointing at it. See
     /// `Core::heal_dangling_supersessions`.
+    ///
+    /// A reaped row is never a candidate. `bury` leaves `superseded_by`
+    /// standing on purpose — the stub keeps every column other rows thread
+    /// into — so deleting the winner made the loser look exactly like an
+    /// artifact hidden in favour of nothing. It is not: there is no surviving
+    /// text to reveal, the text is in the graveyard. Healing it set
+    /// `status = 'active'` and cleared `retired_at`, which put a permanently
+    /// active *empty* artifact into corpus, lineage and Ops that
+    /// `reap_candidates` — `AND reaped_at IS NULL` — could never take back.
+    /// Undoing a burial is `Store::exhume`, and it is a decision somebody
+    /// makes, not a repair.
     pub async fn dangling_superseded(&self) -> Result<Vec<String>> {
         let rows = sqlx::query(
             "SELECT id FROM artifacts
               WHERE superseded_by IS NOT NULL
+                AND reaped_at IS NULL
                 AND superseded_by NOT IN (SELECT id FROM artifacts)",
         )
         .fetch_all(&self.pool)
@@ -1667,6 +1679,56 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Take a buried artifact's text back out of the graveyard — the undo the
+    /// graveyard exists to make possible.
+    ///
+    /// One transaction, and the grave row is deleted only where the artifact
+    /// row was actually restored, so no order of failures loses the text: a
+    /// crash before the commit leaves the burial exactly as it was, and the
+    /// grave is still there to try again from.
+    ///
+    /// `embed_state` goes back to `pending` and `embed_rev` moves, because
+    /// burial deleted the vector point and the caller enqueues `Embed` to
+    /// write a fresh one. `lifecycle_dirty` is deliberately *cleared* rather
+    /// than set: a dirty row asks the drift repair to write a payload, and
+    /// until that embed lands there is no point to write it onto. The whole
+    /// payload arrives with the point.
+    ///
+    /// `false` where there was no grave, or where the row is not reaped after
+    /// all — a restore that has already happened is not an error.
+    pub async fn exhume(&self, id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let Some(row) = sqlx::query("SELECT text FROM graveyard WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let text: String = row.get("text");
+        let res = sqlx::query(
+            "UPDATE artifacts
+                SET text = ?, reaped_at = NULL, embed_state = 'pending',
+                    embed_model = NULL, embed_rev = embed_rev + 1,
+                    lifecycle_dirty = 0, updated_at = ?
+              WHERE id = ? AND reaped_at IS NOT NULL",
+        )
+        .bind(&text)
+        .bind(super::now())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM graveyard WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// One grave, for tests and nothing else today: `(text, meta_json,
@@ -2877,6 +2939,68 @@ mod tests {
             s.bury(&made[0].id, "{}").await,
             Err(Error::NotFound)
         ));
+    }
+
+    /// A buried stub keeps `superseded_by` on purpose, which made it look
+    /// exactly like an artifact hidden in favour of nothing once the winner was
+    /// deleted. Healing it set `status = 'active'` and cleared `retired_at`,
+    /// putting a permanently active *empty* artifact into the base that
+    /// `reap_candidates` — which requires `reaped_at IS NULL` — could never
+    /// take back.
+    #[tokio::test]
+    async fn a_buried_stub_is_not_resurrected_by_the_dangling_heal() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "the loser"), nc(1, "the keeper")])
+            .await
+            .unwrap();
+        let (loser, keeper) = (made[0].id.clone(), made[1].id.clone());
+        s.set_superseded_by(&loser, Some(&keeper)).await.unwrap();
+        s.bury(&loser, "{}").await.unwrap();
+
+        // The keeper goes; the loser's pointer now names nothing.
+        s.delete_artifact(&keeper).await.unwrap();
+        assert!(
+            s.dangling_superseded().await.unwrap().is_empty(),
+            "there is no surviving text to reveal — it is in the graveyard"
+        );
+        let row = s.get_artifact(&loser).await.unwrap();
+        assert!(row.reaped_at.is_some());
+        assert_ne!(row.status, ArtifactStatus::Active);
+    }
+
+    /// Undoing a burial is a decision somebody makes, and it has to bring the
+    /// text back with it — an empty row returned to search is the loss the
+    /// graveyard exists to prevent.
+    #[tokio::test]
+    async fn exhuming_restores_the_text_and_asks_for_a_fresh_embedding() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "ephemeral fact xylophone")])
+            .await
+            .unwrap();
+        let id = made[0].id.clone();
+        s.set_artifact_status(&id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        let before = s.get_artifact(&id).await.unwrap().embed_rev;
+        s.bury(&id, "{}").await.unwrap();
+
+        assert!(s.exhume(&id).await.unwrap());
+        let row = s.get_artifact(&id).await.unwrap();
+        assert_eq!(row.text, "ephemeral fact xylophone");
+        assert!(row.reaped_at.is_none());
+        assert!(row.embed_rev > before, "the point was deleted at burial");
+        assert!(
+            s.graveyard_row(&id).await.unwrap().is_none(),
+            "the grave is emptied only where the row was actually restored"
+        );
+        assert!(
+            !s.exhume(&id).await.unwrap(),
+            "a restore that has already happened is not an error"
+        );
     }
 
     #[tokio::test]
