@@ -1166,17 +1166,24 @@ async fn context_seen(tenant: Tenant, Form(f): Form<SeenForm>) -> Result<Respons
 fn offer_view(o: crate::core::recommend::Offer, snippet: String) -> OfferView {
     use crate::core::recommend::Rung;
     OfferView {
+        // A sentence, not a rung name. "Pattern · weekday, hour, network · like
+        // 26.08., 20:36" is this code's own vocabulary read out loud to a
+        // reader who has never seen the ladder it comes from; the signals
+        // themselves moved into Details, where the rest of the arithmetic
+        // already lives.
         rung: match o.rung {
-            Rung::Pattern => "Pattern".to_string(),
-            Rung::Similar => "Similar to".to_string(),
+            Rung::Pattern => {
+                "Offered because you tend to open things like this around now — like".to_string()
+            }
+            Rung::Similar => "Offered because it is like what you opened".to_string(),
             // The count, in words a person reads. `weight` is the decayed
             // number the ranking uses and nobody can read 1.9 and know it means
             // twice — so the undecayed count is stored alongside it and said
             // out loud here.
             Rung::Tentative => match o.events {
-                0 | 1 => "Once before".to_string(),
-                2 => "Twice before".to_string(),
-                n => format!("{n} times before"),
+                0 | 1 => "Offered on one earlier occasion like this —".to_string(),
+                2 => "Offered on two earlier occasions like this —".to_string(),
+                n => format!("Offered on {n} earlier occasions like this —"),
             },
             // Nothing about the situation produced it, so nothing is claimed.
             Rung::Random => String::new(),
@@ -5944,7 +5951,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(body.contains("Pattern"), "no reason line at all: {body}");
+        assert!(
+            body.contains("Offered because"),
+            "no reason line at all: {body}"
+        );
         assert!(body.contains(r#"<div class="muted offer-why">"#), "{body}");
         assert!(
             !body.contains("<p class=\"muted offer-why\">"),
@@ -5975,7 +5985,7 @@ mod tests {
             !body.contains("offer-why"),
             "the card explains nothing: {body}"
         );
-        assert!(!body.contains("Pattern"), "{body}");
+        assert!(!body.contains("Offered because"), "{body}");
         // The fragment carries what the confirmation posts back, so the shown
         // and the open agree about what was offered.
         assert!(

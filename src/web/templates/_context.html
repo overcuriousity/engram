@@ -46,7 +46,7 @@
   <p class="offer-snippet">{{ o.snippet }}</p>
   {% endif %}
   {% if !o.rung.is_empty() %}
-  <div class="muted offer-why">{{ o.rung }}{% if !o.blocks.is_empty() %} · {{ o.blocks }}{% endif %}{% if !o.when.is_empty() %} · like {{ o.when }}{% endif %}
+  <div class="muted offer-why">{{ o.rung }}{% if !o.when.is_empty() %} {{ o.when }}{% endif %}
     {# `serde_json` over the raw bundle plus the contribution numbers, inside a
        `<details>`. No formatting code, and it satisfies "the parameters must be
        visible" completely: whoever wants to know exactly, expands it. It is
@@ -54,7 +54,8 @@
        promised. #}
     <details class="offer-detail">
       <summary>Details</summary>
-      <pre class="mono">{{ o.detail }}</pre>
+      <pre class="mono">{% if !o.blocks.is_empty() %}signals: {{ o.blocks }}
+{% endif %}{{ o.detail }}</pre>
     </details>
   </div>
   {% endif %}
