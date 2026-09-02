@@ -32,7 +32,7 @@
 **Interfaces:**
 - Produces: `pub(crate) fn artifact_allowance(input_tokens: usize) -> usize` and `pub(crate) fn within_allowance(chunks: Vec<ProposedArtifact>, window: &str, allowance: usize) -> Vec<ProposedArtifact>`, both in `src/jobs/window.rs`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module of `src/jobs/window.rs`:
 
@@ -74,12 +74,12 @@ Add to the `tests` module of `src/jobs/window.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test --locked --lib jobs::window::tests::the_allowance -- --nocapture`
 Expected: compile error, `artifact_allowance` not found.
 
-- [ ] **Step 3: Implement the two functions**
+- [x] **Step 3: Implement the two functions**
 
 Add above `pub(crate) fn from_context_only` in `src/jobs/window.rs`:
 
@@ -117,7 +117,7 @@ pub(crate) fn within_allowance(
 }
 ```
 
-- [ ] **Step 4: Apply the allowance in `run`**
+- [x] **Step 4: Apply the allowance in `run`**
 
 In `src/jobs/window.rs`, directly after the `if !ctx.is_empty() || !neighbor_texts.is_empty() { ... }` block that drops context-only artifacts (it ends with the `tracing::info!(... "artifacts drawn from context blocks were dropped")` call), insert:
 
@@ -141,12 +141,12 @@ In `src/jobs/window.rs`, directly after the `if !ctx.is_empty() || !neighbor_tex
 
 `window_tokens` is already in scope (computed for the over-budget check near the top of `run`).
 
-- [ ] **Step 5: Run the tests and lint**
+- [x] **Step 5: Run the tests and lint**
 
 Run: `cargo test --locked --lib jobs::window && cargo clippy --all-targets --locked -- -D warnings`
 Expected: all window tests pass, clippy clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/jobs/window.rs
@@ -164,7 +164,7 @@ git commit -m "fix(window): a window carries one artifact per thirty tokens, loc
 **Interfaces:**
 - Consumes: `pub fn synthesizer_system(lang: Lang) -> &'static str` (exists).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `tests` module of `src/infer/prompt.rs`:
 
@@ -193,12 +193,12 @@ Add to the `tests` module of `src/infer/prompt.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test --locked --lib infer::prompt::tests::every_language_says_the_judgement_is_not_an_artifact`
 Expected: FAIL on `En`.
 
-- [ ] **Step 3: Add the paragraph to all ten constants**
+- [x] **Step 3: Add the paragraph to all ten constants**
 
 Insert each paragraph as its own paragraph immediately before the closing sentence of the JUDGE section in that language (the sentence that says to reply with `"artifacts"` alone when there is no JUDGE block).
 
@@ -302,16 +302,16 @@ dilinde tam olarak bir artefakt verir.
 
 ```
 
-- [ ] **Step 4: Run the prompt tests**
+- [x] **Step 4: Run the prompt tests**
 
 Run: `cargo test --locked --lib infer::prompt`
 Expected: PASS, including the existing marker test (`"NEIGHBORS"`, `"JUDGE"` still present in all ten).
 
-- [ ] **Step 5: Re-measure the prompt overhead**
+- [x] **Step 5: Re-measure the prompt overhead**
 
 `prompt_overhead` in `src/jobs/synthesize.rs` counts the real prompt, so nothing to change. Run `cargo test --locked --lib jobs::synthesize` to confirm budgets still hold.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/infer/prompt.rs
@@ -329,7 +329,7 @@ git commit -m "feat(prompt): the judgement is not an artifact, in all ten langua
 **Interfaces:**
 - Produces: `pub(crate) fn weekday_named(text: &str) -> Option<chrono::Weekday>` and `pub(crate) fn onto_named_weekday(at: i64, named: chrono::Weekday, now: i64, tz: chrono_tz::Tz) -> i64`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module of `src/jobs/judgement.rs`:
 
@@ -367,12 +367,12 @@ Add to the `tests` module of `src/jobs/judgement.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test --locked --lib jobs::judgement::tests::a_weekday_is_read`
 Expected: compile error, `weekday_named` not found.
 
-- [ ] **Step 3: Implement the two functions**
+- [x] **Step 3: Implement the two functions**
 
 Add above `fn naive(` in `src/jobs/judgement.rs`:
 
@@ -462,7 +462,7 @@ pub(crate) fn onto_named_weekday(
 }
 ```
 
-- [ ] **Step 4: Apply it in `apply`**
+- [x] **Step 4: Apply it in `apply`**
 
 In `src/jobs/judgement.rs`, inside `apply`, add after `let tz_name = tz.name().to_string();`:
 
@@ -514,12 +514,12 @@ to
 
 `src` is the corpus row already loaded at the top of `apply`; `src.raw_text` and `src.created_at` exist on it (see `build_judge_ask` in `window.rs` for the same use).
 
-- [ ] **Step 5: Run the tests and lint**
+- [x] **Step 5: Run the tests and lint**
 
 Run: `cargo test --locked --lib jobs::judgement && cargo clippy --all-targets --locked -- -D warnings`
 Expected: PASS. If clippy flags the closure borrowing `src` across an await, change `let reconcile = |at: i64|` to `let reconcile = move |at: i64|` after copying `let created_at = src.created_at;` above it and using `created_at` inside.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/jobs/judgement.rs
@@ -537,7 +537,7 @@ git commit -m "fix(judgement): a weekday the note names wins over the model's ca
 **Interfaces:**
 - Consumes: `CorpusSpan::places_the_artifact(&self) -> bool`, `CorpusSpan::claimed(a, b)`, `CorpusSpan::unplaced(a, b)` (all exist in `src/store/artifacts.rs`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
     #[test]
@@ -559,12 +559,12 @@ git commit -m "fix(judgement): a weekday the note names wins over the model's ca
     }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test --locked --lib jobs::promote::tests::on_equal_overlap_a_placed`
 Expected: FAIL, got `("p", "u")`.
 
-- [ ] **Step 3: Change the sort key**
+- [x] **Step 3: Change the sort key**
 
 Replace the body of the `for (pid, ps) in passages` loop in `covered_by`:
 
@@ -588,12 +588,12 @@ Replace the body of the `for (pid, ps) in passages` loop in `covered_by`:
 
 Update the doc comment above `covered_by` with one sentence: "Ties on overlap go to a placed span, then to the lowest ordinal."
 
-- [ ] **Step 4: Run the tests and lint**
+- [x] **Step 4: Run the tests and lint**
 
 Run: `cargo test --locked --lib jobs::promote && cargo clippy --all-targets --locked -- -D warnings`
 Expected: PASS, including the existing tie test (its spans are all `located`, so placed-ness is equal and the ordinal rule still decides).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/jobs/promote.rs
@@ -764,7 +764,7 @@ Verification for template and CSS tasks: `cargo test --locked` (askama compiles 
 **Files:**
 - Modify: `assets/css/30-components.css:13-15`, `src/web/templates/_ask_verb.html` (the `<button ... data-verb="ask"` line), `assets/app.js:1096-1110` (`sync()` in the verb-arming function), `src/web/templates/_keyhint.html` (the `keep` label)
 
-- [ ] **Step 1: CSS — disabled accent reads disabled**
+- [x] **Step 1: CSS — disabled accent reads disabled**
 
 In `assets/css/30-components.css`, after `.btn:disabled { opacity: 0.4; pointer-events: none; }` add:
 
@@ -778,11 +778,11 @@ In `assets/css/30-components.css`, after `.btn:disabled { opacity: 0.4; pointer-
 }
 ```
 
-- [ ] **Step 2: Template — Ask starts plain**
+- [x] **Step 2: Template — Ask starts plain**
 
 In `src/web/templates/_ask_verb.html` change `class="btn btn-accent"` on the Ask button to `class="btn"`. Add a comment line above it inside the existing comment block: `app.js lends the accent to whichever verb the box's content shape suggests; see the verb-arming sync().`
 
-- [ ] **Step 3: JS — lend the accent by content shape**
+- [x] **Step 3: JS — lend the accent by content shape**
 
 In `assets/app.js`, inside `function sync()` (the one that reads `hasText` and `hasFile`), replace the `for` loop with:
 
@@ -809,15 +809,15 @@ In `assets/app.js`, inside `function sync()` (the one that reads `hasText` and `
       }
 ```
 
-- [ ] **Step 4: One vocabulary**
+- [x] **Step 4: One vocabulary**
 
 In `src/web/templates/_keyhint.html` change `<kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd> keep` to `<kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd> capture`.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run: `cargo test --locked`. Then in the browser: empty box → both verbs grey, neither accented. Type `wie habe ich backups eingerichtet?` → Ask accented. Paste three lines → Capture accented. Attach a file → Capture accented, Ask grey.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add assets/css/30-components.css assets/app.js src/web/templates/_ask_verb.html src/web/templates/_keyhint.html
@@ -831,7 +831,7 @@ git commit -m "feat(verbs): the accent follows the shape of what is typed, and a
 **Files:**
 - Modify: `assets/css/05-background.css:7-17`, `assets/css/20-layout.css:179`, `assets/app.js:919-938` (`hideIdle`, `showIdle`)
 
-- [ ] **Step 1: CSS**
+- [x] **Step 1: CSS**
 
 In `assets/css/05-background.css` replace the `opacity: 0.72;` line and its comment with:
 
@@ -855,15 +855,15 @@ In `assets/css/20-layout.css` change line 179 to:
 .topbar { border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; background: var(--color-bg-surface); }
 ```
 
-- [ ] **Step 2: JS**
+- [x] **Step 2: JS**
 
 In `assets/app.js`, in `function hideIdle()` add as the first line `document.documentElement.classList.add('typing');` and in `function showIdle()` add as the first line `document.documentElement.classList.remove('typing');`.
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 Browser: load `/ui` — cloud at full strength, no axis lines through the nav. Type one character — cloud fades. Clear the box — it comes back.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add assets/css/05-background.css assets/css/20-layout.css assets/app.js
@@ -877,7 +877,7 @@ git commit -m "feat(bg): the cloud fades on the first keystroke and stops behind
 **Files:**
 - Modify: `assets/css/50-phone.css:146-150` and the `.regions-rail-focus-source .region-bar` rule directly above it (`:~120-130`)
 
-- [ ] **Step 1: The hint hides only while typing**
+- [x] **Step 1: The hint hides only while typing**
 
 Replace
 
@@ -903,7 +903,7 @@ with
   html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
 ```
 
-- [ ] **Step 2: The bar is in the flow while idle**
+- [x] **Step 2: The bar is in the flow while idle**
 
 Directly after the `.regions-rail-focus-source .region-bar { position: fixed; … }` rule add:
 
@@ -917,11 +917,11 @@ Directly after the `.regions-rail-focus-source .region-bar { position: fixed; �
   }
 ```
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 Chrome devtools, 390 px, `/ui` on a held base: box at the top under the nav, "Try … or …" chips visible, no empty band. Type: bar moves to the bottom, chips gone. Clear: back.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add assets/css/50-phone.css
@@ -935,7 +935,7 @@ git commit -m "feat(phone): the example chips survive to the phone, and the idle
 **Files:**
 - Modify: `src/web/ui.rs:565-580` (`ResultsTemplate`), `:1428-1440` (its construction), `:~6924` and `:~7032` (test constructions), `src/web/templates/_results.html:26`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Next to the existing `ResultsTemplate` test at `src/web/ui.rs:~6900`, add a test that builds the template the same way that test does, with three results of which the last has `weak: true`, `all_weak: false`, `loose: 1`, renders it and asserts:
 
@@ -946,12 +946,12 @@ Next to the existing `ResultsTemplate` test at `src/web/ui.rs:~6900`, add a test
 
 Copy the `RenderedResult` literal from that neighbouring test verbatim for the three rows; only `weak` differs on the third.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test --locked --lib web::ui::tests -- loose`
 Expected: compile error, no field `loose`.
 
-- [ ] **Step 3: Add the field**
+- [x] **Step 3: Add the field**
 
 In `ResultsTemplate` after `all_weak: bool,` add:
 
@@ -964,11 +964,11 @@ In `ResultsTemplate` after `all_weak: bool,` add:
 
 In the construction at `:~1435` add `loose: results.iter().filter(|r| r.weak).count(),` on the line before `all_weak:` (both read `results` before it moves). In the two test constructions add `loose: 0,` (the `all_weak: true` one) and `loose: 0,` (the `all_weak: false` one), and `loose: 1,` in the new test.
 
-- [ ] **Step 4: Template**
+- [x] **Step 4: Template**
 
 In `src/web/templates/_results.html` line 26, after `{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}` insert `{% if loose > 0 && !all_weak %} · {{ loose }} loose{% endif %}`.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 Run: `cargo test --locked --lib web::ui && cargo clippy --all-targets --locked -- -D warnings`
 
@@ -984,7 +984,7 @@ git commit -m "feat(rail): the heading counts the loose matches in a mixed list"
 **Files:**
 - Modify: `src/web/templates/_results.html:128-146` (the `rail-why` block)
 
-- [ ] **Step 1: Template**
+- [x] **Step 1: Template**
 
 Change the guard `{% if r.primed || r.weak || r.model_written || r.why_ranked.is_some() %}` to `{% if r.primed || r.weak || r.model_written || r.due_in.is_some() || r.why_ranked.is_some() %}`.
 
@@ -996,7 +996,7 @@ After the `model_written` line and before the `why_ranked` line insert:
 
 Change the `why_ranked` separator condition from `{% if r.primed || r.weak || r.model_written %}` to `{% if r.primed || r.weak || r.model_written || r.due_in.is_some() %}`.
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
 
 Run: `cargo test --locked --lib web::ui`. Browser: search for the Gastro note; its row reads "a reminder on this is due …" under the snippet.
 
@@ -1012,7 +1012,7 @@ git commit -m "feat(rail): a due reminder is a sentence on the row, not a toolti
 **Files:**
 - Modify: `src/web/templates/_box_hint.html` (the `{%- else -%}` branch), `src/web/templates/_idle_foot.html` (the `{%- if !held %}` branch), `src/web/templates/workspace.html` (the two `placeholder` attributes' `{% else %}` halves), `assets/css/40-workspace.css` (one rule)
 
-- [ ] **Step 1: The hint carries the sentence**
+- [x] **Step 1: The hint carries the sentence**
 
 In `_box_hint.html` replace the not-held branch text with:
 
@@ -1021,7 +1021,7 @@ In `_box_hint.html` replace the not-held branch text with:
   engram finds it again by meaning, and nobody else can search this base.
 ```
 
-- [ ] **Step 2: The foot says nothing on an empty base**
+- [x] **Step 2: The foot says nothing on an empty base**
 
 In `_idle_foot.html` replace the two-line "Nothing here yet. Paste anything worth keeping …" text inside `{%- if !held %}` with nothing (keep the branch and its comment; the paragraph renders empty). Add to `assets/css/40-workspace.css` next to the `.idle-foot` rule (grep `idle-foot`):
 
@@ -1029,11 +1029,11 @@ In `_idle_foot.html` replace the two-line "Nothing here yet. Paste anything wort
 .idle-foot:empty { display: none; }
 ```
 
-- [ ] **Step 3: The placeholder stops repeating the hint**
+- [x] **Step 3: The placeholder stops repeating the hint**
 
 In `workspace.html` change the not-held placeholder from `Paste anything worth keeping — a note, an article, a chunk of a chat.` to `Paste something to keep…` and the not-held narrow one from `Paste anything worth keeping…` to `Paste something to keep…`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run `cargo test --locked --lib web::`. Browser with an empty base (a fresh tenant, or `open_registration` sign-in with a new account): one placeholder, one sentence under the box, nothing else.
 
@@ -1049,7 +1049,7 @@ git commit -m "fix(idle): an empty base introduces itself once"
 **Files:**
 - Modify: `src/web/ui.rs` — the corpus page handler that builds `CorpusTemplate` (construction at `:~2061`), `fn artifact_view` at `:464`, `src/web/templates/_artifact.html:1-5`
 
-- [ ] **Step 1: Coverage is `None` for a verbatim-only corpus**
+- [x] **Step 1: Coverage is `None` for a verbatim-only corpus**
 
 In the handler, find the `let coverage` binding (run `grep -n "coverage" src/web/ui.rs` and take the one inside the function that ends with `Ok(HtmlTemplate(CorpusTemplate {`). The handler already holds the corpus's artifacts as a `Vec<Chunk>` to build `bands`; call that vector by its name in the code below. Wrap the binding:
 
@@ -1067,7 +1067,7 @@ In the handler, find the `let coverage` binding (run `grep -n "coverage" src/web
     };
 ```
 
-- [ ] **Step 2: A passage card has no title**
+- [x] **Step 2: A passage card has no title**
 
 In `fn artifact_view`, change `title: artifact_title(c),` to:
 
@@ -1083,7 +1083,7 @@ In `fn artifact_view`, change `title: artifact_title(c),` to:
 
 In `_artifact.html` wrap the title span: `{% if !c.title.is_empty() %}<span class="card-title">{{ c.title }}</span>{% endif %}`.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run `cargo test --locked --lib web::ui`. Browser: the Gastro corpus page shows no coverage line once its rewrites are gone, and the passage card shows the sentence once.
 
@@ -1099,7 +1099,7 @@ git commit -m "fix(corpus): no coverage line for a verbatim-only capture, no tit
 **Files:**
 - Modify: `src/web/ui.rs:1149-1170` (`offer_view`), `src/web/templates/_context.html` (the `offer-why` div and the `offer-detail` details)
 
-- [ ] **Step 1: Sentences instead of rung names**
+- [x] **Step 1: Sentences instead of rung names**
 
 In `offer_view` replace the `rung:` match arms:
 
@@ -1117,7 +1117,7 @@ In `offer_view` replace the `rung:` match arms:
         },
 ```
 
-- [ ] **Step 2: The blocks move into Details**
+- [x] **Step 2: The blocks move into Details**
 
 In `_context.html` replace the `offer-why` div's content with:
 
@@ -1132,7 +1132,7 @@ and change the `<pre class="mono">{{ o.detail }}</pre>` inside `offer-detail` to
 {% endif %}{{ o.detail }}</pre>
 ```
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 The test at `src/web/ui.rs:5911` asserts `body.contains("Pattern")`; change it to `body.contains("Offered because")`. Then run `cargo test --locked --lib web::`. Browser: the card reads "Offered because you tend to open things like this around now — like 26.08., 20:36".
 
@@ -1148,7 +1148,7 @@ git commit -m "feat(offer): the card says why in a sentence; the signals move in
 **Files:**
 - Modify: `assets/css/40-workspace.css` (next to the `.idle-foot` rule)
 
-- [ ] **Step 1: CSS**
+- [x] **Step 1: CSS**
 
 Replace the existing `.idle-foot a { color: inherit; }` at `assets/css/40-workspace.css:1021` with:
 
@@ -1162,7 +1162,7 @@ Replace the existing `.idle-foot a { color: inherit; }` at `assets/css/40-worksp
 }
 ```
 
-- [ ] **Step 2: Verify and commit**
+- [x] **Step 2: Verify and commit**
 
 Browser at 390 px: the foot line is two lines at most, the link ends in "…".
 
@@ -1175,10 +1175,16 @@ git commit -m "fix(idle): the last-kept link is one line"
 
 ### Task 15: Full verification and the prod re-run
 
-- [ ] **Step 1: Whole suite**
+- [x] **Step 1: Whole suite**
 
 Run: `cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`
 Expected: clean.
+
+Ran 2026-09-02: `cargo fmt --all -- --check` clean, `cargo test --locked` clean
+(2360 passed, 0 failed). Clippy was not run here — this machine carries Fedora's
+system Rust without the `clippy` component and without `rustup` to add it, so
+`cargo clippy` reports `no such command`. CI is the lint of record until the
+package is installed.
 
 - [ ] **Step 2: Reproduce the original capture locally**
 
