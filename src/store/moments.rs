@@ -285,6 +285,31 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Has the operator moved a moment of this kind on this artifact?
+    ///
+    /// The re-read's other guard, and the one `has_moment_at` cannot be: that
+    /// answers "is this exact instant already here", which suppresses a
+    /// re-read that lands back on the corrected-away-from date and nothing
+    /// else. A model reading the same prose a third time and resolving it a
+    /// third way — Fri 14:00 read, moved to 16:00 by hand, re-read as 15:00 —
+    /// matched neither clause, and a second open row appeared beside the
+    /// correction with both of them pushing.
+    ///
+    /// A person's date outranks a re-reading of the prose it was corrected
+    /// from. Only the read is refused: completion still arms the recurrence's
+    /// next occurrence, and a door that sets a moment still sets one.
+    pub async fn has_moved_moment(&self, artifact_id: &str, kind: Kind) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moments
+              WHERE artifact_id = ? AND kind = ? AND moved_at IS NOT NULL",
+        )
+        .bind(artifact_id)
+        .bind(kind.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     /// How many occurrences of one recurrence have existed on this artifact,
     /// done rows included — the history of a recurring reminder is its rows,
     /// so counting them is counting the occurrences.

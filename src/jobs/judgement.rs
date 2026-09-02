@@ -43,8 +43,12 @@ pub async fn apply(
     // the wall-clock back out of what is stored here.
     let tz_name = tz.name().to_string();
 
-    // The note's own weekday, read once for the events and the reminder
-    // below. See `onto_named_weekday`.
+    // The note's own weekday, read once for the reminder below. Not for the
+    // events: the weekday witness corrects a date the model computed for the
+    // reminder, and a note reading "Friday I pick up the car; the concert is
+    // 2026-09-12" states that second date outright. Applied to the events it
+    // rewrote every one of them onto the same Friday, past dates included.
+    // See `onto_named_weekday`.
     let named_day = weekday_named(&src.raw_text);
     let created_at = src.created_at;
     let reconcile = move |at: i64| match named_day {
@@ -78,7 +82,7 @@ pub async fn apply(
     // caller already assumes: it logs a failed `apply` and lets the artifacts
     // stand.
     for e in &j.events {
-        let Some(at) = parse_local(e, tz).map(reconcile) else {
+        let Some(at) = parse_local(e, tz) else {
             continue;
         };
         match core
@@ -142,7 +146,7 @@ pub async fn apply(
                 .as_deref()
                 .and_then(|w| parse_local(w, tz))
                 .map(reconcile);
-            let rule = j
+            let valid_rule = j
                 .rule
                 .clone()
                 .filter(|r| match validate_rule(r) {
@@ -151,7 +155,18 @@ pub async fn apply(
                         tracing::warn!(rule = %r, error = %e, "rule outside the subset; the reminder is single");
                         false
                     }
-                })
+                });
+            // A date the rule carries and `when` does not. The rule below may
+            // be dropped as a single occurrence, and dropping it threw away
+            // the only date the answer had: `when: null` with
+            // `FREQ=WEEKLY;BYDAY=FR;COUNT=1` left `at` and `rule` both unset
+            // and the reminder was filed away as an ordinary capture.
+            let at = at.or_else(|| {
+                valid_rule
+                    .as_deref()
+                    .and_then(|r| first_occurrence(r, src.created_at, tz))
+            });
+            let rule = valid_rule
                 // A rule that yields one occurrence is not a repetition, it is
                 // the date `when` already carries. Asked to judge "Freitag
                 // 13:45" the configured model answers
@@ -175,6 +190,18 @@ pub async fn apply(
             // and a finished undated reminder is exactly the row
             // `delete_read_moments` keeps and this must not read back fresh.
             if core.store.has_moment_at(anchor_id, Kind::Due, at).await? {
+                return Ok(());
+            }
+            // And a date the operator moved outranks this reading of the prose
+            // it came from, whatever the reading is this time. `has_moment_at`
+            // only catches a re-read landing back on the instant they moved
+            // away from; a third reading put a second open row beside the
+            // correction, and both of them pushed.
+            if core.store.has_moved_moment(anchor_id, Kind::Due).await? {
+                tracing::debug!(
+                    corpus_id,
+                    "the reminder on this artifact was moved by hand; the re-read adds nothing"
+                );
                 return Ok(());
             }
             core.store
@@ -230,6 +257,20 @@ async fn record_intent(
         m.remove("intent_score");
     }
     core.store.set_corpus_metadata(corpus_id, &meta).await
+}
+
+/// The first instant a rule names after the capture, at `DEFAULT_HOUR`.
+///
+/// Only for a judgement whose `when` is null: the rule then carries the only
+/// date in the answer, and the time of day is the one the prompt names for a
+/// note that states none. `next_after` is strict, so a rule naming the
+/// capture's own weekday means the next one — the reading
+/// `onto_named_weekday` already takes.
+fn first_occurrence(rule: &str, created_at: i64, tz: chrono_tz::Tz) -> Option<i64> {
+    use chrono::TimeZone;
+    let day = tz.timestamp_opt(created_at, 0).single()?.date_naive();
+    let anchor = crate::core::moments::resolve_local(day.and_hms_opt(DEFAULT_HOUR, 0, 0)?, tz)?;
+    crate::core::moments::next_after(rule, anchor, tz)
 }
 
 /// Does this RRULE describe exactly one occurrence?
@@ -602,6 +643,128 @@ mod tests {
             rows[0].moment.rule, None,
             "a COUNT=1 rule is the one date, not a repetition"
         );
+    }
+
+    #[tokio::test]
+    async fn a_single_occurrence_rule_still_gives_the_reminder_its_date() {
+        // `when: null` with a COUNT=1 rule: dropping the rule as no
+        // repetition threw away the only date the answer carried, and the
+        // reminder was filed away as an ordinary capture.
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: None,
+            rule: Some("FREQ=WEEKLY;BYDAY=FR;COUNT=1".into()),
+            events: vec![],
+            links: vec![],
+        });
+        core.ingest("den Termin am Freitag", "web", None)
+            .await
+            .unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].moment.rule, None, "still not a repetition");
+        let at = rows[0].moment.at.expect("the rule carried the date");
+        let tz = crate::core::moments::zone(Some(&rows[0].moment.tz));
+        use chrono::{Datelike, TimeZone, Timelike};
+        let local = tz.timestamp_opt(at, 0).single().unwrap();
+        assert_eq!(local.weekday(), chrono::Weekday::Fri);
+        assert_eq!(local.hour(), crate::core::moments::DEFAULT_HOUR);
+    }
+
+    #[tokio::test]
+    async fn an_event_the_note_dates_outright_keeps_its_date() {
+        // The weekday witness corrects the *reminder*. Applied to the events
+        // it moved every date the note states onto the same weekday, and a
+        // date already past was rewritten into the future.
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T09:00".into()),
+            rule: None,
+            events: vec!["2099-09-12T20:00".into()],
+            links: vec![],
+        });
+        core.ingest(
+            "friday i pick up the car; the concert is on 2099-09-12",
+            "web",
+            None,
+        )
+        .await
+        .unwrap();
+        drain(&core).await;
+        let events: Vec<_> = core
+            .store
+            .moments_between(0, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.moment)
+            .filter(|m| m.kind == Kind::Event)
+            .collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let tz = crate::core::moments::zone(Some(&events[0].tz));
+        use chrono::TimeZone;
+        assert_eq!(
+            tz.timestamp_opt(events[0].at.unwrap(), 0)
+                .single()
+                .unwrap()
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            "2099-09-12 20:00",
+            "the date the note states is not moved onto the named weekday"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reminder_the_operator_moved_is_not_doubled_by_a_third_reading() {
+        // Read Friday 14:00, corrected to 16:00 by hand, re-read as 15:00:
+        // the exact-instant guard misses both times and a second open row
+        // appeared beside the correction, with both of them pushing.
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T14:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        let out = core
+            .ingest("den wagen abholen, freitag", "web", None)
+            .await
+            .unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let moved_to = rows[0].moment.at.unwrap() + 7_200;
+        core.store
+            .move_moment(&rows[0].moment.id, moved_to, &rows[0].moment.tz)
+            .await
+            .unwrap();
+
+        // The same prose, read a third way.
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        let anchor = rows[0].moment.artifact_id.clone();
+        apply(
+            &core,
+            &src.id,
+            &anchor,
+            &Judgement {
+                intent: Some("remind".into()),
+                when: Some("2099-09-04T15:00".into()),
+                rule: None,
+                events: vec![],
+                links: vec![],
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let after = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(after.len(), 1, "the correction stands alone: {after:?}");
+        assert_eq!(after[0].moment.at, Some(moved_to));
     }
 
     #[tokio::test]
