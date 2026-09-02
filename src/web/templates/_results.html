@@ -23,7 +23,7 @@
      is outside the swapped target, so the fragment that fills the list is also
      what names it and the two cannot disagree. #}
   <div class="rail-act" hx-swap-oob="innerHTML:#rail-head">
-    <span class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}{% if reranked %} <span class="refined-tick" title="Order confirmed by the reranker">· refined</span>{% endif %}</span>
+    <span class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}{% if self.loose() > 0 && !all_weak %} · {{ self.loose() }} loose{% endif %}{% if reranked %} <span class="refined-tick" title="Order confirmed by the reranker">· refined</span>{% endif %}</span>
   </div>
   {# Said once, above the list, rather than repeated on every card: when the
      whole answer is loose the useful statement is about the search, not about

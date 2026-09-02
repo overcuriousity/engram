@@ -594,6 +594,16 @@ struct ResultsTemplate {
     q: String,
 }
 
+impl ResultsTemplate {
+    /// How many of the ranked results are loose. Said in the heading when
+    /// the list is mixed; when every one is loose the flag above the list
+    /// already says so and this stays out of the heading. Computed rather
+    /// than carried, so it cannot disagree with the rows it counts.
+    fn loose(&self) -> usize {
+        self.results.iter().filter(|r| r.weak).count()
+    }
+}
+
 /// The rail before anything is asked: the base introducing itself.
 ///
 /// Rendered twice by design — inlined into the workspace page when it opens
@@ -6931,6 +6941,26 @@ mod tests {
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
         assert!(!html.contains("#1"), "{html}");
+
+        // A mixed list says how many of its rows are the loose ones, which is
+        // the split "3 results" alone hid. An all-loose list does not: the flag
+        // above the list already says it.
+        let mixed = askama::Template::render(&ResultsTemplate {
+            results: vec![
+                render_hit(0, result(false), &Default::default(), false),
+                render_hit(1, result(false), &Default::default(), false),
+                render_hit(2, result(true), &Default::default(), false),
+            ],
+            associated: vec![],
+            all_weak: false,
+            event_id: None,
+            echo: String::new(),
+            terms: String::new(),
+            reranked: false,
+            q: String::new(),
+        })
+        .unwrap();
+        assert!(mixed.contains("3 results · 1 loose"), "{mixed}");
     }
 
     #[tokio::test]
