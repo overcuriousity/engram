@@ -108,7 +108,11 @@ fn head_lines(text: &str, limit: usize, counter: &TokenCounter) -> Option<String
     if !taken.is_empty() {
         return Some(taken.join("\n"));
     }
-    cut_chars(text, limit, true)
+    // Not one whole line fits. That is not a pathological case here — it is the
+    // corpus this whole mechanism exists for, pasted with no line boundaries at
+    // all — and no context is worse than context cut mid-word, so the budget is
+    // spent on characters, counted the way every other budget in the prompt is.
+    counter.cut(text, limit, true)
 }
 
 /// As many trailing whole lines as fit, in their original order.
@@ -118,27 +122,7 @@ fn tail_lines(text: &str, limit: usize, counter: &TokenCounter) -> Option<String
     if !taken.is_empty() {
         return Some(taken.join("\n"));
     }
-    cut_chars(text, limit, false)
-}
-
-/// Not one whole line fits. That is not a pathological case here — it is the
-/// corpus this whole mechanism exists for, pasted with no line boundaries at
-/// all — and no context is worse than context cut mid-word, so the budget is
-/// spent on characters. 3.5 per token is the ratio the estimate uses.
-fn cut_chars(text: &str, limit: usize, from_start: bool) -> Option<String> {
-    if limit == 0 || text.is_empty() {
-        return None;
-    }
-    let max_chars = (limit * 7 / 2).max(16);
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
-        return Some(text.to_string());
-    }
-    Some(if from_start {
-        chars[..max_chars].iter().collect()
-    } else {
-        chars[chars.len() - max_chars..].iter().collect()
-    })
+    counter.cut(text, limit, false)
 }
 
 fn take_lines<'a>(

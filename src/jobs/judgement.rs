@@ -68,8 +68,17 @@ pub async fn apply(
         None => at,
     };
 
-    core.store.delete_read_moments(anchor_id).await?;
+    // Recorded before anything is withdrawn, so a store error here costs
+    // nothing: `?` used to abort `apply` with the previous reading already
+    // deleted and no replacement written.
     record_intent(core, corpus_id, &src, j.intent.as_deref()).await?;
+    // Events only. The due rows are withdrawn where the new reading actually
+    // replaces them — see the `remind` arm below — because several paths
+    // through it decide the reading names no reminder they can file and
+    // `return`, and a delete up here meant each of those destroyed a standing
+    // reminder and put nothing back. A window retry whose second reply is
+    // vaguer than the first is enough to walk into one.
+    core.store.delete_read_events(anchor_id).await?;
 
     // Dates the note states without being the reminder: the day page's rows.
     //
@@ -135,10 +144,18 @@ pub async fn apply(
             if JOURNALABLE.contains(&src.origin.as_str())
                 && !intent_refused(&src.metadata, Intent::Journal) =>
         {
+            // The reading says this is an entry and not a reminder, so the
+            // reminder the previous reading filed is withdrawn — the delete
+            // that used to happen unconditionally at the top of `apply`, moved
+            // to the one arm that is actually saying it.
+            core.store.delete_read_due(anchor_id).await?;
             core.set_entry(corpus_id, true).await?;
         }
         Some("remind") => {
             if intent_refused(&src.metadata, Intent::Remind) {
+                // The operator has said this is not a reminder. Their word,
+                // not the model's, and it takes the read rows with it.
+                core.store.delete_read_due(anchor_id).await?;
                 return Ok(());
             }
             let at = j
@@ -180,6 +197,12 @@ pub async fn apply(
             // and an undated one is a question the band asks them.
             let forced_remind = forced == Some("remind");
             if at.is_none() && rule.is_none() && !forced_remind {
+                // And the previous reading stands. This is the arm the window
+                // retry walks into when its second reply is vaguer than the
+                // first: "a reminder, but I cannot date it" is not a statement
+                // that the date already on the artifact was wrong, and taking
+                // the standing reminder away on the strength of it was a
+                // silent loss with a `debug!` line for a record.
                 tracing::debug!(
                     corpus_id,
                     "a judged reminder with no date is left as a capture"
@@ -188,7 +211,10 @@ pub async fn apply(
             }
             // Undated included: `None` is an instant the guard understands,
             // and a finished undated reminder is exactly the row
-            // `delete_read_moments` keeps and this must not read back fresh.
+            // `delete_read_due` keeps and this must not read back fresh. It
+            // now also catches the previous reading landing on the same
+            // instant, which is the cheapest possible answer to a re-read that
+            // changes nothing: no delete, no insert, no churn.
             if core.store.has_moment_at(anchor_id, Kind::Due, at).await? {
                 return Ok(());
             }
@@ -204,6 +230,12 @@ pub async fn apply(
                 );
                 return Ok(());
             }
+            // Every guard is past and this reading has a reminder to file, so
+            // now the previous one is genuinely replaced rather than merely
+            // discarded. Delete and insert, in that order, so no instant in
+            // between leaves the artifact with two open readings of the same
+            // prose.
+            core.store.delete_read_due(anchor_id).await?;
             core.store
                 .insert_moment(&NewMoment {
                     artifact_id: anchor_id.into(),
@@ -227,7 +259,13 @@ pub async fn apply(
                 tracing::warn!(error = %e, "could not push the capture-time confirmation");
             }
         }
-        _ => {}
+        // Every other reading — an intent of `none`, or a `journal` on an
+        // origin that may not be filed as one — says outright that this note
+        // is not a reminder, and the previous reading's rows go with it. The
+        // arms above are the two that had something of their own to say first.
+        _ => {
+            core.store.delete_read_due(anchor_id).await?;
+        }
     }
     Ok(())
 }
@@ -765,6 +803,72 @@ mod tests {
         let after = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(after.len(), 1, "the correction stands alone: {after:?}");
         assert_eq!(after[0].moment.at, Some(moved_to));
+    }
+
+    /// The delete used to happen at the top of `apply`, before any of the
+    /// decisions below it. A window retry whose second reply is vaguer than the
+    /// first walks straight into the "no date anywhere" arm, and that arm
+    /// returns — so the standing reminder was destroyed and nothing was put
+    /// back, with a `debug!` line for a record.
+    #[tokio::test]
+    async fn a_vaguer_re_reading_does_not_take_away_the_reminder_it_cannot_replace() {
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T14:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        let out = core
+            .ingest("erinnere mich freitag, /mnt/backup prüfen", "web", None)
+            .await
+            .unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (at, anchor) = (rows[0].moment.at, rows[0].moment.artifact_id.clone());
+
+        // The same prose, read again as a reminder it cannot date.
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        apply(
+            &core,
+            &src.id,
+            &anchor,
+            &Judgement {
+                intent: Some("remind".into()),
+                when: None,
+                rule: None,
+                events: vec![],
+                links: vec![],
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let after = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(after.len(), 1, "the reminder stands: {after:?}");
+        assert_eq!(after[0].moment.at, at);
+
+        // And a reading that says outright it is *not* a reminder still
+        // withdraws it — the delete moved, it did not go away.
+        apply(
+            &core,
+            &src.id,
+            &anchor,
+            &Judgement {
+                intent: Some("none".into()),
+                when: None,
+                rule: None,
+                events: vec![],
+                links: vec![],
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -2696,12 +2696,56 @@ fn push_url(field: &str, raw: &str) -> Result<()> {
             u.scheme()
         )));
     }
-    if u.host().is_none() {
+    let Some(host) = u.host() else {
         return Err(Error::Validation(format!(
             "{field}: that URL names no host"
         )));
+    };
+    if points_inward(&host) {
+        return Err(Error::Validation(format!(
+            "{field}: a push goes out to a service, and that address is the server's own machine. \
+             A push server on the network — `http://192.168.1.5:8080`, a hostname, a public URL — \
+             is what this field is for."
+        )));
     }
     Ok(())
+}
+
+/// Does this host name the server itself, or the link-local range?
+///
+/// The reason the field is validated at all. Whoever fills this form is telling
+/// the server to make an HTTP request from *its* network position, and it then
+/// makes that request twice over: once immediately, for the "Test Gotify"
+/// button, and on a timer for as long as the setting stands. Pointed at
+/// `http://127.0.0.1:9200/`, the button's two-way "Sent." / "Could not send"
+/// answer says whether something is listening on that port of the server's own
+/// loopback — a port scan of a machine the person at the form may have no other
+/// access to, one entry at a time — and the timer turns an unauthenticated
+/// internal endpoint into a POST it will keep receiving.
+///
+/// Loopback, unspecified and link-local only. The private ranges are
+/// deliberately left alone: engram is self-hosted, a Gotify at `192.168.1.5` is
+/// an ordinary setup, and refusing it would break the common case to narrow an
+/// attack that the loopback rule has already taken the sharp edge off. A
+/// hostname that *resolves* to loopback still gets through — closing that means
+/// resolving at save time and again at send time, which is a different piece of
+/// work.
+fn points_inward(host: &url::Host<&str>) -> bool {
+    use std::net::Ipv4Addr;
+    let v4 = |a: Ipv4Addr| a.is_loopback() || a.is_link_local() || a.is_unspecified();
+    match host {
+        url::Host::Domain(d) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            d == "localhost" || d.ends_with(".localhost")
+        }
+        url::Host::Ipv4(a) => v4(*a),
+        // `fe80::/10` written out, because `is_unicast_link_local` is unstable.
+        // A v4-mapped address is the v4 question again and not a second one.
+        url::Host::Ipv6(a) => match a.to_ipv4_mapped() {
+            Some(m) => v4(m),
+            None => a.is_loopback() || a.is_unspecified() || a.segments()[0] & 0xffc0 == 0xfe80,
+        },
+    }
 }
 
 /// Save the channels. A blank token keeps the stored one while the url stays;
@@ -3585,6 +3629,42 @@ pub fn ui_router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server POSTs to whatever is stored here — once for the test button,
+    /// and on a timer thereafter — from its own network position. The two-way
+    /// answer over loopback is a port scan of the machine one entry at a time.
+    #[test]
+    fn a_push_destination_may_not_be_the_server_talking_to_itself() {
+        for inward in [
+            "http://127.0.0.1:9200/message",
+            "http://127.5.6.7/x",
+            "https://localhost/message",
+            "http://LocalHost.:8080/",
+            "http://sub.localhost/x",
+            "http://[::1]:9200/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[fe80::1]/",
+            "http://0.0.0.0:8080/",
+        ] {
+            assert!(
+                push_url("gotify_url", inward).is_err(),
+                "{inward} points at the server itself"
+            );
+        }
+        // A self-hosted push server on the network is the ordinary case and
+        // stays allowed — the private ranges are deliberately not refused.
+        for outward in [
+            "http://192.168.1.5:8080/message",
+            "http://10.0.0.9/message",
+            "http://gotify.lan:8080/message",
+            "https://push.example.com/message",
+        ] {
+            assert!(push_url("gotify_url", outward).is_ok(), "{outward}");
+        }
+        assert!(push_url("gotify_url", "ftp://example.com/x").is_err());
+        assert!(push_url("gotify_url", "not a url").is_err());
+    }
 
     /// A `Chunk` with every field named, so a test can say the one thing it
     /// cares about and nothing else. `Chunk` has no `Default` on purpose —

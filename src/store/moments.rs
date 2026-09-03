@@ -37,7 +37,7 @@ pub enum Source {
     Extracted,
     /// The next occurrence of a recurrence, armed by the completion of the one
     /// before it. Not a reading of the prose and not a person's doing, and the
-    /// distinction is load-bearing: `delete_read_moments` would otherwise take
+    /// distinction is load-bearing: `delete_read_due` would otherwise take
     /// it for something it read and delete it on the next re-embed, after
     /// which the re-read finds the original instant still done and arms
     /// nothing — the recurrence would end silently at its first completion.
@@ -236,7 +236,7 @@ impl Store {
 
     /// Does this artifact already carry a moment of this kind at this
     /// instant? The moments stage asks before it re-inserts what it just read,
-    /// so a row `delete_read_moments` kept — one already done, pushed or
+    /// so a row `delete_read_due` kept — one already done, pushed or
     /// snoozed — is not doubled by the reading that would have made it again.
     ///
     /// `None` is an instant like any other here, and the comparison is `IS`
@@ -356,14 +356,41 @@ impl Store {
         .map(|r| moment_of(&r)))
     }
 
-    /// What the stage read last time, so a re-read replaces rather than
-    /// duplicates. A row somebody set is not the stage's to delete — and
-    /// neither is one that has since been acted on. Every embed re-arms this
-    /// stage, so without the second half a reindex or a switched embed model
-    /// would delete a reminder finished months ago and read it back fresh:
-    /// it would return to the band and push again. `done_at`, `notified_at`
-    /// and `snoozed_until` are the three marks that say a row has a history,
-    /// and a row with a history outlives the reading that made it.
+    /// The dates a note merely *states*, as the previous reading of it left
+    /// them, so a re-read replaces rather than duplicates.
+    ///
+    /// The guards are the ones `delete_read_due` explains at length, and the
+    /// reason for two functions rather than one is timing, not predicate: the
+    /// stage decides the two kinds at different moments. What a note states is
+    /// settled as soon as the reply parses, so the previous reading of it can
+    /// go straight away. Whether the note *is* a reminder is settled much
+    /// further down, past several `return`s that file nothing at all — and a
+    /// due row deleted before those was a standing reminder destroyed by a
+    /// re-read with nothing to put in its place. See `jobs::judgement::apply`.
+    pub async fn delete_read_events(&self, artifact_id: &str) -> Result<u64> {
+        Ok(sqlx::query(
+            "DELETE FROM moments
+              WHERE artifact_id = ? AND kind = 'event' AND source NOT IN ('set', 'armed')
+                AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL
+                AND moved_at IS NULL",
+        )
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
+    /// Withdraw the reminders this artifact's *reading* put here, and no
+    /// others — what a re-read that reads it differently drops, and what "this
+    /// is not a reminder" is answering.
+    ///
+    /// A row somebody set is not the stage's to delete, and neither is one
+    /// that has since been acted on. Every embed re-arms this stage, so
+    /// without the second half a reindex or a switched embed model would
+    /// delete a reminder finished months ago and read it back fresh: it would
+    /// return to the band and push again. `done_at`, `notified_at` and
+    /// `snoozed_until` are the three marks that say a row has a history, and a
+    /// row with a history outlives the reading that made it.
     ///
     /// `moved_at` is a fourth mark of the same kind: a row somebody moved has
     /// been acted on, and it keeps its `source` so that the note still counts
@@ -376,26 +403,6 @@ impl Store {
     /// itself a reading, and no re-read of the prose would produce it: deleted
     /// here, it was gone for good, because the re-read then found the original
     /// instant still on the artifact — done — and armed nothing in its place.
-    pub async fn delete_read_moments(&self, artifact_id: &str) -> Result<u64> {
-        Ok(sqlx::query(
-            "DELETE FROM moments
-              WHERE artifact_id = ? AND source NOT IN ('set', 'armed')
-                AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL
-                AND moved_at IS NULL",
-        )
-        .bind(artifact_id)
-        .execute(&self.pool)
-        .await?
-        .rows_affected())
-    }
-
-    /// Withdraw the reminders this artifact's *reading* put here — the same
-    /// rows `delete_read_moments` would drop on a re-read, and no others.
-    ///
-    /// `set` and `armed` rows are somebody's own, and a row that has been
-    /// done, pushed, snoozed or moved has a history of its own; neither is the
-    /// stage's to take back. What is left is exactly a verdict nobody has
-    /// touched, which is what "this is not a reminder" is answering.
     pub async fn delete_read_due(&self, artifact_id: &str) -> Result<u64> {
         Ok(sqlx::query(
             "DELETE FROM moments
@@ -477,7 +484,12 @@ impl Store {
         }
         let marks = vec!["?"; artifact_ids.len()].join(",");
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT artifact_id, MIN(at) AS at FROM moments
+            // The *effective* instant, as every other ladder read takes it —
+            // see `eff_at` and `open_due`'s ordering. A row snoozed from Monday
+            // to Friday is correctly re-admitted on Friday, and reading `at`
+            // here made the badge say "4 days ago" for a reminder due in an
+            // hour and gave the search lift the instant the operator put aside.
+            "SELECT artifact_id, MIN(COALESCE(snoozed_until, at)) AS at FROM moments
              WHERE kind = 'due' AND done_at IS NULL AND at IS NOT NULL AND at < ?
                AND (snoozed_until IS NULL OR snoozed_until <= ?) AND artifact_id IN ({marks})
              GROUP BY artifact_id"
@@ -592,6 +604,14 @@ impl Store {
     /// occurrence has been done, pushed or snoozed in its own right it has a
     /// history of its own, and an undo two steps back does not get to discard
     /// it. Returns whether anything went.
+    ///
+    /// `source = 'armed'` is what makes the name true, and it was missing.
+    /// `complete_moment` arms a successor only where the artifact does not
+    /// already carry that instant — a re-read that landed on it, or an
+    /// occurrence somebody set by hand — so on an artifact with two same-rule
+    /// due rows the completion armed nothing and the undo deleted the *other*
+    /// row outright. Undo is not allowed to take away a row this completion
+    /// never created.
     pub async fn delete_armed_occurrence(
         &self,
         artifact_id: &str,
@@ -601,6 +621,7 @@ impl Store {
         let n = sqlx::query(
             "DELETE FROM moments
               WHERE artifact_id = ? AND kind = 'due' AND rule = ? AND at = ?
+                AND source = 'armed'
                 AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL",
         )
         .bind(artifact_id)
@@ -814,6 +835,49 @@ mod tests {
         }
     }
 
+    /// The search lift and the "1 h ago" badge read this, and it was the one
+    /// band read taking `at` raw while every other coalesces the snooze.
+    #[tokio::test]
+    async fn due_for_reads_the_effective_instant_like_every_other_band_read() {
+        let (s, aid) = store_with_artifact().await;
+        let id = s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        s.snooze(&id, 8_000).await.unwrap();
+        let ids = vec![aid.clone()];
+        let got = s.due_for(&ids, 9_000, 10_000).await.unwrap();
+        assert_eq!(
+            got.get(&aid),
+            Some(&8_000),
+            "the instant the operator named, not the one they put aside"
+        );
+    }
+
+    /// `complete_moment` arms a successor only where the artifact does not
+    /// already carry that instant, so on an artifact with two same-rule due
+    /// rows it arms nothing — and the undo, unfiltered, deleted the other row.
+    #[tokio::test]
+    async fn undoing_a_completion_takes_only_the_row_it_armed() {
+        let (s, aid) = store_with_artifact().await;
+        let rule = "FREQ=DAILY";
+        let mut read = due(&aid, Some(2_000));
+        read.rule = Some(rule.into());
+        let read = s.insert_moment(&read).await.unwrap();
+        let mut armed = due(&aid, Some(2_000));
+        armed.rule = Some(rule.into());
+        armed.source = Source::Armed;
+        let armed = s.insert_moment(&armed).await.unwrap();
+
+        assert!(s.delete_armed_occurrence(&aid, rule, 2_000).await.unwrap());
+        assert!(s.moment(&armed).await.unwrap().is_none());
+        assert!(
+            s.moment(&read).await.unwrap().is_some(),
+            "a row no completion created is not the undo's to take"
+        );
+        assert!(
+            !s.delete_armed_occurrence(&aid, rule, 2_000).await.unwrap(),
+            "and there is nothing left that is"
+        );
+    }
+
     #[tokio::test]
     async fn open_due_orders_dated_by_time_then_undated() {
         let (s, aid) = store_with_artifact().await;
@@ -860,7 +924,7 @@ mod tests {
         let mut set = due(&aid, Some(2_000));
         set.source = Source::Set;
         s.insert_moment(&set).await.unwrap();
-        assert_eq!(s.delete_read_moments(&aid).await.unwrap(), 1);
+        assert_eq!(s.delete_read_due(&aid).await.unwrap(), 1);
         let rows = s.open_due(500, 10_000).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].moment.source, Source::Set);
@@ -1098,7 +1162,7 @@ mod tests {
         s.snooze(&put_off, 9_000).await.unwrap();
 
         assert_eq!(
-            s.delete_read_moments(&aid).await.unwrap(),
+            s.delete_read_due(&aid).await.unwrap(),
             1,
             "only the untouched reading"
         );
@@ -1215,7 +1279,7 @@ mod tests {
         );
 
         assert_eq!(
-            s.delete_read_moments(&aid).await.unwrap(),
+            s.delete_read_due(&aid).await.unwrap(),
             0,
             "a moved row has a history"
         );
@@ -1245,7 +1309,7 @@ mod tests {
         assert_eq!(m.moved_from, None);
         assert!(m.moved_at.is_some());
         assert_eq!(
-            s.delete_read_moments(&aid).await.unwrap(),
+            s.delete_read_due(&aid).await.unwrap(),
             0,
             "and it is not read away"
         );
@@ -1259,7 +1323,7 @@ mod tests {
         let armed = s.insert_moment(&m).await.unwrap();
         let read = s.insert_moment(&due(&aid, Some(2_000))).await.unwrap();
         assert_eq!(
-            s.delete_read_moments(&aid).await.unwrap(),
+            s.delete_read_due(&aid).await.unwrap(),
             1,
             "only the reading"
         );

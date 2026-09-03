@@ -173,8 +173,17 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             // so an arming from inside the handler was silently a no-op, and
             // with two reminders due the second never fired until an unrelated
             // write happened to re-arm the unit.
-            if job.stage == Stage::Remind {
-                core.store.rearm_remind().await?;
+            // Logged and carried past, the way `rearm_periodic` treats its own
+            // failure. `complete_job` has already committed, so propagating
+            // recovers nothing here and only turns a lost arming into a lost
+            // arming plus a failed run. `arm_missing_periodic` is what actually
+            // puts the unit back — see the tail of it, where `Remind` is armed
+            // for exactly this reason — and a lost arming now costs one repair
+            // interval rather than lasting until an unrelated write.
+            if job.stage == Stage::Remind
+                && let Err(e) = core.store.rearm_remind().await
+            {
+                tracing::warn!(error = %e, "could not re-arm the reminder unit; the repair pass picks it up");
             }
             rearm_periodic(core, &job, did_work).await;
             arm_successor(core, &job).await;

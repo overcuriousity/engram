@@ -1282,10 +1282,22 @@ impl Store {
     /// refused that text, and re-queueing it every sweep is a retry loop with no
     /// end. Only a row that says `embedded` while the vector store holds nothing
     /// is a write that went missing.
+    ///
+    /// And a reaped row is not that either, which is why `reaped_at IS NULL`
+    /// belongs here rather than only in the sweeps. `bury` leaves `embed_state`
+    /// alone on purpose — nothing about a burial is an embed — so the stub goes
+    /// on saying `embedded` while `reap_one` has deleted its point. Read as
+    /// drift, that queued an `Embed` every pass; the stub still carries a
+    /// title, so the embed *succeeded*, writing a fresh point for an artifact
+    /// whose text is in the graveyard and undoing the burial's own invariant,
+    /// at one embedding call per reaped artifact for ever. `exhume` is what
+    /// puts a point back, and it sets `embed_state` itself.
     pub async fn list_embedded_artifact_ids(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT id FROM artifacts WHERE embed_state = 'embedded'")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT id FROM artifacts WHERE embed_state = 'embedded' AND reaped_at IS NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
@@ -1520,6 +1532,51 @@ impl Store {
         Ok(())
     }
 
+    /// The retired artifacts the reap sweep may put in front of the judge, as
+    /// one predicate over an `artifacts art` — shared verbatim by
+    /// `reap_candidates`, which nominates on it, and by `bury`, which re-checks
+    /// it at the instant it wipes the text.
+    ///
+    /// One string and not two, because the two drifting apart *is* the defect
+    /// this guards against. `bury` used to re-check status and `reaped_at`
+    /// alone, which are the two clauses an operator's restore moves; the
+    /// reminder guard and the fresh-merge guard were missing, and those are
+    /// moved by an ordinary reminder being set and by a merge landing.
+    /// `nominees` reads a whole page up front and the sweep then spends one
+    /// model call per row, so minutes pass between the two reads — long enough
+    /// for either, and the verdict was applied anyway.
+    ///
+    /// Binds three copies of `now - min_age_secs`, in order: the retirement
+    /// age, then the two halves of the fresh-merge exclusion.
+    ///
+    /// `art` and not the bare table name: the reminder clause joins `artifacts`
+    /// a second time, and inside that subquery an unaliased `artifacts.corpus_id`
+    /// resolves to the *inner* copy — which made the comparison trivially true
+    /// and every open reminder anywhere in the base hold back every candidate
+    /// in it.
+    const REAPABLE: &str = "(art.status != 'active' OR art.superseded_by IS NOT NULL)
+                AND art.reaped_at IS NULL
+                AND art.retired_at IS NOT NULL AND art.retired_at < ?
+                AND NOT EXISTS (SELECT 1 FROM moments m
+                                 JOIN artifacts live ON live.id = m.artifact_id
+                                WHERE live.corpus_id = art.corpus_id
+                                  AND live.status = 'active'
+                                  AND m.kind = 'due' AND m.done_at IS NULL)
+                AND art.id NOT IN (
+                  SELECT s.root_id FROM artifact_sources s
+                    JOIN artifacts m ON m.id = s.child_id
+                   WHERE m.provenance = 'merged'
+                     AND m.status = 'active' AND m.superseded_by IS NULL
+                     AND m.created_at > ?
+                  UNION
+                  SELECT s.via_id FROM artifact_sources s
+                    JOIN artifacts m ON m.id = s.child_id
+                   WHERE m.provenance = 'merged'
+                     AND m.status = 'active' AND m.superseded_by IS NULL
+                     AND m.created_at > ?
+                     AND s.via_id IS NOT NULL
+                )";
+
     /// The retired artifacts the reap sweep may put in front of the judge:
     /// out of `active` for at least `min_age_secs`, not already reaped, and
     /// named by no open reminder — a note somebody still expects to be pushed
@@ -1556,38 +1613,13 @@ impl Store {
     /// the vector point, not in this database. See `jobs::reap::nominees`,
     /// which over-fetches to absorb it.
     pub async fn reap_candidates(&self, min_age_secs: i64, limit: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
-            // `art` and not the bare table name: the reminder clause below joins
-            // `artifacts` a second time, and inside that subquery an unaliased
-            // `artifacts.corpus_id` resolves to the *inner* copy — which made
-            // the comparison trivially true and every open reminder anywhere in
-            // the base hold back every candidate in it.
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifacts art
-              WHERE (status != 'active' OR superseded_by IS NOT NULL)
-                AND reaped_at IS NULL
-                AND retired_at IS NOT NULL AND retired_at < ?
-                AND NOT EXISTS (SELECT 1 FROM moments m
-                                 JOIN artifacts live ON live.id = m.artifact_id
-                                WHERE live.corpus_id = art.corpus_id
-                                  AND live.status = 'active'
-                                  AND m.kind = 'due' AND m.done_at IS NULL)
-                AND id NOT IN (
-                  SELECT s.root_id FROM artifact_sources s
-                    JOIN artifacts m ON m.id = s.child_id
-                   WHERE m.provenance = 'merged'
-                     AND m.status = 'active' AND m.superseded_by IS NULL
-                     AND m.created_at > ?
-                  UNION
-                  SELECT s.via_id FROM artifact_sources s
-                    JOIN artifacts m ON m.id = s.child_id
-                   WHERE m.provenance = 'merged'
-                     AND m.status = 'active' AND m.superseded_by IS NULL
-                     AND m.created_at > ?
-                     AND s.via_id IS NOT NULL
-                )
-              ORDER BY retired_at ASC
+              WHERE {}
+              ORDER BY art.retired_at ASC
               LIMIT ?",
-        )
+            Self::REAPABLE
+        )))
         .bind(now() - min_age_secs)
         .bind(now() - min_age_secs)
         .bind(now() - min_age_secs)
@@ -1645,22 +1677,32 @@ impl Store {
     /// front and the sweep then spends one model call per row, so an operator
     /// who reactivates an artifact while its judgement is in flight would have
     /// a verdict about a retired row wipe the text of a live one. The predicate
-    /// is `reap_candidates`' own; missing it, this answers `NotFound` and
+    /// is `reap_candidates`' own — `Self::REAPABLE`, the same string, so that
+    /// the two cannot drift; missing it, this answers `NotFound` and
     /// `reap::run` logs a burial that did not happen, which is the right
     /// outcome for a verdict that has been overtaken.
-    pub async fn bury(&self, id: &str, meta_json: &str) -> Result<()> {
+    ///
+    /// Which is why `min_age_secs` is a parameter rather than a thing this
+    /// could look up: the caller's own value, so the re-check asks the question
+    /// the nomination asked. A reminder set on the note, a merge landing on the
+    /// artifact and a rescue restamping `retired_at` all move it in the minutes
+    /// the model call takes, and each of them now stops the burial.
+    pub async fn bury(&self, id: &str, meta_json: &str, min_age_secs: i64) -> Result<()> {
         let reaped_at = now();
+        let cutoff = reaped_at - min_age_secs;
         let mut tx = self.pool.begin().await?;
-        let res = sqlx::query(
+        let res = sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO graveyard (id, title, text, meta_json, reaped_at)
-             SELECT id, title, text, ?, ? FROM artifacts
-              WHERE id = ?
-                AND (status != 'active' OR superseded_by IS NOT NULL)
-                AND reaped_at IS NULL",
-        )
+             SELECT art.id, art.title, art.text, ?, ? FROM artifacts art
+              WHERE art.id = ? AND {}",
+            Self::REAPABLE
+        )))
         .bind(meta_json)
         .bind(reaped_at)
         .bind(id)
+        .bind(cutoff)
+        .bind(cutoff)
+        .bind(cutoff)
         .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 0 {
@@ -2899,6 +2941,79 @@ mod tests {
         );
     }
 
+    /// The two clauses `bury`'s re-check used to be missing. `nominees` reads a
+    /// page up front and the sweep spends a model call per row, so minutes pass
+    /// between the nomination and the burial — long enough for a reminder to be
+    /// set on the note, and the burial went ahead anyway.
+    #[tokio::test]
+    async fn a_reminder_set_while_the_judgement_was_in_flight_stops_the_burial() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "live"), nc(1, "retired")])
+            .await
+            .unwrap();
+        s.set_artifact_status(&made[1].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        backdate_retired_at(&s, &made[1].id, 100 * 86_400).await;
+        // Nominated: the sweep would take it.
+        assert_eq!(s.reap_candidates(90 * 86_400, 20).await.unwrap().len(), 1);
+
+        // And then somebody sets a reminder on the note, on its live artifact.
+        insert_open_moment(&s, &made[0].id).await;
+        assert!(
+            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            "the nomination would no longer be made"
+        );
+        assert!(
+            matches!(
+                s.bury(&made[1].id, "{}", 90 * 86_400).await,
+                Err(Error::NotFound)
+            ),
+            "so the verdict about it must not be applied either"
+        );
+        assert_eq!(s.get_artifact(&made[1].id).await.unwrap().text, "retired");
+    }
+
+    /// A reaped row says `embedded` while its point is deleted, by design —
+    /// nothing about a burial is an embed. Read as drift, that queued an
+    /// `Embed` per pass, and the stub still has a title, so the embed succeeded
+    /// and wrote a point for text that is in the graveyard.
+    #[tokio::test]
+    async fn a_reaped_row_is_not_drift_for_the_heal_to_re_embed() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "ephemeral")])
+            .await
+            .unwrap();
+        let id = made[0].id.clone();
+        let rev = s.get_artifact(&id).await.unwrap().embed_rev;
+        assert!(s.mark_embedded(&id, "m", rev).await.unwrap());
+        assert_eq!(
+            s.list_embedded_artifact_ids().await.unwrap(),
+            vec![id.clone()]
+        );
+
+        s.set_artifact_status(&id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        backdate_retired_at(&s, &id, 100 * 86_400).await;
+        s.bury(&id, "{}", 90 * 86_400).await.unwrap();
+        assert!(
+            s.list_embedded_artifact_ids().await.unwrap().is_empty(),
+            "a burial is not a write that went missing"
+        );
+
+        assert!(s.exhume(&id).await.unwrap());
+        assert_eq!(
+            s.get_artifact(&id).await.unwrap().embed_state,
+            EmbedState::Pending,
+            "and the restore is what asks for a point again"
+        );
+    }
+
     #[tokio::test]
     async fn burying_an_artifact_that_is_live_again_does_nothing() {
         // `nominees` reads a page up front and the sweep then spends one model
@@ -2919,7 +3034,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            s.bury(&made[0].id, "{}").await,
+            s.bury(&made[0].id, "{}", 0).await,
             Err(Error::NotFound)
         ));
         let row = s.get_artifact(&made[0].id).await.unwrap();
@@ -2934,9 +3049,10 @@ mod tests {
         s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        s.bury(&made[0].id, "{}").await.unwrap();
+        backdate_retired_at(&s, &made[0].id, 60).await;
+        s.bury(&made[0].id, "{}", 0).await.unwrap();
         assert!(matches!(
-            s.bury(&made[0].id, "{}").await,
+            s.bury(&made[0].id, "{}", 0).await,
             Err(Error::NotFound)
         ));
     }
@@ -2957,7 +3073,8 @@ mod tests {
             .unwrap();
         let (loser, keeper) = (made[0].id.clone(), made[1].id.clone());
         s.set_superseded_by(&loser, Some(&keeper)).await.unwrap();
-        s.bury(&loser, "{}").await.unwrap();
+        backdate_retired_at(&s, &loser, 60).await;
+        s.bury(&loser, "{}", 0).await.unwrap();
 
         // The keeper goes; the loser's pointer now names nothing.
         s.delete_artifact(&keeper).await.unwrap();
@@ -2986,7 +3103,8 @@ mod tests {
             .await
             .unwrap();
         let before = s.get_artifact(&id).await.unwrap().embed_rev;
-        s.bury(&id, "{}").await.unwrap();
+        backdate_retired_at(&s, &id, 60).await;
+        s.bury(&id, "{}", 0).await.unwrap();
 
         assert!(s.exhume(&id).await.unwrap());
         let row = s.get_artifact(&id).await.unwrap();
@@ -3014,7 +3132,8 @@ mod tests {
         s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        s.bury(&made[0].id, r#"{"reason":"nothing new"}"#)
+        backdate_retired_at(&s, &made[0].id, 60).await;
+        s.bury(&made[0].id, r#"{"reason":"nothing new"}"#, 0)
             .await
             .unwrap();
 

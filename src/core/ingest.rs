@@ -475,6 +475,16 @@ impl Core {
             // moment earlier.
             Insertion::Existing(existing) => {
                 tracing::info!(corpus_id = %existing.id, "concurrent duplicate ingest, returning the stored source");
+                // And the same request the `find_by_hash` branch above honours,
+                // for the same reason: the loser of the race adds no text, but
+                // it does carry "remind me", and returning the id alone armed
+                // nothing while the operator was told the capture succeeded.
+                // Two racing `engram -r` calls, or one double-submitted form,
+                // is enough.
+                if forced_remind {
+                    self.ask_the_judged_read_for_a_reminder(&existing.id)
+                        .await?;
+                }
                 return Ok(IngestOutcome::existing(&existing));
             }
         };
@@ -971,19 +981,31 @@ impl Core {
     async fn unsupersede_locked(&self, artifact_id: &str) -> Result<()> {
         // Read before clearing: afterwards nothing says who was hiding it.
         let winner = self.store.get_artifact(artifact_id).await?.superseded_by;
-        // Marked before either store is touched. This direction writes the
-        // payload first, so without it a crash between the two would leave
-        // drift no row write ever announced.
-        self.store.mark_lifecycle_dirty(artifact_id).await?;
-        self.vectors
-            .set_lifecycle(artifact_id, ArtifactStatus::Active, None)
-            .await?;
-        self.store.set_superseded_by(artifact_id, None).await?;
-        // Both stores agree now, so the marker the row write set has nothing
-        // left to describe. Cleared only here, never before the payload write.
-        self.store
-            .clear_lifecycle_dirty(std::slice::from_ref(&artifact_id.to_string()))
-            .await?;
+        // A buried artifact comes back out of the graveyard or not at all —
+        // the rule `reactivate` has always followed, and this path did not.
+        // Reached straight from the Ops restore button and from
+        // `undo_promotion`, the ordinary path below published an *active,
+        // empty* artifact: its text was wiped and its point deleted, so the
+        // payload write landed on a point that is no longer there and left a
+        // row `reap_candidates` can never take back — it asks for
+        // `reaped_at IS NULL` — while `repair_lifecycle_drift` went on
+        // deleting the missing point once a pass, for ever.
+        if !self.exhume_locked(artifact_id, None).await? {
+            // Marked before either store is touched. This direction writes the
+            // payload first, so without it a crash between the two would leave
+            // drift no row write ever announced.
+            self.store.mark_lifecycle_dirty(artifact_id).await?;
+            self.vectors
+                .set_lifecycle(artifact_id, ArtifactStatus::Active, None)
+                .await?;
+            self.store.set_superseded_by(artifact_id, None).await?;
+            // Both stores agree now, so the marker the row write set has
+            // nothing left to describe. Cleared only here, never before the
+            // payload write.
+            self.store
+                .clear_lifecycle_dirty(std::slice::from_ref(&artifact_id.to_string()))
+                .await?;
+        }
         // A restore out of a merge is an operator overruling the merge for
         // this one source. Recorded on the lineage, or the sweep's
         // unfinished-merge repair re-hides it on the next tick, every tick.
@@ -1215,6 +1237,35 @@ impl Core {
         Ok(())
     }
 
+    /// Take a reaped artifact back out of the graveyard, entered with
+    /// `lifecycle_lock` already held. `false` where the artifact was not reaped
+    /// after all, or where the grave is already empty — the caller then carries
+    /// on down its ordinary path.
+    ///
+    /// Every restore has to come through here, because a burial wiped the text
+    /// *and* deleted the point: the ordinary path would publish an empty row
+    /// and write a payload onto a point that no longer exists. The text is
+    /// restored first, then the row is moved, then the point is rebuilt by
+    /// `Embed` — which writes the whole payload, status included, so there is no
+    /// `set_lifecycle` to make here and nothing for the drift repair to finish.
+    ///
+    /// `status` is the caller's to name. A reactivation means active; a restore
+    /// out of a supersession says nothing about deprecation and leaves whatever
+    /// status the row already carried. It is set before the `Embed` is queued,
+    /// so the payload that job writes is the one the caller decided on.
+    async fn exhume_locked(&self, id: &str, status: Option<ArtifactStatus>) -> Result<bool> {
+        if self.store.get_artifact(id).await?.reaped_at.is_none() || !self.store.exhume(id).await? {
+            return Ok(false);
+        }
+        if let Some(s) = status {
+            self.store.set_artifact_status(id, s).await?;
+        }
+        self.store.set_superseded_by(id, None).await?;
+        self.store.enqueue(Stage::Embed, "artifact", id).await?;
+        tracing::info!(artifact_id = id, "exhumed a reaped artifact");
+        Ok(true)
+    }
+
     /// Move an artifact back to active.
     ///
     /// An artifact that was hidden by a supersession is handed to
@@ -1235,22 +1286,9 @@ impl Core {
     pub async fn reactivate(&self, id: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let art = self.store.get_artifact(id).await?;
-        // A reaped artifact comes back from the graveyard or not at all: its
-        // text was wiped and its point deleted, so the ordinary path would
-        // publish an empty row and write a payload onto a point that no longer
-        // exists. The text is restored first, then the row is moved, then the
-        // point is rebuilt by `Embed` — which writes the whole payload, status
-        // included, so there is no `set_lifecycle` to make here and nothing for
-        // the drift repair to finish.
-        if art.reaped_at.is_some() && self.store.exhume(id).await? {
-            self.store
-                .set_artifact_status(id, ArtifactStatus::Active)
-                .await?;
-            self.store.set_superseded_by(id, None).await?;
-            self.store.enqueue(Stage::Embed, "artifact", id).await?;
+        if self.exhume_locked(id, Some(ArtifactStatus::Active)).await? {
             self.reopen_the_pairs_that_were_waiting_on(id).await;
             self.store.rearm_remind().await?;
-            tracing::info!(artifact_id = id, "exhumed a reaped artifact");
             return Ok(());
         }
         if art.superseded_by.is_some() {
@@ -1595,6 +1633,17 @@ impl Core {
         crate::core::moments::allow_intent(&mut meta, intent);
         self.store.set_corpus_metadata(corpus_id, &meta).await?;
         let windows = self.store.segments_for_corpus(corpus_id).await?;
+        // Nothing has read it yet — the concurrent-duplicate door arrives
+        // before the writer that won the race has split anything. The intent
+        // now stands on the corpus, and the judged read still to come is the
+        // one that sees it; there is no window here to re-read.
+        if windows.is_empty() {
+            tracing::info!(
+                corpus_id,
+                "the capture has not been read yet; the reminder rides on its first read"
+            );
+            return Ok(());
+        }
         if windows.len() != 1 {
             tracing::info!(
                 corpus_id,

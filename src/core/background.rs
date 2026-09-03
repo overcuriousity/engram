@@ -216,6 +216,20 @@ pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
             }
         }
     }
+    // And the one unit that is *not* periodic. `Stage::Remind` sleeps until the
+    // earliest owed moment and every write that can move that minimum re-arms
+    // it, so it is not in `periodic_units` and the loop above cannot reach it —
+    // which left the whole reminder ladder resting on those writes never
+    // failing. One `SQLITE_BUSY` in the re-arm after a `Remind` run disarmed it
+    // until some unrelated write happened to arm it again, and with two
+    // reminders pending the second pushed at no rung at all in between.
+    //
+    // Safe on every tick and not only after a failure: `rearm_remind` reads the
+    // earliest owed moment and disarms where there is none, `arm_at` refuses a
+    // unit that is already running, and a user with no channel is left disarmed.
+    if let Err(e) = core.store.rearm_remind().await {
+        tracing::warn!(error = %e, "could not re-arm the reminder unit");
+    }
 }
 
 /// How often the repair pass runs. A constant rather than a setting: this is

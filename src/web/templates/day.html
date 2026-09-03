@@ -32,9 +32,12 @@
 {% if !captured.is_empty() %}
 <h2 class="label">Captured</h2>
 {% for c in captured %}
-<p class="day-line"><span class="mono muted">{{ c.when }}</span> <a href="{{ c.href }}">{{ c.label }}</a>
+{# A `div` and not a `p`: the parser closes an open `p` at a `form`, which
+   dropped the button out of the flex row and left an empty paragraph behind
+   it. `.day-line` is `display: flex` and says nothing about the tag. #}
+<div class="day-line"><span class="mono muted">{{ c.when }}</span> <a href="{{ c.href }}">{{ c.label }}</a>
   <form method="post" action="/ui/corpora/{{ c.id }}/entry" class="inline"><input type="hidden" name="on" value="1">
-    <button class="btn btn-ghost btn-sm" type="submit">make it an entry</button></form></p>
+    <button class="btn btn-ghost btn-sm" type="submit">make it an entry</button></form></div>
 {% endfor %}
 {% endif %}
 {% if !was_due.is_empty() %}

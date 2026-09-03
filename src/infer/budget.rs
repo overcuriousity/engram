@@ -43,6 +43,51 @@ impl TokenCounter {
         }
     }
 
+    /// The longest leading (or trailing) run of whole characters that fits in
+    /// `limit` tokens, or `None` where not one character does.
+    ///
+    /// For the callers that have a token budget and no line to cut on: a
+    /// context block from a paste with no line breaks in it, and a neighbour's
+    /// text trimmed to its share. Both used to convert the budget with a
+    /// hardcoded chars-per-token ratio — 3.5, the estimator's — while this
+    /// counter is a real BPE tokenizer, so on Chinese or Russian they ran two
+    /// to four times over the reservation that had been subtracted for them
+    /// and the model's own limit truncated the answer instead.
+    ///
+    /// Binary search, so it costs about `log2` counts rather than one. The
+    /// upper bound is 8 characters per token, generous for every script the
+    /// tokenizer has a vocabulary for: it keeps each of those counts short on a
+    /// megabyte paste, and being an *upper* bound it can only leave the cut
+    /// slightly short, never over.
+    pub fn cut(&self, text: &str, limit: usize, from_start: bool) -> Option<String> {
+        if limit == 0 || text.is_empty() {
+            return None;
+        }
+        if self.count(text) <= limit {
+            return Some(text.to_string());
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let take = |n: usize| -> String {
+            if from_start {
+                chars[..n].iter().collect()
+            } else {
+                chars[chars.len() - n..].iter().collect()
+            }
+        };
+        let (mut lo, mut hi) = (0usize, chars.len().min(limit.saturating_mul(8)));
+        while lo < hi {
+            // Rounded up, so `mid` is always past `lo` and the loop cannot
+            // stall on a two-wide range.
+            let mid = hi - (hi - lo) / 2;
+            if self.count(&take(mid)) <= limit {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        (lo > 0).then(|| take(lo))
+    }
+
     /// Where a URL's one-time download lands: keyed by a hash of the URL so a
     /// changed link re-fetches, beside the store so it survives restarts.
     pub fn cache_path(cache_dir: &std::path::Path, url: &str) -> std::path::PathBuf {
@@ -305,6 +350,35 @@ pub fn pack_by_budget(items: &[String], counter: &TokenCounter, budget: usize) -
 mod tests {
     use super::*;
     use crate::infer::SynthesisBudget;
+
+    /// The defect `cut` replaced: 3.5 characters per token is the estimator's
+    /// ratio, and against a real tokenizer on a non-Latin script it let a
+    /// context block run several times over the reservation subtracted for it.
+    #[test]
+    fn cutting_holds_a_token_budget_on_a_script_the_ratio_does_not_describe() {
+        let real = TokenCounter::load(None, std::path::Path::new("/nonexistent-cache"));
+        let cn = "今天下午三点在办公室开会讨论季度预算和明年的招聘计划。".repeat(40);
+        for counter in [&real, &TokenCounter::default()] {
+            for from_start in [true, false] {
+                let got = counter.cut(&cn, 40, from_start).expect("something fits");
+                assert!(counter.count(&got) <= 40, "over the budget it was given");
+                assert!(!got.is_empty());
+                if from_start {
+                    assert!(cn.starts_with(&got));
+                } else {
+                    assert!(cn.ends_with(&got));
+                }
+            }
+        }
+        // The old arithmetic: 40 tokens read as 140 characters, which on this
+        // text is well over 40 tokens. The point of the change.
+        let naive: String = cn.chars().take(40 * 7 / 2).collect();
+        assert!(real.count(&naive) > 40);
+
+        assert_eq!(real.cut("short", 1_000, true).as_deref(), Some("short"));
+        assert_eq!(real.cut("anything", 0, true), None);
+        assert_eq!(real.cut("", 10, true), None);
+    }
 
     #[test]
     fn the_bundled_tokenizer_counts_and_differs_from_the_estimator() {

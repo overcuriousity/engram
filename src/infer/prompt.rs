@@ -2498,7 +2498,19 @@ pub fn parse_judged_response(body: &str) -> Result<crate::infer::SegmentReply> {
             // answers with the judgement alone. Held to `proposed_from`'s
             // floor that reply was thrown away as malformed, the reminder
             // with it, and the window retried the same call to exhaustion.
-            let artifacts = if env.artifacts.is_empty() && judgement.says_something() {
+            //
+            // "Nothing it is allowed to write" is asked of the *text*, not of
+            // the array. A small model reaching for that shape often answers
+            // with one blank placeholder artifact rather than an empty list,
+            // and against `is_empty()` that took the else branch, where
+            // `proposed_from` filters the empty text out and then errors on
+            // having nothing left — throwing away a good judgement and retrying
+            // the window to exhaustion. The system prompt's own tension makes
+            // the shape likely: "one or two sentences yields exactly one
+            // artifact" against "never write an artifact that describes the
+            // note's intent".
+            let nothing_to_write = env.artifacts.iter().all(|c| c.text.trim().is_empty());
+            let artifacts = if nothing_to_write && judgement.says_something() {
                 Vec::new()
             } else {
                 proposed_from(env.artifacts, true)?
@@ -3896,6 +3908,29 @@ mod tests {
         let j = r.judgement.expect("the judgement is the whole reply");
         assert_eq!(j.intent.as_deref(), Some("remind"));
         assert_eq!(j.when.as_deref(), Some("2026-09-05T13:45"));
+    }
+
+    #[test]
+    fn a_blank_placeholder_artifact_is_the_same_answer_as_an_empty_list() {
+        // The shape a small model reaches for instead of `[]`, pushed there by
+        // the system prompt's own tension: "one or two sentences yields exactly
+        // one artifact" against "never write an artifact that describes the
+        // note's intent". Held to `is_empty()` it took the else branch, where
+        // the blank text is filtered out and the floor then errors on having
+        // nothing left — the good judgement thrown away with it.
+        let body = r#"{"artifacts":[{"text":"   ","title":""}],
+            "moment":{"intent":"remind","when":"2026-09-05T13:45","rule":null},
+            "events":[],"links":[]}"#;
+        let r = parse_judged_response(body).unwrap();
+        assert!(r.artifacts.is_empty());
+        assert_eq!(
+            r.judgement.expect("kept").when.as_deref(),
+            Some("2026-09-05T13:45")
+        );
+        // And a blank placeholder with nothing beside it is still nothing.
+        let empty = r#"{"artifacts":[{"text":"  "}],"moment":{"intent":"none","when":null,"rule":null},
+            "events":[],"links":[]}"#;
+        assert!(parse_judged_response(empty).is_err());
     }
 
     #[test]

@@ -944,6 +944,22 @@
     if (el) el.hidden = !on;
   }
 
+  // The fourth region, at load. `workspace.html` renders `hidden` onto `#idle`,
+  // `#rail`, `#pane` and `#kind-row` from `idle_state` — but `html.typing` is
+  // set only by `hideIdle`, and `hideIdle` runs from a keystroke or a submit
+  // that a server-rendered page never fires. A deep-linked `/ui?q=…`, or the
+  // `ask_door` redirect when `[infer.ask]` is off, therefore opened with the
+  // three regions correct and the class missing: on a phone the capture box
+  // sat undocked, the example chips lay over the results, and `#vec-bg` stayed
+  // at 0.72 opacity behind the text until the first keystroke.
+  //
+  // Read off `#idle` rather than the box, so the browser agrees with the
+  // decision the server already made rather than making a second one.
+  function syncIdle() {
+    var idle = document.getElementById('idle');
+    if (idle) document.documentElement.classList.toggle('typing', idle.hidden);
+  }
+
   // The offer alone, and for exactly one case: the fetch that lands after the
   // keystroke that dismissed it. That card was never on screen, so counting it
   // as shown would put a population that structurally could not click into the
@@ -2221,6 +2237,7 @@
     // A second is the resolution of the last minute of a countdown, and the
     // work is a handful of rows: cheaper than the poll it replaces.
     setInterval(dueTick, 1000);
+    syncIdle();
     themeToggle();
     vectorBg();
     keyHint();

@@ -156,7 +156,19 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
             .await;
         permit.finished();
         match second {
-            Ok(second) => reply = second,
+            Ok(second) => {
+                // The retry was asked for over paraphrased *artifacts*; the
+                // judgement is a separate block and a missing one is not a
+                // retraction. `parse_judged` answers `judgement: None` for a
+                // reply it had to salvage or that arrived truncated, so
+                // replacing the whole reply threw away a JUDGE block the first
+                // call had already given — and with it the reminder a capture
+                // like "erinnere mich Freitag, /mnt/backup prüfen" was made
+                // for. The retry's own judgement still wins where it has one.
+                let first_judgement = reply.judgement.take();
+                reply = second;
+                reply.judgement = reply.judgement.take().or(first_judgement);
+            }
             // The first reply parsed; it merely paraphrased. Keeping it and
             // letting `flag_unverified` mark what went missing beats losing a
             // window we can already read.
@@ -491,9 +503,15 @@ async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::
         if h.payload.corpus_id == corpus_id {
             continue;
         }
-        // A conservative character cut against the per-neighbor budget; the
-        // fence overhead is already in `ContextBudget::total`.
-        let text: String = h.payload.text.chars().take(per * 3).collect();
+        // Cut against the per-neighbor budget with the counter the budget is
+        // written in; the fence overhead is already in `ContextBudget::total`.
+        // A character ratio here was the same defect as in `cut_chars`: on a
+        // script the estimator's 3.5 does not describe, the neighbours ran well
+        // over the share reserved for them.
+        let text = core
+            .counter
+            .cut(&h.payload.text, per, true)
+            .unwrap_or_default();
         out.push(crate::infer::Neighbor {
             id: h.payload.artifact_id,
             title: h.payload.title,

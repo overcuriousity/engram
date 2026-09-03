@@ -44,7 +44,7 @@ pub async fn run(core: &Core) -> Result<Report> {
         report.judged += 1;
         match judge_one(core, c).await {
             Ok(crate::infer::prompt::Reap::Worthless { reason }) => {
-                match reap_one(core, c, &reason).await {
+                match reap_one(core, c, &reason, min_age_secs(core)).await {
                     Ok(()) => {
                         report.reaped += 1;
                         tracing::info!(artifact_id = %c.id, reason, "reaped a retired artifact");
@@ -264,7 +264,12 @@ async fn rescue_one(
 /// point, which is exactly the drift the repair pass reads
 /// `lifecycle_dirty` to find; nothing else in the system would notice. Under
 /// `lifecycle_lock` so no restore lands between the copy and the wipe.
-async fn reap_one(core: &Core, c: &crate::store::artifacts::Chunk, reason: &str) -> Result<()> {
+async fn reap_one(
+    core: &Core,
+    c: &crate::store::artifacts::Chunk,
+    reason: &str,
+    min_age_secs: i64,
+) -> Result<()> {
     let meta = serde_json::json!({
         "reason": reason,
         "status": c.status.as_str(),
@@ -281,7 +286,7 @@ async fn reap_one(core: &Core, c: &crate::store::artifacts::Chunk, reason: &str)
     // `bury` sets `lifecycle_dirty` inside its own transaction, so from the
     // instant the text is wiped the drift repair can finish the delete below
     // if this process never gets to it.
-    core.store.bury(&c.id, &meta).await?;
+    core.store.bury(&c.id, &meta, min_age_secs).await?;
     core.vectors
         .delete_artifacts(std::slice::from_ref(&c.id))
         .await?;
@@ -318,12 +323,20 @@ const OVERFETCH: i64 = 4;
 /// The one rule left here is the one SQLite does not hold: the usage stamps
 /// live only on the vector point, and a candidate seen since it was retired is
 /// still earning its keep. See `OVERFETCH` for what that costs.
+/// How long out of `active` a row must have been before the sweep may look at
+/// it. One function because two reads share it: `nominees` asks the question
+/// and `reap_one` asks it again, at the instant it wipes, against the same
+/// number — a re-check under a different floor is not the same re-check.
+fn min_age_secs(core: &Core) -> i64 {
+    (core.reap.min_age_days as i64).saturating_mul(86_400)
+}
+
 async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u64)> {
     let stamped = core.store.stamp_unaged_retired().await?;
     if stamped > 0 {
         tracing::info!(stamped, "gave pre-column retirements a clock");
     }
-    let min_age_secs = (core.reap.min_age_days as i64).saturating_mul(86_400);
+    let min_age_secs = min_age_secs(core);
     let want = core.reap.max_judged_per_run as i64;
     let mut cands = core
         .store
@@ -665,6 +678,50 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "the marker must be cleared once the delete is acknowledged"
+        );
+    }
+
+    /// `reactivate` has always routed a reaped artifact through `exhume`;
+    /// `unsupersede` did not, and it is what the Ops restore button and
+    /// `undo_promotion` call. The ordinary path published an *active, empty*
+    /// artifact — text wiped, point deleted — that `reap_candidates` could
+    /// never take back, and whose absent point `repair_lifecycle_drift` went on
+    /// deleting once a pass.
+    #[tokio::test]
+    async fn restoring_a_buried_superseded_artifact_brings_its_text_back() {
+        let mut core = test_core().await;
+        core.reaper = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+            ]),
+        ));
+        let ids = seed(&core, &["the loser's own words", "the keeper"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        // Hidden in favour of the keeper, then reaped in that state.
+        core.supersede(&ids[0], &ids[1]).await.unwrap();
+        backdate_retired_at(&core, &ids[0], 400 * 86_400).await;
+        let report = run(&core).await.unwrap();
+        assert_eq!(report.reaped, 1);
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .text
+                .is_empty()
+        );
+
+        core.unsupersede(&ids[0]).await.unwrap();
+
+        let row = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert_eq!(row.text, "the loser's own words", "not an empty row");
+        assert!(row.reaped_at.is_none());
+        assert!(row.superseded_by.is_none());
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+        assert_eq!(
+            row.embed_state,
+            crate::store::artifacts::EmbedState::Pending,
+            "and a fresh point is queued for it"
         );
     }
 

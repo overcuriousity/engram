@@ -155,7 +155,10 @@
 <p class="muted">The model's reading of the photo, not the source itself.</p>
 {% endif %}
 {% if !promoted.is_empty() %}
-<p class="muted">
+{# A `div` and not a `p`: the parser closes an open `p` at a `form`, so each
+   undo button dropped out of the line and left an empty paragraph behind it.
+   `.para` gives back the margin the paragraph had. #}
+<div class="muted para">
   {# A window synthesis has read because its passages were read. Undo puts
      the verbatim text back in results and retires what was written. #}
   Promoted:
@@ -165,7 +168,7 @@
     <button class="btn btn-ghost btn-sm" type="submit">undo</button>
   </form>
   {% endfor %}
-</p>
+</div>
 {% endif %}
 {% include "_bands.html" %}
 {% endif %}

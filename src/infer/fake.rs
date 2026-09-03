@@ -1,6 +1,6 @@
 use super::{
-    Completer, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget,
-    Synthesizer,
+    Completer, Describer, Embedder, Judgement, ProposedArtifact, Reranker, SegmentInput,
+    SegmentReply, SynthesisBudget, Synthesizer,
 };
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -287,6 +287,69 @@ impl Synthesizer for ParaphrasingSynthesizer {
             pinned: false,
         }])
     }
+    fn budget(&self) -> SynthesisBudget {
+        FAKE_BUDGET
+    }
+}
+
+/// Paraphrases on the first judged call and answers with a judgement; keeps
+/// the literals on the retry and answers with none.
+///
+/// The exact shape the window's retry has to merge. `parse_judged_response`
+/// gives `judgement: None` for a reply it had to salvage or that arrived
+/// truncated, and the retry is asked for over paraphrased *artifacts* — never
+/// over the judgement — so a reply that fixes the literals and loses the JUDGE
+/// block is an ordinary outcome, not a retraction.
+pub struct JudgingParaphraser {
+    drop_token: String,
+    judgement: Judgement,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl JudgingParaphraser {
+    pub fn new(drop_token: &str, judgement: Judgement) -> Self {
+        Self {
+            drop_token: drop_token.to_string(),
+            judgement,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl Synthesizer for JudgingParaphraser {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        Ok(self.segment_judged(input).await?.artifacts)
+    }
+
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<SegmentReply> {
+        let first = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            == 0;
+        let text = if first {
+            input.core.replace(&self.drop_token, "")
+        } else {
+            input.core.to_string()
+        };
+        Ok(SegmentReply {
+            artifacts: vec![ProposedArtifact {
+                text,
+                title: Some("read".into()),
+                category: Some("reference".into()),
+                tags: vec![],
+                corpus_lines: None,
+                caveats: vec![],
+                pinned: false,
+            }],
+            judgement: first.then(|| self.judgement.clone()),
+        })
+    }
+
     fn budget(&self) -> SynthesisBudget {
         FAKE_BUDGET
     }

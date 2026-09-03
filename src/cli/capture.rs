@@ -402,28 +402,48 @@ struct Read {
 /// used to claim it anyway, failing the capture with the `File name too long`
 /// this heuristic was written to remove.
 ///
-/// It does not settle it, though. Directories with spaces in their names are
-/// ordinary — `~/Documents/My Notes/plan.pdf` — and a quoted one that misses
-/// was stored as a note whose whole text is the path somebody typed, exit 0,
-/// with nothing said. So the whitespace veto is lifted for an argument that
-/// both looks addressed and lands in a directory that is really there: the
-/// filesystem answers the question the shape cannot. Neither prose case above
-/// has a parent directory on disk — "siehe https:/example.com", "Zahlung 12" —
-/// and both stay the notes they are.
+/// It does not settle it, though, and the answer is in two parts.
+///
+/// An *absolute* argument is a path and nothing else. Prose does not begin at
+/// the root, and `~/` is the same statement typed for a shell that did not
+/// expand it — quoted, on purpose. `engram -c /no/such/file` is a miss worth
+/// reporting, not a note, however little of the path is really there. That also
+/// closes the case this heuristic left open: `~/Documents/My Notes/plan.pdf`,
+/// quoted with a typo in it, used to be stored as a note whose whole text was
+/// the path somebody typed, exit 0, with nothing said.
+///
+/// A *relative* one with a slash in it is the genuinely ambiguous shape, and
+/// the filesystem answers what the form cannot: it is a path exactly when its
+/// parent directory is really there. Neither prose case above has one — "siehe
+/// https:/example.com", "Zahlung 12" — and both stay the notes they are.
+/// Whitespace does not enter into it. Requiring it as proof of prose refused a
+/// whole class of ordinary short notes as missing files — `engram -c
+/// "TODO/urgent"` and `engram -c 24/12` exited 2 with "No such file or
+/// directory" — while the examples above survived only by having spaces in
+/// them. The price is `dir/file`, meant as a path, typed where `dir` is not:
+/// that is stored as a note, because nothing on disk contradicts it and
+/// nothing in the shape does either.
 fn looks_like_a_path(target: &str) -> bool {
-    let addressed = target.contains(std::path::MAIN_SEPARATOR)
-        || target.contains('/')
-        || target.starts_with('~');
-    if !target.chars().any(char::is_whitespace) {
-        return addressed
-            || std::path::Path::new(target)
+    let expanded = expand_home(target);
+    // Nobody's prose begins at the root. `~/` is the same statement typed for
+    // a shell that did not expand it, which is to say quoted on purpose.
+    if expanded.is_absolute() || target.starts_with("~/") {
+        return true;
+    }
+    // A lone word carrying an extension and naming no directory: `notes.pdf`,
+    // typed with the file somewhere else. Its parent is the working directory,
+    // which is always there, so the filesystem has nothing to add and the shape
+    // settles it on its own.
+    let addressed = target.contains(std::path::MAIN_SEPARATOR) || target.contains('/');
+    if !addressed {
+        return !target.chars().any(char::is_whitespace)
+            && std::path::Path::new(target)
                 .extension()
                 .is_some_and(|e| !e.is_empty());
     }
-    addressed
-        && expand_home(target)
-            .parent()
-            .is_some_and(|p| !p.as_os_str().is_empty() && p.is_dir())
+    expanded
+        .parent()
+        .is_some_and(|p| !p.as_os_str().is_empty() && p.is_dir())
 }
 
 /// A leading `~/` resolved, for the directory question above and nothing else:
@@ -581,6 +601,11 @@ mod tests {
             "erinnere mich",
             "siehe https://example.com/x für Details",
             "Zahlung 12/2026 überweisen",
+            // A relative slash whose directory is not there. Prose, and the
+            // shape a short note reaches for: `TODO/urgent`, `24/12`.
+            "TODO/urgent",
+            "24/12",
+            "dir/file",
         ] {
             assert!(!looks_like_a_path(prose), "{prose}");
         }
@@ -589,7 +614,10 @@ mod tests {
             "./missing",
             "/etc/hosts",
             "~/notes.md",
-            "dir/file",
+            // Absolute, and none of it on disk: still a path, still an error.
+            "/no/such/file/anywhere",
+            // Relative, and its directory is really there.
+            "src/main.rs",
         ] {
             assert!(looks_like_a_path(path), "{path}");
         }
