@@ -1309,7 +1309,21 @@ impl Core {
     pub async fn reactivate(&self, id: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let art = self.store.get_artifact(id).await?;
+        // A buried artifact that was *also* hidden by a supersession is both
+        // things at once, and the exhume answers only the first. Returning
+        // here skipped `unsupersede_locked`'s lineage mark, so a deprecated,
+        // merged and buried source restored from Insights came back active
+        // and was re-hidden by the unfinished-merge repair on the next sweep
+        // tick, and the one after that. `exhume_locked` has already cleared
+        // `superseded_by`, so the winner has to be read before it runs.
+        let winner = art.superseded_by.clone();
         if self.exhume_locked(id, Some(ArtifactStatus::Active)).await? {
+            if let Some(w) = winner
+                && let Ok(wc) = self.store.get_artifact(&w).await
+                && wc.provenance == crate::store::artifacts::Provenance::Merged
+            {
+                self.store.mark_source_restored(id).await?;
+            }
             self.reopen_the_pairs_that_were_waiting_on(id).await;
             self.store.rearm_remind().await?;
             return Ok(());
@@ -3719,6 +3733,98 @@ mod tests {
             core.store.open_due(0, i64::MAX).await.unwrap().len(),
             1,
             "and it is a reminder"
+        );
+    }
+
+    /// A restore out of a merge is an operator overruling the merge for this
+    /// one source, and the lineage has to record it or `merge::finish`'s
+    /// unfinished-merge repair re-hides the source on the next sweep tick, and
+    /// the one after that. `unsupersede_locked` records it; `reactivate`'s
+    /// exhume branch returned before ever reaching that code, so an artifact
+    /// that was deprecated *and* merged *and* buried — the shape the Insights
+    /// restore button reaches — came back and was hidden again immediately.
+    #[tokio::test]
+    async fn a_buried_merge_source_restored_from_insights_stays_restored() {
+        use crate::store::artifacts::{ArtifactStatus, NewMerged};
+        let core = test_core().await;
+        let out = core
+            .ingest("the roof gutters and what they cost", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let root = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.in_results())
+            .expect("a live artifact")
+            .id;
+        let merged = core
+            .store
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "the merged account of the gutters".into(),
+                    title: Some("gutters".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                std::slice::from_ref(&root),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.roots_to_hide(&merged.id).await.unwrap(),
+            vec![root.clone()],
+            "the merge may hide its source, to begin with"
+        );
+
+        // Hidden by the merge, then retired and buried.
+        core.store
+            .set_superseded_by(&root, Some(&merged.id))
+            .await
+            .unwrap();
+        core.store
+            .set_artifact_status(&root, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        // Old enough for the sweep, and the merge old enough not to be the
+        // "fresh merge" the age guard holds a root back for.
+        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 1_000)
+            .bind(&root)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE artifacts SET created_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 1_000)
+            .bind(&merged.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.store.bury(&root, "{}", 100).await.unwrap();
+        assert!(
+            core.store
+                .get_artifact(&root)
+                .await
+                .unwrap()
+                .reaped_at
+                .is_some(),
+            "the fixture must actually be buried"
+        );
+
+        core.reactivate(&root).await.unwrap();
+        let back = core.store.get_artifact(&root).await.unwrap();
+        assert!(back.reaped_at.is_none() && back.superseded_by.is_none());
+        assert!(
+            core.store
+                .roots_to_hide(&merged.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "and the repair may never hide it again"
         );
     }
 

@@ -581,8 +581,15 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                     .ok_or_else(|| format!("INTERVAL must be between 1 and {MAX_INTERVAL}"))?
             }
             "BYDAY" => {
+                // Deduped, which is also what bounds it. `INTERVAL` is capped
+                // at `MAX_INTERVAL` precisely because `next_after` walks the
+                // calendar a day at a time, and `BYDAY` is read on every one
+                // of those days — an eight-megabyte `BYDAY=MO,MO,MO,…` was
+                // parsed whole and then scanned once per step, which blocks a
+                // tokio worker for seconds every time the row is read. Seven
+                // weekdays exist; a list naming one twice means it once.
                 for d in v.split(',') {
-                    r.by_day.push(match d {
+                    let day = match d {
                         "MO" => Weekday::Mon,
                         "TU" => Weekday::Tue,
                         "WE" => Weekday::Wed,
@@ -593,7 +600,10 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                         other => {
                             return Err(format!("BYDAY={other}: weekday codes only, no ordinals"));
                         }
-                    });
+                    };
+                    if !r.by_day.contains(&day) {
+                        r.by_day.push(day);
+                    }
                 }
             }
             "BYMONTHDAY" => {
@@ -859,19 +869,42 @@ impl crate::core::Core {
                     })
                     .await?;
             }
-            self.store.rearm_remind().await?;
+            // Warn and carry on, as every other `rearm_remind` on this path
+            // does. The one-shot `mark_done` above has already committed: a
+            // transient SQLITE_BUSY here reported the completion as *failed*,
+            // the retirement below never ran for this moment again, and the
+            // retry the failure invited answered "nothing to finish".
+            if let Err(e) = self.store.rearm_remind().await {
+                tracing::warn!(error = %e, moment_id = id, "could not re-arm Remind after a completion");
+            }
             // Last, and only after the recurrence above has armed the next
             // occurrence: "no open reminder remains" is a question about the
             // state this call leaves behind, not the one it found.
-            if let Some(cid) = self.store.corpus_of_moment(id).await?
-                && !self.store.has_open_reminder_for_corpus(&cid).await?
-                && self.store.corpus_was_read_as_reminder(&cid).await?
-            {
-                self.store.retire_corpus(&cid, now).await?;
+            // Best-effort for the same reason as the re-arm above: the row is
+            // already done, and failing the call here is the one outcome that
+            // guarantees this never runs again.
+            if let Err(e) = self.retire_the_note_if_nothing_is_owed_on_it(id, now).await {
+                tracing::warn!(error = %e, moment_id = id, "could not retire the note behind a completed reminder");
             }
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// The retirement half of a completion, lifted out so `complete_moment`
+    /// can run it best-effort.
+    async fn retire_the_note_if_nothing_is_owed_on_it(
+        &self,
+        moment_id: &str,
+        now: i64,
+    ) -> crate::error::Result<()> {
+        if let Some(cid) = self.store.corpus_of_moment(moment_id).await?
+            && !self.store.has_open_reminder_for_corpus(&cid).await?
+            && self.store.corpus_was_read_as_reminder(&cid).await?
+        {
+            self.store.retire_corpus(&cid, now).await?;
+        }
+        Ok(())
     }
 
     /// The exact inverse of `complete_moment`, and the only way to undo one.
@@ -1279,6 +1312,36 @@ mod tests {
             .timestamp();
         assert_eq!(
             local(next_after("FREQ=WEEKLY;BYDAY=MO,WE", mon, berlin()).unwrap()),
+            "2026-09-02 09:00"
+        );
+    }
+
+    /// `INTERVAL` is capped because `next_after` walks the calendar a day at
+    /// a time, and `BYDAY` is read on every one of those days — so an
+    /// unbounded, un-deduped list was the same denial of service one field
+    /// over: a megabytes-long `BYDAY=MO,MO,MO,…` was parsed whole and then
+    /// scanned once per step, blocking a worker every time the row was read.
+    /// Seven weekdays exist; naming one twice means it once.
+    #[test]
+    fn a_byday_list_is_bounded_by_the_days_that_exist() {
+        assert_eq!(
+            parse_rule("FREQ=WEEKLY;BYDAY=MO,MO,MO,TU,MO")
+                .unwrap()
+                .by_day,
+            vec![Weekday::Mon, Weekday::Tue]
+        );
+        let huge = format!(
+            "FREQ=MONTHLY;INTERVAL=100;BYDAY={}",
+            "MO,".repeat(50_000) + "MO"
+        );
+        assert_eq!(parse_rule(&huge).unwrap().by_day, vec![Weekday::Mon]);
+        // And the meaning is untouched: order of first mention is kept.
+        let mon = berlin()
+            .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            local(next_after("FREQ=WEEKLY;BYDAY=MO,WE,MO,WE", mon, berlin()).unwrap()),
             "2026-09-02 09:00"
         );
     }

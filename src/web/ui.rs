@@ -2830,7 +2830,11 @@ async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> Result<Re
         )
         .into_response());
     };
+    // `Policy::none()`, for the reason `jobs::remind::http_client` gives at
+    // length: this button's answer is two-valued and server-side, so a
+    // followed redirect turns it into a loopback port oracle.
     let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| Error::Internal(e.to_string()))?;
@@ -5017,7 +5021,7 @@ mod tests {
     fn the_idle_column_is_hidden_and_the_band_re_fetched_never_removed() {
         let js = include_str!("../../assets/app.js");
         assert!(
-            js.contains("function showIdle()"),
+            js.contains("function showIdle(force)"),
             "nothing brings the column back"
         );
         assert!(

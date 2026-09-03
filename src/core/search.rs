@@ -1649,6 +1649,18 @@ impl Core {
             note_reorder(&mut results, &before, |e| &mut e.prime);
         }
 
+        // Before the capture below, not after the truncate: the recorded
+        // `rank` is the enumerate index of this very list, and sinking the
+        // retired hits afterwards meant the judge and the tuning pipeline were
+        // trained on an ordering no searcher ever saw. Scoped to the window
+        // the caller will actually be handed, so what the truncate keeps and
+        // what a person reads are unchanged — a retired hit outside `limit`
+        // was already going to be dropped, and the sink has nothing to say
+        // about it.
+
+        let visible = limit.min(results.len());
+        sink_retired_and_mark_the_cliff(&mut results[..visible], reranked);
+
         // Recorded here, where the list is still wider than the answer and the
         // ordering is final. Off the request path via `Background`, like
         // `mark_seen` below it: a search must not get slower, or fail, because
@@ -1739,10 +1751,6 @@ impl Core {
                     .is_some_and(|e| matches!(e.cap, crate::core::explain::CapEffect::Refilled))
             })
             .count();
-        // On the list the caller will see, in its final order: after priming,
-        // after the truncate, and before association appends hits that never
-        // competed for a place.
-        sink_retired_and_mark_the_cliff(&mut results, reranked);
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
@@ -1978,6 +1986,52 @@ mod tests {
             "demoted to the tail, so `ask` still truncates a tail"
         );
         assert!(after.iter().position(|r| r.corpus_id == cid).unwrap() >= pos);
+    }
+
+    /// The recorded `rank` is the enumerate index of the list the searcher saw,
+    /// so the retired sink has to happen before the capture. It used to run
+    /// after, and the judge and the tuning pipeline were then trained on an
+    /// ordering nobody was ever shown: a retired hit recorded at rank 1 and
+    /// read at the tail.
+    #[tokio::test]
+    async fn the_recorded_ranks_are_the_order_the_searcher_was_handed() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(
+            &core,
+            &[
+                ("the invoice for august", "admin", &[]),
+                ("invoice terms and conditions", "admin", &[]),
+                ("invoice numbering scheme", "admin", &[]),
+            ],
+        )
+        .await;
+        let cid = seed_from(
+            &core,
+            "reminder",
+            &[("remind me friday to send the invoice", "admin", &[])],
+        )
+        .await;
+        core.store.retire_corpus(&cid, now_secs()).await.unwrap();
+
+        // `Door::Ui` captures inline, so the row is there when the search
+        // returns rather than whenever a background task lands.
+        let got = core.search(&q("invoice"), Door::Ui).await.unwrap();
+        assert!(
+            got.iter().any(|r| r.retired),
+            "the fixture must actually put a retired hit in the list"
+        );
+        let recorded: Vec<String> =
+            sqlx::query_scalar("SELECT artifact_id FROM search_candidates ORDER BY event_id, rank")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        let shown: Vec<String> = got.iter().map(|r| r.artifact_id.clone()).collect();
+        assert_eq!(
+            recorded[..shown.len()],
+            shown[..],
+            "the ranking that was trained on is the ranking that was read"
+        );
     }
 
     #[tokio::test]

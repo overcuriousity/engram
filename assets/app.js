@@ -1170,11 +1170,17 @@
   // one hid `#pane` and `#rail` mid-stream, taking the answer and the "back to
   // results" anchor with them. `show` is the only writer of those flags, so
   // nothing brought them back until another keystroke or a reload.
-  function paneIsBusy() {
+  // An ask actually in flight: the submit is out, or tokens are still
+  // arriving. Nothing may take the pane away from this, whatever asked.
+  function paneIsAsking() {
     var form = document.getElementById('box-form');
     if (form && form.classList.contains('asking')) return true;
     var live = document.getElementById('ask-live');
-    if (live && !live.hidden && live.textContent.trim()) return true;
+    return !!(live && !live.hidden && live.textContent.trim());
+  }
+
+  function paneIsBusy() {
+    if (paneIsAsking()) return true;
     var result = document.getElementById('ask-result');
     return !!(result && result.textContent.trim());
   }
@@ -1184,11 +1190,18 @@
   // a capture that armed something, and what it holds is a minute old.
   //
   // Except where the pane is mid-answer: see `paneIsBusy`.
-  function showIdle() {
+  //
+  // `force` is for the one caller that is a statement rather than a side
+  // effect: a capture that has just landed and emptied the box. Without it
+  // `paneIsBusy` stayed true for the rest of the session once `#ask-result`
+  // held anything, so after any completed Ask a captured reminder left
+  // `#idle` — and the due band inside it — hidden until a full reload. An ask
+  // still in flight is never overruled; only an answer left standing is.
+  function showIdle(force) {
     // Before the class, not after: `html.typing` says an intent is expressed,
     // and an answer standing in the pane is one whether or not the box that
     // asked for it still holds the question.
-    if (paneIsBusy()) return;
+    if (paneIsAsking() || (!force && paneIsBusy())) return;
     document.documentElement.classList.remove('typing');
     var idle = document.getElementById('idle');
     if (idle) idle.hidden = false;
@@ -1932,7 +1945,7 @@
       // this is the moment a reminder captured a second ago wants to appear.
       // The band's own polling covers the gap between here and the background
       // job that reads the intent out of the note.
-      showIdle();
+      showIdle(true);
     }
 
     // Hands back its promise: the press that carries a file too runs the two

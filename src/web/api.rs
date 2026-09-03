@@ -1906,6 +1906,19 @@ async fn moment_snooze(
                 .into(),
         ));
     }
+    // And a reminder with no date has nothing to be put aside until. It is
+    // the band's question "when?", which `open_due` lists whatever any snooze
+    // says — so the 204 this used to answer drew "Snoozed — undo" over a row
+    // that went on standing directly underneath it. Named here rather than
+    // left to `snooze`'s `false`, which spells "no such row".
+    if let Some(m) = tenant.core.store.moment(&id).await?
+        && m.at.is_none()
+    {
+        return Err(Error::Validation(
+            "this reminder has no date, so there is nothing to put it aside until;              set a date first"
+                .into(),
+        ));
+    }
     if !tenant.core.store.snooze(&id, b.until).await? {
         return Err(Error::NotFound);
     }

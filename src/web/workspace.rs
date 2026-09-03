@@ -1851,10 +1851,12 @@ mod tests {
     fn emptying_the_box_does_not_take_away_an_answer_being_written() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
         let js = String::from_utf8(js.data.into_owned()).unwrap();
-        let body = &js[js.find("function showIdle()").expect("the idle transition")..];
+        let body = &js[js
+            .find("function showIdle(force)")
+            .expect("the idle transition")..];
         let body = &body[..body.find("function show(").expect("it ends")];
         assert!(
-            body.contains("if (paneIsBusy()) return;"),
+            body.contains("if (paneIsAsking() || (!force && paneIsBusy())) return;"),
             "the idle transition asks what the pane is doing first: {body}"
         );
         assert!(
@@ -1862,6 +1864,36 @@ mod tests {
                 && js.contains("classList.contains('asking')")
                 && js.contains("getElementById('ask-result')"),
             "and an ask in flight or an answer standing both count"
+        );
+    }
+
+    /// And the one caller that *is* a statement. A capture empties the box
+    /// itself, and the column it leaves is where the due band lives — so an
+    /// answer standing in the pane from an earlier Ask must not keep the band
+    /// hidden. `paneIsBusy` stayed true for the rest of the session once
+    /// `#ask-result` held anything, and a reminder captured after any
+    /// completed Ask appeared only after a full reload.
+    #[test]
+    fn a_capture_brings_the_column_back_over_an_answer_that_is_finished() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        let refresh = &js[js
+            .find("function refreshRail()")
+            .expect("the capture's rail refresh")..];
+        let refresh = &refresh[..refresh.find('}').expect("it ends")];
+        assert!(
+            refresh.contains("showIdle(true)"),
+            "the capture overrules a finished answer: {refresh}"
+        );
+        // But never an ask still arriving: `force` skips only the standing
+        // answer, and `paneIsAsking` is checked ahead of it.
+        let body = &js[js
+            .find("function showIdle(force)")
+            .expect("the idle transition")..];
+        let body = &body[..body.find("function show(").expect("it ends")];
+        assert!(
+            body.contains("paneIsAsking() ||"),
+            "an ask in flight is not overruled by anything: {body}"
         );
     }
 

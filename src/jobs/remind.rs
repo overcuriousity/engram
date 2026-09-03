@@ -171,9 +171,14 @@ pub const BODY_LINES: usize = 8;
 /// the ladder is a buzz in a pocket and twenty of them at once is twenty
 /// reasons to turn the channel off.
 pub fn compose(rows: &[crate::store::moments::DueRow], now: i64) -> (String, String) {
+    // `snoozed_until` first, everywhere: the whole ladder is keyed on the
+    // effective time, and reading `at` here meant a reminder due at 09:00 and
+    // put aside until 15:00 pushed at 15:00 saying "6 hours ago" — the band,
+    // reading the same row the other way, said "now".
+    let eff = |m: &crate::store::moments::Moment| m.snoozed_until.or(m.at).unwrap_or(now);
     if let [row] = rows {
         let when = crate::web::due::when_words(
-            row.moment.at.unwrap_or(now),
+            eff(&row.moment),
             now,
             crate::core::moments::zone(Some(&row.moment.tz)),
         );
@@ -184,7 +189,7 @@ pub fn compose(rows: &[crate::store::moments::DueRow], now: i64) -> (String, Str
         .take(BODY_LINES)
         .map(|row| {
             let when = crate::web::due::due_words(
-                row.moment.at.unwrap_or(now),
+                eff(&row.moment),
                 now,
                 crate::core::moments::zone(Some(&row.moment.tz)),
             );
@@ -225,8 +230,19 @@ async fn deliver(
     Ok(())
 }
 
+/// The one client every push goes out on.
+///
+/// `Policy::none()`, because the endpoint is a URL the user saved and
+/// `points_inward` vets it once, at save time. reqwest's default follows up
+/// to ten redirects, and it re-checks nothing: an allowed host answering 302
+/// with `Location: http://127.0.0.1:<port>` puts the request on the server's
+/// own loopback, and the Settings test button's two-way "Sent." / "Could not
+/// send." answer then reads back as a port scan needing no DNS control at
+/// all. A push endpoint that redirects is a push endpoint that is
+/// misconfigured; refusing to follow costs nothing real.
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| crate::error::Error::Internal(e.to_string()))
@@ -341,6 +357,109 @@ mod tests {
             .unwrap();
         core.store.rearm_remind().await.unwrap();
         id
+    }
+
+    /// A `DueRow` built by hand, so `compose` can be read on its own.
+    fn row(at: Option<i64>, snoozed_until: Option<i64>) -> crate::store::moments::DueRow {
+        crate::store::moments::DueRow {
+            moment: crate::store::moments::Moment {
+                id: "m1".into(),
+                artifact_id: "a1".into(),
+                kind: Kind::Due,
+                at,
+                tz: "UTC".into(),
+                rule: None,
+                source: Source::Set,
+                span: None,
+                done_at: None,
+                snoozed_until,
+                notified_at: None,
+                moved_from: None,
+                moved_at: None,
+                series_id: None,
+                origin_corpus_id: None,
+                until: None,
+                created_at: 0,
+            },
+            title: "Send the invoice".into(),
+            opening: "Send the invoice".into(),
+        }
+    }
+
+    /// The whole ladder is keyed on `snoozed_until.or(at)`, and so is the
+    /// band. The message was not: a reminder due at 09:00 and put aside until
+    /// 15:00 pushed at 15:00 saying "6 hours ago" — about an instant the
+    /// person had already moved away from — while the row it came from said
+    /// "now".
+    #[test]
+    fn a_snoozed_reminder_is_described_by_the_time_it_was_put_aside_until() {
+        let due = 1_600_000_000;
+        let snoozed = due + 6 * 3_600;
+        let (_, body) = compose(&[row(Some(due), Some(snoozed))], snoozed);
+        let (_, unsnoozed) = compose(&[row(Some(snoozed), None)], snoozed);
+        assert_eq!(
+            body, unsnoozed,
+            "a row put aside until now reads exactly like one due now: {body}"
+        );
+        assert!(
+            !body.contains("ago"),
+            "and never counts from the instant it was moved off: {body}"
+        );
+        // The collapsed form reads the same clock.
+        let (_, many) = compose(
+            &[row(Some(due), Some(snoozed)), row(Some(due), Some(snoozed))],
+            snoozed,
+        );
+        let (_, many_unsnoozed) = compose(
+            &[row(Some(snoozed), None), row(Some(snoozed), None)],
+            snoozed,
+        );
+        assert_eq!(many, many_unsnoozed);
+    }
+
+    /// The endpoint is a URL the user saved and `points_inward` vets it once,
+    /// at save time. reqwest's default follows up to ten redirects and
+    /// re-checks nothing — so an allowed host answering 302 with
+    /// `Location: http://127.0.0.1:<port>` put the request on the server's own
+    /// loopback, and the Settings test button's two-valued "Sent." / "Could
+    /// not send." answer read back as a port scan needing no DNS control at
+    /// all.
+    #[tokio::test]
+    async fn a_push_endpoint_that_redirects_is_not_followed() {
+        let inward = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&inward)
+            .await;
+
+        let allowed = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(302).insert_header("location", inward.uri()),
+            )
+            .expect(1)
+            .mount(&allowed)
+            .await;
+
+        let http = http_client().unwrap();
+        let err = push(
+            &http,
+            &Target::UnifiedPush {
+                endpoint: allowed.uri(),
+            },
+            "engram",
+            "A test from Settings.",
+        )
+        .await
+        .expect_err("a redirect is a misconfigured endpoint, not a hop to take");
+        assert!(
+            err.to_string().contains("302"),
+            "and it is reported as the status it is: {err}"
+        );
+        // Explicit: `expect(0)` above is checked on drop, and this says so
+        // where a reader is looking.
+        drop(inward);
     }
 
     /// The pending Remind row's wake time, or none when nothing is armed.

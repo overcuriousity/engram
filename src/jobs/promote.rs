@@ -298,16 +298,26 @@ pub async fn supersede_covered(
     for (p, a) in &pairs {
         by_winner.entry(a).or_default().push(p);
     }
-    let all_superseded: std::collections::HashSet<&str> = pairs.iter().map(|(p, _)| *p).collect();
     let mut n = 0;
+
+    // Every supersession first, across every winner, and only then what they
+    // earned. `supersede` refuses a side an operator has deprecated in the
+    // meantime, and `try_supersede` warns and carries on rather than failing
+    // the sweep — so carrying the engagement and the links up front meant a
+    // refusal left both artifacts active, the winner holding the passage's
+    // engagement twice over and the passage stripped of the links it still
+    // needed. Nothing moves off a passage that is still standing.
+    //
+    // And the pass is whole rather than per-winner because `all_superseded`
+    // below has to be the passages that actually went dark. Built from the
+    // candidate `pairs`, it named refused ones too, and a link to a *still
+    // live* sibling passage was then dropped as "about to go dark": carried
+    // nowhere, and gone from the loser's end when the loser was superseded.
+    // Per-winner it would still be wrong in one direction, because a passage
+    // a later winner is refused for is live while an earlier winner's links
+    // are being carried.
+    let mut won: Vec<(&str, Vec<String>)> = Vec::new();
     for (winner, losers) in by_winner {
-        // The supersession first, and what it earned afterwards. `supersede`
-        // refuses a side an operator has deprecated in the meantime, and
-        // `try_supersede` warns and carries on rather than failing the sweep —
-        // so carrying the engagement and the links up front meant a refusal
-        // left both artifacts active, the winner holding the passage's
-        // engagement twice over and the passage stripped of the links it still
-        // needed. Nothing moves off a passage that is still standing.
         let mut ids: Vec<String> = Vec::new();
         for loser in &losers {
             if crate::jobs::try_supersede(core, loser, winner, "a passage its promotion covers")
@@ -317,9 +327,18 @@ pub async fn supersede_covered(
                 ids.push((*loser).to_string());
             }
         }
-        if ids.is_empty() {
-            continue;
+        if !ids.is_empty() {
+            won.push((winner, ids));
         }
+    }
+
+    let all_superseded: std::collections::HashSet<&str> = won
+        .iter()
+        .flat_map(|(_, ids)| ids.iter().map(String::as_str))
+        .collect();
+
+    for (winner, ids) in &won {
+        let winner = *winner;
         // What moves is the engagement the passages *earned*, never the raw
         // stored sum. Activation is a capture baseline plus use, and the
         // baseline is anchored to each artifact's own `created_at`: the winner
@@ -331,7 +350,7 @@ pub async fn supersede_covered(
         // below the line: 0.5 earned carried ~0.6, lost the `max` to the
         // winner's own 1.0, and the artifact that was supposed to inherit the
         // access came out at zero.
-        let act = core.store.activation_of(&ids).await?;
+        let act = core.store.activation_of(ids).await?;
         let carried = act
             .values()
             .map(|(v, s, c)| crate::store::links::engagement_at(*v, *s, *c, at, half_life))
@@ -354,7 +373,7 @@ pub async fn supersede_covered(
                     .await?;
             }
         }
-        for loser in &ids {
+        for loser in ids {
             for link in core.store.links_touching(loser).await? {
                 let other = if link.a_id == *loser {
                     &link.b_id
@@ -982,6 +1001,58 @@ mod tests {
             .await
             .unwrap();
         assert!(from_passage.is_empty());
+    }
+
+    /// `all_superseded` is what actually went dark, not what was nominated.
+    /// Built from the candidate pairs, it named passages `try_supersede`
+    /// *refused* too — and a link to one of those, a passage still standing
+    /// and still reachable, was dropped as "about to go dark": carried
+    /// nowhere, and gone from the loser's end the moment the loser was hidden.
+    #[tokio::test]
+    async fn a_link_to_a_sibling_the_supersession_was_refused_for_is_still_carried() {
+        let (core, corpus, passages, mut written) = promoted_fixture().await;
+        // B covers passage 3 outright rather than by half, so it is a
+        // candidate pair like the others. `supersede_covered` reads the span
+        // off what it is handed.
+        written[1].corpus_span = Some(sp(5, 6));
+        // Passage 2 goes dark under A; passage 3 is linked to it and will not.
+        core.store
+            .bump_links(
+                &[(passages[1].id.as_str(), passages[2].id.as_str())],
+                2.0,
+                Some("siblings"),
+                14.0,
+                1_000,
+            )
+            .await
+            .unwrap();
+        // An operator deprecates B in the meantime. `supersede` refuses a
+        // deprecated *winner* — the loser would be hidden in favour of an
+        // artifact that is itself out of results — so passage 3 stays.
+        core.deprecate(&written[1].id).await.unwrap();
+
+        let n = supersede_covered(&core, &corpus, 0, &written, 2_000)
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "A's two passages went dark and B's did not");
+        assert_eq!(
+            core.store
+                .get_artifact(&passages[2].id)
+                .await
+                .unwrap()
+                .superseded_by,
+            None,
+            "the passage B was refused for is still standing"
+        );
+        assert!(
+            core.store
+                .links_touching(&written[0].id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|l| l.a_id == passages[2].id || l.b_id == passages[2].id),
+            "so the link to it belongs on the artifact that took its sibling's place"
+        );
     }
 
     #[tokio::test]

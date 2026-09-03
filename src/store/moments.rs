@@ -772,9 +772,18 @@ impl Store {
     /// onto the replacement artifact was then listed twice on the day page —
     /// once against the row a reader can open and once against the retired one
     /// behind it.
+    ///
+    /// Done rows are the exception, and they have to be: `carry_moments` moves
+    /// only *open* rows, so a reminder that was completed and whose artifact
+    /// was later superseded by an ordinary promotion had nothing left to
+    /// stand on. The status filter alone took its "was due / done" line off
+    /// the day page for good — which is the one thing a day page exists to
+    /// keep. A done row beside a live one reads as two lines in two different
+    /// states, not as the duplicate the filter was added for.
     pub async fn moments_between(&self, from: i64, to: i64) -> Result<Vec<DueRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{JOINED} WHERE a.status = 'active' AND m.at >= ? AND m.at < ? ORDER BY m.at"
+            "{JOINED} WHERE (a.status = 'active' OR m.done_at IS NOT NULL) \
+               AND m.at >= ? AND m.at < ? ORDER BY m.at"
         )))
         .bind(from)
         .bind(to)
@@ -893,9 +902,20 @@ impl Store {
     /// only where something was. An id that names nothing — a stale button on
     /// a page open since before a re-read replaced the row — reported the
     /// snooze and offered the undo for it either way.
+    /// `at IS NOT NULL`, because there is nothing to put aside. An undated
+    /// reminder is the band's question "when?", and `open_due` lists it
+    /// unconditionally — the `m.at IS NULL` branch short-circuits the snooze
+    /// predicate, and it has to, or a row asking for a date could be hidden
+    /// away from the only field that supplies one. So a snooze accepted here
+    /// was a snooze that hid nothing: the API answered 204, the band drew
+    /// "Snoozed — undo", and the row went on standing directly underneath it
+    /// for ever. The band never offered the control on such a row; only the
+    /// API door reached it.
     pub async fn snooze(&self, id: &str, until: i64) -> Result<bool> {
         Ok(
-            sqlx::query("UPDATE moments SET snoozed_until = ? WHERE id = ? AND done_at IS NULL")
+            sqlx::query(
+                "UPDATE moments SET snoozed_until = ?                  WHERE id = ? AND done_at IS NULL AND at IS NOT NULL",
+            )
                 .bind(until)
                 .bind(id)
                 .execute(&self.pool)
@@ -1101,6 +1121,123 @@ mod tests {
             .await
             .unwrap();
         made[0].id.clone()
+    }
+
+    /// A done reminder belongs to the day it was due, whatever later became of
+    /// the artifact it hung off. `carry_moments` moves only *open* rows, so an
+    /// ordinary promotion superseding the artifact underneath a completed
+    /// reminder left that row with nothing active to stand on — and the status
+    /// filter, added to stop one reminder being listed twice, took its "was
+    /// due / done" line off the day page for good.
+    #[tokio::test]
+    async fn a_completed_reminder_keeps_its_day_after_its_artifact_is_superseded() {
+        let (s, aid) = store_with_artifact().await;
+        let id = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(1_000),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(s.mark_done(&id, 1_100).await.unwrap());
+
+        let winner = other_artifact(&s, "the passage that replaced it").await;
+        s.set_superseded_by(&aid, Some(&winner)).await.unwrap();
+        s.set_artifact_status(&aid, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        let rows = s.moments_between(0, 2_000).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.moment.id == id),
+            "the day it was due still says it happened"
+        );
+        // And the filter still does its own job: an *open* row on a retired
+        // artifact is not on any band and has no business on the day page.
+        let open = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(1_500),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        let rows = s.moments_between(0, 2_000).await.unwrap();
+        assert!(
+            !rows.iter().any(|r| r.moment.id == open),
+            "and an open row behind a supersession is still filtered out"
+        );
+    }
+
+    /// There is nothing to put an undated reminder aside *until*: it is the
+    /// band's question "when?", and `open_due` lists it whatever any snooze
+    /// says. A snooze accepted on one hid nothing at all — the API answered
+    /// 204, the band drew "Snoozed — undo", and the row went on standing
+    /// directly underneath it.
+    #[tokio::test]
+    async fn a_reminder_with_no_date_cannot_be_put_aside() {
+        let (s, aid) = store_with_artifact().await;
+        let undated = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: None,
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            !s.snooze(&undated, 10_000).await.unwrap(),
+            "nothing moved, and the caller is told so"
+        );
+        assert!(
+            s.moment(&undated)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until
+                .is_none(),
+            "and no snooze was written"
+        );
+        assert!(
+            s.open_due(1_000, 5_000)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.moment.id == undated),
+            "the row is where it always was"
+        );
+
+        // A dated row is untouched by the guard.
+        let dated = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid,
+                kind: Kind::Due,
+                at: Some(2_000),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(s.snooze(&dated, 10_000).await.unwrap());
     }
 
     /// `carry_moments` moves the *open* row of a recurrence to the winner and

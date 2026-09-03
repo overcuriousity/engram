@@ -1554,12 +1554,21 @@ impl Store {
     /// resolves to the *inner* copy — which made the comparison trivially true
     /// and every open reminder anywhere in the base hold back every candidate
     /// in it.
+    ///
+    /// And the moment's note is `COALESCE(m.origin_corpus_id, live.corpus_id)`,
+    /// the expression `has_open_reminder_for_corpus` asks the same question
+    /// through. Reading `live.corpus_id` alone was the same drift this doc
+    /// comment warns about, one column over: a merge carries an open moment
+    /// onto a merged artifact, whose `corpus_id` is NULL, so the comparison
+    /// answered NULL, the guard passed, and reap wiped the text a reminder
+    /// still being pushed had been read out of.
     const REAPABLE: &str = "(art.status != 'active' OR art.superseded_by IS NOT NULL)
                 AND art.reaped_at IS NULL
                 AND art.retired_at IS NOT NULL AND art.retired_at < ?
                 AND NOT EXISTS (SELECT 1 FROM moments m
                                  JOIN artifacts live ON live.id = m.artifact_id
-                                WHERE live.corpus_id = art.corpus_id
+                                WHERE COALESCE(m.origin_corpus_id, live.corpus_id)
+                                        = art.corpus_id
                                   AND live.status = 'active'
                                   AND m.kind = 'due' AND m.done_at IS NULL)
                 AND art.id NOT IN (
@@ -2940,6 +2949,82 @@ mod tests {
             ids, want,
             "the old retirements, the note with a live reminder aside"
         );
+    }
+
+    /// The reminder guard asks `has_open_reminder_for_corpus`' question in
+    /// SQL, so it has to ask it the same way: the moment's note is
+    /// `COALESCE(m.origin_corpus_id, live.corpus_id)`. Reading `live.corpus_id`
+    /// alone meant a merge — which carries an open moment onto a merged
+    /// artifact, whose `corpus_id` is NULL — made the comparison answer NULL,
+    /// the guard pass, and reap wipe the text a reminder still being pushed
+    /// had been read out of.
+    #[tokio::test]
+    async fn a_reminder_carried_onto_a_merged_artifact_still_holds_its_note_back() {
+        let s = Store::memory().await.unwrap();
+        let src = s
+            .insert_corpus("the note behind the reminder", "web", None)
+            .await
+            .unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "live"), nc(1, "retired")])
+            .await
+            .unwrap();
+        s.set_artifact_status(&made[1].id, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        backdate_retired_at(&s, &made[1].id, 100 * 86_400).await;
+
+        // The merge's output: an artifact of no single note.
+        let merged = s
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "the merged text".into(),
+                    title: Some("merged".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                std::slice::from_ref(&made[0].id),
+            )
+            .await
+            .unwrap()
+            .id;
+        assert!(
+            s.get_artifact(&merged).await.unwrap().corpus_id.is_none(),
+            "a merged artifact belongs to no one note, which is the whole point"
+        );
+
+        // The open reminder rides onto it, remembering the note it was read
+        // out of.
+        sqlx::query(
+            "INSERT INTO moments (id, artifact_id, kind, at, tz, source, origin_corpus_id, created_at)
+             VALUES (?, ?, 'due', ?, 'UTC', 'set', ?, ?)",
+        )
+        .bind(new_id())
+        .bind(&merged)
+        .bind(now() + 3_600)
+        .bind(&src.id)
+        .bind(now())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        assert!(
+            s.has_open_reminder_for_corpus(&src.id).await.unwrap(),
+            "the note is one somebody is still being reminded about"
+        );
+        assert!(
+            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            "so nothing of it is nominated"
+        );
+        assert!(
+            matches!(
+                s.bury(&made[1].id, "{}", 90 * 86_400).await,
+                Err(Error::NotFound)
+            ),
+            "and the burial re-check refuses on the same grounds"
+        );
+        assert_eq!(s.get_artifact(&made[1].id).await.unwrap().text, "retired");
     }
 
     #[tokio::test]

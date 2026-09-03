@@ -158,7 +158,17 @@ pub async fn apply(
     }
 
     let forced = src.metadata["intent"].as_str();
-    match j.intent.as_deref() {
+    // The door outranks the model. `engram -r` is a person saying "remind
+    // me", and the forcing was only ever consumed *inside* the `remind` arm —
+    // so a model answering `none` (or `journal`) for an explicit reminder fell
+    // into the catch-all below, wrote no due row at all, and took the previous
+    // reading's reminder with it. The operator's own refusal is still checked
+    // inside the arm; nothing else overrules the door.
+    let read_as = match forced {
+        Some("remind") => Some("remind"),
+        _ => j.intent.as_deref(),
+    };
+    match read_as {
         Some("journal")
             if JOURNALABLE.contains(&src.origin.as_str())
                 && !intent_refused(&src.metadata, Intent::Journal) =>
@@ -317,6 +327,21 @@ pub async fn apply(
                 })
                 .await?;
             core.store.rearm_remind().await?;
+            // A note a completed reminder retired, being read as a reminder
+            // again. `complete_moment` retires the corpus so a finished
+            // reminder stops being one of the last things you kept — but an
+            // open reminder standing on a note that is missing from the rail
+            // and demoted below the search cliff is a reminder nobody can see
+            // the source of, with no undo anywhere offering to bring it back.
+            // Arming takes the retirement back, and only arming does: this is
+            // past every guard above, so the row genuinely exists.
+            if core.store.is_retired(corpus_id).await? {
+                core.store.unretire_corpus(corpus_id).await?;
+                tracing::info!(
+                    corpus_id,
+                    "the note was retired by a completed reminder; a new one brings it back"
+                );
+            }
             let art = core.store.get_artifact(anchor_id).await?;
             if let Err(e) = confirm_created(core, &art, at, tz).await {
                 // Best-effort: a note that failed to say "reminder set" is
@@ -364,6 +389,14 @@ async fn record_intent(
     intent: Option<&str>,
 ) -> Result<()> {
     let mut meta = src.metadata.clone();
+    // Indexing a `Value` that is not an object panics, and this one comes
+    // straight out of a column — the guard `describe::park_failed` and
+    // `extract` both carry. This runs at the very top of `apply`, so a corpus
+    // whose metadata is a JSON scalar took the worker down before any of the
+    // judgement was filed.
+    if !meta.is_object() {
+        meta = serde_json::json!({});
+    }
     meta["intent_read"] = serde_json::Value::String(intent.unwrap_or("none").to_string());
     meta["intent_by"] = serde_json::Value::String("synthesis".to_string());
     if let Some(m) = meta.as_object_mut() {
@@ -458,30 +491,41 @@ pub(crate) fn parse_local(s: &str, tz: chrono_tz::Tz) -> Option<i64> {
 /// text is split on anything that is not a letter, digit or hyphen, so
 /// "sundays" is not "sunday" and "monday-ish" is not a date either. The
 /// hyphen stays a word character for the Portuguese "sexta-feira".
+///
+/// The clipped Portuguese forms — bare `segunda`, `terça`, `quarta`,
+/// `quinta`, `sexta` — are deliberately absent, and so is Turkish `pazar`.
+/// They are ordinary words: the ordinals "second", "third", "fourth",
+/// "fifth", and "market". A note reading "a segunda parte, entregar
+/// 2026-09-10" names no weekday at all, but matched `Mon` here, and
+/// `onto_named_weekday` then overrode the date the note stated outright and
+/// fired the reminder three days early. A word that is only sometimes a
+/// weekday is not a witness, and the only thing that could tell the two
+/// apart is guessing at the surrounding prose. Full `-feira` compounds and
+/// `pazartesi` still carry Portuguese and Turkish.
 pub(crate) fn weekday_named(text: &str) -> Option<chrono::Weekday> {
     use chrono::Weekday::*;
     #[rustfmt::skip]
     const NAMES: &[(&str, chrono::Weekday)] = &[
         ("monday", Mon), ("montag", Mon), ("lunes", Mon), ("lundi", Mon), ("lunedì", Mon),
         ("lunedi", Mon), ("maandag", Mon), ("poniedziałek", Mon), ("segunda-feira", Mon),
-        ("segunda", Mon), ("понедельник", Mon), ("pazartesi", Mon),
+        ("понедельник", Mon), ("pazartesi", Mon),
         ("tuesday", Tue), ("dienstag", Tue), ("martes", Tue), ("mardi", Tue), ("martedì", Tue),
-        ("martedi", Tue), ("dinsdag", Tue), ("wtorek", Tue), ("terça-feira", Tue), ("terça", Tue),
+        ("martedi", Tue), ("dinsdag", Tue), ("wtorek", Tue), ("terça-feira", Tue),
         ("вторник", Tue), ("salı", Tue),
         ("wednesday", Wed), ("mittwoch", Wed), ("miércoles", Wed), ("miercoles", Wed),
         ("mercredi", Wed), ("mercoledì", Wed), ("mercoledi", Wed), ("woensdag", Wed), ("środa", Wed),
-        ("quarta-feira", Wed), ("quarta", Wed), ("среда", Wed), ("çarşamba", Wed),
+        ("quarta-feira", Wed), ("среда", Wed), ("çarşamba", Wed),
         ("thursday", Thu), ("donnerstag", Thu), ("jueves", Thu), ("jeudi", Thu), ("giovedì", Thu),
         ("giovedi", Thu), ("donderdag", Thu), ("czwartek", Thu), ("quinta-feira", Thu),
-        ("quinta", Thu), ("четверг", Thu), ("perşembe", Thu),
+        ("четверг", Thu), ("perşembe", Thu),
         ("friday", Fri), ("freitag", Fri), ("viernes", Fri), ("vendredi", Fri), ("venerdì", Fri),
-        ("venerdi", Fri), ("vrijdag", Fri), ("piątek", Fri), ("sexta-feira", Fri), ("sexta", Fri),
+        ("venerdi", Fri), ("vrijdag", Fri), ("piątek", Fri), ("sexta-feira", Fri),
         ("пятница", Fri), ("cuma", Fri),
         ("saturday", Sat), ("samstag", Sat), ("sonnabend", Sat), ("sábado", Sat), ("sabado", Sat),
         ("samedi", Sat), ("sabato", Sat), ("zaterdag", Sat), ("sobota", Sat), ("суббота", Sat),
         ("cumartesi", Sat),
         ("sunday", Sun), ("sonntag", Sun), ("domingo", Sun), ("dimanche", Sun), ("domenica", Sun),
-        ("zondag", Sun), ("niedziela", Sun), ("воскресенье", Sun), ("pazar", Sun),
+        ("zondag", Sun), ("niedziela", Sun), ("воскресенье", Sun),
     ];
     let lower = text.to_lowercase();
     let words: Vec<&str> = lower
@@ -536,10 +580,16 @@ pub(crate) fn onto_named_weekday(
         .unwrap_or(at)
 }
 
-/// The three wall-clock spellings, with a bare date meaning `DEFAULT_HOUR`.
+/// The wall-clock spellings, with a bare date meaning `DEFAULT_HOUR`.
+///
+/// Fractional seconds included: `2026-09-04T09:00:00.000Z` is what a model
+/// hands back often enough, `split_offset` takes the `Z` off it, and the
+/// remaining `.000` matched none of the three formats — so the reminder was
+/// dropped on the floor with a `debug!` line for a record.
 fn naive(s: &str) -> Option<chrono::NaiveDateTime> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f"))
         .or_else(|_| {
             chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
                 .map(|d| d.and_hms_opt(DEFAULT_HOUR, 0, 0).unwrap())
@@ -597,6 +647,45 @@ mod tests {
         // A weekday inside another word is not a weekday.
         assert_eq!(weekday_named("the monday-ish feeling"), None);
         assert_eq!(weekday_named("sundays"), None);
+    }
+
+    /// The clipped forms are ordinary words, and reading them as weekdays
+    /// overrode dates the note stated outright. "a segunda parte" is "the
+    /// second part", `pazar` is a market, and neither is a Monday or a
+    /// Sunday. The full compounds still carry the language.
+    #[test]
+    fn a_word_that_is_only_sometimes_a_weekday_is_no_witness_at_all() {
+        use chrono::Weekday;
+        assert_eq!(weekday_named("a segunda parte, entregar 2026-09-10"), None);
+        assert_eq!(weekday_named("a quarta tentativa"), None);
+        assert_eq!(weekday_named("na quinta rua à direita"), None);
+        assert_eq!(weekday_named("a terça parte do total"), None);
+        assert_eq!(weekday_named("pagar a sexta prestação"), None);
+        assert_eq!(weekday_named("pazar yerinde buluşalım"), None);
+        // And what still reads.
+        assert_eq!(
+            weekday_named("entregar na segunda-feira"),
+            Some(Weekday::Mon)
+        );
+        assert_eq!(weekday_named("quarta-feira à tarde"), Some(Weekday::Wed));
+        assert_eq!(weekday_named("pazartesi sabah"), Some(Weekday::Mon));
+    }
+
+    /// `2026-09-04T09:00:00.000Z` is a spelling models hand back, and
+    /// `split_offset` takes the `Z` off before `naive` ever sees it. Without
+    /// the fractional format the remainder parsed as nothing at all and the
+    /// reminder was dropped with a `debug!` line for a record.
+    #[test]
+    fn a_when_with_fractional_seconds_is_a_date() {
+        let utc = chrono_tz::UTC;
+        let plain = parse_local("2026-09-04T09:00:00Z", utc).expect("the plain spelling");
+        assert_eq!(parse_local("2026-09-04T09:00:00.000Z", utc), Some(plain));
+        assert_eq!(parse_local("2026-09-04T09:00:00.123456Z", utc), Some(plain));
+        assert_eq!(
+            parse_local("2026-09-04T09:00:00.5+00:00", utc),
+            Some(plain),
+            "and beside a stated offset, which is the other door into `naive`"
+        );
     }
 
     #[test]
@@ -1064,6 +1153,145 @@ mod tests {
             core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
             "the refusal outlived the re-read; {:?}",
             src.metadata
+        );
+    }
+
+    /// The door outranks the model. `engram -r` is a person saying "remind
+    /// me", and the forcing used to be consumed only *inside* the `remind`
+    /// arm — so a model answering `none` for an explicit reminder fell into
+    /// the catch-all, wrote no due row at all, and took the previous
+    /// reading's reminder with it.
+    #[tokio::test]
+    async fn a_door_that_says_remind_me_outranks_a_model_that_says_otherwise() {
+        for answered in ["none", "journal"] {
+            let mut core = test_core().await;
+            core.synthesizer = judged_core_reply(Judgement {
+                intent: Some(answered.into()),
+                when: Some("2099-01-01T09:00".into()),
+                rule: None,
+                events: vec![],
+                links: vec![],
+            });
+            let mut c = Capture::new("remind me about the gutters on the first", "web");
+            c.metadata["intent"] = serde_json::Value::String("remind".into());
+            core.ingest_capture(c).await.unwrap();
+            drain(&core).await;
+            let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+            assert_eq!(
+                rows.len(),
+                1,
+                "the door asked for a reminder and the model said {answered}"
+            );
+            assert_eq!(rows[0].moment.source, Source::Cue);
+        }
+    }
+
+    /// Metadata comes straight out of a column, and indexing a `Value` that
+    /// is not an object panics. `record_intent` runs at the very top of
+    /// `apply`, so a corpus whose metadata is a JSON scalar took the worker
+    /// down before any of the judgement was filed — the guard
+    /// `describe::park_failed` and `extract` both carry.
+    #[tokio::test]
+    async fn metadata_that_is_not_an_object_does_not_take_the_worker_down() {
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-01-01T09:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        let out = core
+            .ingest_capture(Capture::new("water the gutters on the first", "web"))
+            .await
+            .unwrap();
+        drain(&core).await;
+        core.store
+            .set_corpus_metadata(&out.id, &serde_json::json!("a scalar"))
+            .await
+            .unwrap();
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.in_results())
+            .expect("a live artifact")
+            .id;
+        let j = Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-02-01T09:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        };
+        apply(&core, &out.id, &aid, &j, &[], &src.raw_text)
+            .await
+            .expect("the reading is filed rather than panicking");
+        let meta = core.store.get_corpus(&out.id).await.unwrap().metadata;
+        assert_eq!(meta["intent_read"], "remind");
+    }
+
+    /// Completing a reminder retires the note behind it, so it stops being one
+    /// of the last things you kept. A later reading that arms a *new* reminder
+    /// on that note has to take the retirement back: an open reminder whose
+    /// note is missing from the rail and demoted below the search cliff is a
+    /// reminder nobody can see the source of, and no undo anywhere offers to
+    /// bring it back.
+    #[tokio::test]
+    async fn a_note_read_as_a_reminder_again_comes_back_out_of_retirement() {
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-01-01T09:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        let out = core
+            .ingest_capture(Capture::new("clear the gutters before the frost", "web"))
+            .await
+            .unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "the first reading armed one");
+        let aid = rows[0].moment.artifact_id.clone();
+        assert!(core.complete_moment(&rows[0].moment.id).await.unwrap());
+        assert!(
+            core.store.is_retired(&out.id).await.unwrap(),
+            "the fixture must actually retire the note"
+        );
+
+        // A later reading of the same prose, landing on a different date.
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        let j = Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-03-01T09:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        };
+        apply(&core, &out.id, &aid, &j, &[], &src.raw_text)
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.open_due(0, i64::MAX).await.unwrap().len(),
+            1,
+            "a reminder stands again"
+        );
+        assert!(
+            !core.store.is_retired(&out.id).await.unwrap(),
+            "so the note it is about is back among the recent captures"
+        );
+        assert!(
+            core.store
+                .recent_captures(20)
+                .await
+                .unwrap()
+                .iter()
+                .any(|(id, ..)| *id == out.id)
         );
     }
 
