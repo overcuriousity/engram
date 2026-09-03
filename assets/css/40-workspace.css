@@ -11,8 +11,59 @@
 /* ── Chunk detail: the chunk beside the lines it claims ──────────────────── */
 
 /* The source column takes the larger share: it holds the source's own lines,
-   while the artifact beside it is prose that reads better narrow. */
-.split { display: grid; grid-template-columns: 1fr 1.2fr; gap: 0.75rem; align-items: start; }
+   while the artifact beside it is prose that reads better narrow.
+   45.45% is `1fr 1.2fr` written as a share the reader can take hold of;
+   `--split-l` is what the handle between the two columns writes. */
+.split {
+  display: grid; grid-template-columns: var(--split-l, 45.45%) minmax(0, 1fr);
+  gap: 0.75rem; align-items: start; position: relative;
+}
+
+/* ── A column boundary somebody can move ─────────────────────────────────── */
+
+/* Absolutely positioned, and that is not decoration: both parents are grids,
+   and a handle in flow would either eat a track or open a row beneath the two
+   that are there. Out of flow it sits over the gap it divides — exactly over
+   it, `width` being the gap's own width, so it covers nothing either column is
+   using and there is nothing to mis-click.
+   Hidden by default: the two blocks that show it — one here, one in
+   20-layout.css — name the arrangements that have two columns to divide. */
+.col-handle {
+  display: none; position: absolute; top: 0; bottom: 0; z-index: 2;
+  appearance: none; background: none; border: 0; padding: 0;
+  cursor: col-resize;
+  /* Or a drag on a touchscreen scrolls the page out from under the finger. */
+  touch-action: none;
+}
+/* The line is the affordance, and it is absent until somebody goes looking for
+   it: a permanent rule between the panes is furniture, and the gap already
+   separates them. */
+.col-handle::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%;
+  width: 2px; transform: translateX(-50%); border-radius: 1px;
+  background: var(--color-accent);
+  opacity: 0; transition: opacity 120ms ease;
+}
+.col-handle:hover::before,
+.col-handle:focus-visible::before,
+.col-handle.dragging::before { opacity: 0.7; }
+.col-handle:focus-visible { outline: none; }
+/* The pointer is captured for the length of a drag, so the cursor is right
+   wherever it goes; this is only about not selecting the prose it passes over. */
+body.col-dragging { user-select: none; cursor: col-resize; }
+@media (prefers-reduced-motion: reduce) { .col-handle::before { transition: none; } }
+
+/* The artifact/source boundary, wherever the split is actually two columns —
+   the same pair of conditions the split itself answers to, and not when the
+   source is hidden, which leaves one column and nothing to divide. */
+@media (width > 62rem) {
+  @container artifact (width > 36rem) {
+    .regions:not(.hide-source) .split > .col-handle {
+      display: block; left: var(--split-l, 45.45%); width: 0.75rem;
+    }
+  }
+}
+
 /* 62rem rather than 60rem: this has to be a media query — `.shell` stops being
    a container under 40rem — and 62rem of viewport is the 60rem of container
    that every `@container shell` block beside it asks about. At 60rem the split

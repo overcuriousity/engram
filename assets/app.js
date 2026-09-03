@@ -248,6 +248,160 @@
     copyButtons(root);
     collapseBlanks(root);
     lockstep(root);
+    splitHandles(root);
+  }
+
+  // ── Column boundaries the reader can move ─────────────────────────────────
+  //
+  // Two of them, and they are one mechanism twice: the results rail against
+  // the pane, and the artifact against the source it was cut from. Each is a
+  // grid whose first track is a custom property, so moving the boundary is
+  // writing one number onto the container — nothing the server rendered is
+  // touched, and the stylesheet's own default stands for everyone who never
+  // drags anything.
+  //
+  // Remembered in `localStorage` and not in the base. A reading width is a
+  // habit of one browser on one screen, like the theme beside it; carried
+  // between a desktop and a phone it would be wrong in both places.
+  function rem() {
+    return parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  }
+
+  function clampTo(v, lo, hi) {
+    return Math.min(Math.max(v, lo), Math.max(lo, hi));
+  }
+
+  // `spec`: `prop` is the custom property the grid reads, `key` where the
+  // reader's answer is kept, `value(x, rect)` turns a position inside the
+  // container into what the property should say, and `nudge(rect)` is one
+  // press of an arrow key in pixels.
+  function columnHandle(el, spec) {
+    if (!el || el.querySelector(':scope > .col-handle')) return;
+    try {
+      var kept = localStorage.getItem(spec.key);
+      if (kept) el.style.setProperty(spec.prop, kept);
+    } catch (e) {}
+
+    var h = document.createElement('button');
+    h.type = 'button';
+    h.className = 'col-handle';
+    // A separator rather than a button as far as assistive technology is
+    // concerned, because that is what it is: `aria-orientation` says which way
+    // it divides, and the arrow keys below are what the role promises.
+    h.setAttribute('role', 'separator');
+    h.setAttribute('aria-orientation', 'vertical');
+    h.setAttribute('aria-label', spec.label);
+    h.title = spec.label + ' — drag to move, double-click to reset';
+    el.appendChild(h);
+
+    function put(x, rect) {
+      el.style.setProperty(spec.prop, spec.value(x, rect));
+    }
+
+    function remember() {
+      try {
+        localStorage.setItem(spec.key, el.style.getPropertyValue(spec.prop));
+      } catch (e) {}
+    }
+
+    h.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      // Captured, so the drag survives the pointer leaving the handle — which
+      // it does immediately, the handle being as narrow as the gap it covers.
+      h.setPointerCapture(e.pointerId);
+      h.classList.add('dragging');
+      document.body.classList.add('col-dragging');
+      e.preventDefault();
+    });
+
+    h.addEventListener('pointermove', function (e) {
+      if (!h.classList.contains('dragging')) return;
+      var rect = el.getBoundingClientRect();
+      put(e.clientX - rect.left, rect);
+    });
+
+    function release(e) {
+      if (!h.classList.contains('dragging')) return;
+      h.classList.remove('dragging');
+      document.body.classList.remove('col-dragging');
+      try {
+        h.releasePointerCapture(e.pointerId);
+      } catch (err) {}
+      remember();
+    }
+    h.addEventListener('pointerup', release);
+    h.addEventListener('pointercancel', release);
+
+    // The keyboard's half of the same thing. `offsetLeft` is where the
+    // boundary resolved to — the handle is positioned by the very property
+    // being read, and `el` is its offset parent — so this works in whichever
+    // unit the property happens to be written in.
+    h.addEventListener('keydown', function (e) {
+      var step = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
+      if (!step) return;
+      e.preventDefault();
+      var rect = el.getBoundingClientRect();
+      put(h.offsetLeft + step * spec.nudge(rect), rect);
+      remember();
+    });
+
+    // The way back to the stylesheet's own answer, on the element itself
+    // rather than a control somewhere else: whoever moved it is holding it.
+    h.addEventListener('dblclick', function () {
+      el.style.removeProperty(spec.prop);
+      try {
+        localStorage.removeItem(spec.key);
+      } catch (e) {}
+    });
+  }
+
+  // The rail is measured in pixels, because what it holds is a list of fixed
+  // things — titles and snippets — and its right size is a width, not a share
+  // of the window. The floors are what keep a drag from producing a column
+  // that can hold nothing: neither side may be squeezed past the point where
+  // it stops being readable, and the pane's floor wins when the window is too
+  // narrow for both.
+  function railHandle() {
+    columnHandle(document.querySelector('.regions-rail-focus-source'), {
+      prop: '--rail-w',
+      key: 'engram.rail-w',
+      label: 'Results width',
+      nudge: function () {
+        return rem();
+      },
+      value: function (x, rect) {
+        var u = rem();
+        // 30rem for the pane and 1rem for the gap between them, which is part
+        // of the width the rail's own number does not describe: without it the
+        // pane's floor was a rem short of what it says.
+        return Math.round(clampTo(x, 15 * u, rect.width - 31 * u)) + 'px';
+      },
+    });
+  }
+
+  // The split is measured as a share, because both columns are prose-shaped
+  // and what a reader is choosing is how to divide whatever room the pane has
+  // — which is not the same number of pixels in the pane as on the standalone
+  // page.
+  function splitHandles(root) {
+    var splits = root.matches && root.matches('.split') ? [root] : [];
+    if (root.querySelectorAll) {
+      splits = splits.concat(Array.prototype.slice.call(root.querySelectorAll('.split')));
+    }
+    splits.forEach(function (s) {
+      columnHandle(s, {
+        prop: '--split-l',
+        key: 'engram.split-l',
+        label: 'Artifact width',
+        nudge: function (rect) {
+          return rect.width * 0.02;
+        },
+        value: function (x, rect) {
+          if (!rect.width) return '45.45%';
+          return clampTo((x / rect.width) * 100, 22, 78).toFixed(2) + '%';
+        },
+      });
+    });
   }
 
   // ── Ask, as it happens ────────────────────────────────────────────────────
@@ -2238,6 +2392,7 @@
     // work is a handful of rows: cheaper than the poll it replaces.
     setInterval(dueTick, 1000);
     syncIdle();
+    railHandle();
     themeToggle();
     vectorBg();
     keyHint();

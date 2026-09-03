@@ -4381,6 +4381,29 @@ mod tests {
             first.text
         );
 
+        // And the way onward is a swap, not a navigation. Left as a bare
+        // `href` this was the one link in the pane that left it: following it
+        // loaded the standalone artifact page, and the results the passage was
+        // found in — the box, the rail, the run — went with it. The Related
+        // list two blocks down has always swapped in place; this is the same
+        // act and takes the same route.
+        let html = askama::Template::render(&ArtifactDetailFragment { d }).unwrap();
+        let onward = html
+            .split(r#"<p class="continues">"#)
+            .nth(1)
+            .and_then(|s| s.split("</p>").next())
+            .expect("the way onward is rendered");
+        assert!(onward.contains("continues in the next passage"), "{onward}");
+        assert!(onward.contains("hx-get=\"/ui/artifacts/"), "{onward}");
+        assert!(
+            onward.contains(r#"hx-target="closest [data-terms]""#),
+            "it must replace the detail it is printed under: {onward}"
+        );
+        assert!(
+            onward.contains("href=\"/ui/artifacts/"),
+            "and keep the plain href for a browser running no script: {onward}"
+        );
+
         let last = all.iter().max_by_key(|c| c.ordinal).unwrap();
         let d = super::build_artifact_detail(&core, &last.id, "")
             .await

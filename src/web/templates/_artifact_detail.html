@@ -193,9 +193,22 @@
         {% endif %}
         {# The passage stopped mid-sentence, so the window it was cut from did.
            The source column beside this already shows the rest of the line;
-           this is the way to the artifact that carries it. #}
+           this is the way to the artifact that carries it.
+
+           Swapped in place, exactly as the Related list below swaps — and for
+           the same reason. Left as a bare `href` this was the one link on the
+           page that *navigated*: following it out of the workspace loaded the
+           standalone artifact page, and the results this passage was found in
+           went with it. The rest of the reading — the box, the rail, the run —
+           is what the pane is inside of, and continuing to the next passage is
+           the least of all the reasons to leave it. The `href` stays for a
+           browser running no script, where the standalone page is the right
+           and only answer. #}
         {% if let Some(next) = d.continues_at %}
-        <p class="continues"><a class="quiet-link" href="/ui/artifacts/{{ next }}">continues in the next passage →</a></p>
+        <p class="continues"><a class="quiet-link" href="/ui/artifacts/{{ next }}"
+             hx-get="/ui/artifacts/{{ next }}?via={{ d.id }}"
+             hx-target="closest [data-terms]" hx-swap="outerHTML"
+             hx-push-url="true">continues in the next passage →</a></p>
         {% endif %}
         {% if !d.caveats.is_empty() %}
         {# Emitted by the same synthesis call that wrote the artifact, from what
