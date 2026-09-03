@@ -2482,6 +2482,52 @@ mod tests {
 
     /// A press and a release with nothing said. Answered as the empty
     /// transcript it is, without a call to spend on it.
+    /// `MediaRecorder` has no WAV to give: Chrome and Firefox record
+    /// `audio/webm;codecs=opus`, Safari `audio/mp4`. whisper.cpp built without
+    /// `WHISPER_FFMPEG` reads WAV and nothing else, and answers HTTP 200
+    /// carrying `{"error": "failed to read audio data as wav"}` — so every
+    /// recording this page sent came back as a transcription failure. The
+    /// browser holds the decoder for its own output; the conversion is one
+    /// `decodeAudioData` on the client and costs the server nothing.
+    ///
+    /// Asserted over the source because the behaviour is a browser's. The
+    /// route itself still passes through whatever it is handed — the API and
+    /// the extension are other callers, and a whisper with ffmpeg behind it
+    /// takes any of it.
+    #[test]
+    fn the_recording_is_converted_to_wav_before_it_is_uploaded() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("toWav(blob).then(send)"),
+            "the recorder's own container never reaches the upload"
+        );
+        assert!(
+            js.contains("var STT_RATE = 16000;"),
+            "and it is resampled to what whisper reads internally anyway"
+        );
+        // The one shape a minimal WAV reader takes without an argument: PCM,
+        // mono, 16-bit, every length known before a byte is written.
+        for spelling in [
+            "ascii(0, 'RIFF')",
+            "ascii(8, 'WAVE')",
+            "v.setUint16(20, 1, true)",
+            "v.setUint16(22, 1, true)",
+            "v.setUint16(34, 16, true)",
+            "type: 'audio/wav'",
+        ] {
+            assert!(
+                js.contains(spelling),
+                "the RIFF header is missing {spelling}"
+            );
+        }
+        // And a conversion that cannot be done is not a recording thrown away.
+        assert!(
+            js.contains(".catch(function () { return blob; })"),
+            "a browser that cannot decode its own output still uploads what it has"
+        );
+    }
+
     #[tokio::test]
     async fn an_empty_recording_costs_no_call() {
         let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::default());

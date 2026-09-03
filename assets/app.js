@@ -1584,6 +1584,98 @@
       try { box.setSelectionRange(box.value.length, box.value.length); } catch (e) {}
     }
 
+    // What the transcriber is handed, always: 16 kHz mono 16-bit PCM in a RIFF
+    // wrapper, and never what the recorder produced.
+    //
+    // `MediaRecorder` has no WAV to give — Chrome and Firefox record
+    // `audio/webm;codecs=opus`, Safari `audio/mp4` — and whisper.cpp built
+    // without `WHISPER_FFMPEG` reads WAV and nothing else. It answered HTTP
+    // 200 carrying `{"error": "failed to read audio data as wav"}` to every
+    // recording this page ever sent, which the client then reported as a
+    // missing `text` field. The browser already holds the decoder for its own
+    // output, so the conversion belongs here: one `decodeAudioData`, and no
+    // build flag or server-side dependency anywhere.
+    //
+    // 16 kHz mono because that is what whisper resamples to internally
+    // whatever it is given — anything richer is bytes over the wire the model
+    // throws away, and Opus at 44.1 kHz stereo is several times the size of
+    // the PCM that comes out of it. One channel on the `OfflineAudioContext`
+    // does the downmix and the resample together, in the browser's own
+    // resampler rather than a hand-rolled one.
+    var STT_RATE = 16000;
+
+    function toWav(blob) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      if (!AC || !OAC || !blob.arrayBuffer) return Promise.resolve(blob);
+      var ctx = new AC();
+      var close = function () { if (ctx.close) { try { ctx.close(); } catch (e) {} } };
+      return blob.arrayBuffer()
+        .then(function (buf) {
+          // Safari answers `decodeAudioData` through callbacks and returns
+          // nothing; everything else returns a promise. Both, so neither
+          // browser hangs on the other's contract.
+          return new Promise(function (resolve, reject) {
+            var p = ctx.decodeAudioData(buf, resolve, reject);
+            if (p && p.then) p.then(resolve, reject);
+          });
+        })
+        .then(function (audio) {
+          var frames = Math.ceil(audio.duration * STT_RATE);
+          if (!frames) throw new Error('nothing decoded');
+          var off = new OAC(1, frames, STT_RATE);
+          var src = off.createBufferSource();
+          src.buffer = audio;
+          src.connect(off.destination);
+          src.start();
+          return off.startRendering();
+        })
+        .then(function (rendered) { return wavOf(rendered.getChannelData(0)); })
+        // The recording is never thrown away over a conversion. A browser that
+        // refuses 16 kHz on an `OfflineAudioContext`, or a codec its own
+        // decoder will not take, still has audio somebody just spoke — and a
+        // whisper built with ffmpeg takes it as it stands. The upload is the
+        // same one this code has always made.
+        .catch(function () { return blob; })
+        .then(function (out) { close(); return out; }, function (e) { close(); throw e; });
+    }
+
+    // A RIFF header and the samples, 16-bit signed little-endian. The shape
+    // every minimal WAV reader accepts without an argument — `dr_wav`, which
+    // is whisper's, among them: no extensible subformat, no float samples, no
+    // streaming `0xFFFFFFFF` sizes, every length known before a byte is
+    // written.
+    function wavOf(samples) {
+      var n = samples.length;
+      var buf = new ArrayBuffer(44 + n * 2);
+      var v = new DataView(buf);
+      var ascii = function (at, str) {
+        for (var i = 0; i < str.length; i++) v.setUint8(at + i, str.charCodeAt(i));
+      };
+      ascii(0, 'RIFF');
+      v.setUint32(4, 36 + n * 2, true);
+      ascii(8, 'WAVE');
+      ascii(12, 'fmt ');
+      v.setUint32(16, 16, true);              // the fmt chunk's own length
+      v.setUint16(20, 1, true);               // PCM, uncompressed
+      v.setUint16(22, 1, true);               // mono
+      v.setUint32(24, STT_RATE, true);
+      v.setUint32(28, STT_RATE * 2, true);    // bytes per second
+      v.setUint16(32, 2, true);               // bytes per frame
+      v.setUint16(34, 16, true);              // bits per sample
+      ascii(36, 'data');
+      v.setUint32(40, n * 2, true);
+      for (var i = 0; i < n; i++) {
+        // Clamped before it is scaled. Both the decoder and the resampler hand
+        // back values a hair outside [-1, 1], and `setInt16` wraps rather than
+        // saturating — so the loudest moment of a recording came back as a
+        // click at the opposite polarity.
+        var x = Math.max(-1, Math.min(1, samples[i]));
+        v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+      }
+      return new Blob([buf], { type: 'audio/wav' });
+    }
+
     function send(blob) {
       // A press and a release with nothing in between. No call, no message:
       // nothing happened, and saying so is noise.
@@ -1632,7 +1724,8 @@
           var blob = new Blob(chunks, { type: type });
           recorder = null;
           chunks = [];
-          send(blob);
+          // Converted before it is sent, not after it fails: see `toWav`.
+          toWav(blob).then(send);
         });
         recorder.start();
       }).catch(function () {
