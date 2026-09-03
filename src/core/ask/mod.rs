@@ -69,6 +69,16 @@ pub struct AskResponse {
     /// number here that is in no excerpt is the model's own rather than
     /// something the base holds. Reported so the page can say which.
     pub unsupported: Vec<String>,
+    /// Every excerpt the answer was written from has been retired.
+    ///
+    /// Retired rows sit below the cliff and are normally never read for an
+    /// answer. The exception is a question whose whole match has been retired
+    /// — a completed reminder retires the note it was read from, and that note
+    /// may be the only place the base states the thing — where answering from
+    /// nothing is the worse of the two failures. Reported so the reader is
+    /// told which they are looking at, rather than being handed a confident
+    /// answer drawn entirely from what the base has put away.
+    pub retired_only: bool,
     /// The recorded question, when this door records — the UI, with feedback
     /// on. The page shows a verdict bar only when this is set.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,6 +171,7 @@ impl Core {
                     abstained: true,
                     // Nothing was shown and nothing was claimed.
                     unsupported: vec![],
+                    retired_only: false,
                     event_id: None,
                 };
                 // Emitted even though it is empty: a reader that waits for the
@@ -202,6 +213,7 @@ impl Core {
                     // A configuration failure, not a statement about the base.
                     abstained: false,
                     unsupported: vec![],
+                    retired_only: false,
                     event_id: None,
                 };
                 yield AskEvent::Retrieved {
@@ -419,6 +431,12 @@ impl Core {
                 );
             }
 
+            // Read off the excerpts the model was actually shown, not off the
+            // ranking: what the answer stands on is what was sent.
+            let retired_only = !citations.is_empty() && citations.iter().all(|c| c.retired);
+            if retired_only {
+                tracing::info!("ask: every excerpt the answer was written from is retired");
+            }
             let response = AskResponse {
                 abstained,
                 answer: answer.text,
@@ -426,6 +444,7 @@ impl Core {
                 dropped,
                 truncated: answer.truncated,
                 unsupported,
+                retired_only,
                 event_id: None,
             };
             // Recorded here rather than by either door, so one ask is one row

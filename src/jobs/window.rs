@@ -333,7 +333,8 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         match anchor {
             Some(anchor) => {
                 if let Err(e) =
-                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids).await
+                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids, &text)
+                        .await
                 {
                     tracing::warn!(
                         corpus_id,
@@ -497,7 +498,18 @@ async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::
             .await
             .unwrap_or_default();
     }
+    // Five shares of the reserved budget, and a floor under each: a neighbour
+    // cut to a dozen tokens is a title and half a sentence, which tells the
+    // model nothing and costs the same fence overhead as a useful one.
+    //
+    // The floor is what the *count* gives way to, not the budget. `max(64)`
+    // alone overran the reservation on every budget under 320 — five slices of
+    // 64 out of, say, 200 tokens, which is the share reserved for neighbours
+    // spent one and a half times over, against a ceiling the whole point of
+    // which is that the prompt fits. Fewer neighbours, each still worth
+    // reading, is the trade a narrow budget actually offers.
     let per = (budget / 5).max(64);
+    let slots = (budget / per.max(1)).clamp(1, 5);
     let mut out = Vec::new();
     for h in hits {
         if h.payload.corpus_id == corpus_id {
@@ -517,7 +529,7 @@ async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::
             title: h.payload.title,
             text,
         });
-        if out.len() == 5 {
+        if out.len() == slots {
             break;
         }
     }

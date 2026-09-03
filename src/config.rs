@@ -525,9 +525,13 @@ impl Default for TimeConfig {
 ///
 /// The one stage that destroys captured text, which is why every field of it
 /// is written out in `config.example.toml` rather than left to these defaults:
-/// a sweep an operator cannot find is one they cannot turn off. Nothing is
-/// lost — `graveyard` keeps the text and the judge's reason permanently — but
-/// a buried artifact leaves search, FTS and the vector store.
+/// a sweep an operator cannot find is one they cannot turn off. And why
+/// `enabled = true` here is only the default *inside a `[reap]` block*: a file
+/// with no such block does not run the sweep at all, whatever this says. See
+/// `Config::disable_undeclared_reap`.
+///
+/// Nothing is lost — `graveyard` keeps the text and the judge's reason
+/// permanently — but a buried artifact leaves search, FTS and the vector store.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ReapConfig {
@@ -1986,7 +1990,7 @@ impl Config {
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         cfg.warn_on_defaulted_store(&raw);
-        cfg.warn_on_undeclared_reap(&raw);
+        cfg.disable_undeclared_reap(&raw);
         cfg.warn_on_inert_settings();
         cfg.warn_on_inferred_ceiling_param();
         cfg.warn_on_unplaced_plan_cost();
@@ -2310,20 +2314,29 @@ impl Config {
     /// stage an operator cannot find is one they cannot turn off, and the block
     /// is documented precisely so it is not a surprise.
     ///
-    /// A warning and not a changed default: turning it off for an existing base
-    /// would as quietly stop a sweep another operator is relying on.
-    fn warn_on_undeclared_reap(&self, raw: &config::Config) {
+    /// So the section is the consent, and its absence is the refusal. The
+    /// default inside the block stays `true` — an operator who writes `[reap]`
+    /// and only sets `min_age_days` means the sweep — but a file that never
+    /// mentions it does not run it, whatever the default says. Nothing else in
+    /// the configuration destroys text, so nothing else needs this; here it is
+    /// the difference between a stage an operator chose and one an upgrade
+    /// chose for them.
+    ///
+    /// A warning was the previous answer and it was not one: it names the right
+    /// facts to somebody already reading the log, ninety days before the first
+    /// burial, in a line that scrolls past on every boot.
+    fn disable_undeclared_reap(&mut self, raw: &config::Config) {
         if !self.reap.enabled || raw.get::<config::Value>("reap").is_ok() {
             return;
         }
-        tracing::warn!(
+        self.reap.enabled = false;
+        tracing::info!(
             min_age_days = self.reap.min_age_days,
             interval_mins = self.reap.interval_mins,
-            "no [reap] section: the reap sweep is on by default and will judge artifacts \
-             retired longer than min_age_days, burying what the live base already states. \
-             It runs only where [infer.synthesize] gives it a judge model. Write \
-             `[reap] enabled = false` to turn it off, or the block from config.example.toml \
-             to say so on purpose."
+            "no [reap] section: the reap sweep stays off. It is the one stage that \
+             destroys captured text, so it runs only where a file asks for it. Write \
+             `[reap] enabled = true`, or the whole block from config.example.toml, to \
+             turn it on."
         );
     }
 
@@ -3014,6 +3027,38 @@ mod tests {
         let p = dir.path().join("config.toml");
         std::fs::write(&p, body).unwrap();
         p
+    }
+
+    /// The section is the consent, and its absence is the refusal.
+    ///
+    /// `ReapConfig::default()` is `enabled = true` under `#[serde(default)]`, so
+    /// every config file written before the sweep existed — which is every one
+    /// of them — deserialized into a base that would begin burying artifact
+    /// text ninety days later. It is the one stage that destroys captured text,
+    /// and a warning ninety days ahead in a boot log is not a decision anybody
+    /// made.
+    #[test]
+    fn a_config_that_never_mentions_reap_does_not_run_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load(Some(&write(&dir, MINIMAL))).unwrap();
+        assert!(!cfg.reap.enabled, "an undeclared sweep stays off");
+
+        // A file that says `[reap]` and nothing else means the sweep: the
+        // default inside the block is unchanged, and writing the block is the
+        // act that turns it on.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load(Some(&write(&dir, &format!("{MINIMAL}\n[reap]\n")))).unwrap();
+        assert!(cfg.reap.enabled);
+        assert_eq!(cfg.reap.min_age_days, ReapConfig::default().min_age_days);
+
+        // And off is still off.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load(Some(&write(
+            &dir,
+            &format!("{MINIMAL}\n[reap]\nenabled = false\n"),
+        )))
+        .unwrap();
+        assert!(!cfg.reap.enabled);
     }
 
     const MINIMAL: &str = r#"

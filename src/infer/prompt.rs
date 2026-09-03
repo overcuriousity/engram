@@ -1996,6 +1996,19 @@ where
 /// still delivers its artifacts.
 #[derive(serde::Deserialize)]
 struct JudgedEnvelope {
+    /// Defaulted, like every other field here, and for the reason the note at
+    /// `parse_judged_response` gives about the empty array: a note that is
+    /// nothing but a reminder leaves the model nothing it is *allowed* to
+    /// write, so the judgement alone is a real answer. That note handled
+    /// `"artifacts": []` and the blank placeholder; it did not handle the key
+    /// simply not being there, which is what a model answers with when the
+    /// grammar is not being enforced — `structured_output` off, or an endpoint
+    /// that ignores it, both cases this file plans for elsewhere. Without the
+    /// default the whole reply failed on `missing field 'artifacts'`, and
+    /// `salvage_objects` cannot rescue it either: it looks for the substring
+    /// `"artifacts"` and there is none. The reminder was lost to a reply that
+    /// stated it perfectly.
+    #[serde(default)]
     artifacts: Vec<RawArtifact>,
     #[serde(default, deserialize_with = "lenient")]
     moment: Option<RawMoment>,
@@ -3942,6 +3955,28 @@ mod tests {
             "events":[],"links":[]}"#;
         assert!(parse_judged_response(body).is_err());
         assert!(parse_judged_response(r#"{"artifacts":[]}"#).is_err());
+    }
+
+    /// A reminder stated perfectly, lost to a key that was not there.
+    ///
+    /// The empty-artifacts case is handled and documented: a note that is
+    /// nothing but a reminder leaves the model nothing it is allowed to write.
+    /// What was not handled is the model omitting `artifacts` altogether rather
+    /// than sending it empty, which is what comes back when the grammar is not
+    /// being enforced — `structured_output` off, or an endpoint that ignores
+    /// it. `missing field 'artifacts'`, and `salvage_objects` cannot help: it
+    /// looks for the substring and there is none.
+    #[test]
+    fn a_judged_reply_that_omits_the_artifact_key_is_still_a_judgement() {
+        let body = r#"{"moment":{"intent":"remind","when":"2026-09-04T09:00","rule":null}}"#;
+        let r = parse_judged_response(body).expect("the judgement stands on its own");
+        assert!(r.artifacts.is_empty());
+        let j = r.judgement.expect("the moment was read");
+        assert_eq!(j.intent.as_deref(), Some("remind"));
+        assert_eq!(j.when.as_deref(), Some("2026-09-04T09:00"));
+        // And the reply that says nothing at all is still a failure to retry,
+        // exactly as an explicit empty list with no judgement is.
+        assert!(parse_judged_response("{}").is_err());
     }
 
     #[test]

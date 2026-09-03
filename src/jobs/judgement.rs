@@ -31,6 +31,7 @@ pub async fn apply(
     anchor_id: &str,
     j: &Judgement,
     shown: &[String],
+    window_text: &str,
 ) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     let tz_name = src.metadata["tz"]
@@ -49,9 +50,26 @@ pub async fn apply(
     // 2026-09-12" states that second date outright. Applied to the events it
     // rewrote every one of them onto the same Friday, past dates included.
     // See `onto_named_weekday`.
-    let named_day = weekday_named(&src.raw_text);
+    //
+    // Read from the *judged window* and not from `src.raw_text`. This runs once
+    // per window, and the corpus is every window at once: a weekday word in a
+    // lecture's third page corrected the reminder read out of its tenth, which
+    // is a witness to nothing. The window is what the model was shown and what
+    // it answered about, so it is the only text whose weekday says anything
+    // about the date that came back.
+    let named_day = weekday_named(window_text);
     let created_at = src.created_at;
     let reconcile = move |at: i64| match named_day {
+        // Far enough out that the weekday word cannot be where the date came
+        // from. The correction exists for "Freitag", captured on a Wednesday
+        // and resolved to a Saturday — one wrong step of calendar arithmetic
+        // over a date the note does not spell out. A note that also states
+        // "Antragsfrist: 2026-11-30" gives the model nothing to compute, and
+        // moving *that* onto the coming Friday is not a correction, it is
+        // three months of the reminder being wrong in the one direction that
+        // fires early and then never again. Past the horizon the model's date
+        // stands, because past the horizon it is the note's date.
+        Some(_) if at > created_at + WITNESS_HORIZON => at,
         Some(d) => {
             let moved = onto_named_weekday(at, d, created_at, tz);
             if moved != at {
@@ -269,6 +287,16 @@ pub async fn apply(
     }
     Ok(())
 }
+
+/// How far past the capture a weekday the note names is still evidence about
+/// the date the model returned.
+///
+/// One week, because that is the reach of the word: "Freitag" said on a
+/// Wednesday means the Friday three days out, and no speaker of any of the ten
+/// prompt languages means the Friday in November by it. A date beyond this is
+/// one the note stated outright or the model read off something it stated, and
+/// the weekday standing beside it is describing a different sentence.
+const WITNESS_HORIZON: i64 = 7 * 86_400;
 
 /// Origins the judgement may file as a journal entry. Not `api` or `mcp`:
 /// a program that wanted an entry says so with `origin`.
@@ -551,6 +579,44 @@ mod tests {
         assert_eq!(onto_named_weekday(sat, Weekday::Wed, now, tz), next_wed);
     }
 
+    /// The horizon under the witness.
+    ///
+    /// It corrects one wrong step of calendar arithmetic over a date the note
+    /// does not spell out — "Freitag", said on a Wednesday, resolved to a
+    /// Saturday. Left unbounded it also moved a date the note *does* spell out:
+    /// a deadline three months away, judged correctly, dragged onto the coming
+    /// Friday because the same note happened to mention one. Early, and then
+    /// never again.
+    #[test]
+    fn the_witness_reaches_a_week_and_no_further() {
+        use chrono::{TimeZone, Weekday};
+        let tz = chrono_tz::Europe::Berlin;
+        let made = tz
+            .with_ymd_and_hms(2026, 9, 2, 14, 43, 0)
+            .unwrap()
+            .timestamp(); // Wednesday
+        let sat = tz
+            .with_ymd_and_hms(2026, 9, 5, 13, 45, 0)
+            .unwrap()
+            .timestamp();
+        let far = tz
+            .with_ymd_and_hms(2026, 11, 30, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert!(sat <= made + WITNESS_HORIZON, "the near date is inside");
+        assert!(far > made + WITNESS_HORIZON, "the far one is not");
+        // Inside: corrected, as it always was.
+        assert_ne!(onto_named_weekday(sat, Weekday::Fri, made, tz), sat);
+        // Outside: `apply`'s guard is the horizon, and the mover is never
+        // reached — but assert what the mover *would* have done, so the reason
+        // the guard exists is written down beside it.
+        let moved = onto_named_weekday(far, Weekday::Fri, made, tz);
+        assert!(
+            moved < made + WITNESS_HORIZON,
+            "unbounded, the correction pulls a November date into this week"
+        );
+    }
+
     /// A synthesizer whose judged reply is set by the test after it knows the
     /// ids it wants to link to.
     struct JudgedFake(std::sync::Mutex<Judgement>);
@@ -796,6 +862,7 @@ mod tests {
                 links: vec![],
             },
             &[],
+            &src.raw_text,
         )
         .await
         .unwrap();
@@ -843,6 +910,7 @@ mod tests {
                 links: vec![],
             },
             &[],
+            &src.raw_text,
         )
         .await
         .unwrap();
@@ -865,6 +933,7 @@ mod tests {
                 links: vec![],
             },
             &[],
+            &src.raw_text,
         )
         .await
         .unwrap();
@@ -941,7 +1010,9 @@ mod tests {
             events: vec![],
             links: vec![],
         };
-        apply(&core, &out.id, &aid, &j, &[]).await.unwrap();
+        apply(&core, &out.id, &aid, &j, &[], &src.raw_text)
+            .await
+            .unwrap();
         assert!(
             core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
             "the refusal outlived the re-read; {:?}",
@@ -999,9 +1070,17 @@ mod tests {
                 },
             ],
         };
-        apply(&core, &out.id, &anchor, &j, std::slice::from_ref(&neighbor))
-            .await
-            .unwrap();
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        apply(
+            &core,
+            &out.id,
+            &anchor,
+            &j,
+            std::slice::from_ref(&neighbor),
+            &src.raw_text,
+        )
+        .await
+        .unwrap();
 
         let events = core.store.event_moments_between(0, i64::MAX).await.unwrap();
         assert!(

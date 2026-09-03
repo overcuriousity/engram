@@ -8,12 +8,39 @@ use crate::error::{Error, Result};
 /// line says what called.
 pub(crate) const USER_AGENT: &str = concat!("engram-cli/", env!("CARGO_PKG_VERSION"));
 
+/// Does this argument address something, or is it a word somebody typed?
+///
+/// The question `run` asks of a multi-argument invocation, and it is
+/// `read_target`'s own reading stated ahead of the read: stdin, a link, a name
+/// that is really there, or a shape only a path has. Everything else is prose.
+fn addresses_something(target: &str) -> bool {
+    target == "-"
+        || target.starts_with("http://")
+        || target.starts_with("https://")
+        || looks_like_a_path(target)
+        || std::path::Path::new(target).exists()
+}
+
 /// Capture each target in turn, answering with the corpus ids in the order they
 /// were given.
 ///
 /// One request per target rather than one multipart body holding all of them: a
 /// glob of forty PDFs that fails on the nineteenth should have stored eighteen,
 /// and the operator should be told which one stopped it.
+///
+/// Several arguments mean several captures only where every one of them
+/// addresses something. `-c` takes a list so that the shell can glob — `engram
+/// -c *.pdf` is one invocation and three corpora — and the same list is what an
+/// unquoted note arrives as: `engram -c buy milk` stored two corpora holding
+/// the single words "buy" and "milk", exit 0, where before `-c` accepted prose
+/// at all it had failed loudly with `buy: No such file or directory`. So the
+/// arguments are joined back into the sentence the shell took apart, which is
+/// what every other text verb does with its words (`args::read`), and the
+/// glob keeps its meaning because a glob is all paths.
+///
+/// Joined, they are prose outright and are not put back through the path
+/// heuristic: "dir/file plus a comment" would find `dir` on disk and be refused
+/// as a missing file, which is the failure this is here to remove.
 pub async fn run(
     e: &Endpoint,
     targets: &[String],
@@ -23,8 +50,25 @@ pub async fn run(
 ) -> Result<Vec<String>> {
     let http = client()?;
     let mut ids = Vec::new();
+    let joined;
+    let (targets, as_prose) =
+        match targets.len() > 1 && !targets.iter().all(|t| addresses_something(t)) {
+            true => {
+                joined = [targets.join(" ")];
+                (&joined[..], true)
+            }
+            false => (targets, false),
+        };
     for target in targets {
-        let read = read_target(target)?;
+        let read = if as_prose {
+            Read {
+                bytes: target.as_bytes().to_vec(),
+                content_type: "text/plain".into(),
+                label: "text".into(),
+            }
+        } else {
+            read_target(target)?
+        };
         let tz = zone_for(&read.content_type, &read.bytes);
         let meta = Meta {
             title,
@@ -648,6 +692,38 @@ mod tests {
             panic!("a sentence is a note");
         };
         assert_eq!(read.label, "text");
+    }
+
+    /// The shell takes an unquoted note apart, and `-c` used to keep the
+    /// pieces.
+    ///
+    /// `num_args = 1..` is there so a glob is one invocation, and it is also
+    /// what an unquoted sentence arrives as: `engram -c buy milk` stored two
+    /// corpora holding the words "buy" and "milk", exit 0. Before `-c` took
+    /// prose at all the same command had failed loudly with `buy: No such file
+    /// or directory`, which is the worse failure to have replaced with a
+    /// quieter one.
+    #[test]
+    fn several_arguments_are_several_captures_only_when_each_addresses_something() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.pdf");
+        let b = dir.path().join("b.pdf");
+        std::fs::write(&a, b"%PDF-1.4\n").unwrap();
+        std::fs::write(&b, b"%PDF-1.4\n").unwrap();
+        // The glob: every argument names a file, so each is its own capture.
+        for p in [&a, &b] {
+            assert!(addresses_something(p.to_str().unwrap()), "{p:?}");
+        }
+        assert!(addresses_something("-"));
+        assert!(addresses_something("https://example.com/x"));
+        assert!(
+            addresses_something("notes.pdf"),
+            "a lone name with a suffix"
+        );
+        // And the prose the shell split.
+        for word in ["buy", "milk", "erinnere", "zahnarzt"] {
+            assert!(!addresses_something(word), "{word}");
+        }
     }
 
     /// A paragraph is longer than a file name may be, and the kernel says so

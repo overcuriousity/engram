@@ -51,7 +51,34 @@
 /* The pointer is captured for the length of a drag, so the cursor is right
    wherever it goes; this is only about not selecting the prose it passes over. */
 body.col-dragging { user-select: none; cursor: col-resize; }
-@media (prefers-reduced-motion: reduce) { .col-handle::before { transition: none; } }
+
+/* The horizontal one, between the artifact and the lists under it. In flow
+   rather than over a gap, because there is no gap: that column is a flex
+   column whose spacing is the card's own bottom margin. So the handle takes
+   that margin back — `margin-top` cancels its own height — and offering the
+   boundary costs the layout nothing. */
+.row-handle {
+  display: none; flex: none; position: relative;
+  height: 0.75rem; margin-top: -0.75rem; width: 100%;
+  appearance: none; background: none; border: 0; padding: 0;
+  cursor: row-resize;
+  touch-action: none;
+}
+.row-handle::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 50%;
+  height: 2px; transform: translateY(-50%); border-radius: 1px;
+  background: var(--color-accent);
+  opacity: 0; transition: opacity 120ms ease;
+}
+.row-handle:hover::before,
+.row-handle:focus-visible::before,
+.row-handle.dragging::before { opacity: 0.7; }
+.row-handle:focus-visible { outline: none; }
+body.row-dragging { user-select: none; cursor: row-resize; }
+
+@media (prefers-reduced-motion: reduce) {
+  .col-handle::before, .row-handle::before { transition: none; }
+}
 
 /* The artifact/source boundary, wherever the split is actually two columns —
    the same pair of conditions the split itself answers to, and not when the
@@ -680,9 +707,21 @@ body { overflow-x: hidden; }
      own, and give way first. Both keep a floor — a list crushed to one clipped
      row says less than no list at all, and an artifact crushed to a sliver is
      the pane the page exists to show. */
-  .split > :first-child > .card { flex: 1 1 auto; min-height: 8rem; overflow-y: auto; }
+  /* `--artifact-fill` and `--artifact-h` are the two halves of one statement,
+     and both are written by the handle below the card: a height, and the card
+     no longer growing to take back what that height gave the lists. Unset —
+     which is everyone who has not moved the boundary — this is the `flex: 1 1
+     auto` it has always been. */
+  .split > :first-child > .card {
+    flex: var(--artifact-fill, 1) 1 var(--artifact-h, auto);
+    min-height: 8rem; overflow-y: auto;
+  }
   .split > :first-child > .related { flex: 0 4 auto; min-height: 5rem; overflow-y: auto; }
   .split > :first-child > .pane-label { flex: none; }
+  /* Offered exactly where the column is a box of a fixed height with something
+     under the artifact in it. Stacked, the column is as tall as it needs to be
+     and "how to divide it" is not a question anyone is asking. */
+  .split > :first-child > .row-handle { display: block; }
 
   /* The right column carries the cap too, rather than the source table alone
      inside it. With it on the table, the column stood one label taller than
@@ -705,6 +744,10 @@ body { overflow-x: hidden; }
 .regions.hide-source .split > :first-child > .card {
   min-height: 0; overflow: visible;
 }
+/* And with no box there is no height to divide. The two wide arrangements put
+   the column back to `flex` further down and below, where the page is still
+   not what scrolls; this is the one place the artifact simply runs. */
+.regions.hide-source .split > :first-child > .row-handle { display: none; }
 
 /* ── One height, for all three ────────────────────────────────────────────
    The rail, the artifact and the source used to carry three ceilings in two
@@ -786,6 +829,11 @@ body { overflow-x: hidden; }
   }
   .regions-rail-focus-source.hide-source .split > :first-child > .card {
     min-height: 12rem; overflow-y: auto;
+  }
+  /* The column is a box again here, so the boundary in it means something
+     again — see the hide-source note above for the case that it doesn't. */
+  .regions-rail-focus-source.hide-source .split > :first-child > .row-handle {
+    display: block;
   }
 }
 

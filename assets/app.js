@@ -271,31 +271,68 @@
     return Math.min(Math.max(v, lo), Math.max(lo, hi));
   }
 
-  // `spec`: `prop` is the custom property the grid reads, `key` where the
-  // reader's answer is kept, `value(x, rect)` turns a position inside the
-  // container into what the property should say, and `nudge(rect)` is one
-  // press of an arrow key in pixels.
+  // Everything that differs between a boundary between columns and a boundary
+  // between rows, which is less than it sounds: which coordinate of a drag is
+  // the one that means anything, which two arrow keys are the arrow keys, where
+  // the boundary currently sits, and what the browser is told the thing is.
+  //
+  // `at` reads the boundary back off the page rather than off the property,
+  // so the keyboard works in whichever unit the property happens to be written
+  // in. The vertical one is positioned by that very property inside its own
+  // offset parent, so `offsetLeft` is the answer; the horizontal one is in
+  // flow, and where it landed is what its rect says.
+  var AXES = {
+    x: {
+      cls: 'col-handle', orient: 'vertical', body: 'col-dragging',
+      pos: function (e, rect) { return e.clientX - rect.left; },
+      at: function (h) { return h.offsetLeft; },
+      step: function (k) { return k === 'ArrowLeft' ? -1 : k === 'ArrowRight' ? 1 : 0; },
+    },
+    y: {
+      cls: 'row-handle', orient: 'horizontal', body: 'row-dragging',
+      pos: function (e, rect) { return e.clientY - rect.top; },
+      at: function (h, rect) { return h.getBoundingClientRect().top - rect.top; },
+      step: function (k) { return k === 'ArrowUp' ? -1 : k === 'ArrowDown' ? 1 : 0; },
+    },
+  };
+
+  // Writing the boundary onto the container. `also` is for a boundary that
+  // takes more than one property to state — an artifact given a height has
+  // also stopped growing into whatever the lists leave — and those ride along
+  // with the one number that is remembered rather than being remembered too:
+  // they are not the reader's answer, they are what the answer implies.
+  function pin(el, spec, v) {
+    el.style.setProperty(spec.prop, v);
+    for (var k in spec.also || {}) el.style.setProperty(k, spec.also[k]);
+  }
+
+  // `spec`: `axis` picks a row of the table above, `prop` is the custom
+  // property the grid reads, `key` where the reader's answer is kept,
+  // `value(pos, rect)` turns a position inside the container into what the
+  // property should say, `nudge(rect)` is one press of an arrow key in pixels,
+  // and `place` puts the handle where it belongs when appending is wrong.
   function columnHandle(el, spec) {
-    if (!el || el.querySelector(':scope > .col-handle')) return;
+    var ax = AXES[spec.axis || 'x'];
+    if (!el || el.querySelector(':scope > .' + ax.cls)) return;
     try {
       var kept = localStorage.getItem(spec.key);
-      if (kept) el.style.setProperty(spec.prop, kept);
+      if (kept) pin(el, spec, kept);
     } catch (e) {}
 
     var h = document.createElement('button');
     h.type = 'button';
-    h.className = 'col-handle';
+    h.className = ax.cls;
     // A separator rather than a button as far as assistive technology is
     // concerned, because that is what it is: `aria-orientation` says which way
     // it divides, and the arrow keys below are what the role promises.
     h.setAttribute('role', 'separator');
-    h.setAttribute('aria-orientation', 'vertical');
+    h.setAttribute('aria-orientation', ax.orient);
     h.setAttribute('aria-label', spec.label);
     h.title = spec.label + ' — drag to move, double-click to reset';
-    el.appendChild(h);
+    (spec.place || function (p, n) { p.appendChild(n); })(el, h);
 
-    function put(x, rect) {
-      el.style.setProperty(spec.prop, spec.value(x, rect));
+    function put(pos, rect) {
+      pin(el, spec, spec.value(pos, rect));
     }
 
     function remember() {
@@ -310,20 +347,20 @@
       // it does immediately, the handle being as narrow as the gap it covers.
       h.setPointerCapture(e.pointerId);
       h.classList.add('dragging');
-      document.body.classList.add('col-dragging');
+      document.body.classList.add(ax.body);
       e.preventDefault();
     });
 
     h.addEventListener('pointermove', function (e) {
       if (!h.classList.contains('dragging')) return;
       var rect = el.getBoundingClientRect();
-      put(e.clientX - rect.left, rect);
+      put(ax.pos(e, rect), rect);
     });
 
     function release(e) {
       if (!h.classList.contains('dragging')) return;
       h.classList.remove('dragging');
-      document.body.classList.remove('col-dragging');
+      document.body.classList.remove(ax.body);
       try {
         h.releasePointerCapture(e.pointerId);
       } catch (err) {}
@@ -332,16 +369,15 @@
     h.addEventListener('pointerup', release);
     h.addEventListener('pointercancel', release);
 
-    // The keyboard's half of the same thing. `offsetLeft` is where the
-    // boundary resolved to — the handle is positioned by the very property
-    // being read, and `el` is its offset parent — so this works in whichever
-    // unit the property happens to be written in.
+    // The keyboard's half of the same thing, one step of `nudge` from wherever
+    // the boundary actually resolved to — see `at` on the axis for how that is
+    // read back.
     h.addEventListener('keydown', function (e) {
-      var step = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
+      var step = ax.step(e.key);
       if (!step) return;
       e.preventDefault();
       var rect = el.getBoundingClientRect();
-      put(h.offsetLeft + step * spec.nudge(rect), rect);
+      put(ax.at(h, rect) + step * spec.nudge(rect), rect);
       remember();
     });
 
@@ -349,6 +385,7 @@
     // rather than a control somewhere else: whoever moved it is holding it.
     h.addEventListener('dblclick', function () {
       el.style.removeProperty(spec.prop);
+      for (var k in spec.also || {}) el.style.removeProperty(k);
       try {
         localStorage.removeItem(spec.key);
       } catch (e) {}
@@ -401,6 +438,51 @@
           return clampTo((x / rect.width) * 100, 22, 78).toFixed(2) + '%';
         },
       });
+      cardHandle(s.firstElementChild);
+    });
+  }
+
+  // The third boundary, and the only horizontal one: the artifact against the
+  // neighbour lists under it. What it divides is not the page's height — that
+  // column is a scroll box of whatever height the pane leaves — but how that
+  // height is spent, and the two halves want it for opposite reasons. Reading
+  // the passage wants the artifact tall; casting around for what else is near
+  // it wants the lists tall. The stylesheet's own answer gives the artifact
+  // everything the lists do not need, which is right until it isn't.
+  //
+  // Pixels, like the rail and unlike the split: what is being sized is a number
+  // of lines of prose, and lines do not come in percentages of a window.
+  function cardHandle(col) {
+    if (!col || !col.matches) return;
+    var card = col.querySelector(':scope > .card');
+    // Nothing under the artifact is nothing to divide it from. Both lists are
+    // conditional in the template — a fresh artifact has no neighbours yet.
+    if (!card || !col.querySelector(':scope > .related')) return;
+    columnHandle(col, {
+      axis: 'y',
+      prop: '--artifact-h',
+      // The stated height is only half of it. Left growing, the card would
+      // take back at the next layout every pixel the drag just gave the lists.
+      also: { '--artifact-fill': '0' },
+      key: 'engram.artifact-h',
+      label: 'Artifact height',
+      // In the card's own bottom margin — see the note in 40-workspace.css —
+      // so offering the boundary moves nothing on the page.
+      place: function (el, h) {
+        card.parentNode.insertBefore(h, card.nextSibling);
+      },
+      nudge: function () {
+        return rem();
+      },
+      // `top` is where the artifact starts inside the column, which is under a
+      // label and is not zero; the drag reports a position in the column, and
+      // the property is a height. 7rem is the floor under the boundary: the
+      // lists' own 5rem plus the label that says what they are.
+      value: function (y, rect) {
+        var u = rem();
+        var top = card.getBoundingClientRect().top - rect.top;
+        return Math.round(clampTo(y - top, 8 * u, rect.height - top - 7 * u)) + 'px';
+      },
     });
   }
 
@@ -1257,7 +1339,18 @@
     if (!form) return;
     var box = form.querySelector('textarea[name="q"]');
     if (!box) return;
-    var buttons = form.querySelectorAll('[data-verb]');
+    // Read at every sync, never captured. A `querySelectorAll` here is a
+    // static list, and the Ask button is not always in it: an empty base
+    // renders no Ask verb at all — `_ask_verb.html` has nothing to offer until
+    // something is held — and the first capture swaps a fresh `disabled`
+    // button into the slot out of band, long after this ran. That button was
+    // in no list, so nothing ever enabled it or lit it, and a new base's Ask
+    // verb stayed dead until a full reload. This driver became the only thing
+    // that decides how the verb looks when the hard-coded accent came off it,
+    // so a list that cannot see it is a verb that cannot work.
+    function verbs() {
+      return form.querySelectorAll('[data-verb]');
+    }
 
     // Neither verb has anything to act on while the box is empty — except
     // Capture, whose act can also be a staged file. A photo over an empty box
@@ -1284,6 +1377,7 @@
       var asksLike = /\?\s*$/.test(text) ||
         /^(who|what|when|where|why|how|which|is|are|do|does|did|can|could|should|wer|was|wann|wo|warum|wie|welche|ist|sind|kann|hat|habe)\b/i.test(text);
       var keepsLike = hasFile || text.length > 200 || text.indexOf('\n') !== -1;
+      var buttons = verbs();
       for (var i = 0; i < buttons.length; i++) {
         var verb = buttons[i].getAttribute('data-verb');
         buttons[i].disabled = verb === 'capture'
@@ -2366,11 +2460,33 @@
   //
   // Only the band's own requests are held off. A snooze or a `done` is a
   // button inside the band asking to be swapped, and must always land.
+  //
+  // The undo is the third thing a swap destroys, and the worst of the three.
+  // `just` — "Done · undo" — is rendered for exactly one swap, and it shares
+  // the `#due` element the poll replaces; the poll runs every two seconds
+  // while anything is in flight, and a capture puts something in flight. So
+  // pressing done on a moment, with a capture still settling, offered the undo
+  // and took it back before it could be read — and for a deleted moment it is
+  // the only way back.
+  //
+  // Bounded rather than absolute: an undo nobody takes must not stop the band
+  // for ever. It is held for as long as a person plausibly reaches for it and
+  // then let go, after which one poll clears it and the next press starts the
+  // clock again.
+  var UNDO_GRACE = 30000;
+  var undoSince = 0;
+
   function dueBusy() {
     var band = document.getElementById('due');
     if (!band) return false;
     if (band.querySelector('details[open]')) return true;
     if (document.activeElement && band.contains(document.activeElement)) return true;
+    if (band.querySelector('.due-done button')) {
+      if (!undoSince) undoSince = Date.now();
+      if (Date.now() - undoSince < UNDO_GRACE) return true;
+    } else {
+      undoSince = 0;
+    }
     // A date typed but not yet submitted. Nothing else on the band holds text.
     return Array.prototype.some.call(band.querySelectorAll('input'), function (i) {
       return i.value !== '';

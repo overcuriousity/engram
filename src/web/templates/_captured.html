@@ -42,13 +42,11 @@
   {% endif %}
   <a href="/ui/corpora/{{ id }}">View source</a>
 </div>
-{% else if entry %}
-{# The one thing the ordinary path still answers with, and not a receipt: a
-   note the stage filed as today's entry was filed by a reading of its words,
-   nobody pressed anything, and this is the only offer to undo that. It appears
-   where a person can act on it and nowhere else. #}
-{# `div`, for the reason `day.html` gives: a `form` inside a `p` closes it. #}
-<div class="muted para" role="status">Kept as today&rsquo;s entry —
-  <form method="post" action="/ui/corpora/{{ id }}/entry" class="inline"><input type="hidden" name="on" value="0">
-    <button class="btn btn-ghost btn-sm" type="submit">undo</button></form></div>
 {% endif %}
+{# There used to be a third branch here: "Kept as today's entry", with its undo,
+   for a note the stage filed as a journal entry. It could not fire and never
+   had. Filing as an entry is a *judgement*, made by the window job minutes
+   after this response was written — `judgement::apply` calls `set_entry` — so
+   the origin this template was asked about was still `web` every single time.
+   The undo is offered where the entry actually appears, on the day page, which
+   is also where somebody who wants to take it back is looking. #}

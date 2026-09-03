@@ -310,6 +310,14 @@ impl Tenants {
             .vectors
             .open(&self.alias(&user), self.cfg.infer.embed.dim)
             .await?;
+        // Before the core, because building one parses the tokenizer and this
+        // is an `async fn`: see `TokenCounter::warm`. Memoized, so every open
+        // after the first is a lookup.
+        crate::infer::budget::TokenCounter::warm(
+            self.cfg.infer.tokenizer.as_deref(),
+            std::path::Path::new(&self.cfg.store.dir),
+        )
+        .await;
         let core =
             Core::from_config_with(&self.cfg, vectors, store, self.working_for(&user.subject));
         self.on_first_open(&core, &user.subject, trigger);

@@ -760,6 +760,11 @@ default_tz = ""
 [reap]
 # The sweep at all. Off means retired artifacts keep their text forever, which
 # is what every base did before this stage existed.
+#
+# This whole section is the consent: a config file that does not mention [reap]
+# does not run the sweep, whatever the default below says. It is the one stage
+# that destroys captured text, so an upgrade never turns it on for you — you
+# do, by writing this block.
 enabled = true
 # How often the sweep runs. Once a day: the backlog it drains accumulated over
 # months, and there is nothing to be gained by draining it faster.

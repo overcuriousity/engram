@@ -36,6 +36,24 @@ fn ladder(snoozed: bool) -> &'static [i64] {
     }
 }
 
+/// Rungs a row was created too late to stand on are not rungs it owes.
+///
+/// The first rung is 48 hours, and most reminders are set inside that: "erinnere
+/// mich morgen um 9" is armed at `eff_at - 48h`, which is yesterday, so the
+/// ladder found a rung owed the second the row was written and pushed — beside
+/// `confirm_created`, which had just pushed to say the reminder was set. Two
+/// buzzes seconds apart for every reminder under two days out, which is to say
+/// for the common one.
+///
+/// A rung that fell before the moment existed says nothing about it: nobody was
+/// waiting to be told two days ahead about a thing they decided on this
+/// morning. The rungs that come *after* it was created are the ladder it
+/// actually has, and the last of them is the moment itself, which always
+/// remains.
+fn reachable(lead: i64, eff_at: i64, created_at: i64) -> bool {
+    lead == 0 || eff_at - lead >= created_at
+}
+
 /// The rung a moment owes at `now`: the nearest one already reached that the
 /// last push did not cover, or `None` when nothing is owed.
 ///
@@ -43,19 +61,34 @@ fn ladder(snoozed: bool) -> &'static [i64] {
 /// reminder set ten minutes out from firing four pushes at once: the rungs
 /// above it are behind us, one push covers them all, and `notified_at` moving
 /// to now retires them.
-pub fn owed_lead(eff_at: i64, snoozed: bool, notified_at: Option<i64>, now: i64) -> Option<i64> {
+///
+/// `created_at` is the moment's own — see `reachable`.
+pub fn owed_lead(
+    eff_at: i64,
+    snoozed: bool,
+    notified_at: Option<i64>,
+    created_at: i64,
+    now: i64,
+) -> Option<i64> {
     ladder(snoozed)
         .iter()
         .copied()
+        .filter(|lead| reachable(*lead, eff_at, created_at))
         .filter(|lead| eff_at - lead <= now)
         .rfind(|lead| notified_at.is_none_or(|n| n < eff_at - lead))
 }
 
 /// The next second at which this moment owes a push: the earliest rung the
 /// last push did not cover, at any time, past or future.
-pub fn next_lead_at(eff_at: i64, snoozed: bool, notified_at: Option<i64>) -> Option<i64> {
+pub fn next_lead_at(
+    eff_at: i64,
+    snoozed: bool,
+    notified_at: Option<i64>,
+    created_at: i64,
+) -> Option<i64> {
     ladder(snoozed)
         .iter()
+        .filter(|lead| reachable(**lead, eff_at, created_at))
         .map(|lead| eff_at - lead)
         .find(|at| notified_at.is_none_or(|n| n < *at))
 }
@@ -635,8 +668,8 @@ mod tests {
         let owed = due_at(&core, now - 10).await;
         assert_eq!(
             run_after_of(&core).await,
-            Some(now - 10 - LEADS[0]),
-            "a rung already behind us"
+            Some(now - 10),
+            "the moment itself, already behind us"
         );
 
         let job = core.store.claim_job().await.unwrap().unwrap();
@@ -720,24 +753,31 @@ mod tests {
 mod ladder_tests {
     use super::*;
 
+    /// A moment that has existed longer than the ladder is deep: every rung is
+    /// one it could have stood on. The `created_at` most of these tests want.
+    const LONG_AGO: i64 = 0;
+
     #[test]
     fn a_far_out_moment_is_owed_its_first_rung_when_it_enters_the_band() {
         let due = 1_000_000;
         assert_eq!(
-            owed_lead(due, false, None, due - LEADS[0] - 1),
+            owed_lead(due, false, None, LONG_AGO, due - LEADS[0] - 1),
             None,
             "still outside the band"
         );
-        assert_eq!(owed_lead(due, false, None, due - LEADS[0]), Some(LEADS[0]));
+        assert_eq!(
+            owed_lead(due, false, None, LONG_AGO, due - LEADS[0]),
+            Some(LEADS[0])
+        );
     }
 
     #[test]
     fn a_rung_already_pushed_is_not_owed_again_but_the_next_one_is() {
         let due = 1_000_000;
         let sent = due - LEADS[0];
-        assert_eq!(owed_lead(due, false, Some(sent), sent + 1), None);
+        assert_eq!(owed_lead(due, false, Some(sent), LONG_AGO, sent + 1), None);
         assert_eq!(
-            owed_lead(due, false, Some(sent), due - LEADS[1]),
+            owed_lead(due, false, Some(sent), LONG_AGO, due - LEADS[1]),
             Some(LEADS[1])
         );
     }
@@ -747,28 +787,69 @@ mod ladder_tests {
         let due = 1_000_000;
         let now = due - 600; // ten minutes out: every rung above 30m is behind us
         assert_eq!(
-            owed_lead(due, false, None, now),
+            owed_lead(due, false, None, LONG_AGO, now),
             Some(30 * 60),
             "the nearest passed rung, once"
         );
         // And then the moment itself, which is the only rung still ahead.
-        assert_eq!(owed_lead(due, false, Some(now), due), Some(0));
+        assert_eq!(owed_lead(due, false, Some(now), LONG_AGO, due), Some(0));
+    }
+
+    /// The rungs a reminder was created too late to stand on.
+    ///
+    /// "erinnere mich morgen um 9", set this afternoon, is inside the 48-hour
+    /// first rung before it exists. The ladder read that rung as passed and
+    /// unpushed and owed it at once — while `confirm_created` was pushing
+    /// "reminder set" for the same act. Two buzzes seconds apart, for every
+    /// reminder under two days out.
+    #[test]
+    fn a_reminder_created_inside_the_band_owes_nothing_until_its_own_time() {
+        let due = 1_000_000;
+        let made = due - 20 * 3_600; // set twenty hours out: inside the 48h rung
+        assert_eq!(
+            owed_lead(due, false, None, made, made),
+            None,
+            "nothing is owed at the second it is written"
+        );
+        assert_eq!(
+            owed_lead(due, false, None, made, due - 13 * 3_600),
+            None,
+            "and not before the first rung it was actually created above"
+        );
+        assert_eq!(
+            owed_lead(due, false, None, made, due - 12 * 3_600),
+            Some(LEADS[1]),
+            "the twelve-hour rung is inside its life and is owed"
+        );
+        // A reminder set ten minutes out clears no rung but the last, and that
+        // one is what it is for.
+        let soon = due - 600;
+        assert_eq!(owed_lead(due, false, None, soon, soon), None);
+        assert_eq!(owed_lead(due, false, None, soon, due), Some(0));
+        // And the unit sleeps until that, rather than waking to owe nothing.
+        assert_eq!(next_lead_at(due, false, None, soon), Some(due));
     }
 
     #[test]
     fn nothing_is_owed_once_the_moment_itself_has_been_pushed() {
         let due = 1_000_000;
-        assert_eq!(owed_lead(due, false, Some(due), due + 10_000), None);
+        assert_eq!(
+            owed_lead(due, false, Some(due), LONG_AGO, due + 10_000),
+            None
+        );
     }
 
     #[test]
     fn the_next_boundary_is_the_earliest_rung_not_yet_covered() {
         let due = 1_000_000;
-        assert_eq!(next_lead_at(due, false, None), Some(due - LEADS[0]));
         assert_eq!(
-            next_lead_at(due, false, Some(due - LEADS[0])),
+            next_lead_at(due, false, None, LONG_AGO),
+            Some(due - LEADS[0])
+        );
+        assert_eq!(
+            next_lead_at(due, false, Some(due - LEADS[0]), LONG_AGO),
             Some(due - LEADS[1])
         );
-        assert_eq!(next_lead_at(due, false, Some(due)), None);
+        assert_eq!(next_lead_at(due, false, Some(due), LONG_AGO), None);
     }
 }

@@ -1723,6 +1723,46 @@ impl Store {
         Ok(())
     }
 
+    /// Point a still-reapable candidate at the rewrite the sweep made for it.
+    ///
+    /// `bury`'s guard, applied to the other verdict. `rescue_one` works from a
+    /// `Chunk` snapshot `nominees` took a whole page ago and then spends a
+    /// judge call and a generation call on it, and `set_superseded_by` — which
+    /// it must use, because `core.supersede()` rightly refuses a retired loser
+    /// — has no both-active guard of its own to be stopped by. An operator who
+    /// reactivates an artifact during those minutes had it silently re-retired
+    /// on the strength of a verdict about the row as it used to be, and pointed
+    /// at model-written text.
+    ///
+    /// Same predicate, same string, same reason as `bury`: `NotFound` when the
+    /// row has been overtaken, and the caller says so and leaves the rewrite
+    /// standing on its own. `min_age_secs` is the caller's, so the re-check
+    /// asks the question the nomination asked.
+    pub async fn supersede_if_reapable(&self, id: &str, by: &str, min_age_secs: i64) -> Result<()> {
+        let cutoff = now() - min_age_secs;
+        let res = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1,
+                    retired_at = COALESCE(retired_at, ?)
+              WHERE id = ? AND id IN (SELECT art.id FROM artifacts art
+                                       WHERE art.id = ? AND {})",
+            Self::REAPABLE
+        )))
+        .bind(by)
+        .bind(ArtifactStatus::Superseded.as_str())
+        .bind(now())
+        .bind(id)
+        .bind(id)
+        .bind(cutoff)
+        .bind(cutoff)
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
     /// Take a buried artifact's text back out of the graveyard — the undo the
     /// graveyard exists to make possible.
     ///

@@ -124,6 +124,27 @@ impl TokenCounter {
         TokenCounter { tok }
     }
 
+    /// Fill the memo off the async runtime's worker threads.
+    ///
+    /// `load` is memoized, so this costs nothing after the first call — but the
+    /// first call parses 11 MB of JSON (and may fetch a file over the network),
+    /// and `from_config_with` is sync and called from `Tenants::open`, which is
+    /// an `async fn` on a request path. The parse therefore sat on a tokio
+    /// worker, blocking every other task that thread was carrying, for as long
+    /// as it took. Warmed here instead, on a thread that is allowed to block,
+    /// so the `load` inside the core build is a hashmap lookup.
+    ///
+    /// Nothing is returned and nothing can fail: a warm that did not finish
+    /// leaves `load` to do exactly what it did before.
+    pub async fn warm(spec: Option<&str>, cache_dir: &std::path::Path) {
+        let spec = spec.map(String::from);
+        let dir = cache_dir.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || {
+            Self::load(spec.as_deref(), &dir);
+        })
+        .await;
+    }
+
     fn parse(
         spec: Option<&str>,
         cache_dir: &std::path::Path,

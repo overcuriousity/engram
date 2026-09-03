@@ -634,6 +634,17 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
     if !r.by_day.is_empty() && r.freq == Freq::Yearly {
         return Err("BYDAY under FREQ=YEARLY is outside the subset".into());
     }
+    // And its mirror. `next_after`'s Daily and Weekly arms never read
+    // `by_month_day`, so the constraint was accepted and then dropped:
+    // `FREQ=DAILY;BYMONTHDAY=15` validated, was stored by the API door, and
+    // fired every day of the month with the whole push ladder behind each one —
+    // a rule that says "the fifteenth" behaving as "always". RFC 5545 forbids
+    // the WEEKLY pairing outright, and under DAILY the day-of-month is a limit
+    // this subset does not implement. Refused for the reason directly above:
+    // silently ignoring a constraint somebody wrote is the failure.
+    if r.by_month_day.is_some() && matches!(r.freq, Freq::Daily | Freq::Weekly) {
+        return Err("BYMONTHDAY under FREQ=DAILY or FREQ=WEEKLY is outside the subset".into());
+    }
     Ok(r)
 }
 
@@ -746,7 +757,12 @@ impl crate::core::Core {
     /// Done, and — for a recurring moment — the next occurrence as a new row
     /// carrying the same rule and source. The done row stays: the history of
     /// a recurring reminder is its rows.
-    pub async fn complete_moment(&self, id: &str) -> crate::error::Result<()> {
+    /// Answers whether the completion actually happened, so a door can tell
+    /// "done" from "there was nothing there to finish" — a button pressed
+    /// twice, or one on a page open since before a re-read replaced the row.
+    /// The band reported "Done · undone" for both, and offered an undo for a
+    /// moment nothing had changed.
+    pub async fn complete_moment(&self, id: &str) -> crate::error::Result<bool> {
         let now = self.clock.now();
         if let Some(m) = self.store.moment(id).await?
             // The claim, and the gate: everything below arms rows and retires
@@ -760,14 +776,18 @@ impl crate::core::Core {
             if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
                 && !self.store.rule_is_exhausted(&m.artifact_id, rule).await?
                 && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
-                // The same question every other insert on this artifact asks
-                // first. The claim above rules out this call racing itself;
-                // this rules out arming an instant the artifact already
-                // carries — a re-read that landed on the successor, or an
-                // occurrence somebody set by hand.
+                // Not `has_moment_at`, which is the re-read's question and
+                // answers yes for an instant that is only some row's
+                // `moved_from`. Moving this very reminder off next week's
+                // occurrence is exactly what an operator does with a recurring
+                // row, and it made completion decline to arm the successor it
+                // had just stepped over — the recurrence ended there, with
+                // `has_moved_moment` refusing every re-read that might have
+                // put it back. What arming needs to know is whether a row is
+                // parked on the instant, and nothing else.
                 && !self
                     .store
-                    .has_moment_at(&m.artifact_id, crate::store::moments::Kind::Due, Some(next))
+                    .moment_parked_at(&m.artifact_id, crate::store::moments::Kind::Due, Some(next))
                     .await?
             {
                 self.store
@@ -798,8 +818,9 @@ impl crate::core::Core {
             {
                 self.store.retire_corpus(&cid, now).await?;
             }
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// The exact inverse of `complete_moment`, and the only way to undo one.
@@ -895,6 +916,113 @@ mod tests {
             "two of two, and no third"
         );
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
+    }
+
+    /// The recurrence that died on its first completion.
+    ///
+    /// A daily reminder, moved by hand off the occurrence it was about to reach
+    /// — which is the ordinary thing to do with a recurring row that lands
+    /// badly one week. Completing the moved row computes the next occurrence,
+    /// and that instant is exactly what the row was moved *away from*, which
+    /// `has_moment_at` answers "yes" to by design: it is the re-read's
+    /// question, and a re-read must not put a row back on a corrected-away-from
+    /// date. Used as the gate for arming, it declined to arm the successor —
+    /// and `has_moved_moment` then refused every re-read that might have put
+    /// one back, so the recurrence was over, silently and for good.
+    #[tokio::test]
+    async fn a_recurrence_moved_off_its_next_occurrence_still_arms_one() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Take the tablets", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let rule = "FREQ=DAILY";
+        let wed = berlin()
+            .with_ymd_and_hms(2026, 9, 2, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        let id = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(wed),
+                tz: "Europe/Berlin".into(),
+                rule: Some(rule.into()),
+                source: Source::Cue,
+                span: None,
+            })
+            .await
+            .unwrap();
+        // Moved a day earlier by hand. `next_after` from Tuesday is Wednesday,
+        // which is now this row's `moved_from`.
+        let tue = wed - 86_400;
+        core.store
+            .move_moment(&id, tue, "Europe/Berlin")
+            .await
+            .unwrap();
+
+        assert!(core.complete_moment(&id).await.unwrap());
+        let open = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(open.len(), 1, "the next occurrence is armed: {open:?}");
+        assert_eq!(open[0].moment.at, Some(wed));
+        assert_eq!(open[0].moment.rule.as_deref(), Some(rule));
+    }
+
+    /// And the guard the one above must not undo: an instant the artifact
+    /// really does carry is still not armed a second time.
+    #[tokio::test]
+    async fn a_recurrence_does_not_arm_an_occurrence_that_is_already_there() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Water the plants", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let rule = "FREQ=DAILY";
+        let day = |d| {
+            berlin()
+                .with_ymd_and_hms(2026, 9, d, 9, 0, 0)
+                .unwrap()
+                .timestamp()
+        };
+        let row = |at: i64| NewMoment {
+            artifact_id: aid.clone(),
+            kind: Kind::Due,
+            at: Some(at),
+            tz: "Europe/Berlin".into(),
+            rule: Some(rule.into()),
+            source: Source::Cue,
+            span: None,
+        };
+        let first = core.store.insert_moment(&row(day(2))).await.unwrap();
+        // Somebody already set tomorrow's by hand.
+        core.store.insert_moment(&row(day(3))).await.unwrap();
+        assert!(core.complete_moment(&first).await.unwrap());
+        let open = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(open.len(), 1, "no second row on the same instant: {open:?}");
+        assert_eq!(open[0].moment.at, Some(day(3)));
     }
 
     #[test]
@@ -1019,6 +1147,12 @@ mod tests {
             // interval: unbounded here is an unbounded loop inside a request.
             "FREQ=DAILY;INTERVAL=0",
             "FREQ=DAILY;INTERVAL=4000000000",
+            // `next_after`'s Daily and Weekly arms never read `by_month_day`,
+            // so accepting these was accepting a constraint and then dropping
+            // it: "the fifteenth" stored, and a push every day of the month.
+            // RFC 5545 forbids the weekly pairing outright.
+            "FREQ=DAILY;BYMONTHDAY=15",
+            "FREQ=WEEKLY;BYMONTHDAY=15",
         ] {
             assert!(validate_rule(bad).is_err(), "{bad}");
         }

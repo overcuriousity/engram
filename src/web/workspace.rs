@@ -355,10 +355,6 @@ struct CapturedTemplate {
     /// only hint is a queue on Ops the writer has no reason to open.
     near_dupe_of: Option<String>,
     near_dupe_percent: i64,
-    /// The note opened like a diary entry and was filed as one. Said on the
-    /// receipt with its undo, because a channel label nobody asked for is
-    /// exactly the kind of thing that must not happen silently.
-    entry: bool,
 }
 
 async fn capture_submit(
@@ -407,14 +403,7 @@ async fn capture_submit(
                 .with_tz(viewer_zone(f.tz.as_deref())),
         )
         .await?;
-    let entry = tenant
-        .core
-        .store
-        .corpus_origin(&out.id)
-        .await?
-        .is_some_and(|o| o.origin == crate::core::ingest::ORIGIN_JOURNAL);
     Ok(HtmlTemplate(CapturedTemplate {
-        entry,
         id: out.id,
         duplicate: out.duplicate,
         near_dupe_percent: out
@@ -492,6 +481,11 @@ struct AnswerTemplate {
     /// marked in `answer`, so a reader can tell what the base holds from what
     /// the model wrote.
     unsupported: Vec<String>,
+    /// Every excerpt this was written from has been retired. Badged, because
+    /// an answer drawn entirely from what the base has put away is a different
+    /// kind of answer and the reader is the one who decides what to do about
+    /// it.
+    retired_only: bool,
     /// Set when the question was recorded; the verdict bar exists only then.
     event_id: Option<String>,
     /// The bar, rendered — empty when there is no event.
@@ -720,6 +714,7 @@ fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
             .collect(),
         dropped: out.dropped,
         truncated: out.truncated,
+        retired_only: out.retired_only,
         abstained: out.abstained,
         unsupported: out.unsupported,
         verdict_bar: match &out.event_id {
@@ -1541,6 +1536,7 @@ mod tests {
             citations: vec![],
             dropped,
             truncated: false,
+            retired_only: false,
             abstained: false,
             unsupported: vec![],
             event_id: None,

@@ -285,6 +285,79 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Move an artifact's open moments to the artifact that superseded it.
+    ///
+    /// `supersede` already says that every other question about the loser now
+    /// belongs to the winner — the open pairs move, the links move, the
+    /// engagement moves. Time did not, and it is the one that pushes: a
+    /// reminder read onto a verbatim passage, which is what the judgement
+    /// anchors to when the model wrote no artifact for a note that is nothing
+    /// but a reminder, went dark the moment a later promotion superseded that
+    /// passage. `uncovered` filters on `a.status = 'active'`, so the row simply
+    /// stopped being on the band — no push at any rung, nothing on the day
+    /// page, and nothing anywhere saying it had gone.
+    ///
+    /// Open rows only. A done row is the history of a thing that happened to
+    /// the artifact it happened on, and moving it would rewrite that.
+    ///
+    /// And never onto an instant the winner already carries, which is the same
+    /// uniqueness every insert on an artifact asks about: a promotion whose
+    /// artifacts were themselves read as the reminder has the row already, and
+    /// the passage's copy stays where it is rather than becoming a second one.
+    pub async fn carry_moments(&self, loser: &str, winner: &str) -> Result<u64> {
+        if loser == winner {
+            return Ok(0);
+        }
+        let res = sqlx::query(
+            "UPDATE moments SET artifact_id = ?
+              WHERE artifact_id = ? AND done_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM moments w
+                                 WHERE w.artifact_id = ?
+                                   AND w.kind = moments.kind
+                                   AND w.at IS moments.at)",
+        )
+        .bind(winner)
+        .bind(loser)
+        .bind(winner)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Is a moment of this kind actually parked at this instant?
+    ///
+    /// `has_moment_at` above answers a wider question on purpose — it also says
+    /// yes for an instant that is merely some row's `moved_from`, because a
+    /// re-read landing back on the date the operator corrected away from must
+    /// not put a second row there. That is the right question for a re-read and
+    /// the wrong one for arming a recurrence: `complete_moment` asks "does this
+    /// artifact already carry the successor", and a daily reminder moved by
+    /// hand from Wednesday to Tuesday answers its own next Wednesday with the
+    /// instant it was moved off. Nothing was armed, and `has_moved_moment` then
+    /// refused every re-read — so the recurrence died on its first completion,
+    /// silently and for good.
+    ///
+    /// So this one asks only what it needs: is there a row *here*. A row moved
+    /// *onto* this instant carries it in `at` and is still found; a row moved
+    /// *off* it is somewhere else and no longer speaks for it.
+    pub async fn moment_parked_at(
+        &self,
+        artifact_id: &str,
+        kind: Kind,
+        at: Option<i64>,
+    ) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moments
+              WHERE artifact_id = ? AND kind = ? AND at IS ?",
+        )
+        .bind(artifact_id)
+        .bind(kind.as_str())
+        .bind(at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     /// Has the operator moved a moment of this kind on this artifact?
     ///
     /// The re-read's other guard, and the one `has_moment_at` cannot be: that
@@ -641,13 +714,20 @@ impl Store {
     /// an *unsnooze* then found a bare ladder: the reminder the phone had
     /// already said was owed — and said — again the moment the snooze was
     /// taken back.
-    pub async fn snooze(&self, id: &str, until: i64) -> Result<()> {
-        sqlx::query("UPDATE moments SET snoozed_until = ? WHERE id = ?")
-            .bind(until)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Whether a row was actually put aside, so the band can say "Snoozed"
+    /// only where something was. An id that names nothing — a stale button on
+    /// a page open since before a re-read replaced the row — reported the
+    /// snooze and offered the undo for it either way.
+    pub async fn snooze(&self, id: &str, until: i64) -> Result<bool> {
+        Ok(
+            sqlx::query("UPDATE moments SET snoozed_until = ? WHERE id = ? AND done_at IS NULL")
+                .bind(until)
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                > 0,
+        )
     }
 
     pub async fn unsnooze(&self, id: &str) -> Result<()> {
@@ -696,6 +776,7 @@ impl Store {
                     eff_at(r),
                     r.moment.snoozed_until.is_some(),
                     r.moment.notified_at,
+                    r.moment.created_at,
                     now,
                 )
                 .is_some()
@@ -786,6 +867,7 @@ impl Store {
                     eff_at(r),
                     r.moment.snoozed_until.is_some(),
                     r.moment.notified_at,
+                    r.moment.created_at,
                 )
             })
             .min())
@@ -821,6 +903,23 @@ mod tests {
             .await
             .unwrap();
         (s, made[0].id.clone())
+    }
+
+    /// Push a row's `created_at` back before the ladder it is being read
+    /// against.
+    ///
+    /// The ladder only offers a rung the moment was alive for — see
+    /// `remind::reachable` — and these tests date their moments in synthetic
+    /// seconds well below the wall clock `insert_moment` stamps, so every row
+    /// would be one created after its own due time. Backdating is what makes
+    /// them the long-standing reminders they are written about.
+    async fn existed_since(s: &Store, id: &str, created_at: i64) {
+        sqlx::query("UPDATE moments SET created_at = ? WHERE id = ?")
+            .bind(created_at)
+            .bind(id)
+            .execute(&s.pool)
+            .await
+            .unwrap();
     }
 
     fn due(aid: &str, at: Option<i64>) -> NewMoment {
@@ -937,6 +1036,8 @@ mod tests {
         let a = s.insert_moment(&due(&aid, Some(10_000_000))).await.unwrap();
         let b = s.insert_moment(&due(&aid, Some(9_000_000))).await.unwrap();
         s.insert_moment(&due(&aid, None)).await.unwrap();
+        existed_since(&s, &a, 0).await;
+        existed_since(&s, &b, 0).await;
         assert_eq!(
             s.next_notify_at().await.unwrap(),
             Some(9_000_000 - LEADS[0]),
@@ -968,6 +1069,7 @@ mod tests {
         let (s, aid) = store_with_artifact().await;
         let at = 10_000_000;
         let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
+        existed_since(&s, &id, 0).await;
         assert!(
             s.due_owed(at - LEADS[0] - 1).await.unwrap().is_empty(),
             "not yet in the band"
@@ -997,6 +1099,7 @@ mod tests {
         let (s, aid) = store_with_artifact().await;
         let at = 10_000_000;
         let id = s.insert_moment(&due(&aid, Some(at))).await.unwrap();
+        existed_since(&s, &id, 0).await;
         assert_eq!(s.next_notify_at().await.unwrap(), Some(at - LEADS[0]));
         s.mark_notified(std::slice::from_ref(&id), at - LEADS[0])
             .await

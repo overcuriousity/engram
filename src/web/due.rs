@@ -362,15 +362,15 @@ async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
 }
 
 async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
-    tenant.core.complete_moment(&id).await?;
-    render(
-        &tenant,
-        &f.tz,
-        Some(Just::moment(&id, "Done", "undone")),
-        f.since,
-        f.all == "1",
-    )
-    .await
+    // Only where something was finished. A press that changed nothing — a
+    // second click, a button on a page open since a re-read replaced the row —
+    // reported "Done" and offered to undo a completion that never happened.
+    let just = tenant
+        .core
+        .complete_moment(&id)
+        .await?
+        .then(|| Just::moment(&id, "Done", "undone"));
+    render(&tenant, &f.tz, just, f.since, f.all == "1").await
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -416,8 +416,9 @@ fn local(at: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
 
 async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     let mut just = None;
-    if let Some(until) = snooze_until(&f.until, tenant.core.clock.now(), zone(Some(&f.tz))) {
-        tenant.core.store.snooze(&id, until).await?;
+    if let Some(until) = snooze_until(&f.until, tenant.core.clock.now(), zone(Some(&f.tz)))
+        && tenant.core.store.snooze(&id, until).await?
+    {
         tenant.core.store.rearm_remind().await?;
         just = Some(Just::moment(&id, "Snoozed", "unsnooze"));
     }

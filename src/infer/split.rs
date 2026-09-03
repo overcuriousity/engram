@@ -89,7 +89,25 @@ pub fn split_into_segments(text: &str, counter: &TokenCounter, budget: usize) ->
                     // A hard cut inside one long line cannot be snapped: both
                     // windows then name that line and take the fragments as they
                     // are. See the doc above.
-                    if snapped > acc[i - 1] { snapped } else { *off }
+                    //
+                    // Compared against where the predecessor's own *content*
+                    // begins, not against where its window begins. The two are
+                    // the same everywhere but the first window, which claims
+                    // the head of the document from byte zero however much the
+                    // splitter trimmed off it — so with leading blank lines
+                    // `acc[0]` was 0 while the first chunk started on line 5,
+                    // and snapping the second boundary back to that same line 5
+                    // cleared a bar that was standing in the wrong place. Window
+                    // zero collapsed to the whitespace and window one carried
+                    // two chunks: `"\n\n\n\n"` before a long line came back as
+                    // one token and then 513 against a budget of 256, twice the
+                    // input the context reservation is sized for, and a
+                    // synthesis call spent on four newlines. Leading blanks are
+                    // routine out of HTML and PDF extraction — see the note at
+                    // the top of this function, which is about the same four
+                    // characters.
+                    let prev = acc[i - 1].max(line_start(offsets[i - 1]));
+                    if snapped > prev { snapped } else { *off }
                 };
                 acc.push(from);
                 acc
@@ -163,6 +181,42 @@ mod tests {
         assert_eq!(w.last().unwrap().end_line, text.lines().count() as i64);
         for pair in w.windows(2) {
             assert_eq!(pair[0].end_line + 1, pair[1].start_line, "spans must abut");
+        }
+    }
+
+    /// Leading blank lines used to buy the document one wasted window and its
+    /// successor two chunks' worth of text.
+    ///
+    /// The first window claims the head of the document from byte zero, so its
+    /// recorded start is not where the splitter's first chunk begins. The
+    /// snapping guard compared the second boundary against that zero, found it
+    /// clear, and snapped the boundary onto the very line the first chunk
+    /// opens on — leaving window zero holding nothing but the blank lines and
+    /// window one holding both chunks. Four newlines out of a PDF extraction
+    /// are enough, and what came back was a window at twice the budget: past
+    /// what the context reservation is sized for, with a synthesis call spent
+    /// on the whitespace beside it.
+    #[test]
+    fn leading_blank_lines_do_not_collapse_the_first_window() {
+        let counter = TokenCounter::default();
+        for lead in ["\n\n\n\n", "\n", "   \n\n\t\n"] {
+            let text = format!("{lead}{}", "line of words here. ".repeat(500));
+            for budget in [64, 128, 256] {
+                let w = split_into_segments(&text, &counter, budget);
+                for win in &w {
+                    // The splitter's own overshoot is a token or two; twice the
+                    // budget is a window carrying a neighbour's chunk.
+                    assert!(
+                        counter.count(&win.text) <= budget + budget / 2,
+                        "lead {lead:?} budget {budget}: a window of {} tokens",
+                        counter.count(&win.text)
+                    );
+                }
+                // And the text still reconstructs, which is what the snapping
+                // is for in the first place.
+                let joined: String = w.iter().map(|x| x.text.as_str()).collect();
+                assert_eq!(joined, text, "lead {lead:?} budget {budget}");
+            }
         }
     }
 

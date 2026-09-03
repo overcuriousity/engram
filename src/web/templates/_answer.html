@@ -12,6 +12,14 @@
         title="These appear in no cited excerpt. The model wrote them; the base does not hold them.">
         {{ unsupported.len() }} literal{% if unsupported.len() != 1 %}s{% endif %} no excerpt supports</span></span>
     {% endif %}
+    {% if retired_only %}
+      {# Not a warning about the answer's quality: the excerpts are as real as
+         any others and the base is what put them away. It is a warning about
+         where the reader is standing. #}
+      <span class="card-meta"><span class="badge badge-warning"
+        title="Nothing live matched. Every excerpt this answer was written from has been retired — a completed reminder, a superseded note — and is no longer part of what the base offers.">
+        written only from retired notes</span></span>
+    {% endif %}
     {% if dropped > 0 %}
       {# In words a reader uses. "excerpt(s) omitted for context budget" is
          the accounting behind it, which belongs where an operator can still

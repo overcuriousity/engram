@@ -996,6 +996,7 @@ mod tests {
             truncated: false,
             abstained: false,
             unsupported: unsupported.iter().map(|s| s.to_string()).collect(),
+            retired_only: false,
             event_id: None,
         }
     }

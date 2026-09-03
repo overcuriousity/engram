@@ -1192,6 +1192,29 @@ impl Core {
                 tracing::warn!(loser_id, winner_id, error = %e, "could not move the loser's open pairs")
             }
         }
+        // And the loser's open moments, for the same reason and with the same
+        // best-effort handling: the supersession has happened, and a reminder
+        // that failed to move is a reminder still on a hidden artifact — which
+        // is where it already was. `rearm_remind` after it, because the earliest
+        // owed instant in the base may have just changed: a row that was
+        // invisible to `uncovered` is visible again on the winner.
+        match self.store.carry_moments(loser_id, winner_id).await {
+            Ok(0) => {}
+            Ok(n) => {
+                tracing::info!(
+                    moved = n,
+                    loser_id,
+                    winner_id,
+                    "carried the superseded artifact's open moments to its winner"
+                );
+                if let Err(e) = self.store.rearm_remind().await {
+                    tracing::warn!(error = %e, "could not re-arm the reminder unit after a supersession");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(loser_id, winner_id, error = %e, "could not carry the loser's moments")
+            }
+        }
         tracing::info!(loser_id, winner_id, "superseded an artifact");
         Ok(())
     }
@@ -1653,6 +1676,21 @@ impl Core {
             return Ok(());
         }
         let idx = windows[0].idx;
+        // The mark an undone promotion leaves, honoured here as `jobs::promote`
+        // and `jobs::passages` honour it. Re-reading this window is a promotion
+        // — it writes artifacts and `supersede_covered` hides the passages
+        // under them — so arming it here silently performed the very act the
+        // operator undid, and did it worse: the deprecated artifacts of the
+        // first promotion fail `in_results()`, so what lands is a second
+        // generation beside them.
+        if self.store.segment_no_promote(corpus_id, idx).await? {
+            tracing::info!(
+                corpus_id,
+                window = idx,
+                "this window's promotion was undone; the reminder is not read from it again"
+            );
+            return Ok(());
+        }
         self.store.reset_segment(corpus_id, idx, true).await?;
         self.store
             .rearm_idle_seq(
@@ -1717,6 +1755,17 @@ impl Core {
                 );
                 return Ok(false);
             };
+            // The same mark, for the same reason — see
+            // `ask_the_judged_read_for_a_reminder`. Read before the metadata is
+            // written, so a refusal changes nothing at all.
+            if self.store.segment_no_promote(cid, idx).await? {
+                tracing::info!(
+                    corpus_id = cid,
+                    window = idx,
+                    "this window's promotion was undone; it is not read again for a reminder"
+                );
+                return Ok(false);
+            }
             crate::core::moments::allow_intent(&mut meta, intent);
             self.store.set_corpus_metadata(cid, &meta).await?;
             // Hand the note back to the judged read: re-run its window's
@@ -3829,6 +3878,82 @@ mod tests {
             core.store.get_corpus(&out.id).await.unwrap().origin,
             "journal"
         );
+    }
+
+    /// A reminder read onto a passage, and the passage superseded under it.
+    ///
+    /// `supersede` says every other question about the loser now belongs to the
+    /// winner — the open pairs move, the links move, the engagement moves. Time
+    /// did not. A note that is nothing but a reminder leaves the model nothing
+    /// it is allowed to write, so the judgement anchors to the verbatim passage
+    /// itself; when a later promotion superseded that passage the row went
+    /// dark, because `uncovered` reads `a.status = 'active'`. No push at any
+    /// rung, nothing on the day page, and nothing anywhere saying it had gone.
+    #[tokio::test]
+    async fn superseding_an_artifact_carries_the_reminder_standing_on_it() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("the gutters", [1.0, 0.0]), ("the drain", [0.0, 1.0])],
+        )
+        .await;
+        let (loser, winner) = (ids[0].clone(), ids[1].clone());
+
+        let at = crate::store::now() + 7 * 86_400;
+        core.store
+            .insert_moment(&NewMoment {
+                artifact_id: loser.clone(),
+                kind: Kind::Due,
+                at: Some(at),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Classified,
+                span: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(core.store.open_due(0, i64::MAX).await.unwrap().len(), 1);
+
+        core.supersede(&loser, &winner).await.unwrap();
+
+        let open = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(open.len(), 1, "the reminder is still on the band: {open:?}");
+        assert_eq!(open[0].moment.artifact_id, winner, "it moved to the winner");
+        assert_eq!(open[0].moment.at, Some(at));
+    }
+
+    /// And it never becomes a second row: a winner that already carries the
+    /// instant keeps the one it has.
+    #[tokio::test]
+    async fn a_carried_moment_never_doubles_an_instant_the_winner_holds() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("the gutters", [1.0, 0.0]), ("the drain", [0.0, 1.0])],
+        )
+        .await;
+        let (loser, winner) = (ids[0].clone(), ids[1].clone());
+        let at = crate::store::now() + 7 * 86_400;
+        for id in [&loser, &winner] {
+            core.store
+                .insert_moment(&NewMoment {
+                    artifact_id: id.clone(),
+                    kind: Kind::Due,
+                    at: Some(at),
+                    tz: "Europe/Berlin".into(),
+                    rule: None,
+                    source: Source::Classified,
+                    span: None,
+                })
+                .await
+                .unwrap();
+        }
+        core.supersede(&loser, &winner).await.unwrap();
+        let open = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(open.len(), 1, "one row, not two: {open:?}");
+        assert_eq!(open[0].moment.artifact_id, winner);
     }
 
     #[tokio::test]

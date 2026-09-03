@@ -111,25 +111,41 @@ async fn step_aside(core: &Core, id: &str) {
 /// means what `in_results` means; the payload's own status can lag the row,
 /// so the row answers. A candidate with no point gets none, which only ever
 /// defends it.
-async fn live_neighbours(core: &Core, id: &str) -> Vec<(String, String)> {
+///
+/// The errors are raised and not swallowed, and that is the whole safety
+/// argument of the prompt: the judge is asked whether the live base already
+/// states this, and the live texts are what it is asked *against*. A vector
+/// search that timed out came back as an empty list — indistinguishable from
+/// "nothing near it" — and the model then ruled on a retired artifact with no
+/// evidence in front of it, at which point `worthless` wipes the text with only
+/// the graveyard for a way back. Under load, or while an index is building,
+/// that could be a whole run. An error here stops the judging of this row; the
+/// sweep says so and comes back for it.
+///
+/// An empty list from a search that *worked* is still fine, and still only ever
+/// defends the row: the prompt is told there are no neighbours, which is true.
+async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String, String)>> {
     let mut out: Vec<(String, String)> = Vec::new();
-    if let Ok(hits) = core.vectors.neighbours(id, 6).await {
-        for h in hits {
-            if h.payload.artifact_id == id {
-                continue;
-            }
-            if let Ok(Some(true)) = core.store.artifact_in_results(&h.payload.artifact_id).await {
-                out.push((
-                    h.payload.title.clone().unwrap_or_else(|| "untitled".into()),
-                    h.payload.text.clone(),
-                ));
-            }
-            if out.len() >= 5 {
-                break;
-            }
+    for h in core.vectors.neighbours(id, 6).await? {
+        if h.payload.artifact_id == id {
+            continue;
+        }
+        if core
+            .store
+            .artifact_in_results(&h.payload.artifact_id)
+            .await?
+            == Some(true)
+        {
+            out.push((
+                h.payload.title.clone().unwrap_or_else(|| "untitled".into()),
+                h.payload.text.clone(),
+            ));
+        }
+        if out.len() >= 5 {
+            break;
         }
     }
-    out
+    Ok(out)
 }
 
 /// Act on `valuable`: rewrite what remains into a live synthesized artifact
@@ -195,7 +211,7 @@ async fn rescue_one(
     for (title, text) in &excerpts {
         user.push_str(&format!("Title: {title}\n\n{text}\n\n"));
     }
-    let neighbours = live_neighbours(core, &c.id).await;
+    let neighbours = live_neighbours(core, &c.id).await?;
     if !neighbours.is_empty() {
         user.push_str("----- CLOSEST LIVE ARTIFACTS -----\n");
         for (title, text) in &neighbours {
@@ -230,19 +246,44 @@ async fn rescue_one(
     // both-active guard rightly refuses a retired loser. An already-superseded
     // candidate keeps its pointer: its old winner retired it, and the rewrite
     // will simply outrank it as a live neighbour on the second visit.
+    //
+    // Guarded the way `bury` is, and for the same minutes: `c` is a snapshot
+    // `nominees` took before two model calls, and the row it describes may
+    // have been reactivated since. Without the re-check this verdict about a
+    // retired artifact silently re-retired a live one and pointed it at text a
+    // model wrote. Overtaken, the rewrite simply stands on its own — it is a
+    // live artifact with the candidate in its lineage either way, and the
+    // second visit is where the two are compared.
     if c.superseded_by.is_none() {
         let _guard = core.lifecycle_lock.lock().await;
-        core.store.set_superseded_by(&c.id, Some(&made.id)).await?;
-        core.vectors
-            .set_lifecycle(
-                &c.id,
-                crate::store::artifacts::ArtifactStatus::Superseded,
-                Some(&made.id),
-            )
-            .await?;
-        core.store
-            .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
-            .await?;
+        match core
+            .store
+            .supersede_if_reapable(&c.id, &made.id, min_age_secs(core))
+            .await
+        {
+            Ok(()) => {
+                core.vectors
+                    .set_lifecycle(
+                        &c.id,
+                        crate::store::artifacts::ArtifactStatus::Superseded,
+                        Some(&made.id),
+                    )
+                    .await?;
+                core.store
+                    .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
+                    .await?;
+            }
+            Err(crate::error::Error::NotFound) => {
+                tracing::info!(
+                    artifact_id = %c.id,
+                    new_id = %made.id,
+                    "the candidate stopped being one while it was being rewritten; \
+                     the rewrite stands and the row is left alone"
+                );
+                return Ok(made.id);
+            }
+            Err(e) => return Err(e),
+        }
     }
     // And the clock starts over, on both branches. `set_superseded_by` keeps
     // the first retirement's stamp on purpose, and an already-superseded
@@ -394,7 +435,7 @@ async fn judge_one(
         Some(id) => core.store.get_artifact(id).await.ok(),
         None => None,
     };
-    let neighbours = live_neighbours(core, &c.id).await;
+    let neighbours = live_neighbours(core, &c.id).await?;
     let case = crate::infer::prompt::ReapCase {
         title: c.title.as_deref().unwrap_or("untitled"),
         text: &c.text,

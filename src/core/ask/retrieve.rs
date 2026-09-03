@@ -21,7 +21,21 @@
 /// caller reports that position on the wire and reaches neighbours from it —
 /// rather than computing the cliff a second time.
 pub(super) fn above_cliff(cliff_at: Option<usize>, hits: usize) -> usize {
-    cliff_at.unwrap_or(hits)
+    match cliff_at {
+        // A cliff at the very first hit says nothing is above it, which is not
+        // a cut — it is the same "nothing to conclude from" the `None` arm
+        // already hands the whole list back for. `search` produces it in one
+        // case: every hit is retired, and the retired tail it marks is the
+        // whole list. Retiring is ordinary lifecycle — completing a reminder
+        // retires the note it was read from — so those rows can be the only
+        // record the base has of an answer, and truncating here left `ask`
+        // writing from no excerpts at all while the search page beside it
+        // listed them. They are answered from, and `AskResponse::retired_only`
+        // is what says so.
+        Some(0) => hits,
+        Some(n) => n,
+        None => hits,
+    }
 }
 
 /// How many of the top hits get their neighbours pulled in.
@@ -590,6 +604,24 @@ mod tests {
     #[test]
     fn a_list_with_a_cliff_packs_to_it() {
         assert_eq!(cut(&[0.9, 0.88, 0.86, 0.20, 0.19]), 3);
+    }
+
+    /// A cliff at the very first hit is not a cut.
+    ///
+    /// `search` produces it in one case: every hit is retired, so the retired
+    /// tail it marks is the whole list. Taken literally, `ask` truncated to
+    /// zero excerpts and wrote its answer from nothing while the search page
+    /// beside it listed the rows. Retiring is ordinary lifecycle — completing a
+    /// reminder retires the note it was read from — so those rows can be all
+    /// the base has, and answering from them with `retired_only` set is the
+    /// better of the two failures.
+    #[test]
+    fn a_cliff_at_the_first_hit_cuts_nothing() {
+        assert_eq!(above_cliff(Some(0), 5), 5);
+        assert_eq!(above_cliff(Some(0), 0), 0);
+        // And every other position still means what it said.
+        assert_eq!(above_cliff(Some(3), 5), 3);
+        assert_eq!(above_cliff(None, 5), 5);
     }
 
     /// `above_cliff` as `ask` runs it: the cliff of this list, then the cut.

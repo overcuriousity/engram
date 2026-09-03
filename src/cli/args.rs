@@ -15,7 +15,9 @@ pub struct CliArgs {
     /// Capture a file, a link, a sentence, or `-` for standard input.
     /// Repeatable: `engram -c *.pdf` is one invocation and several corpora.
     /// An argument that names no file and looks like no path is the note
-    /// itself — see `cli::capture::read_target`.
+    /// itself — see `cli::capture::read_target`. Several arguments are several
+    /// captures only where each one addresses something; an unquoted sentence
+    /// is joined back together — see `cli::capture::run`.
     #[arg(short = 'c', value_name = "PATH|URL|TEXT|-", num_args = 1.., conflicts_with_all = ["search", "ask", "remind", "journal"])]
     pub capture: Vec<String>,
     /// Search. A leading bare integer is how many hits are wanted.
@@ -47,7 +49,10 @@ pub struct CliArgs {
     ///
     /// Refused with `--show` for the plainer version of the same reason: one
     /// artifact named by id is not a list there is anything to narrow.
-    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status"])]
+    ///
+    /// And refused with `-r` and `-j`, which do not carry them either: a
+    /// reminder and a journal entry are captures the server tags for itself.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status", "remind", "journal"])]
     pub tags: Vec<String>,
     /// Narrow a search to artifacts in this category. Refused with `-a`, like `--tag`.
     #[arg(long, value_name = "CATEGORY", conflicts_with_all = ["ask", "show", "status"])]
@@ -70,7 +75,11 @@ pub struct CliArgs {
     ///
     /// There is nothing to follow behind the other three verbs: they finish
     /// when their response arrives.
-    #[arg(long, conflicts_with_all = ["search", "ask", "show", "status"])]
+    ///
+    /// Refused with `-r` and `-j` for the reason `--tag` is refused with `-a`:
+    /// those two doors post once and answer with what they made, and `--watch`
+    /// was parsed, accepted and then dropped on the floor by both.
+    #[arg(long, conflicts_with_all = ["search", "ask", "show", "status", "remind", "journal"])]
     pub watch: bool,
     /// Read one artifact in full: a rank from the last search, a leading piece
     /// of an id, or a whole id.

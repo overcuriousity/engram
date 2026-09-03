@@ -199,6 +199,8 @@ pub fn periodic_period(
 /// where the repair pass's first tick fires immediately, and a restart picking
 /// the work straight up is the behaviour the tickers had.
 pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
+    use crate::jobs::remind::REMIND_TARGET;
+    use crate::store::jobs::Stage;
     for (stage, target) in periodic_units(core) {
         match core.store.live_job(stage, target).await {
             Ok(true) => {}
@@ -224,11 +226,27 @@ pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
     // until some unrelated write happened to arm it again, and with two
     // reminders pending the second pushed at no rung at all in between.
     //
-    // Safe on every tick and not only after a failure: `rearm_remind` reads the
-    // earliest owed moment and disarms where there is none, `arm_at` refuses a
-    // unit that is already running, and a user with no channel is left disarmed.
-    if let Err(e) = core.store.rearm_remind().await {
-        tracing::warn!(error = %e, "could not re-arm the reminder unit");
+    // Only where the unit is actually missing, which is the same question the
+    // loop above asks of every periodic one. `rearm_remind` goes through
+    // `arm_at`, and `arm_at` resets `attempts` and `empty_runs` — rightly, for
+    // the writes it exists for, which carry new information about when the
+    // next moment is due. This call carries none: it is a net under a unit
+    // that fell out of the table, and running it unconditionally handed a
+    // failing Remind unit a clean slate every hour, so a channel that has been
+    // refusing pushes all night was retried on the repair pass's cadence
+    // instead of on its own backoff.
+    //
+    // A stale row is not a case this has to answer for. A unit armed at the
+    // wrong second wakes, finds nothing owed, and re-arms or disarms itself;
+    // every write that moves the earliest owed instant re-arms it directly.
+    match core.store.live_job(Stage::Remind, REMIND_TARGET).await {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Err(e) = core.store.rearm_remind().await {
+                tracing::warn!(error = %e, "could not re-arm the reminder unit");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not look for the reminder unit"),
     }
 }
 

@@ -140,6 +140,7 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
   .regions-split.hide-source .split > :first-child > .card {
     min-height: 12rem; overflow-y: auto;
   }
+  .regions-split.hide-source .split > :first-child > .row-handle { display: block; }
 }
 
 /* One region. Two of them, and the difference is what the region holds rather
