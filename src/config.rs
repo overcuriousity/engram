@@ -950,6 +950,10 @@ pub struct InferConfig {
     pub ask: Option<AskRole>,
     pub rerank: Option<RerankRole>,
     pub vision: Option<VisionRole>,
+    /// The speech model behind the microphone in the search box. `None` — the
+    /// default — takes the button off the page rather than leaving one that
+    /// fails, the same way an absent `vision` closes the image door.
+    pub transcribe: Option<TranscribeRole>,
 }
 
 /// The file's shape, before tiers are folded into the roles. Every endpoint
@@ -970,6 +974,8 @@ pub struct RawInferConfig {
     rerank: Option<RerankRole>,
     #[serde(default)]
     vision: Option<RawVisionRole>,
+    #[serde(default)]
+    transcribe: Option<TranscribeRole>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1191,6 +1197,12 @@ impl TryFrom<RawInferConfig> for InferConfig {
             ask,
             rerank: raw.rerank,
             vision,
+            // Folded by hand nowhere: unlike vision, this role never borrows
+            // the synthesize endpoint. A server that transcribes speech is not
+            // the server that writes chat completions — the one installation
+            // where it would be is a proxy in front of both, and there the
+            // address is worth writing twice rather than inherited by silence.
+            transcribe: raw.transcribe,
         })
     }
 }
@@ -1784,6 +1796,39 @@ impl RerankStyle {
             RerankStyle::Vllm => "v1/models",
         }
     }
+}
+
+/// The speech-to-text model the microphone in the search box speaks to.
+/// Optional: absent means there is no microphone.
+///
+/// An OpenAI-compatible `POST {base_url}/audio/transcriptions`, which is what
+/// whisper.cpp's server, faster-whisper-server, vLLM and the hosted APIs all
+/// answer. Both endpoint fields are required once the section exists — there
+/// is no tier to fall back to and no other role's address to borrow, so an
+/// under-specified block would be a microphone that fails on first press.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TranscribeRole {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// A minute, not the fifteen the other roles take. What waits on this call
+    /// is a person holding a button, and a transcription that has not come back
+    /// within a minute is one they have given up on.
+    #[serde(default = "default_transcribe_timeout_secs")]
+    pub timeout_secs: u64,
+    /// An ISO-639-1 code sent with every recording, or nothing at all.
+    ///
+    /// Worth setting where the operator speaks one language: whisper detects
+    /// the language from the audio and is at its worst at that on the two or
+    /// three words a search query usually is — a German query comes back as
+    /// English words that sound like it. Naming it skips the detection.
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+fn default_transcribe_timeout_secs() -> u64 {
+    60
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -2501,6 +2546,9 @@ impl Config {
         if let Some(v) = c.infer.vision.as_mut() {
             v.api_key = v.api_key.as_ref().map(|_| R.into());
         }
+        if let Some(t) = c.infer.transcribe.as_mut() {
+            t.api_key = t.api_key.as_ref().map(|_| R.into());
+        }
         if let Some(o) = c.auth.oidc.as_mut() {
             o.client_secret = o.client_secret.as_ref().map(|_| R.into());
         }
@@ -2595,6 +2643,7 @@ impl Config {
                 }),
                 rerank: None,
                 vision: None,
+                transcribe: None,
             },
             auth: AuthConfig {
                 mode: AuthMode::Local,
@@ -3268,6 +3317,47 @@ mode = "off"
             cfg.infer.rerank.is_none(),
             "rerank must default to disabled"
         );
+    }
+
+    #[test]
+    fn transcription_is_off_until_an_endpoint_is_named() {
+        // The microphone is a door like the image door: shipped shut, opened
+        // by naming a server. Nothing about the button is a preference — the
+        // page asks whether the role exists and renders it or does not.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        assert!(
+            Config::load(Some(&p)).unwrap().infer.transcribe.is_none(),
+            "speech-to-text must default to unconfigured"
+        );
+
+        let stt = "\n[infer.transcribe]\nbase_url = \"http://localhost:8090/v1\"\nmodel = \"whisper-1\"\n";
+        let p = write(&dir, &format!("{MINIMAL}{stt}"));
+        let role = Config::load(Some(&p)).unwrap().infer.transcribe.unwrap();
+        assert_eq!(role.base_url, "http://localhost:8090/v1");
+        assert_eq!(role.model, "whisper-1");
+        assert_eq!(role.timeout_secs, 60, "a person is holding the button");
+        assert!(
+            role.language.is_none(),
+            "detection unless a language is named"
+        );
+
+        let p = write(&dir, &format!("{MINIMAL}{stt}language = \"de\"\n"));
+        let role = Config::load(Some(&p)).unwrap().infer.transcribe.unwrap();
+        assert_eq!(role.language.as_deref(), Some("de"));
+    }
+
+    #[test]
+    fn the_transcription_key_is_redacted_in_the_dump() {
+        // `--print-config` is a thing operators paste into issues.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let stt = "\n[infer.transcribe]\nbase_url = \"http://localhost:8090/v1\"\nmodel = \"whisper-1\"\napi_key = \"sk-not-in-the-dump\"\n";
+        let p = write(&dir, &format!("{MINIMAL}{stt}"));
+        let dump = Config::load(Some(&p)).unwrap().redacted();
+        assert!(!dump.contains("sk-not-in-the-dump"), "{dump}");
+        assert!(dump.contains("REDACTED"), "{dump}");
     }
 
     #[test]

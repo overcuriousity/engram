@@ -1516,6 +1516,163 @@
     grow();
   }
 
+  // ── The microphone ──────────────────────────────────────────────────
+  // Hold the button, talk, let go: the recording goes to `/ui/transcribe` and
+  // the words come back into the box. The button is on the page only where a
+  // speech model is configured, so everything here is guarded on finding it.
+  //
+  // What this deliberately does not do is search. The transcript is written
+  // into the value and `VERB_SYNC` is fired — the same event a staged file
+  // fires — so the verbs and the height catch up without the `input` htmx
+  // listens on. Dictation fills the box; pressing something is still what acts
+  // on it, exactly as it is for typing that has not been finished yet.
+  function micButton() {
+    var btn = document.getElementById('mic');
+    if (!btn) return;
+    var form = document.getElementById('box-form');
+    var box = form && form.querySelector('textarea[name="q"]');
+    if (!box) return;
+    var status = document.getElementById('mic-status');
+
+    // Nothing to hold down if the browser has neither half of this. Removed
+    // rather than left dead: the server said a microphone is configured, and
+    // this is the client's own answer that it cannot use one.
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
+        typeof window.MediaRecorder === 'undefined') {
+      btn.remove();
+      box.classList.remove('box-with-mic');
+      return;
+    }
+
+    var recorder = null;
+    var chunks = [];
+    // Set on the way down and read on the way up: a press that has already
+    // been given up on must not start a recorder that arrives after it.
+    var holding = false;
+
+    function say(msg) { if (status) status.textContent = msg || ''; }
+
+    function stopTracks(stream) {
+      var tracks = stream.getTracks();
+      for (var i = 0; i < tracks.length; i++) tracks[i].stop();
+    }
+
+    // The transcript goes in at the end, never over what is there: the box may
+    // hold a question half typed, and a microphone is not a reason to lose it.
+    function fill(text) {
+      if (!text) return;
+      var had = box.value.replace(/\s+$/, '');
+      box.value = had ? had + ' ' + text : text;
+      box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
+      // The caret at the end of what was just said, so the next thing typed
+      // continues it. Focus, because the press was on a button and the box is
+      // where the operator is now working.
+      box.focus();
+      try { box.setSelectionRange(box.value.length, box.value.length); } catch (e) {}
+    }
+
+    function send(blob) {
+      // A press and a release with nothing in between. No call, no message:
+      // nothing happened, and saying so is noise.
+      if (!blob || !blob.size) { say(''); return; }
+      btn.disabled = true;
+      say('Transcribing…');
+      var body = new FormData();
+      // The name the handler reads, and a filename because a part without one
+      // is a field rather than a file to the multipart reader on the server.
+      body.append('audio', blob, 'recording');
+      fetch('/ui/transcribe', { method: 'POST', body: body, credentials: 'same-origin' })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
+        .then(function (text) {
+          fill(text.trim());
+          say('');
+        })
+        .catch(function () {
+          // The endpoint is the operator's own, and what is wrong with it is in
+          // the server log. What the page can say is that nothing was typed.
+          say('Could not transcribe that.');
+        })
+        .then(function () { btn.disabled = false; });
+    }
+
+    function start() {
+      if (holding || btn.disabled) return;
+      holding = true;
+      btn.classList.add('listening');
+      say('Listening…');
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+        // Let go before the permission dialog was answered, or before the
+        // device opened. The stream is closed again and nothing is recorded —
+        // leaving it open is a microphone light nobody asked for.
+        if (!holding) { stopTracks(stream); return; }
+        chunks = [];
+        recorder = new MediaRecorder(stream);
+        recorder.addEventListener('dataavailable', function (e) {
+          if (e.data && e.data.size) chunks.push(e.data);
+        });
+        recorder.addEventListener('stop', function () {
+          stopTracks(stream);
+          var type = recorder.mimeType || (chunks[0] && chunks[0].type) || 'audio/webm';
+          var blob = new Blob(chunks, { type: type });
+          recorder = null;
+          chunks = [];
+          send(blob);
+        });
+        recorder.start();
+      }).catch(function () {
+        holding = false;
+        btn.classList.remove('listening');
+        // The one failure worth a sentence on the page: no amount of pressing
+        // again fixes it, and the browser's own prompt is gone by now.
+        say('No microphone — the browser refused access.');
+      });
+    }
+
+    function stop() {
+      if (!holding) return;
+      holding = false;
+      btn.classList.remove('listening');
+      if (!recorder) { say(''); return; }
+      if (recorder.state !== 'inactive') recorder.stop();
+    }
+
+    // Pointer events cover mouse, pen and touch in one, and `pointerup` is
+    // taken on the window rather than the button: a hold that drifts off the
+    // button — which a thumb does — must still end the recording, and end it
+    // where the finger actually came up.
+    btn.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      start();
+    });
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    // A window that loses focus mid-hold — an alt-tab, a phone call — is a
+    // held button nothing will ever release.
+    window.addEventListener('blur', stop);
+
+    // The keyboard's half of the same gesture. Space and Enter on a focused
+    // button auto-repeat while held, so `e.repeat` is what keeps the second
+    // and hundredth keydown from starting a second recorder.
+    btn.addEventListener('keydown', function (e) {
+      if (e.key !== ' ' && e.key !== 'Enter') return;
+      e.preventDefault();
+      if (e.repeat) return;
+      start();
+    });
+    btn.addEventListener('keyup', function (e) {
+      if (e.key !== ' ' && e.key !== 'Enter') return;
+      e.preventDefault();
+      stop();
+    });
+    // A button that fires `click` as well would start a recording nobody is
+    // holding: the key gesture above already ran, and the browser synthesises
+    // this one after it.
+    btn.addEventListener('click', function (e) { e.preventDefault(); });
+  }
+
   // ── Capture, as a verb ──────────────────────────────────────────────
   // Everything the capture page used to do inline, on the one box. The
   // reasons are the page's own and travel with the code.
@@ -2546,6 +2703,7 @@
     exampleChips();
     boxZone();
     captureVerb();
+    micButton();
     askDriver();
     refinePass();
     trackDwell();

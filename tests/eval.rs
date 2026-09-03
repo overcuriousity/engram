@@ -511,6 +511,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         // The harness measures the shipped default, which is one round.
         planner: None,
         describer: None,
+        transcriber: None,
         chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
         counter: Arc::new(engram::infer::budget::TokenCounter::default()),
         background: Arc::new(engram::core::background::Background::default()),

@@ -247,6 +247,62 @@ body { overflow-x: hidden; }
   background: var(--color-bg-surface);
 }
 
+/* ── The microphone on the box ───────────────────────────────────────────────
+   The wrapper exists only so the button has an edge to sit against. It is a
+   plain block otherwise: the box's own width, growth and focus ring are
+   untouched by it, and where no speech model is configured the button inside
+   is not rendered at all. */
+.box-wrap { position: relative; }
+/* Room for the button, so a line of text never runs under it. On the box
+   rather than the wrapper, and only where a microphone is actually there. */
+.box-with-mic { padding-right: 2.75rem; }
+/* Anchored to the top, not centred: the box grows to ten lines, and a control
+   that walks down the page as you type is a control you have to look for.
+   Beside the first line is where it was when the box was one line tall. */
+.mic {
+  position: absolute; top: 0.375rem; right: 0.375rem;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 2rem; height: 2rem; padding: 0;
+  color: var(--color-fg-muted); background: transparent;
+  border: 1px solid transparent; border-radius: var(--radius-md);
+  cursor: pointer;
+  /* A held button that also selects the text under it is a held button that
+     paints half the query blue on every dictation — and on a touch screen a
+     long press over a control is the browser's own gesture for exactly that. */
+  -webkit-user-select: none; user-select: none; touch-action: none;
+}
+.mic:hover { color: var(--color-fg-primary); background: var(--color-bg-surface); }
+.mic:focus-visible {
+  outline: none;
+  color: var(--color-fg-primary);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-dim);
+}
+/* Listening. The one state that has to read across a room: it says a
+   microphone in this room is open, which is not a thing to indicate subtly. */
+.mic.listening {
+  color: var(--color-bg-elevated); background: var(--color-danger);
+  border-color: transparent;
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+/* Waiting on the endpoint. Dimmed and inert rather than hidden: the recording
+   is over, and pressing again before the words come back would start a second
+   one over the first. */
+.mic[disabled] { opacity: 0.5; cursor: wait; }
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--color-accent-dim); }
+  50% { box-shadow: 0 0 0 4px var(--color-accent-dim); }
+}
+/* Motion is the redundant half of this signal — the colour is the signal — so
+   it is the half that goes. */
+@media (prefers-reduced-motion: reduce) { .mic.listening { animation: none; } }
+/* Empty on every ordinary press: what the button is doing is on the button.
+   This line is for the screen reader, and for the one failure a person can see
+   nothing else about — a microphone the browser refused us. */
+.mic-status { display: block; margin-top: 0.375rem;
+  font-size: var(--text-sm); color: var(--color-fg-muted); }
+.mic-status:empty { display: none; }
+
 /* The row under the box. Two verbs on the left, what narrows the typing on the
    right, and the spinner between them. It wraps, because the chip row grows
    with the vocabulary and a bar that scrolls sideways is a bar that hides one

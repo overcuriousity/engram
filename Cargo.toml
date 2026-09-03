@@ -40,7 +40,10 @@ async-stream = "0.3"
 tokio-stream = "0.1"
 # `blocking` is for exactly one call: the one-time tokenizer download at boot,
 # which runs on its own OS thread — see `infer::budget::fetch_blocking`.
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream", "blocking"] }
+# `multipart` is for exactly one other: the speech endpoint, which takes the
+# recording as a form part because that is the shape OpenAI's transcription
+# API has — every other role here posts JSON.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream", "blocking", "multipart"] }
 pulldown-cmark = "0.13.4"
 ammonia = "4.1.4"
 argon2 = { version = "0.5.3", features = ["std", "password-hash"] }

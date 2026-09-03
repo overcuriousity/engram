@@ -293,6 +293,19 @@ pub trait Completer: Send + Sync {
     fn max_output_tokens(&self) -> usize;
 }
 
+/// Turns one recording into the words in it. Nothing is stored: what comes
+/// back is typed into the box, and the box is what the operator then does
+/// something with.
+#[async_trait]
+pub trait Transcriber: Send + Sync {
+    /// `mime` is the recording's own content type — whatever the browser's
+    /// recorder produced, which is `audio/webm` on Chrome and Firefox and
+    /// `audio/mp4` on Safari. Passed through rather than converted: the
+    /// endpoint reads the container, and re-encoding here would mean shipping
+    /// a codec to do work the model's own loader already does.
+    async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String>;
+}
+
 /// Reads a captured image into text. One call per image; the caller has
 /// already decoded, oriented and downscaled the picture into a JPEG.
 #[async_trait]

@@ -1,6 +1,6 @@
 use super::{
     Completer, Describer, Embedder, Judgement, ProposedArtifact, Reranker, SegmentInput,
-    SegmentReply, SynthesisBudget, Synthesizer,
+    SegmentReply, SynthesisBudget, Synthesizer, Transcriber,
 };
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -743,6 +743,65 @@ impl Describer for FakeDescriber {
             }),
             Some(m) => Err(Error::Inference {
                 role: "vision",
+                detail: m.clone(),
+            }),
+            None => Ok(self.reply.clone()),
+        }
+    }
+}
+
+/// A microphone that always hears the same sentence, and can be asked what it
+/// was handed.
+pub struct FakeTranscriber {
+    pub reply: String,
+    pub fail_with: Option<String>,
+    calls: std::sync::atomic::AtomicUsize,
+    last_mime: std::sync::Mutex<String>,
+    last_len: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for FakeTranscriber {
+    fn default() -> Self {
+        Self::saying("the thing I said out loud")
+    }
+}
+
+impl FakeTranscriber {
+    pub fn saying(reply: &str) -> Self {
+        Self {
+            reply: reply.into(),
+            fail_with: None,
+            calls: Default::default(),
+            last_mime: Default::default(),
+            last_len: Default::default(),
+        }
+    }
+    pub fn failing(msg: &str) -> Self {
+        let mut t = Self::saying("");
+        t.fail_with = Some(msg.into());
+        t
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn last_mime(&self) -> String {
+        self.last_mime.lock().unwrap().clone()
+    }
+    pub fn last_len(&self) -> usize {
+        self.last_len.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Transcriber for FakeTranscriber {
+    async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.last_mime.lock().unwrap() = mime.to_string();
+        self.last_len
+            .store(audio.len(), std::sync::atomic::Ordering::SeqCst);
+        match &self.fail_with {
+            Some(m) => Err(Error::Inference {
+                role: "transcribe",
                 detail: m.clone(),
             }),
             None => Ok(self.reply.clone()),

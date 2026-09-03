@@ -1,9 +1,10 @@
 use super::{
     Completer, Completion, Delta, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput,
-    SynthesisBudget, Synthesizer, prompt,
+    SynthesisBudget, Synthesizer, Transcriber, prompt,
 };
 use crate::config::{
     AskRole, CeilingParam, EmbedRole, RerankRole, RerankStyle, SynthesizeRole, TierConfig,
+    TranscribeRole,
 };
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -188,8 +189,27 @@ impl Endpoint {
     /// caller that wants the body as a stream is not forced to buffer it into
     /// JSON first.
     async fn post(&self, path: &str, body: serde_json::Value) -> Result<reqwest::Response> {
+        self.send(self.client.post(url(&self.base_url, path)).json(&body))
+            .await
+    }
+
+    /// The same call with a form body instead of JSON. One role needs it —
+    /// transcription, whose API takes the recording as a file part — and it
+    /// goes through here rather than around it so that a speech endpoint's
+    /// failures are judged, logged and classified like every other role's.
+    async fn post_multipart(
+        &self,
+        path: &str,
+        form: reqwest::multipart::Form,
+    ) -> Result<reqwest::Response> {
+        self.send(self.client.post(url(&self.base_url, path)).multipart(form))
+            .await
+    }
+
+    /// Send a request that is already built, and judge what comes back: the
+    /// key, the timing log, and which of the two failure kinds a bad status is.
+    async fn send(&self, mut req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let role = self.role;
-        let mut req = self.client.post(url(&self.base_url, path)).json(&body);
         if let Some(k) = &self.api_key {
             req = req.bearer_auth(k);
         }
@@ -1401,6 +1421,98 @@ impl Describer for HttpDescriber {
         // truncation is logged rather than raised. An empty one is not, and
         // `chat` says so in terms the operator can act on.
         Ok(self.ep.chat(body, Some(self.max_output_tokens)).await?.text)
+    }
+}
+
+/// The microphone's other end: one recording in, the words in it out.
+pub struct HttpTranscriber {
+    ep: Endpoint,
+    language: Option<String>,
+}
+
+impl HttpTranscriber {
+    pub fn new(cfg: &TranscribeRole) -> Self {
+        Self {
+            ep: Endpoint::new(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.api_key.as_deref(),
+                cfg.timeout_secs,
+                "transcribe",
+            ),
+            language: cfg.language.clone(),
+        }
+    }
+}
+
+/// The extension to send the recording under.
+///
+/// Not decoration: whisper.cpp's server and faster-whisper-server both pick
+/// the demuxer from the part's filename, and a WebM container arriving as
+/// `audio.bin` is refused before any model sees it. The subtype is the
+/// extension in every container a browser records — the map exists for
+/// `audio/mpeg`, where it is not.
+fn audio_extension(mime: &str) -> &str {
+    let subtype = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim();
+    match subtype {
+        "mpeg" => "mp3",
+        "x-wav" | "wave" => "wav",
+        // An empty or unrecognised type is still a recording, and the one
+        // format a browser produces without saying so is WebM.
+        "" => "webm",
+        other => other,
+    }
+}
+
+#[async_trait]
+impl Transcriber for HttpTranscriber {
+    async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String> {
+        let role = "transcribe";
+        let part = reqwest::multipart::Part::bytes(audio.to_vec())
+            .file_name(format!("recording.{}", audio_extension(mime)))
+            .mime_str(mime.split(';').next().unwrap_or("application/octet-stream"))
+            .map_err(|e| Error::Inference {
+                role,
+                detail: e.to_string(),
+            })?;
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model", self.ep.model.clone())
+            // Plain text would spare the parse, but `json` is the format every
+            // one of these servers agrees on: the OpenAI default, and what the
+            // local ones implement first.
+            .text("response_format", "json");
+        if let Some(l) = &self.language {
+            form = form.text("language", l.clone());
+        }
+        let body: serde_json::Value = self
+            .ep
+            .post_multipart("audio/transcriptions", form)
+            .await?
+            .json()
+            .await
+            .map_err(|e| Error::Inference {
+                role,
+                detail: e.to_string(),
+            })?;
+        // Silence is a legitimate answer — a button pressed and released with
+        // nothing said — so an empty string is returned rather than raised. A
+        // reply with no `text` at all is a different thing: the endpoint
+        // answered something this is not the client for.
+        body.get("text")
+            .and_then(|t| t.as_str())
+            .map(|t| t.trim().to_string())
+            .ok_or_else(|| Error::Inference {
+                role,
+                detail: "the reply carried no `text` field".into(),
+            })
     }
 }
 
@@ -2871,5 +2983,121 @@ mod tests {
         assert_eq!(body["max_tokens"].as_u64(), Some(1024), "{body}");
         assert_eq!(body["messages"][0]["content"], serde_json::json!("s"));
         assert_eq!(body["temperature"], serde_json::json!(0.3));
+    }
+
+    fn transcribe_cfg(base: String) -> TranscribeRole {
+        TranscribeRole {
+            base_url: base,
+            model: "whisper-1".into(),
+            api_key: Some("secret".into()),
+            timeout_secs: 60,
+            language: None,
+        }
+    }
+
+    /// The one role that posts a form. What the endpoint has to receive is the
+    /// audio under `file`, the model beside it, and the key in the header —
+    /// and the part has to carry a filename with the container's extension, or
+    /// the local servers refuse it before a model is loaded.
+    #[tokio::test]
+    async fn the_transcriber_posts_the_recording_as_a_file_part() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .and(header("authorization", "Bearer secret"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": " hello  "})),
+            )
+            .mount(&server)
+            .await;
+
+        let out = HttpTranscriber::new(&transcribe_cfg(server.uri()))
+            .transcribe(b"\x1a\x45\xdf\xa3fake webm", "audio/webm;codecs=opus")
+            .await
+            .unwrap();
+        // Trimmed: whisper returns its text with a leading space, every time,
+        // and that space would land in the search box.
+        assert_eq!(out, "hello");
+
+        let reqs = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&reqs[0].body);
+        assert!(body.contains("name=\"file\""), "{body}");
+        assert!(body.contains("filename=\"recording.webm\""), "{body}");
+        assert!(body.contains("whisper-1"), "{body}");
+        assert!(
+            !body.contains("name=\"language\""),
+            "no language is a language to detect, not an empty field: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_language_is_sent_with_the_recording() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": "ja"})),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = transcribe_cfg(server.uri());
+        cfg.language = Some("de".into());
+        HttpTranscriber::new(&cfg)
+            .transcribe(b"audio", "audio/webm")
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&reqs[0].body);
+        assert!(body.contains("name=\"language\""), "{body}");
+        assert!(body.contains("de"), "{body}");
+    }
+
+    /// A reply this is not the client for is an error, and an empty one is not:
+    /// a button pressed with nothing said transcribes to nothing, and the box
+    /// is simply left as it was.
+    #[tokio::test]
+    async fn silence_is_an_answer_and_a_foreign_reply_is_not() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": ""})))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            HttpTranscriber::new(&transcribe_cfg(server.uri()))
+                .transcribe(b"a", "audio/webm")
+                .await
+                .unwrap(),
+            ""
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"error": "nope"})),
+            )
+            .mount(&server)
+            .await;
+        assert!(
+            HttpTranscriber::new(&transcribe_cfg(server.uri()))
+                .transcribe(b"a", "audio/webm")
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_recording_is_named_after_the_container_it_is_in() {
+        // The servers that read the extension are the ones this is for, and
+        // Safari's recorder is the reason the map is not just the subtype.
+        assert_eq!(audio_extension("audio/webm;codecs=opus"), "webm");
+        assert_eq!(audio_extension("audio/mp4"), "mp4");
+        assert_eq!(audio_extension("audio/ogg"), "ogg");
+        assert_eq!(audio_extension("audio/mpeg"), "mp3");
+        assert_eq!(audio_extension("audio/x-wav"), "wav");
+        assert_eq!(audio_extension(""), "webm");
     }
 }

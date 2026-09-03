@@ -17,9 +17,9 @@ pub mod sitting;
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
 use crate::infer::openai::{
-    HttpCompleter, HttpDescriber, HttpEmbedder, HttpReranker, HttpSynthesizer,
+    HttpCompleter, HttpDescriber, HttpEmbedder, HttpReranker, HttpSynthesizer, HttpTranscriber,
 };
-use crate::infer::{Completer, Describer, Embedder, Reranker, Synthesizer};
+use crate::infer::{Completer, Describer, Embedder, Reranker, Synthesizer, Transcriber};
 use crate::store::Store;
 use crate::vector::VectorStore;
 use background::Background;
@@ -165,6 +165,10 @@ pub struct Core {
     pub planner: Option<Arc<dyn Completer>>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
+    /// The speech model, when one is configured. `None` takes the microphone
+    /// off the search box. Nothing on any background path reads it: this is
+    /// the one model role that exists only for a control someone is holding.
+    pub transcriber: Option<Arc<dyn Transcriber>>,
     /// Passage size, already clamped to the embedder.
     pub chunk_tokens: usize,
     pub counter: Arc<TokenCounter>,
@@ -342,6 +346,11 @@ impl Core {
                 .vision
                 .as_ref()
                 .map(|v| Arc::new(HttpDescriber::new(v, Some(synth))) as Arc<dyn Describer>),
+            transcriber: cfg
+                .infer
+                .transcribe
+                .as_ref()
+                .map(|t| Arc::new(HttpTranscriber::new(t)) as Arc<dyn Transcriber>),
             chunk_tokens: cfg.infer.embed.effective_chunk_tokens(),
             counter,
             background: Arc::new(Background::default()),
@@ -472,6 +481,7 @@ pub mod test_support {
     use super::*;
     use crate::infer::fake::{
         FailingReranker, FakeCompleter, FakeDescriber, FakeEmbedder, FakeReranker, FakeSynthesizer,
+        FakeTranscriber,
     };
     use crate::vector::memory::MemoryVectors;
 
@@ -516,6 +526,14 @@ pub mod test_support {
         core
     }
 
+    /// A core whose speech model is the given fake, so the microphone is on
+    /// the page and answers.
+    pub async fn test_core_with_transcriber(t: Arc<FakeTranscriber>) -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.transcriber = Some(t);
+        core
+    }
+
     /// The shipped default: no `[infer.vision]`, image door closed.
     pub async fn test_core_without_vision() -> Core {
         let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
@@ -557,6 +575,9 @@ pub mod test_support {
             // extra call to account for.
             planner: None,
             describer: Some(Arc::new(FakeDescriber::default())),
+            // Off, like the shipped default: the tests that want a microphone
+            // put one here, and every other test renders the page without one.
+            transcriber: None,
             chunk_tokens: crate::config::DEFAULT_CHUNK_TOKENS,
             counter: Arc::new(TokenCounter::default()),
             background: Arc::new(Background::default()),

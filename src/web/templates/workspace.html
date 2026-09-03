@@ -99,7 +99,13 @@
      `data-placeholder-narrow` is the same sentence for a box one row tall on a
      phone, where the long one is clipped around its thirtieth character.
      app.js swaps them. #}
-  <textarea class="box" name="q" rows="1"
+  {# The box and the one control that sits on it. A wrapper only so the
+     microphone can be positioned against the box's own right edge: everything
+     else about the box — its growth, its placeholders, its verbs — is
+     unchanged by it, and where no speech model is configured this is a plain
+     div around a textarea. #}
+  <div class="box-wrap">
+  <textarea class="box{% if stt_enabled %} box-with-mic{% endif %}" name="q" rows="1"
             aria-label="Search, ask, or capture"
             placeholder="{% if held %}Describe the situation, ask a question, or paste anything worth keeping…{% else %}Paste something to keep…{% endif %}"
             data-placeholder-narrow="{% if held %}Ask, search, or paste to keep…{% else %}Paste something to keep…{% endif %}"
@@ -113,6 +119,36 @@
             data-placeholder-held-narrow="Ask, search, or paste to keep…"
             {%- endif %}
             aria-describedby="box-hint">{{ q }}</textarea>
+  {% if stt_enabled %}
+  {# Hold to talk. Not a toggle: a held button is a recording whose end is
+     never in doubt, and there is no state to be left stuck in — let go, and
+     whatever the microphone heard is over.
+
+     A `button` rather than an icon someone bound a handler to, so it is in the
+     tab order and answers Space and Enter like every other control. The key
+     press is handled in app.js on `keydown`/`keyup` for the same reason the
+     pointer is: holding is the gesture, and a click event fires only once it
+     is already over.
+
+     The status line is `aria-live` and otherwise invisible: a microphone that
+     is listening has to say so to somebody who cannot see the button change
+     colour, and it is also where a refused permission is reported — the one
+     failure here that no amount of pressing fixes. #}
+  <button type="button" id="mic" class="mic" aria-describedby="mic-status"
+          title="Hold to dictate — what you say is typed into the box">
+    {# Presentational: the button is named by its own label below. #}
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+         stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+         aria-hidden="true">
+      <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+      <path d="M5 11a7 7 0 0 0 14 0"></path>
+      <path d="M12 18v3"></path>
+    </svg>
+    <span class="sr-only">Hold to dictate</span>
+  </button>
+  {% endif %}
+  </div>
+  {% if stt_enabled %}<span id="mic-status" class="mic-status" role="status" aria-live="polite"></span>{% endif %}
 {# The file, when there is one. It used to be an always-open drop zone and a
      staged box under it — two places for one idea, on a page that grew a row as
      you used it. The picker lives in the verb row below — for four commits it

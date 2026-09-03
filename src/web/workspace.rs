@@ -57,6 +57,10 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/search/{id}/gap", post(search_gap))
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/ask/{id}/keep", post(ask_keep))
+        // The microphone. Not a door onto anything: it is the keyboard, and
+        // what it answers with goes into the box for the operator to then do
+        // something with.
+        .route("/ui/transcribe", post(transcribe))
 }
 
 #[derive(Template)]
@@ -81,6 +85,10 @@ struct WorkspaceTemplate {
     /// Whether the image door is open, i.e. `[infer.vision]` is configured.
     /// Off, the control offers text only rather than a picker that fails.
     vision_enabled: bool,
+    /// Whether `[infer.transcribe]` is configured. Off, the box has no
+    /// microphone — the same rule the image door follows, and for the same
+    /// reason: a control that cannot work is worse than no control.
+    stt_enabled: bool,
     /// Whether this page asks the rail to say why each row ranked where it
     /// did — `/ui?explain=1`. Carried onto the form as a hidden field and
     /// named in `hx-params`, because that allowlist strips everything it does
@@ -285,6 +293,7 @@ async fn base_template(
         category,
         recommend: tenant.core.recommends(),
         vision_enabled: tenant.core.describer.is_some(),
+        stt_enabled: tenant.core.transcriber.is_some(),
         search_reranks: tenant.core.reranks_search(),
         // The deep-link door sets it; every other door onto this page is not
         // an operator looking into a ranking.
@@ -545,6 +554,72 @@ struct AskForm {
 /// GET-only, so the alternative is a GET that runs inference and writes a row —
 /// exactly what history, prefetchers and link scanners replay. The id is the
 /// guard, and it is spent on first use.
+/// The microphone under the box: one recording in, the words in it back as
+/// plain text.
+///
+/// Nothing is recorded and nothing is stored. A dictated query is a query
+/// somebody typed with their voice — the search it becomes is logged where
+/// every other search is, by the search endpoint, and this call is no more a
+/// capture than pressing a key is. So: no artifact, no activation, no job.
+///
+/// A closed door is a 404, like the ask door, and the page never provokes one:
+/// the button is not rendered where no speech model is configured. The answer
+/// is `text/plain` rather than a fragment because the destination is a
+/// textarea's value, not the DOM.
+async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> Result<Response> {
+    let Some(model) = tenant.core.transcriber.clone() else {
+        return Err(Error::NotFound);
+    };
+
+    let mut audio: Option<(Vec<u8>, String)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Validation(format!("multipart: {e}")))?
+    {
+        if field.name() != Some("audio") {
+            continue;
+        }
+        // Read before the bytes, which consume the field.
+        let mime = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| Error::Validation(format!("audio: {e}")))?;
+        audio = Some((bytes.to_vec(), mime));
+        break;
+    }
+    let Some((bytes, mime)) = audio else {
+        return Err(Error::Validation("no audio part".into()));
+    };
+    // A recording of nothing is a press and a release, which happens by
+    // accident on every touch screen. Answered as the empty transcript it is,
+    // without spending a call on it.
+    if bytes.is_empty() {
+        return Ok((
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            String::new(),
+        )
+            .into_response());
+    }
+
+    let text = model.transcribe(&bytes, &mime).await?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response())
+}
+
 async fn ask_submit(
     State(st): State<AppState>,
     tenant: Tenant,
@@ -2282,5 +2357,138 @@ mod tests {
         let stored = core.store.recent_captures(1).await.unwrap();
         let cid = stored[0].0.clone();
         assert!(core.store.get_corpus(&cid).await.unwrap().metadata["tz"].is_null());
+    }
+
+    /// One `audio` part, with a cookie rather than the bearer token
+    /// `test_support::multipart` sends: this is a page's own fetch.
+    fn dictation(cookie: &str, mime: Option<&str>, body: &[u8]) -> Request<Body> {
+        const B: &str = "engramtestboundary";
+        let typed = match mime {
+            Some(m) => format!("Content-Type: {m}\r\n"),
+            None => String::new(),
+        };
+        let mut buf: Vec<u8> = format!(
+            "--{B}\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"recording\"\r\n{typed}\r\n"
+        )
+        .into_bytes();
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(format!("--{B}--\r\n").as_bytes());
+        Request::builder()
+            .uri("/ui/transcribe")
+            .method("POST")
+            .header("cookie", cookie)
+            .header("content-type", format!("multipart/form-data; boundary={B}"))
+            .body(Body::from(buf))
+            .unwrap()
+    }
+
+    /// A configured speech model puts the button on the box, and nothing else
+    /// about the page moves. Absent, there is no control at all — the rule the
+    /// image door follows.
+    #[tokio::test]
+    async fn the_microphone_is_on_the_box_only_where_a_speech_model_is_configured() {
+        let html = workspace("/ui").await;
+        assert!(
+            !html.contains("id=\"mic\""),
+            "shipped default has no microphone"
+        );
+
+        let core = crate::core::test_support::test_core_with_transcriber(std::sync::Arc::new(
+            crate::infer::fake::FakeTranscriber::default(),
+        ))
+        .await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("id=\"mic\""), "{html}");
+        assert!(
+            html.contains("box-with-mic"),
+            "the box has to leave room for it: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dictation_hands_back_the_words_and_stores_nothing() {
+        let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::saying(
+            "tombstones in leveldb",
+        ));
+        let core = crate::core::test_support::test_core_with_transcriber(heard.clone()).await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let res = app
+            .oneshot(dictation(
+                &cookie,
+                Some("audio/webm;codecs=opus"),
+                b"fake audio",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_of(res).await, "tombstones in leveldb");
+
+        assert_eq!(heard.calls(), 1);
+        assert_eq!(
+            heard.last_mime(),
+            "audio/webm;codecs=opus",
+            "the container the browser recorded in is passed through"
+        );
+        assert_eq!(heard.last_len(), b"fake audio".len());
+        // Dictation is typing. The search it becomes is recorded by the search
+        // endpoint like any other; this call leaves nothing behind on its own.
+        assert!(core.store.recent_captures(5).await.unwrap().is_empty());
+    }
+
+    /// A press and a release with nothing said. Answered as the empty
+    /// transcript it is, without a call to spend on it.
+    #[tokio::test]
+    async fn an_empty_recording_costs_no_call() {
+        let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::default());
+        let core = crate::core::test_support::test_core_with_transcriber(heard.clone()).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(dictation(&cookie, Some("audio/webm"), b""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_of(res).await, "");
+        assert_eq!(heard.calls(), 0);
+    }
+
+    /// No speech model, no route: the same answer the ask door gives when
+    /// there is no ask model behind it.
+    #[tokio::test]
+    async fn there_is_no_transcription_route_without_a_speech_model() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(dictation(&cookie, Some("audio/webm"), b"audio"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A dead speech endpoint is the endpoint's failure, reported as one.
+    #[tokio::test]
+    async fn a_failing_speech_endpoint_is_a_bad_gateway() {
+        let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::failing(
+            "connection refused",
+        ));
+        let core = crate::core::test_support::test_core_with_transcriber(heard).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(dictation(&cookie, Some("audio/webm"), b"audio"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
     }
 }

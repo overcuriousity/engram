@@ -385,6 +385,40 @@ tier = "deep"
 # own — in both cases because it is then the same server.
 # ceiling_param = "max_tokens"
 
+# Speaking instead of typing. Optional and disabled by default: with this block
+# absent there is no microphone on the search box — not a greyed-out one, no
+# control at all, the same rule the image door above follows.
+#
+# The button is held down while you talk, and what comes back is appended to
+# whatever is already in the box. Nothing is stored and nothing is recorded:
+# dictation is typing, and the search it becomes is logged where every other
+# search is.
+#
+# `base_url` and `model` are both required once this block exists. There is no
+# tier to inherit from and no other role's address to borrow — a server that
+# transcribes speech is not the server that writes chat completions, and the
+# one installation where it is has a proxy in front of both, where the address
+# is worth writing twice. The endpoint is an OpenAI-compatible
+# POST {base_url}/audio/transcriptions, which whisper.cpp's server,
+# faster-whisper-server, vLLM and the hosted APIs all answer.
+#
+# Not probed at startup, unlike the other roles: the small speech servers serve
+# only the transcription route, so a probe would warn about an endpoint that
+# works. The first press is the check.
+# [infer.transcribe]
+# base_url = "http://localhost:8090/v1"
+# model = "whisper-1"
+# api_key = ""
+# Seconds before one recording is given up on. Defaults to 60, not the fifteen
+# minutes the background roles take: what is waiting on this call is a person
+# holding a button.
+# timeout_secs = 60
+# An ISO-639-1 code sent with every recording. Unset, the model detects the
+# language from the audio — which is where it is weakest, since a search query
+# is two or three words, and a German one comes back as the English words that
+# sound like it. Worth naming where one person speaks one language.
+# language = "de"
+
 # ── Authentication ──────────────────────────────────────────────────────────
 # Exactly one mode is active.
 

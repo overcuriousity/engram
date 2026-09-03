@@ -157,6 +157,15 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
     } else {
         tracing::info!("vision not configured; the image door is closed");
     }
+    // Named but not probed. Every other role here answers `models`; the small
+    // speech servers this is aimed at — whisper.cpp's `server`, and the
+    // faster-whisper wrappers — serve only the transcription route, so a probe
+    // would print "transcribe unreachable" at every startup of an installation
+    // whose microphone works. The first press is the check.
+    match &cfg.infer.transcribe {
+        Some(t) => tracing::info!(model = %t.model, "speech to text configured"),
+        None => tracing::info!("speech to text not configured; the search box has no microphone"),
+    }
     Ok(())
 }
 

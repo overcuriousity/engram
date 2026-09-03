@@ -41,6 +41,8 @@ score.
   `[infer.vision]`.
 - **Search** — loose matches say they are loose, and a divider marks where
   relevance falls off. Below the line, hits keep their rank and stop pretending.
+  Hold the microphone on the box and talk instead of typing, where
+  `[infer.transcribe]` names a speech endpoint; without one there is no button.
 - **Ask** — one question across the whole base, streamed. It abstains out loud
   when the base has nothing. Any command or path the model wrote that no excerpt
   supports gets badged. That badge is the best part.
