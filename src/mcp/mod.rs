@@ -1636,6 +1636,8 @@ mod tests {
                 notified_at: None,
                 moved_from: None,
                 moved_at: None,
+                series_id: None,
+                origin_corpus_id: None,
                 created_at: 0,
             },
             title: title.into(),

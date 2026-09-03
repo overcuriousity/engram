@@ -54,8 +54,15 @@ pub struct CliArgs {
     /// reminder and a journal entry are captures the server tags for itself.
     #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status", "remind", "journal"])]
     pub tags: Vec<String>,
-    /// Narrow a search to artifacts in this category. Refused with `-a`, like `--tag`.
-    #[arg(long, value_name = "CATEGORY", conflicts_with_all = ["ask", "show", "status"])]
+    /// Narrow a search to artifacts in this category. Refused with `-a`, like
+    /// `--tag` — and with `-r` and `-j` for the same reason `--tag` is: those
+    /// two doors post a capture and answer with what they made, and a filter
+    /// they accept and then drop is worse than one they refuse.
+    #[arg(
+        long,
+        value_name = "CATEGORY",
+        conflicts_with_all = ["ask", "show", "status", "remind", "journal"]
+    )]
     pub category: Option<String>,
     /// Print the results as JSON instead of for a person.
     ///
@@ -63,7 +70,10 @@ pub struct CliArgs {
     /// body for a person to read and has no JSON form, and being handed the
     /// human rendering after asking for JSON is the failure this whole rule is
     /// about.
-    #[arg(long, conflicts_with_all = ["ask", "show"])]
+    ///
+    /// `-r` and `-j` refuse it too: both print their own one-line receipt and
+    /// have no JSON form, so the flag was accepted and silently dropped.
+    #[arg(long, conflicts_with_all = ["ask", "show", "remind", "journal"])]
     pub json: bool,
     /// Never colour, never animate, never leave ASCII.
     #[arg(long)]

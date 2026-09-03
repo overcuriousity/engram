@@ -1998,6 +1998,7 @@ mod tests {
                 rule: None,
                 source: crate::store::moments::Source::Set,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -2016,6 +2017,7 @@ mod tests {
                 rule: None,
                 source: crate::store::moments::Source::Set,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();

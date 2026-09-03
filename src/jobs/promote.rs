@@ -301,7 +301,25 @@ pub async fn supersede_covered(
     let all_superseded: std::collections::HashSet<&str> = pairs.iter().map(|(p, _)| *p).collect();
     let mut n = 0;
     for (winner, losers) in by_winner {
-        let ids: Vec<String> = losers.iter().map(|s| s.to_string()).collect();
+        // The supersession first, and what it earned afterwards. `supersede`
+        // refuses a side an operator has deprecated in the meantime, and
+        // `try_supersede` warns and carries on rather than failing the sweep —
+        // so carrying the engagement and the links up front meant a refusal
+        // left both artifacts active, the winner holding the passage's
+        // engagement twice over and the passage stripped of the links it still
+        // needed. Nothing moves off a passage that is still standing.
+        let mut ids: Vec<String> = Vec::new();
+        for loser in &losers {
+            if crate::jobs::try_supersede(core, loser, winner, "a passage its promotion covers")
+                .await
+            {
+                n += 1;
+                ids.push((*loser).to_string());
+            }
+        }
+        if ids.is_empty() {
+            continue;
+        }
         // What moves is the engagement the passages *earned*, never the raw
         // stored sum. Activation is a capture baseline plus use, and the
         // baseline is anchored to each artifact's own `created_at`: the winner
@@ -336,7 +354,7 @@ pub async fn supersede_covered(
                     .await?;
             }
         }
-        for loser in &losers {
+        for loser in &ids {
             for link in core.store.links_touching(loser).await? {
                 let other = if link.a_id == *loser {
                     &link.b_id
@@ -352,13 +370,6 @@ pub async fn supersede_covered(
                 core.store
                     .carry_link(&link, loser, winner, link_half_life, at)
                     .await?;
-            }
-        }
-        for loser in &losers {
-            if crate::jobs::try_supersede(core, loser, winner, "a passage its promotion covers")
-                .await
-            {
-                n += 1;
             }
         }
     }

@@ -3333,7 +3333,12 @@ pub(crate) async fn build_artifact_detail(
             tracing::warn!(artifact_id, error = %e, "no due state for this pane");
             None
         })
-        .and_then(|m| m.at)
+        // The *effective* instant, as `due_for` reads it for the result-row
+        // badge and `open_due` for the band. A row snoozed from Tuesday to
+        // next Thursday is off the band and its row badge says "in 7 days";
+        // read raw, `at` had the pane say "due 2 days ago" about the same
+        // reminder, on the same screen.
+        .and_then(|m| m.snoozed_until.or(m.at))
         .map(ago_or_ahead);
     Ok(ArtifactDetail {
         due_in,
@@ -4191,6 +4196,50 @@ mod tests {
             !r.snippet.contains('<'),
             "the snippet must not carry markup"
         );
+    }
+
+    #[tokio::test]
+    async fn a_snoozed_reminder_reads_the_same_in_the_pane_as_in_the_row() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay the rent", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let now = core.clock.now();
+        let id = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(now - 2 * 86_400),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Set,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        core.store.snooze(&id, now + 7 * 86_400).await.unwrap();
+
+        // The band hides it and the result-row badge reads the effective
+        // instant. The pane read raw `at` and said "due 2 days ago" about the
+        // same row, on the same screen — the defect `Store::due_for`'s comment
+        // says was already fixed once.
+        let d = build_artifact_detail(&core, &aid, "").await.unwrap();
+        let due = d.due_in.expect("the pane says a reminder is here");
+        assert!(!due.contains("ago"), "the pane read past the snooze: {due}");
     }
 
     #[tokio::test]
@@ -6604,6 +6653,7 @@ mod tests {
                 rule: None,
                 source: crate::store::moments::Source::Set,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();

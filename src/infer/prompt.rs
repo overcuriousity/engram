@@ -2048,8 +2048,20 @@ struct RawArtifact {
     caveats: Vec<String>,
     #[serde(default, deserialize_with = "lenient")]
     tags: Option<Vec<String>>,
-    #[serde(default)]
-    pinned: bool,
+    /// Lenient like `tags` beside it, and for a sharper version of the same
+    /// reason: this was the one strict field left on the struct, so a reply
+    /// answering `"pinned": null` — or `0`, or the string `"false"` — failed
+    /// the whole envelope. `salvage_objects` cannot rescue that either, since
+    /// it deserializes this same struct per object, so every artifact in the
+    /// window was lost and the repair call spent on a reply whose only fault
+    /// was the shape of a flag that the plain path discards anyway.
+    ///
+    /// `None` is read as not pinned. Nothing here tries to make sense of
+    /// `"false"`: a value that is not a boolean is a value the model did not
+    /// state, and guessing at its text would be a second reading of the
+    /// reply — see `lenient`.
+    #[serde(default, deserialize_with = "lenient")]
+    pinned: Option<bool>,
 }
 
 /// What kind of thing an artifact is.
@@ -2466,7 +2478,7 @@ fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArt
                 .filter(|c| !c.is_empty())
                 .take(3)
                 .collect(),
-            pinned: judged && c.pinned,
+            pinned: judged && c.pinned.unwrap_or(false),
         })
         .collect();
 
@@ -3868,6 +3880,27 @@ mod tests {
     fn ask_prompt_skips_an_empty_excerpt() {
         let p = ask_prompt("q", &["[1] t\na".into(), String::new(), "[3] t\nc".into()]);
         assert_eq!(p, "Question: q\n\nExcerpts:\n\n[1] t\na\n\n---\n\n[3] t\nc");
+    }
+
+    /// The flag is a flag, not the reply. A model that answers `null` where a
+    /// boolean was asked for has still written the artifact, and the strict
+    /// field this used to be threw the whole window away over it — including
+    /// in `salvage_objects`, which deserializes the same struct per object and
+    /// so could rescue nothing.
+    #[test]
+    fn a_pinned_flag_of_the_wrong_shape_costs_no_artifact() {
+        for v in ["null", "\"false\"", "0", "[]"] {
+            let body = format!(
+                r#"{{"artifacts":[{{"text":"Send the invoice","title":"Invoice",
+                   "category":"other","corpus_lines":[1,1],"caveats":[],
+                   "tags":[],"pinned":{v}}}]}}"#
+            );
+            let r = parse_response(&body).unwrap_or_else(|e| panic!("pinned={v}: {e}"));
+            assert_eq!(r.len(), 1, "pinned={v}");
+            assert!(!r[0].pinned, "pinned={v}");
+            let j = parse_judged_response(&body).unwrap_or_else(|e| panic!("pinned={v}: {e}"));
+            assert_eq!(j.artifacts.len(), 1, "pinned={v}");
+        }
     }
 
     #[test]

@@ -134,6 +134,7 @@ pub async fn apply(
                 rule: None,
                 source: Source::Classified,
                 span: None,
+                series_id: None,
             })
             .await
         {
@@ -234,6 +235,51 @@ pub async fn apply(
             // instant, which is the cheapest possible answer to a re-read that
             // changes nothing: no delete, no insert, no churn.
             if core.store.has_moment_at(anchor_id, Kind::Due, at).await? {
+                // One thing a second reading of the same prose can still add,
+                // and the instant comparison above cannot see: the same Friday
+                // now read as *every* Friday. Returning on the instant alone
+                // dropped the recurrence, and the reminder stayed a one-shot
+                // however plainly the note said it repeats.
+                if let Some(r) = rule.as_deref()
+                    && core.store.set_rule_of_open_due(anchor_id, at, r).await?
+                {
+                    core.store.rearm_remind().await?;
+                    tracing::debug!(
+                        corpus_id,
+                        rule = r,
+                        "the standing reminder repeats after all"
+                    );
+                }
+                return Ok(());
+            }
+            // A row this base has already spoken about — pushed, or put aside
+            // — is not a re-read's to replace. `delete_read_due` keeps such a
+            // row on purpose, so the delete below would find nothing and the
+            // insert would add a *second* open row beside it: two readings of
+            // one piece of prose, both on the ladder, both pushing.
+            if core.store.has_acted_on_due(anchor_id).await? {
+                tracing::debug!(
+                    corpus_id,
+                    "the reminder on this artifact has already been pushed or snoozed; \
+                     the re-read adds nothing"
+                );
+                return Ok(());
+            }
+            // And an undated *forced* remind never outranks a date already
+            // standing here. The undated row is the band's question "when?",
+            // which is the right answer where there is no date to be had and
+            // the wrong one where there is: `uncovered` filters on
+            // `m.at IS NOT NULL`, so replacing a dated row with it stopped the
+            // reminder firing without saying so anywhere.
+            if at.is_none()
+                && rule.is_none()
+                && let Some(open) = core.store.open_due_for_artifact(anchor_id).await?
+                && open.at.is_some()
+            {
+                tracing::debug!(
+                    corpus_id,
+                    "a forced remind with no date leaves the standing dated reminder alone"
+                );
                 return Ok(());
             }
             // And a date the operator moved outranks this reading of the prose
@@ -267,6 +313,7 @@ pub async fn apply(
                         Source::Classified
                     },
                     span: None,
+                    series_id: None,
                 })
                 .await?;
             core.store.rearm_remind().await?;
@@ -1017,6 +1064,158 @@ mod tests {
             core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
             "the refusal outlived the re-read; {:?}",
             src.metadata
+        );
+    }
+
+    /// `delete_read_due` keeps a row that has already been pushed — it has a
+    /// history, and a row with a history outlives the reading that made it.
+    /// The stage deleted anyway, found nothing to delete, and inserted: two
+    /// open rows for one reading of one note, both climbing the ladder.
+    #[tokio::test]
+    async fn a_re_read_adds_nothing_beside_a_reminder_that_already_pushed() {
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T14:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        let out = core
+            .ingest("die rechnung schicken", "web", None)
+            .await
+            .unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        // The 48 h rung fires, which is what the delete refuses to undo.
+        core.store
+            .mark_notified(&[rows[0].moment.id.clone()], 1_000)
+            .await
+            .unwrap();
+
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        let anchor = rows[0].moment.artifact_id.clone();
+        apply(
+            &core,
+            &src.id,
+            &anchor,
+            &Judgement {
+                intent: Some("remind".into()),
+                when: Some("2099-09-04T15:00".into()),
+                rule: None,
+                events: vec![],
+                links: vec![],
+            },
+            &[],
+            &src.raw_text,
+        )
+        .await
+        .unwrap();
+
+        let after = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(after.len(), 1, "one reading, one row: {after:?}");
+        assert_eq!(after[0].moment.at, rows[0].moment.at);
+    }
+
+    /// A forced remind with no date is the band asking "when?", which is the
+    /// right question where there is no date and the wrong one where a date is
+    /// already standing: `uncovered` filters undated rows out, so the swap
+    /// stopped the reminder firing with nothing said anywhere.
+    #[tokio::test]
+    async fn a_forced_remind_with_no_date_leaves_a_standing_date_alone() {
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T14:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        let mut c = Capture::new("die reifen wechseln, freitag", "web");
+        c.metadata["intent"] = serde_json::Value::String("remind".into());
+        let out = core.ingest_capture(c).await.unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let dated = rows[0].moment.at;
+        assert!(dated.is_some());
+
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        let anchor = rows[0].moment.artifact_id.clone();
+        apply(
+            &core,
+            &src.id,
+            &anchor,
+            &Judgement {
+                intent: Some("remind".into()),
+                when: None,
+                rule: None,
+                events: vec![],
+                links: vec![],
+            },
+            &[],
+            &src.raw_text,
+        )
+        .await
+        .unwrap();
+
+        let after = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after[0].moment.at, dated, "the date survived the re-read");
+    }
+
+    /// The instant guard compares instants and nothing else, which is right
+    /// for the duplicate it prevents and wrong for the one thing a second
+    /// reading can add: the same Friday, now read as every Friday.
+    #[tokio::test]
+    async fn a_re_read_that_recognises_the_recurrence_keeps_it() {
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T14:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        let out = core
+            .ingest("freitags den müll rausstellen", "web", None)
+            .await
+            .unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].moment.rule, None);
+
+        let src = core.store.get_corpus(&out.id).await.unwrap();
+        let anchor = rows[0].moment.artifact_id.clone();
+        apply(
+            &core,
+            &src.id,
+            &anchor,
+            &Judgement {
+                intent: Some("remind".into()),
+                when: Some("2099-09-04T14:00".into()),
+                rule: Some("FREQ=WEEKLY;BYDAY=FR".into()),
+                events: vec![],
+                links: vec![],
+            },
+            &[],
+            &src.raw_text,
+        )
+        .await
+        .unwrap();
+
+        let after = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(after.len(), 1, "no second row: {after:?}");
+        assert_eq!(
+            after[0].moment.rule.as_deref(),
+            Some("FREQ=WEEKLY;BYDAY=FR"),
+            "the recurrence reached the row that was already there"
+        );
+        assert!(
+            after[0].moment.series_id.is_some(),
+            "and it heads its own series, which is what COUNT is counted over"
         );
     }
 

@@ -1767,6 +1767,29 @@ mod tests {
         );
     }
 
+    /// Emptying the box is not a statement that the answer is over. The box
+    /// keeps the question after an Ask on purpose, so select-all and Delete
+    /// went through `showIdle`, which hides `#pane` and `#rail` — taking the
+    /// streaming answer and the way back to the results with them, with
+    /// nothing to bring them back until another keystroke or a reload.
+    #[test]
+    fn emptying_the_box_does_not_take_away_an_answer_being_written() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        let body = &js[js.find("function showIdle()").expect("the idle transition")..];
+        let body = &body[..body.find("function show(").expect("it ends")];
+        assert!(
+            body.contains("if (paneIsBusy()) return;"),
+            "the idle transition asks what the pane is doing first: {body}"
+        );
+        assert!(
+            js.contains("function paneIsBusy()")
+                && js.contains("classList.contains('asking')")
+                && js.contains("getElementById('ask-result')"),
+            "and an ask in flight or an answer standing both count"
+        );
+    }
+
     /// A press was once two captures — a staged file and the text above it —
     /// and both answered in `#capture-result`, so whichever request landed
     /// last wiped the other's line. The text above a file is that file's note

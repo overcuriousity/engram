@@ -14,9 +14,23 @@ pub struct ContextBudget {
 }
 
 /// The fence lines and their labels, which are prompt text like any other and
-/// have to be paid for out of the same budget. Sized for all four block
-/// kinds, the NEIGHBORS and JUDGE fences included.
-const FENCE_TOKENS: usize = 60;
+/// have to be paid for out of the same budget. Sized for all four block kinds,
+/// the NEIGHBORS and JUDGE fences included.
+///
+/// Counted rather than guessed at, because 60 was a guess and it was short.
+/// The opening, preceding and following fences are two lines each, the INPUT
+/// fence carries a sentence about line numbers and the artifact ceiling, and
+/// the JUDGE block spells out the local time, the zone and — where the door
+/// said one — the forced intent before its own fence. See
+/// `prompt::synthesis_prompt`, which is what these numbers describe.
+const FENCE_TOKENS: usize = 160;
+
+/// What one entry of the NEIGHBORS block costs before a word of its text:
+/// `[id: <uuid>] ` and the two newlines around it. A UUID is not one token —
+/// it is a couple of dozen — and with five neighbours that alone was most of
+/// the overrun this budget was under-reserving by. The title is counted for
+/// real beside it; only the fixed part is a constant.
+pub const NEIGHBOR_HEADER_TOKENS: usize = 28;
 
 impl ContextBudget {
     /// Everything the context blocks cost, fences included. This is subtracted

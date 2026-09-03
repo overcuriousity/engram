@@ -265,7 +265,33 @@ pub async fn run(core: &Core) -> Result<()> {
     let (title, message) = compose(&owed, now);
     deliver(&http_client()?, &targets, &title, &message).await?;
     let ids: Vec<String> = owed.iter().map(|r| r.moment.id.clone()).collect();
-    core.store.mark_notified(&ids, now).await?;
+    // The message is already out, so from here the mark is the fragile step
+    // and `?` is the wrong thing to do with it. `Error::Store` is retryable —
+    // `SQLITE_BUSY` is treated as routine everywhere else — and a retry
+    // re-reads the same `due_owed` set and delivers the whole batch a second
+    // time. So the mark is attempted until it sticks; the realistic cause is a
+    // writer holding the file for a few milliseconds.
+    let mut failed = None;
+    for attempt in 0..5u32 {
+        match core.store.mark_notified(&ids, now).await {
+            Ok(()) => {
+                failed = None;
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "could not record a push that went out");
+                failed = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50 << attempt)).await;
+            }
+        }
+    }
+    if let Some(e) = failed {
+        // Still not returned. A job that fails here is a job that retries, and
+        // its retry says the same thing to the same people about the same
+        // rows. The rows stay owed and the next wake will say it again, which
+        // is the same duplicate arriving later and with a record of why.
+        tracing::error!(error = %e, n = ids.len(), "a push went out that could not be recorded");
+    }
     // The re-arm is NOT here. `arm_at` only moves a row in `pending`, `done`
     // or `failed`, and while this runs the row is `running` — so an arming
     // from inside the run is a no-op, `complete_job` then closes the row with
@@ -309,6 +335,7 @@ mod tests {
                 rule: None,
                 source: Source::Set,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();

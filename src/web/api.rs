@@ -1840,7 +1840,13 @@ async fn list_moments(
     let to =
         q.to.unwrap_or(now + tenant.core.time.horizon_hours as i64 * 3_600);
     let rows = match q.kind.as_deref().unwrap_or("due") {
-        "due" => tenant.core.store.open_due(from, to).await?,
+        // `now`, and never the caller's `from`. `open_due`'s first argument is
+        // the instant a snooze is measured against, not a window's lower
+        // bound — the query has no lower bound on `at` at all, because an
+        // overdue reminder is the one that most deserves to be listed. Passed
+        // `from`, a window a month out both listed every past-overdue row and
+        // un-hid everything snoozed between here and there as currently due.
+        "due" => tenant.core.store.open_due(now, to).await?,
         "event" => tenant.core.store.event_moments_between(from, to).await?,
         other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
     };
@@ -1868,12 +1874,41 @@ pub struct SnoozeBody {
     pub until: i64,
 }
 
+/// Put a reminder aside until an instant that is actually later than now.
+///
+/// Validated like `set_moment`, and then some. A snooze is read as the row's
+/// effective time everywhere the ladder is computed, and `snoozed_until IS
+/// NOT NULL` collapses the lead rungs to the single one at zero — so an
+/// `until` in the past does not merely fail to hide the row, it permanently
+/// removes the 48 h, 12 h, 3 h and 30 min pushes from it. `{"until": 0}` is a
+/// plausible way to spell "clear the snooze"; the route for that is
+/// `moment_unsnooze`, and this one says so rather than quietly obeying.
+///
+/// And a 404 where nothing was put aside: `snooze` answers whether a row
+/// moved, and a stale button on a page open since before a re-read replaced
+/// the row was told "snoozed" either way.
 async fn moment_snooze(
     tenant: Tenant,
     Path(id): Path<String>,
     Json(b): Json<SnoozeBody>,
 ) -> Result<StatusCode> {
-    tenant.core.store.snooze(&id, b.until).await?;
+    let now = tenant.core.clock.now();
+    if !(YEAR_ONE..=END_OF_9999).contains(&b.until) {
+        return Err(Error::Validation(format!(
+            "until={}: outside the range a date can be spelled in",
+            b.until
+        )));
+    }
+    if b.until <= now {
+        return Err(Error::Validation(
+            "until must be in the future; to put a reminder back on the band, \
+             DELETE the snooze instead"
+                .into(),
+        ));
+    }
+    if !tenant.core.store.snooze(&id, b.until).await? {
+        return Err(Error::NotFound);
+    }
     tenant.core.store.rearm_remind().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1954,6 +1989,7 @@ async fn set_moment(
             rule: b.rule,
             source: crate::store::moments::Source::Set,
             span: None,
+            series_id: None,
         })
         .await?;
     tenant.core.store.rearm_remind().await?;
@@ -2220,6 +2256,7 @@ pub(crate) mod tests {
                 rule: rule.map(str::to_string),
                 source: Source::Cue,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -4951,6 +4988,139 @@ mod patch_tests {
                 .unwrap()
                 .snoozed_until
                 .is_some()
+        );
+    }
+
+    /// Two things the snooze route took on trust. `{"until": 0}` is a
+    /// plausible way to spell "put it back on the band", and written through
+    /// it did the opposite: `open_due` re-admitted the row, and
+    /// `snoozed_until IS NOT NULL` collapsed the lead ladder to its single
+    /// rung at zero, so the 48 h, 12 h, 3 h and 30 min pushes were gone for
+    /// good. And an id naming nothing answered 204.
+    #[tokio::test]
+    async fn a_snooze_into_the_past_is_refused_and_an_unknown_row_is_a_404() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let at = crate::store::now() + 600;
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({"at": at, "tz": "Europe/Berlin", "kind": "due"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+
+        for until in [0, -1, crate::store::now(), i64::MAX] {
+            let res = app
+                .clone()
+                .oneshot(post_json(
+                    &format!("/api/v1/moments/{id}/snooze"),
+                    &token,
+                    serde_json::json!({ "until": until }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "until={until}");
+        }
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until
+                .is_none(),
+            "nothing was written"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/moments/no-such-row/snooze",
+                &token,
+                serde_json::json!({"until": at + 86_400}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `open_due`'s first argument is the instant a snooze is measured
+    /// against, not a window's lower bound. Handed the caller's `from`, a
+    /// window a month out listed every overdue row and treated everything
+    /// snoozed between here and there as currently due.
+    #[tokio::test]
+    async fn a_moments_window_in_the_future_does_not_unhide_a_snoozed_row() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let now = crate::store::now();
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({"at": now + 600, "tz": "Europe/Berlin", "kind": "due"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/snooze"),
+                &token,
+                serde_json::json!({"until": now + 30 * 86_400}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let list = json_of(
+            app.clone()
+                .oneshot(bearer_get(
+                    &format!(
+                        "/api/v1/moments?kind=due&from={}&to={}",
+                        now + 40 * 86_400,
+                        now + 47 * 86_400
+                    ),
+                    &token,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            list.as_array().unwrap().is_empty(),
+            "the row is put aside until it is not: {list}"
         );
     }
 

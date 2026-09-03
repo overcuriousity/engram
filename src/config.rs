@@ -1182,8 +1182,9 @@ impl TryFrom<RawInferConfig> for InferConfig {
             tokenizer: raw.tokenizer,
             synthesize: synthesize.ok_or_else(|| {
                 "[infer.synthesize] is required: capture synthesizes, and engram has run \
-                 nothing without a chat model since the 2026-09 capture reshape. Point it at \
-                 a tier — see config.example.toml."
+                 nothing without a chat model since the 2026-09 capture reshape — the \
+                 embed-only mode `synthesis = \"off\"` named went with it. Point it at a \
+                 tier, or give it its own `base_url` and `model` — see config.example.toml."
                     .to_string()
             })?,
             embed: raw.embed,
@@ -2034,7 +2035,10 @@ impl Config {
                 "this config sets keys removed in the 2026-09 capture reshape:\n{}\nThere are \
                  no synthesis modes any more: [infer.synthesize] is required, capture stores \
                  verbatim passages first and synthesizes what fits one call, and larger \
-                 corpora earn synthesis through use. Delete the keys.",
+                 corpora earn synthesis through use. Delete the keys.\n\nA base that ran \
+                 `synthesis = \"off\"` had no chat endpoint at all, and now needs one: point \
+                 [infer.synthesize] at a tier or give it its own `base_url` and `model`. \
+                 config.example.toml has both shapes.",
                 found.join("\n")
             )));
         }

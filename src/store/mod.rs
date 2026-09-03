@@ -147,7 +147,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 9] = [
+        const ADDITIVE: [(&str, &str, &str); 11] = [
             (
                 "artifacts",
                 "updated_at",
@@ -209,6 +209,21 @@ impl Store {
                 "moments",
                 "moved_at",
                 "ALTER TABLE moments ADD COLUMN moved_at INTEGER",
+            ),
+            // Both nullable, no default, and NULL is the truth about every row
+            // written before them. A moment with no `series_id` is counted the
+            // old way -- by the rows on its artifact -- and one with no
+            // `origin_corpus_id` resolves its note through the artifact it
+            // sits on, which is what every such row did when it was written.
+            (
+                "moments",
+                "series_id",
+                "ALTER TABLE moments ADD COLUMN series_id TEXT",
+            ),
+            (
+                "moments",
+                "origin_corpus_id",
+                "ALTER TABLE moments ADD COLUMN origin_corpus_id TEXT",
             ),
         ];
         for (table, column, ddl) in ADDITIVE {

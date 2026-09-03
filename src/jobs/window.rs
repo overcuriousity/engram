@@ -520,9 +520,23 @@ async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::
         // A character ratio here was the same defect as in `cut_chars`: on a
         // script the estimator's 3.5 does not describe, the neighbours ran well
         // over the share reserved for them.
+        // The share pays for the whole entry, not just its text: `[id: <uuid>]`
+        // and the title are prompt tokens like any other, and leaving them out
+        // put five neighbours' worth of header over a reservation whose only
+        // job is that the prompt fits. A share that the header alone would
+        // exhaust buys nothing worth reading, so that neighbour is skipped.
+        let overhead = crate::infer::context::NEIGHBOR_HEADER_TOKENS
+            + h.payload
+                .title
+                .as_deref()
+                .map(|t| core.counter.count(t))
+                .unwrap_or(0);
+        let Some(room) = per.checked_sub(overhead).filter(|r| *r >= 16) else {
+            continue;
+        };
         let text = core
             .counter
-            .cut(&h.payload.text, per, true)
+            .cut(&h.payload.text, room, true)
             .unwrap_or_default();
         out.push(crate::infer::Neighbor {
             id: h.payload.artifact_id,

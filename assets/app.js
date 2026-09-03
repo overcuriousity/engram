@@ -1161,10 +1161,34 @@
     show('kind-row', true);
   }
 
+  // Is the pane holding an act of its own — an ask in flight, or the answer
+  // one left standing?
+  //
+  // `askDriver` never clears the box, on purpose: the question stays legible
+  // beside the answer it produced. So emptying the box by hand — select all,
+  // Delete — is not a statement that the answer is over, and treating it as
+  // one hid `#pane` and `#rail` mid-stream, taking the answer and the "back to
+  // results" anchor with them. `show` is the only writer of those flags, so
+  // nothing brought them back until another keystroke or a reload.
+  function paneIsBusy() {
+    var form = document.getElementById('box-form');
+    if (form && form.classList.contains('asking')) return true;
+    var live = document.getElementById('ask-live');
+    if (live && !live.hidden && live.textContent.trim()) return true;
+    var result = document.getElementById('ask-result');
+    return !!(result && result.textContent.trim());
+  }
+
   // The box is empty again, so the column is right again. The due band is
   // re-fetched rather than left as it stands: it may have been hidden through
   // a capture that armed something, and what it holds is a minute old.
+  //
+  // Except where the pane is mid-answer: see `paneIsBusy`.
   function showIdle() {
+    // Before the class, not after: `html.typing` says an intent is expressed,
+    // and an answer standing in the pane is one whether or not the box that
+    // asked for it still holds the question.
+    if (paneIsBusy()) return;
     document.documentElement.classList.remove('typing');
     var idle = document.getElementById('idle');
     if (idle) idle.hidden = false;

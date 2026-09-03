@@ -151,9 +151,26 @@ struct Meta<'a> {
     intent: Option<&'a str>,
 }
 
-/// The zone this process is in, or none where the platform cannot say.
+/// The zone this process is in, or none where the platform cannot say — or
+/// says something the server cannot read.
+///
+/// `/capture` parses `tz` with `chrono_tz` and answers 400 for anything it
+/// will not take, and a host has several ways to name a zone that is not an
+/// IANA identifier: `/etc/localtime` symlinked into the leap-second tree
+/// (`right/Europe/Berlin`), a hand-written `/etc/timezone`, a `TZ` holding a
+/// POSIX rule. Sent on regardless, that failed every `-c`, `-r`, `-j` and
+/// piped capture from that host, naming a field the operator never typed.
+///
+/// So the same parser this end, and where it will not take the name the zone
+/// is simply not sent: the server then reads dates in its own zone, which is
+/// what it does for every client that cannot name one at all.
 pub(crate) fn local_zone() -> Option<String> {
-    iana_time_zone::get_timezone().ok()
+    let name = iana_time_zone::get_timezone().ok()?;
+    if name.parse::<chrono_tz::Tz>().is_err() {
+        tracing::debug!(zone = %name, "this host names a zone the server cannot read; sending none");
+        return None;
+    }
+    Some(name)
 }
 
 /// The zone to send for a capture whose kind this end has not been told — a

@@ -877,6 +877,18 @@ impl Core {
         // neighbour may appear, and the caller only ever hands it candidates it
         // could genuinely show.
         let ids: Vec<String> = live.iter().map(|(c, _, _)| c.id.clone()).collect();
+        // A neighbour is retired or not for the same reason a ranked hit is —
+        // its note was retired — and hard-coding `false` here was not a
+        // shortcut but a wrong answer. `AskResponse::retired_only` is read
+        // over every citation the model was shown, so one reached neighbour of
+        // a retired note flipped it false, and the page gave a confident
+        // answer with the "this came entirely from retired notes" caveat
+        // withheld — the completed-reminder case the field exists for.
+        let cids: Vec<String> = live
+            .iter()
+            .filter_map(|(c, _, _)| c.corpus_id.clone())
+            .collect();
+        let retired = self.store.retired_among(&cids).await.unwrap_or_default();
         let merged = retrieve::append_neighbours(ranked, ids, retrieve::NEIGHBOUR_MAX);
 
         for id in merged.into_iter().skip(ranked_len) {
@@ -884,9 +896,11 @@ impl Core {
                 continue;
             };
             let (c, via, reason) = live.swap_remove(i);
+            let corpus_id = c.corpus_id.unwrap_or_default();
+            let is_retired = retired.contains(&corpus_id);
             hits.push(SearchResult {
                 artifact_id: c.id,
-                corpus_id: c.corpus_id.unwrap_or_default(),
+                corpus_id,
                 title: c.title,
                 text: c.text,
                 category: c.category,
@@ -912,7 +926,7 @@ impl Core {
                 in_sitting: false,
                 // The cliff was computed over scores this one was never in.
                 past_cliff: false,
-                retired: false,
+                retired: is_retired,
                 similarity: None,
                 titled_by_corpus: false,
                 // What makes a reached artifact tellable apart from a retrieved

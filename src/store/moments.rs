@@ -87,6 +87,14 @@ pub struct Moment {
     pub moved_from: Option<i64>,
     /// When somebody moved this row, or `None` if nobody has.
     pub moved_at: Option<i64>,
+    /// The recurrence this row is one occurrence of — the id of the series'
+    /// first moment, which for that first moment is its own id. `None` on a
+    /// one-shot, and on every row written before the column existed.
+    pub series_id: Option<String>,
+    /// The note this row was read out of, as it stood when the row was
+    /// written. `None` on a row that predates the column, where the artifact
+    /// it sits on is the only answer there is.
+    pub origin_corpus_id: Option<String>,
     pub created_at: i64,
 }
 
@@ -98,6 +106,11 @@ pub struct NewMoment {
     pub rule: Option<String>,
     pub source: Source,
     pub span: Option<String>,
+    /// The series this row continues, for the successor a completed
+    /// recurrence arms. `None` everywhere else: a row that carries a rule and
+    /// continues nothing is the first occurrence of its own series, and
+    /// `insert_moment` stamps it with its own id.
+    pub series_id: Option<String>,
 }
 
 /// A moment with the artifact it hangs on: its title, or the opening line
@@ -125,6 +138,8 @@ fn moment_of(r: &sqlx::sqlite::SqliteRow) -> Moment {
         notified_at: r.get("notified_at"),
         moved_from: r.get("moved_from"),
         moved_at: r.get("moved_at"),
+        series_id: r.get("series_id"),
+        origin_corpus_id: r.get("origin_corpus_id"),
         created_at: r.get("created_at"),
     }
 }
@@ -159,10 +174,19 @@ const JOINED: &str =
     "SELECT m.*, a.title, a.text FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
 
 impl Store {
-    /// A moment hangs off an artifact; the note is the artifact's corpus.
+    /// The note this moment was read out of.
+    ///
+    /// `origin_corpus_id` first, and the artifact's corpus only where the row
+    /// predates that column. A moment hangs off an artifact, but not always
+    /// the one it was written on: `carry_moments` moves an open row onto the
+    /// artifact that superseded its own, and where a promotion or a merge
+    /// crossed notes, the join alone then answered a note nobody had set a
+    /// reminder on — which `complete_moment` duly retired, sinking a note out
+    /// of `recent_captures` while the one that was actually read stayed put.
     pub async fn corpus_of_moment(&self, moment_id: &str) -> Result<Option<String>> {
         Ok(sqlx::query_scalar(
-            "SELECT a.corpus_id FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
+            "SELECT COALESCE(m.origin_corpus_id, a.corpus_id) \
+             FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
              WHERE m.id = ?",
         )
         .bind(moment_id)
@@ -187,8 +211,8 @@ impl Store {
     pub async fn has_open_reminder_for_corpus(&self, corpus_id: &str) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
-             WHERE a.corpus_id = ? AND m.kind = 'due' AND m.done_at IS NULL \
-               AND a.status = 'active'",
+             WHERE COALESCE(m.origin_corpus_id, a.corpus_id) = ? AND m.kind = 'due' \
+               AND m.done_at IS NULL AND a.status = 'active'",
         )
         .bind(corpus_id)
         .fetch_one(&self.pool)
@@ -206,7 +230,8 @@ impl Store {
     pub async fn corpus_was_read_as_reminder(&self, corpus_id: &str) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
-             WHERE a.corpus_id = ? AND m.source IN ('cue', 'classified')",
+             WHERE COALESCE(m.origin_corpus_id, a.corpus_id) = ? \
+               AND m.source IN ('cue', 'classified')",
         )
         .bind(corpus_id)
         .fetch_one(&self.pool)
@@ -214,11 +239,35 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Two columns this fills in for itself, because both answer questions
+    /// about where the row came from and neither can be re-derived later.
+    ///
+    /// `series_id` is the row's own id where the row carries a rule and
+    /// continues no series — the first occurrence of a recurrence names the
+    /// series — and the parent's where `NewMoment` names one. A one-shot has
+    /// none. `occurrences_in_series` is what reads it.
+    ///
+    /// `origin_corpus_id` is the note the artifact belonged to at this
+    /// instant. `carry_moments` will move the row onto another artifact, and
+    /// after that the join through `artifact_id` answers a different note than
+    /// the one whose prose was read as the reminder.
     pub async fn insert_moment(&self, m: &NewMoment) -> Result<String> {
         let id = new_id();
+        let series: Option<String> = match (&m.series_id, &m.rule) {
+            (Some(s), _) => Some(s.clone()),
+            (None, Some(_)) => Some(id.clone()),
+            (None, None) => None,
+        };
+        let corpus: Option<String> =
+            sqlx::query_scalar("SELECT corpus_id FROM artifacts WHERE id = ?")
+                .bind(&m.artifact_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten();
         sqlx::query(
-            "INSERT INTO moments (id, artifact_id, kind, at, tz, rule, source, span, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO moments (id, artifact_id, kind, at, tz, rule, source, span,
+                                  series_id, origin_corpus_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&m.artifact_id)
@@ -228,6 +277,8 @@ impl Store {
         .bind(&m.rule)
         .bind(m.source.as_str())
         .bind(&m.span)
+        .bind(&series)
+        .bind(&corpus)
         .bind(crate::store::now())
         .execute(&self.pool)
         .await?;
@@ -324,6 +375,41 @@ impl Store {
         Ok(res.rows_affected())
     }
 
+    /// The wall-clock this recurrence is meant to happen at, as an instant to
+    /// read a time off.
+    ///
+    /// A row moved by hand wins, most recent first: moving a recurring
+    /// reminder from 09:00 to 10:00 is a person restating what time it
+    /// happens, and every later occurrence should follow. Failing that, the
+    /// first row of the series — the time the recurrence was read at, before
+    /// any daylight-saving gap rolled an occurrence forward off it.
+    ///
+    /// `None` where the series has no dated row, which leaves `next_after`
+    /// reading the previous occurrence exactly as it always did.
+    pub async fn series_anchor(&self, series_id: &str) -> Result<Option<i64>> {
+        let moved: Option<i64> = sqlx::query_scalar(
+            "SELECT at FROM moments
+              WHERE series_id = ? AND at IS NOT NULL AND moved_at IS NOT NULL
+              ORDER BY moved_at DESC LIMIT 1",
+        )
+        .bind(series_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        if moved.is_some() {
+            return Ok(moved);
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT at FROM moments
+              WHERE series_id = ? AND at IS NOT NULL
+              ORDER BY created_at, id LIMIT 1",
+        )
+        .bind(series_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+
     /// Is a moment of this kind actually parked at this instant?
     ///
     /// `has_moment_at` above answers a wider question on purpose — it also says
@@ -356,6 +442,63 @@ impl Store {
         .fetch_one(&self.pool)
         .await?;
         Ok(n > 0)
+    }
+
+    /// Is there an open due row here that has already been acted on — pushed,
+    /// or put aside?
+    ///
+    /// `delete_read_due` deliberately keeps such a row: it has a history, and
+    /// a row with a history outlives the reading that made it. What the stage
+    /// then did with that fact was wrong, though. It deleted, found nothing to
+    /// delete, and inserted anyway — so a note re-read as a reminder after its
+    /// 48 h rung had fired came out carrying two open rows for one reading of
+    /// one piece of prose, both climbing the ladder and both pushing.
+    ///
+    /// So the same stance `has_moved_moment` takes for a row a person moved: a
+    /// row the base has already spoken about is not this re-read's to replace.
+    pub async fn has_acted_on_due(&self, artifact_id: &str) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moments
+              WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL
+                AND (notified_at IS NOT NULL OR snoozed_until IS NOT NULL)",
+        )
+        .bind(artifact_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
+    /// Hand the recurrence a re-read has just recognised to the open row
+    /// already parked at that instant.
+    ///
+    /// The stage's "this instant is already here" guard compares instants and
+    /// nothing else, which is right for the duplicate it exists to prevent and
+    /// wrong for the one thing a second reading of the same prose can still
+    /// add: the same Friday, now understood as *every* Friday. The guard
+    /// returned first, the rule was dropped, and the reminder stayed a
+    /// one-shot however often the model read the recurrence correctly.
+    ///
+    /// A row gaining a rule becomes the head of its own series, which is what
+    /// `COUNT` is later counted over — see `occurrences_in_series`.
+    pub async fn set_rule_of_open_due(
+        &self,
+        artifact_id: &str,
+        at: Option<i64>,
+        rule: &str,
+    ) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE moments SET rule = ?, series_id = COALESCE(series_id, id)
+              WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL AND at IS ?
+                AND (rule IS NULL OR rule <> ?)",
+        )
+        .bind(rule)
+        .bind(artifact_id)
+        .bind(at)
+        .bind(rule)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
     }
 
     /// Has the operator moved a moment of this kind on this artifact?
@@ -396,14 +539,46 @@ impl Store {
         .await?)
     }
 
+    /// How many occurrences one recurrence has had, counted by its series and
+    /// so immune to the artifact its rows sit on.
+    ///
+    /// `occurrences_of_rule` above counts the rows on one artifact, which is
+    /// the same number right up until a supersession: `carry_moments` moves
+    /// the *open* row to the winner and leaves the done ones on the loser, so
+    /// a `COUNT=3` that had already fired twice arrived at the winner counting
+    /// one, re-armed past its count, and — since every later occurrence landed
+    /// on the winner too — never stopped. A bounded recurrence became an
+    /// unbounded one, silently.
+    pub async fn occurrences_in_series(&self, series_id: &str) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM moments WHERE kind = 'due' AND series_id = ?")
+                .bind(series_id)
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
     /// Has a `COUNT=n` rule had its n occurrences? False for a rule with no
     /// COUNT, which is open-ended, and for one that does not parse — an
     /// unreadable rule is `next_after`'s to refuse, not this read's.
-    pub async fn rule_is_exhausted(&self, artifact_id: &str, rule: &str) -> Result<bool> {
+    ///
+    /// Counted over the series where the row has one, and over the artifact's
+    /// rows where it does not — which is every row written before `series_id`
+    /// existed, and is what those rows have always been counted by.
+    pub async fn rule_is_exhausted(
+        &self,
+        artifact_id: &str,
+        rule: &str,
+        series_id: Option<&str>,
+    ) -> Result<bool> {
         let Some(count) = crate::core::moments::rule_count(rule) else {
             return Ok(false);
         };
-        Ok(self.occurrences_of_rule(artifact_id, rule).await? >= count as i64)
+        let n = match series_id {
+            Some(s) => self.occurrences_in_series(s).await?,
+            None => self.occurrences_of_rule(artifact_id, rule).await?,
+        };
+        Ok(n >= count as i64)
     }
 
     pub async fn moment(&self, id: &str) -> Result<Option<Moment>> {
@@ -905,6 +1080,141 @@ mod tests {
         (s, made[0].id.clone())
     }
 
+    /// A second note with one artifact, so a carry can cross corpora the way a
+    /// merge does.
+    async fn other_artifact(s: &Store, text: &str) -> String {
+        let c = s.insert_corpus(text, "ui", None).await.unwrap();
+        let made = s
+            .insert_artifacts(
+                &c.id,
+                &[NewArtifact {
+                    ordinal: 0,
+                    text: text.into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        made[0].id.clone()
+    }
+
+    /// `carry_moments` moves the *open* row of a recurrence to the winner and
+    /// leaves the done ones behind, so counting the rows on one artifact
+    /// restarted the count at every supersession: a `COUNT=3` that had fired
+    /// twice arrived counting one and re-armed for ever.
+    #[tokio::test]
+    async fn a_counted_recurrence_is_counted_by_its_series_not_its_artifact() {
+        let (s, aid) = store_with_artifact().await;
+        let rule = "FREQ=DAILY;COUNT=3";
+        let first = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(1_000),
+                tz: "Europe/Berlin".into(),
+                rule: Some(rule.into()),
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        let series = s.moment(&first).await.unwrap().unwrap().series_id.unwrap();
+        assert_eq!(series, first, "the first occurrence names the series");
+        s.mark_done(&first, 1_100).await.unwrap();
+        let second = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(87_400),
+                tz: "Europe/Berlin".into(),
+                rule: Some(rule.into()),
+                source: Source::Armed,
+                span: None,
+                series_id: Some(series.clone()),
+            })
+            .await
+            .unwrap();
+
+        let winner = other_artifact(&s, "the promoted rewrite").await;
+        assert_eq!(s.carry_moments(&aid, &winner).await.unwrap(), 1);
+        assert_eq!(
+            s.occurrences_of_rule(&winner, rule).await.unwrap(),
+            1,
+            "the done occurrence stayed behind on the superseded artifact"
+        );
+        assert_eq!(
+            s.occurrences_in_series(&series).await.unwrap(),
+            2,
+            "the series remembers both"
+        );
+        assert!(
+            !s.rule_is_exhausted(&winner, rule, Some(&series))
+                .await
+                .unwrap()
+        );
+        let m = s.moment(&second).await.unwrap().unwrap();
+        s.mark_done(&second, 1_200).await.unwrap();
+        s.insert_moment(&NewMoment {
+            artifact_id: winner.clone(),
+            kind: Kind::Due,
+            at: Some(173_800),
+            tz: "Europe/Berlin".into(),
+            rule: Some(rule.into()),
+            source: Source::Armed,
+            span: None,
+            series_id: m.series_id.clone(),
+        })
+        .await
+        .unwrap();
+        assert!(
+            s.rule_is_exhausted(&winner, rule, Some(&series))
+                .await
+                .unwrap(),
+            "three occurrences is three, wherever the rows ended up"
+        );
+    }
+
+    /// Completing a reminder retires the note it was read out of. Resolved
+    /// through the row's current artifact, a carry across notes made that the
+    /// wrong note — one nobody had set a reminder on.
+    #[tokio::test]
+    async fn a_carried_reminder_still_names_the_note_it_was_read_from() {
+        let (s, aid) = store_with_artifact().await;
+        let origin = s.get_artifact(&aid).await.unwrap().corpus_id.unwrap();
+        let id = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(1_000),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        let winner = other_artifact(&s, "a note nobody set a reminder on").await;
+        assert_eq!(s.carry_moments(&aid, &winner).await.unwrap(), 1);
+
+        assert_eq!(
+            s.corpus_of_moment(&id).await.unwrap().as_deref(),
+            Some(origin.as_str()),
+            "the note that was read, not the artifact it sits on today"
+        );
+        assert!(
+            s.has_open_reminder_for_corpus(&origin).await.unwrap(),
+            "and the open reminder still counts for that note"
+        );
+        assert!(s.corpus_was_read_as_reminder(&origin).await.unwrap());
+    }
+
     /// Push a row's `created_at` back before the ladder it is being read
     /// against.
     ///
@@ -931,6 +1241,7 @@ mod tests {
             rule: None,
             source: Source::Cue,
             span: None,
+            series_id: None,
         }
     }
 
@@ -1289,26 +1600,26 @@ mod tests {
         let mut m = due(&aid, Some(1_000));
         m.rule = Some("FREQ=DAILY;COUNT=2".into());
         assert!(
-            !s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2")
+            !s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2", None)
                 .await
                 .unwrap(),
             "none yet"
         );
         s.insert_moment(&m).await.unwrap();
         assert!(
-            !s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2")
+            !s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2", None)
                 .await
                 .unwrap()
         );
         s.insert_moment(&m).await.unwrap();
         assert!(
-            s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2")
+            s.rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=2", None)
                 .await
                 .unwrap(),
             "two of two"
         );
         assert!(
-            !s.rule_is_exhausted(&aid, "FREQ=DAILY").await.unwrap(),
+            !s.rule_is_exhausted(&aid, "FREQ=DAILY", None).await.unwrap(),
             "open-ended is never exhausted"
         );
     }

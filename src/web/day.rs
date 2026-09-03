@@ -637,6 +637,7 @@ mod tests {
                     rule: None,
                     source,
                     span,
+                    series_id: None,
                 })
                 .await
                 .unwrap();

@@ -41,8 +41,16 @@ pub async fn run(core: &Core) -> Result<Report> {
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
     for c in &cands {
-        report.judged += 1;
-        match judge_one(core, c).await {
+        let verdict = judge_one(core, c).await;
+        // Counted only where a judgement actually came back. `jobs::did_work`
+        // calls any non-zero number in the report work, so counting the
+        // attempt made a sweep that judged nothing — no `[infer.reap]` model,
+        // an endpoint that is down — look busy, and the empty-run backoff that
+        // exists to stop it hammering a dead endpoint never engaged.
+        if verdict.is_ok() {
+            report.judged += 1;
+        }
+        match verdict {
             Ok(crate::infer::prompt::Reap::Worthless { reason }) => {
                 match reap_one(core, c, &reason, min_age_secs(core)).await {
                     Ok(()) => {
@@ -777,7 +785,11 @@ mod tests {
         deprecate_long_ago(&core, &ids[0]).await;
 
         let report = run(&core).await.unwrap();
-        assert_eq!((report.judged, report.reaped), (1, 0));
+        // Nothing judged, and that is the point of the number: `jobs::did_work`
+        // reads any non-zero count in the report as work done, so a sweep whose
+        // every call failed — no model configured, an endpoint down — must come
+        // back empty or the backoff that stops it hammering never engages.
+        assert_eq!((report.judged, report.reaped), (0, 0));
         assert_eq!(
             core.store.get_artifact(&ids[0]).await.unwrap().text,
             "still here"

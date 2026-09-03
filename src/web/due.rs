@@ -536,6 +536,7 @@ mod tests {
                 rule: None,
                 source: Source::Cue,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap()
@@ -710,6 +711,7 @@ mod tests {
                 rule: Some("FREQ=MONTHLY;BYMONTHDAY=1".into()),
                 source: Source::Cue,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -754,6 +756,7 @@ mod tests {
                 rule: None,
                 source: Source::Set,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -887,6 +890,7 @@ mod tests {
                 rule: None,
                 source: Source::Set,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -1037,6 +1041,7 @@ mod tests {
                 rule: Some("FREQ=MONTHLY;BYMONTHDAY=1".into()),
                 source: Source::Set,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -1092,6 +1097,7 @@ mod tests {
                 rule: Some(rule.into()),
                 source: Source::Set,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap()
@@ -1213,7 +1219,7 @@ mod tests {
         assert!(
             !core
                 .store
-                .rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=3")
+                .rule_is_exhausted(&aid, "FREQ=DAILY;COUNT=3", None)
                 .await
                 .unwrap()
         );

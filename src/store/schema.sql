@@ -680,10 +680,23 @@ CREATE TABLE IF NOT EXISTS moments (
   -- separate from `moved_from` because dating an undated reminder is a move
   -- with no old instant to record and must still leave a mark.
   moved_at      INTEGER,
+  -- The recurrence this row is one occurrence of: the id of the first moment
+  -- of the series, copied onto every successor an `armed` completion inserts.
+  -- A bounded `COUNT=n` is bounded by its occurrences, and its occurrences are
+  -- the rows carrying this id -- not the rows that happen to sit on one
+  -- artifact today, because `carry_moments` moves the open row across a
+  -- supersession and leaves the done ones behind. NULL for a one-shot.
+  series_id     TEXT,
+  -- The corpus the artifact belonged to when this row was written. Completing
+  -- a reminder retires the note it was read out of, and after a carry the
+  -- row's current artifact can belong to a different note entirely -- which
+  -- sank a note nobody had set a reminder on. Stamped once, never re-derived.
+  origin_corpus_id TEXT,
   created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_moments_open     ON moments(kind, done_at, at);
 CREATE INDEX IF NOT EXISTS idx_moments_artifact ON moments(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_moments_series   ON moments(series_id);
 
 -- Where a reaped artifact's text goes. Never read by search, FTS, or the
 -- embedder; permanent by design — its purpose is that no reap verdict is

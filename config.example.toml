@@ -130,6 +130,12 @@ per_source_cap = 3
 # reachable — and anything larger earns its rewrites through use, window by
 # window (see [promote]). [infer.synthesize] is required: capture
 # synthesizes, and there is no mode key any more.
+#
+# Upgrading from before the 2026-09 reshape: `infer.synthesis` and
+# `infer.segment_tokens` are refused at startup rather than ignored, so delete
+# them. There is no embed-only mode any more either — a base that ran
+# `synthesis = "off"` had no chat endpoint and now needs one, either a `tier`
+# below or a `base_url` and `model` of its own.
 # How tokens are counted for every budget: threshold, windows, prompts. A
 # HF-format tokenizer.json, as a path or an http(s) link. A link is fetched
 # once and cached beside the store; a changed link re-fetches. Unset, the

@@ -683,9 +683,31 @@ pub(crate) fn resolve_local(dt: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
 /// `tz`. None when the rule is exhausted or invalid. COUNT is enforced by
 /// `complete_moment`, which counts the occurrences already on the artifact.
 pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
+    next_after_anchored(rule, at, tz, None)
+}
+
+/// The same, with the wall-clock time read off `anchor` rather than off `at`.
+///
+/// Which matters exactly twice a year. `resolve_local` rolls a time that falls
+/// inside a spring-forward gap to the first instant the zone has again, which
+/// is the right answer for *that* occurrence — a daily 02:30 in Europe/Berlin
+/// has to happen somewhere on the Sunday the zone has no 02:30. But the next
+/// occurrence then took its wall-clock from that stored instant and the
+/// reminder read 03:00 from that day on, for good: an RRULE with no DTSTART
+/// has nothing to re-anchor to, so the roll became the new time.
+///
+/// The anchor is the series' own starting wall-clock — see
+/// `Store::series_anchor`, which prefers a time somebody moved the reminder to
+/// over the one it was first read at, because a person moving a recurring row
+/// is restating what time it happens. `None` keeps the old reading, which is
+/// what a one-shot and every pre-series row have.
+pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> Option<i64> {
     let r = parse_rule(rule).ok()?;
     let start = tz.timestamp_opt(at, 0).single()?;
-    let time = start.time();
+    let time = anchor
+        .and_then(|a| tz.timestamp_opt(a, 0).single())
+        .map(|a| a.time())
+        .unwrap_or_else(|| start.time());
     let origin = start.date_naive();
     let mut date = origin;
     // Day by day, bounded: the subset never needs more than four years of
@@ -762,6 +784,18 @@ impl crate::core::Core {
     /// twice, or one on a page open since before a re-read replaced the row.
     /// The band reported "Done · undone" for both, and offered an undo for a
     /// moment nothing had changed.
+    /// The wall-clock a recurrence is anchored to, or `None` where there is
+    /// no series to read one from — a row written before `series_id` existed.
+    /// A store error here is not the completion's to fail on: the worst it
+    /// costs is the reading `next_after` did before the anchor existed.
+    async fn series_anchor_of(&self, m: &crate::store::moments::Moment) -> Option<i64> {
+        let series = m.series_id.as_deref()?;
+        self.store.series_anchor(series).await.unwrap_or_else(|e| {
+            tracing::warn!(series, error = %e, "no anchor for this recurrence");
+            None
+        })
+    }
+
     pub async fn complete_moment(&self, id: &str) -> crate::error::Result<bool> {
         let now = self.clock.now();
         if let Some(m) = self.store.moment(id).await?
@@ -774,8 +808,20 @@ impl crate::core::Core {
             // artifact carrying this rule — including the one just completed.
             // At COUNT, nothing further is armed.
             if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
-                && !self.store.rule_is_exhausted(&m.artifact_id, rule).await?
-                && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
+                && !self
+                    .store
+                    .rule_is_exhausted(&m.artifact_id, rule, m.series_id.as_deref())
+                    .await?
+                // Anchored, so a daylight-saving gap cannot move the time of
+                // day permanently. `uncomplete_moment` anchors the same way,
+                // or it would look for the successor at a different instant
+                // than the one this armed.
+                && let Some(next) = next_after_anchored(
+                    rule,
+                    at,
+                    zone(Some(&m.tz)),
+                    self.series_anchor_of(&m).await,
+                )
                 // Not `has_moment_at`, which is the re-read's question and
                 // answers yes for an instant that is only some row's
                 // `moved_from`. Moving this very reminder off next week's
@@ -805,6 +851,11 @@ impl crate::core::Core {
                         // nothing. See `Source::Armed`.
                         source: crate::store::moments::Source::Armed,
                         span: m.span,
+                        // The successor continues this recurrence rather than
+                        // starting one: same series, so `COUNT` keeps counting
+                        // from where the completed occurrence left it however
+                        // many supersessions the rows have ridden since.
+                        series_id: m.series_id.clone(),
                     })
                     .await?;
             }
@@ -842,7 +893,8 @@ impl crate::core::Core {
         // whose completion armed the successor, and `next_after` from its own
         // `at` is the instant that successor was given.
         if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
-            && let Some(next) = next_after(rule, at, zone(Some(&m.tz)))
+            && let Some(next) =
+                next_after_anchored(rule, at, zone(Some(&m.tz)), self.series_anchor_of(&m).await)
         {
             self.store
                 .delete_armed_occurrence(&m.artifact_id, rule, next)
@@ -897,6 +949,7 @@ mod tests {
                 rule: Some(rule.into()),
                 source: Source::Cue,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -962,6 +1015,7 @@ mod tests {
                 rule: Some(rule.into()),
                 source: Source::Cue,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -1015,6 +1069,7 @@ mod tests {
             rule: Some(rule.into()),
             source: Source::Cue,
             span: None,
+            series_id: None,
         };
         let first = core.store.insert_moment(&row(day(2))).await.unwrap();
         // Somebody already set tomorrow's by hand.
@@ -1177,6 +1232,42 @@ mod tests {
             next - at,
             7 * 86_400 + 3_600,
             "one week and the hour DST gave back"
+        );
+    }
+
+    /// A daily 02:30 in Berlin meets the Sunday the zone has no 02:30. That
+    /// occurrence is rolled to 03:00, which is right — and then every later
+    /// one read its wall-clock off the rolled instant and the reminder was a
+    /// 03:00 reminder from that day on, permanently, with no DTSTART to
+    /// re-anchor to.
+    #[test]
+    fn a_spring_forward_does_not_move_a_daily_reminder_for_good() {
+        let anchor = berlin()
+            .with_ymd_and_hms(2027, 3, 26, 2, 30, 0)
+            .unwrap()
+            .timestamp();
+        let gap_day = next_after("FREQ=DAILY", anchor, berlin()).unwrap();
+        assert_eq!(
+            local(gap_day),
+            "2027-03-27 02:30",
+            "the day before the change"
+        );
+        let rolled = next_after("FREQ=DAILY", gap_day, berlin()).unwrap();
+        assert_eq!(
+            local(rolled),
+            "2027-03-28 03:00",
+            "the Sunday has no 02:30, so the occurrence rolls out of the gap"
+        );
+
+        assert_eq!(
+            local(next_after("FREQ=DAILY", rolled, berlin()).unwrap()),
+            "2027-03-29 03:00",
+            "unanchored, the roll becomes the new time"
+        );
+        assert_eq!(
+            local(next_after_anchored("FREQ=DAILY", rolled, berlin(), Some(anchor)).unwrap()),
+            "2027-03-29 02:30",
+            "anchored, the reminder goes back to the time it was set for"
         );
     }
 

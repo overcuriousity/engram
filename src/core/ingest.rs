@@ -3910,6 +3910,7 @@ mod tests {
                 rule: None,
                 source: Source::Classified,
                 span: None,
+                series_id: None,
             })
             .await
             .unwrap();
@@ -3946,6 +3947,7 @@ mod tests {
                     rule: None,
                     source: Source::Classified,
                     span: None,
+                    series_id: None,
                 })
                 .await
                 .unwrap();
