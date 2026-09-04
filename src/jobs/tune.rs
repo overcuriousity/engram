@@ -234,6 +234,28 @@ async fn propose(
     })
 }
 
+/// Bases in each state the loop can be in, for this module's tests and the
+/// insights page's.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::tests::{adopted_and_watching as watching, disagree_loudly};
+    use crate::core::Core;
+
+    /// A base that has just adopted a generation, with the one it replaced.
+    pub(crate) async fn adopted_and_watching() -> (Core, String) {
+        watching().await
+    }
+
+    /// A base whose evidence has stopped agreeing with its verdicts, with the
+    /// generation that was live when it did.
+    pub(crate) async fn suspended() -> (Core, String) {
+        let (core, _) = watching().await;
+        let live = core.store.live_generation().await.unwrap().unwrap().id;
+        disagree_loudly(&core, 20).await;
+        (core, live)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

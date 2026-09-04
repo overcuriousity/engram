@@ -1,0 +1,24 @@
+{# What the base has been doing to its own ranking, and whether it may.
+
+   Autonomy the operator cannot see is autonomy they cannot judge. First, in
+   plain words, whether the loop is suspended and why; then the generation in
+   force and whether it is being watched; then what was adopted and what was
+   taken back. Rendered for everyone who can open this page — it is disclosure,
+   not a control — and only once a generation exists to disclose. #}
+{% if let Some(e) = evolve %}
+<div id="evolve" class="judge-tune">
+  {% if let Some(s) = e.suspended %}
+  <p class="row"><strong>Not moving on its own.</strong> {{ s }}</p>
+  {% endif %}
+  <p class="row"><span>{{ e.live }}</span></p>
+  <p class="muted hint">{{ e.standing }}</p>
+  {% if !e.history.is_empty() %}
+  <details class="judge-tune-history">
+    <summary class="muted">generations ({{ e.history.len() }})</summary>
+    <ul class="mono">
+      {% for h in e.history %}<li>{{ h }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{% endif %}

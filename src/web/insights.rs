@@ -168,6 +168,9 @@ struct InsightsTemplate {
     /// apply route is behind `CanJudge`, and a block offering what a press
     /// would refuse is a lie.
     tune: Option<TuneView>,
+    /// What the base did to its own ranking. `None` before a generation
+    /// exists, which is a base whose boot path has not run yet.
+    evolve: Option<EvolveView>,
     /// Whether the ask door is open. See `state::ask_enabled`.
     ///
     /// The nav has no use for it any more — Ask is a verb on the box, not a
@@ -532,6 +535,7 @@ async fn page(tenant: Tenant) -> Result<Response> {
 
     Ok(HtmlTemplate(InsightsTemplate {
         tune,
+        evolve: evolve_view(&tenant.core).await?,
         held: tenant.core.store.held().await?,
         used: tenant
             .core
@@ -721,6 +725,121 @@ async fn tune_view(tenant: &Tenant, flash: &str) -> Result<TuneView> {
         applied,
         flash: flash.to_string(),
     })
+}
+
+// ── What the base did on its own ────────────────────────────────────────────
+
+/// The `_evolve.html` block: the state of the self-tuning loop, in words.
+struct EvolveView {
+    /// Why the loop is not moving, when it is not. Said before anything else.
+    suspended: Option<String>,
+    /// The generation in force and its parameters.
+    live: String,
+    /// Whether it is under watch and what it promised, or that autonomy is off,
+    /// or that the base is free to propose.
+    standing: String,
+    /// Recent generations, newest first, each with how it came to be and how
+    /// it ended.
+    history: Vec<String>,
+}
+
+fn params_str(p: &crate::store::generations::GenerationParams) -> String {
+    format!(
+        "recency {:.2}, cap {}",
+        p.recency_weight,
+        cap_str(p.per_source_cap)
+    )
+}
+
+/// The tail of an id. Ids are ULIDs, so two minted in one sitting share their
+/// head; the tail is what tells them apart.
+fn short(id: &str) -> &str {
+    &id[id.len().saturating_sub(8)..]
+}
+
+async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
+    let Some(live) = core.store.live_generation().await? else {
+        return Ok(None);
+    };
+    let suspended = match crate::eval::anchor::agreement(core).await? {
+        Some(a) if !crate::eval::anchor::trustworthy(&a) => Some(format!(
+            "Over the judged searches that also left an observation, the base's own evidence agreed with your verdicts {} time{} and disagreed {} — no better than chance. It adopts nothing and takes nothing back until that changes; it keeps recording.",
+            a.agreed,
+            if a.agreed == 1 { "" } else { "s" },
+            a.disagreed
+        )),
+        _ => None,
+    };
+    let standing = match (&live.parent_id, live.predicted) {
+        (Some(parent_id), Some(predicted)) => {
+            let new = crate::eval::lived::lived(core, &live.id).await?;
+            let old = match core.store.generation(parent_id).await? {
+                Some(parent) => crate::eval::lived::lived(core, &parent.id).await?,
+                None => crate::eval::lived::Lived {
+                    positives: 0,
+                    negatives: 0.0,
+                    observations: 0,
+                },
+            };
+            if crate::eval::lived::settled(&new, &old) {
+                format!(
+                    "adopted by the base and held: {} positive of {} observations, against {} of {} for the generation before it.",
+                    new.positives, new.observations, old.positives, old.observations
+                )
+            } else {
+                format!(
+                    "under watch — it promised MRR {:+.3} over the replay and has earned {} positive of {} observations so far, against {} of {} for the generation before it. Nothing else is proposed until this is decided.",
+                    predicted, new.positives, new.observations, old.positives, old.observations
+                )
+            }
+        }
+        _ if !core.evolve.autonomous => {
+            "autonomy is off: the file is in force, and the base proposes nothing on its own."
+                .to_string()
+        }
+        _ => "set by hand or at boot; the base may propose a change when it has been quiet."
+            .to_string(),
+    };
+    let history = core
+        .store
+        .generation_history(10)
+        .await?
+        .iter()
+        .filter(|g| g.id != live.id)
+        .map(|g| {
+            let how = match (&g.run_id, &g.parent_id) {
+                (Some(_), _) => format!(
+                    "adopted by the base, promising MRR {:+.3}",
+                    g.predicted.unwrap_or(0.0)
+                ),
+                (None, Some(_)) => "set by hand".to_string(),
+                (None, None) => "starting point".to_string(),
+            };
+            let ended = match g.state.as_str() {
+                "reverted" => "taken back",
+                _ => "superseded",
+            };
+            format!(
+                "{} — {} · {} · {} — {}",
+                ago(g.created_at),
+                short(&g.id),
+                params_str(&g.params),
+                how,
+                ended
+            )
+        })
+        .collect();
+    Ok(Some(EvolveView {
+        suspended,
+        live: format!(
+            "live generation {} · {} · since {}",
+            short(&live.id),
+            params_str(&live.params),
+            ago(live.created_at)
+        ),
+        standing,
+        history,
+    }))
 }
 
 // ── Taking a recommendation live ────────────────────────────────────────────
@@ -1273,6 +1392,62 @@ mod tests {
                 .is_some()
         );
         assert!(core.store.open_recommendation().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn insights_names_the_live_generation_and_whether_it_is_watched() {
+        let (core, parent) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        let body = insights(core).await;
+        assert!(body.contains("under watch"), "{body}");
+        assert!(body.contains("live generation"), "{body}");
+        assert!(
+            body.contains(super::short(&live.id)),
+            "the generation in force is named: {body}"
+        );
+        assert!(
+            body.contains(super::short(&parent)),
+            "and the one it replaced is in the history: {body}"
+        );
+        assert_ne!(
+            super::short(&live.id),
+            super::short(&parent),
+            "two ids, two names"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_suspended_base_says_so_before_anything_else() {
+        let (core, _) = crate::jobs::tune::test_support::suspended().await;
+        let body = insights(core).await;
+        let suspended_at = body.find("Not moving").expect("said");
+        let history_at = body.find("adopted").unwrap_or(usize::MAX);
+        assert!(
+            suspended_at < history_at,
+            "the reason comes before the history"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_base_that_never_moved_says_the_file_is_in_force() {
+        let core = crate::core::test_support::test_core().await;
+        core.store
+            .insert_corpus("some text", "web", None)
+            .await
+            .unwrap();
+        let params = *core.ranking.read().unwrap();
+        core.store
+            .record_generation(&crate::store::generations::NewGeneration {
+                params: params.into(),
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        let body = insights(core).await;
+        assert!(body.contains("autonomy is off"), "{body}");
+        assert!(!body.contains("under watch"), "{body}");
     }
 
     #[tokio::test]
