@@ -745,3 +745,39 @@ CREATE TABLE IF NOT EXISTS generations (
   state         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_generations_live ON generations(state, created_at DESC);
+
+-- What use left behind: one statement that a particular artifact mattered, or
+-- did not, for a query somebody really asked, under a named generation.
+--
+-- Never updated except to exclude. An observation is a fact about a moment, and
+-- a moment does not change its mind.
+CREATE TABLE IF NOT EXISTS observations (
+  id            TEXT PRIMARY KEY,
+  created_at    INTEGER NOT NULL,
+  generation_id TEXT NOT NULL REFERENCES generations(id),
+  -- The query as asked, and its vector, so replaying it costs no embedding.
+  query         TEXT NOT NULL,
+  query_vec     BLOB NOT NULL,
+  vec_dim       INTEGER NOT NULL,
+  embed_model   TEXT NOT NULL,
+  -- What it is about. NULL where the observation is about the retrieval as a
+  -- whole rather than one artifact: an unsupported literal says the set failed
+  -- to carry the answer and names nothing inside it.
+  artifact_id   TEXT,
+  -- Where the artifact stood, 1-based, in the list this is about. NULL with a
+  -- NULL artifact.
+  rank          INTEGER,
+  -- `cited` | `opened` | `unsupported` | `gave_up`
+  source        TEXT NOT NULL,
+  -- Positive above zero, negative below. A weight class, not a tuned number.
+  -- That a weak negative may revert and may never adopt is enforced where
+  -- these are read, not here.
+  strength      REAL NOT NULL,
+  -- Set when the artifact this names has gone. An excluded observation is not
+  -- scored as a miss: a miss is a claim about ordering, and this is not one.
+  excluded_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_observations_generation
+  ON observations(generation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_observations_artifact
+  ON observations(artifact_id) WHERE artifact_id IS NOT NULL;

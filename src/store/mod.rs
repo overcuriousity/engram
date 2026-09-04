@@ -14,6 +14,7 @@ pub mod jobs;
 pub mod lineage;
 pub mod links;
 pub mod moments;
+pub mod observations;
 pub mod pairs;
 pub mod pursuits;
 pub mod segments;
