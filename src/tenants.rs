@@ -320,6 +320,19 @@ impl Tenants {
         .await;
         let core =
             Core::from_config_with(&self.cfg, vectors, store, self.working_for(&user.subject));
+        // One `meta` read, before this core serves anything. `weak_below`
+        // reads an unmeasured line as the configured floor, and the floor is
+        // low enough that a base running at it calls unrelated things related
+        // — see `Core::adopt_measured_line`. A failure here leaves the floor
+        // standing, which is the state this call exists to shorten, not one it
+        // can make worse.
+        if let Err(e) = core.adopt_measured_line().await {
+            tracing::warn!(
+                subject = %user.subject,
+                error = %e,
+                "could not read the stored weak line; the floor stands until the next pass"
+            );
+        }
         self.on_first_open(&core, &user.subject, trigger);
         Ok(Tenant { core, user })
     }

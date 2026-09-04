@@ -28,6 +28,11 @@ use std::sync::Arc;
 /// Entries kept in the query embedding cache.
 pub const QUERY_CACHE_CAPACITY: usize = 256;
 
+/// Where the measured weak line is kept between runs. Written by `calibrate`
+/// on every repair pass and read back by `adopt_measured_line` when a core is
+/// built, so a restart does not spend an hour at `weak_floor`.
+const CALIBRATION_KEY: &str = "calibration.line";
+
 /// Bounded cache of query embeddings.
 ///
 /// Search-as-you-type asks for `d`, `dd`, `dd i`, `dd if` inside one search,
@@ -60,6 +65,21 @@ pub struct QueryCache {
 pub struct Working {
     pub sittings: Arc<crate::core::sitting::Sittings>,
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
+    /// Where "unrelated" stops, as `Core::line` reads it — held here so that
+    /// every `Core` this subject is served through shares one measurement.
+    ///
+    /// It is not working memory in the sense the two above are: it is a
+    /// measurement of the base, and `meta.calibration.line` is where it
+    /// actually lives. It is here because the hourly pass opens its own
+    /// transient `Core` (`background::open_for_pass`) to calibrate on, and an
+    /// atomic per `Core` meant that measurement was taken, written to `meta`,
+    /// and then dropped with the core that took it — leaving whichever core is
+    /// serving requests running at `weak_floor`, the configured 0.35, until
+    /// some later pass happened to find it in the registry. A capture landing
+    /// in that window answered every open gap it came within 0.40 of, and the
+    /// next pass, calibrating properly, deleted all of it again as being under
+    /// the line.
+    pub line: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Default for Working {
@@ -67,6 +87,7 @@ impl Default for Working {
         Working {
             sittings: Arc::new(Default::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+            line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -189,9 +210,11 @@ pub struct Core {
     /// `Core::weak_below`.
     pub weak_floor: f32,
     /// Where "unrelated" stops under this base's embedder, as `f32` bits;
-    /// zero until `calibrate` has measured it. Shared by every clone of
-    /// `Core`, so one measurement serves every request. See
-    /// `core::gaps::unrelated_line`.
+    /// zero until `calibrate` has measured it or `adopt_measured_line` has
+    /// read the last measurement back. Shared by every clone of `Core` *and*
+    /// by every `Core` built for this subject — it lives on `Working`, which
+    /// the registry hands back on reopen. See `Working::line` for why that
+    /// matters and `core::gaps::unrelated_line` for what is measured.
     pub line: Arc<std::sync::atomic::AtomicU32>,
     /// The recency decay's half-life and the pinned tag's boost — the two
     /// terms the vector store folds into one score and never reports back.
@@ -299,6 +322,43 @@ impl Core {
         self.line = Arc::new(std::sync::atomic::AtomicU32::new(0));
     }
 
+    /// Take up the last measurement this base recorded, for a core that has
+    /// not been calibrated in this process yet.
+    ///
+    /// `calibrate` writes the line to `meta` on every pass and nothing read it
+    /// back at startup: `line` began at zero, which `weak_below` reads as
+    /// "unmeasured" and answers with `weak_floor` — the configured 0.35 —
+    /// however many times this base had measured 0.60 before the restart. That
+    /// is not a conservative fallback. Every reader of the line treats it as
+    /// "below this, two things are unrelated", so a line an eighth of the way
+    /// down from where it belongs makes unrelated things related: a capture
+    /// closes gaps it does not answer, a search calls weak hits good, and the
+    /// first repair pass after the restart deletes the lot for being under the
+    /// line it should have been holding all along.
+    ///
+    /// Never overwrites a measurement already in hand — a second core opened
+    /// for a subject the registry is already serving adopts nothing, because
+    /// what `Working::line` holds is at least as fresh as what is in `meta`.
+    ///
+    /// A base that has never been calibrated has no key and keeps the floor,
+    /// which is what the floor is for.
+    pub async fn adopt_measured_line(&self) -> crate::error::Result<()> {
+        if self.measured_line() > 0.0 {
+            return Ok(());
+        }
+        let stored = self
+            .store
+            .meta_get(CALIBRATION_KEY)
+            .await?
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        if stored > 0.0 {
+            self.line
+                .store(stored.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     /// Measure where "unrelated" stops from what this base holds — every
     /// recorded query against the others and against a sample of stored
     /// artifacts — and remember it, in memory for the readers above and in
@@ -306,7 +366,6 @@ impl Core {
     /// follows the base as it grows and the embedder if it changes; a base
     /// with too little recorded keeps the floors.
     pub async fn calibrate(&self) -> crate::error::Result<f32> {
-        const KEY: &str = "calibration.line";
         let queries = self.store.calibration_vecs(self.embedder.model()).await?;
         let artifacts: Vec<Vec<f32>> = self
             .vectors
@@ -320,12 +379,14 @@ impl Core {
             Some(l) => l,
             None => self
                 .store
-                .meta_get(KEY)
+                .meta_get(CALIBRATION_KEY)
                 .await?
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0),
         };
-        self.store.meta_set(KEY, &line.to_string()).await?;
+        self.store
+            .meta_set(CALIBRATION_KEY, &line.to_string())
+            .await?;
         self.line
             .store(line.to_bits(), std::sync::atomic::Ordering::Relaxed);
         Ok(line)
@@ -429,7 +490,10 @@ impl Core {
             )),
             tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             weak_floor: cfg.vector.weak_below,
-            line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            // From the subject's working memory, not a fresh atomic: see
+            // `Working::line`. A core built for one pass and dropped after it
+            // still hands its measurement to whichever core is serving.
+            line: working.line,
             recency_half_life_days: cfg.vector.recency_half_life_days.max(1),
             pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
@@ -778,6 +842,62 @@ mod tests {
         assert_eq!(
             core.store.meta_get("calibration.line").await.unwrap(),
             Some(line.to_string())
+        );
+    }
+
+    /// A core built over a base that has already measured its line starts
+    /// with that line, rather than at the floor until some later pass gets
+    /// round to it.
+    ///
+    /// The bug this is against: `calibrate` runs on the hourly pass, which
+    /// opens a *transient* core to run it on, so the measurement was written
+    /// to meta and then dropped with the core that took it. Whatever core was
+    /// serving requests went on reading `weak_below` as the 0.35 floor, and a
+    /// capture landing in that window closed every gap it came within 0.40 of
+    /// — all of which the next pass then deleted as being under the line.
+    #[tokio::test]
+    async fn a_core_starts_from_the_line_the_base_last_measured() {
+        let mut core = test_support::test_core().await;
+        core.weak_floor = 0.35;
+        // Nothing recorded: no key, the floor stands, and adopting is a no-op
+        // rather than a zero written over it.
+        core.adopt_measured_line().await.unwrap();
+        assert_eq!(core.weak_below(), 0.35);
+
+        core.store.meta_set(CALIBRATION_KEY, "0.6").await.unwrap();
+        core.adopt_measured_line().await.unwrap();
+        assert_eq!(core.weak_below(), 0.6);
+
+        // A measurement in hand is never overwritten by a stored one: what the
+        // running process measured is at least as fresh as what is on disk.
+        core.store.meta_set(CALIBRATION_KEY, "0.4").await.unwrap();
+        core.adopt_measured_line().await.unwrap();
+        assert_eq!(core.weak_below(), 0.6);
+    }
+
+    /// Two cores built for one subject read one line, whichever of them
+    /// measured it. `Working` is what carries it across the two, and the
+    /// hourly pass's transient core is the one that matters: see
+    /// `background::open_for_pass`.
+    #[tokio::test]
+    async fn one_subjects_cores_share_the_measurement_whichever_took_it() {
+        let store = crate::store::Store::memory().await.unwrap();
+        let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        let working = Working::default();
+        // What the registry does on two cache misses for one subject — and
+        // what `open_for_pass` does beside whichever core is serving.
+        let serving =
+            Core::from_config_with(&cfg, vectors.clone(), store.clone(), working.clone());
+        let passing = Core::from_config_with(&cfg, vectors, store, working);
+        assert_eq!(serving.measured_line(), 0.0);
+        passing
+            .line
+            .store(0.6f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            serving.measured_line(),
+            0.6,
+            "a measurement taken on a transient core did not reach the one serving"
         );
     }
 

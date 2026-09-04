@@ -494,6 +494,28 @@ fn neighbour_shares(budget: usize) -> Option<(usize, usize)> {
     }
 }
 
+/// Is this neighbour near enough to be worth putting in front of the model?
+///
+/// `neighbours` is a nearest-k with no floor of its own, so before this a
+/// capture with no neighbours at all still had the five nearest artifacts in
+/// the base pasted into its prompt. That is not merely tokens spent for
+/// nothing. The prompt tells the model not to extract from context, a small
+/// local model obeys that unevenly, and `from_context_only` then drops what it
+/// wrote — so a one-sentence capture whose window yielded exactly one artifact
+/// yielded none, and reached the base as an untitled verbatim passage with
+/// nothing in the captured list and any reminder read off it hanging on a row
+/// with no name.
+///
+/// `Core::weak_below` is the line, because "is this near that" is one question
+/// asked of one embedder and this is another reader of it.
+///
+/// `None` is kept rather than dropped, as everywhere else that reads this
+/// field: it is the store having no opinion, which is not the same as a low
+/// value.
+pub(crate) fn worth_showing(similarity: Option<f32>, weak_below: f32) -> bool {
+    !similarity.is_some_and(|s| s < weak_below)
+}
+
 async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::infer::Neighbor> {
     let budget = core.synthesizer.budget().context.neighbors;
     if budget == 0 {
@@ -530,8 +552,12 @@ async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::
             .unwrap_or_default();
     }
     let mut out = Vec::new();
+    let weak_below = core.weak_below();
     for h in hits {
         if h.payload.corpus_id == corpus_id {
+            continue;
+        }
+        if !worth_showing(h.similarity, weak_below) {
             continue;
         }
         // Cut against the per-neighbor budget with the counter the budget is
@@ -884,6 +910,24 @@ pub(crate) fn proposed_to_new(
 
 #[cfg(test)]
 mod tests {
+
+    /// A neighbour under the weak line is not shown. The capture that made
+    /// this necessary: one sentence about working hours, whose five nearest
+    /// artifacts were five unrelated ones, one of which the model restated —
+    /// and `from_context_only` dropped it, leaving the capture with no
+    /// artifact at all.
+    #[test]
+    fn a_neighbour_below_the_line_is_not_put_in_front_of_the_model() {
+        assert!(super::worth_showing(Some(0.71), 0.6));
+        assert!(super::worth_showing(Some(0.6), 0.6), "the line is inclusive");
+        assert!(!super::worth_showing(Some(0.59), 0.6));
+        // No opinion is not a low score: an exact lexical match reaches here
+        // with nothing set, and it is the opposite of weak.
+        assert!(super::worth_showing(None, 0.6));
+        // A base that has never measured its line runs at `weak_floor`, and a
+        // floor of zero keeps everything — which is what it meant before.
+        assert!(super::worth_showing(Some(0.0), 0.0));
+    }
 
     /// The reservation is a ceiling, and the count is what gives way to the
     /// floor under each share. `clamp(1, 5)` raised the count instead, so a
