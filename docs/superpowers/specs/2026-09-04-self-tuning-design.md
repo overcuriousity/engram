@@ -375,6 +375,15 @@ vector reads into a query per candidate per observation. That is a different
 conversation about what a quiet base may spend, and it is held separately for
 that reason rather than because it is a different piece of work.
 
+*Built 2026-09-05.* That conversation, read against the tree, ended with two
+of the four retrieval knobs in and two out: the pool depth and the recency
+half-life move; rerank on/off does not, because the gate scores ranking quality
+and cannot weigh the model call per search that adopting it would impose; and
+`prime_lift` cannot be replayed, because observations do not record the sitting.
+The reasons are in `docs/superpowers/plans/2026-09-05-self-tuning-stage-2b.md`
+under "What the code admits", and the running state of the whole design in
+`docs/superpowers/plans/2026-09-05-self-tuning-handoff.md`.
+
 **Stage 3 — earned autonomy for the corpus jobs.** Needs stage 2's agreement
 history to exist before it can mean anything, and needs a reap restore path
 before reap is in it at all.
