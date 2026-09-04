@@ -6,12 +6,15 @@ pub mod describe;
 pub mod embed;
 pub mod extract;
 pub mod gaps;
+pub mod judgement;
 pub mod merge;
 pub mod passages;
 pub mod promote;
 pub mod pursuit;
+pub mod reap;
 pub mod reconcile;
 pub mod relate;
+pub mod remind;
 pub mod retention;
 pub mod synthesize;
 pub mod window;
@@ -119,33 +122,7 @@ async fn run_dispatched(core: &Core, job: Job, subject: Option<&str>) -> Result<
     run_claimed(core, job).instrument(span).await
 }
 
-/// The role a stage cannot run without. `Synthesize` is deliberately absent:
-/// at `off` it is the verbatim capture path and needs nothing.
-fn needs_model(stage: Stage) -> Option<&'static str> {
-    match stage {
-        Stage::SegmentWindow
-        | Stage::Title
-        | Stage::Dedupe
-        | Stage::LinkJudge
-        | Stage::Generate => Some("synthesize"),
-        _ => None,
-    }
-}
-
 async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
-    // A unit that needs a model the configuration does not have can never run.
-    // Close it with a reason rather than retrying to the ceiling for ever —
-    // a base captured at `eager`, then reconfigured, has rows like this.
-    if let Some(role) = needs_model(job.stage)
-        && !core.synthesizes()
-    {
-        tracing::warn!(
-            stage = job.stage.as_str(),
-            "no [infer.{role}] configured; dropping the unit"
-        );
-        core.store.complete_job(job.id).await?;
-        return Ok(true);
-    }
     // Only a sweep answers this, and only a sweep is asked: `did_work`
     // governs how long until the next *periodic* run, and a unit that is not
     // periodic has none.
@@ -173,9 +150,11 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::Pursuit
             | Stage::Retention
             | Stage::ArmDedupe
-            | Stage::Context,
+            | Stage::Context
+            | Stage::Reap,
             _,
         ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
+        (Stage::Remind, _) => remind::run(core).await,
     };
 
     match result {
@@ -186,6 +165,25 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             // very row this `complete_job` then closes.
             if job.stage == Stage::Embed && job.target_kind == "corpus" {
                 embed::rearm_if_more(core, &job.target_id).await?;
+            }
+            // Same rule, and the same reason `remind::run` does not do this
+            // itself: the unit sleeps until the *earliest* owed moment, so
+            // every run has to name the next one. `arm_at` refuses a `running`
+            // row — that guard is what stops a queued sweep receding forever —
+            // so an arming from inside the handler was silently a no-op, and
+            // with two reminders due the second never fired until an unrelated
+            // write happened to re-arm the unit.
+            // Logged and carried past, the way `rearm_periodic` treats its own
+            // failure. `complete_job` has already committed, so propagating
+            // recovers nothing here and only turns a lost arming into a lost
+            // arming plus a failed run. `arm_missing_periodic` is what actually
+            // puts the unit back — see the tail of it, where `Remind` is armed
+            // for exactly this reason — and a lost arming now costs one repair
+            // interval rather than lasting until an unrelated write.
+            if job.stage == Stage::Remind
+                && let Err(e) = core.store.rearm_remind().await
+            {
+                tracing::warn!(error = %e, "could not re-arm the reminder unit; the repair pass picks it up");
             }
             rearm_periodic(core, &job, did_work).await;
             arm_successor(core, &job).await;
@@ -208,6 +206,16 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 // again whether it is worth asking about. Everything else
                 // stays queued at the backoff ceiling, because everything else
                 // carries knowledge that would otherwise be lost.
+                // A push that went out and could not be written down. The
+                // retries have each re-delivered it; going on would re-deliver
+                // it for ever, and the rows are still owed either way. Closed
+                // *without* re-arming — `rearm_remind` lives on the `Ok` road
+                // above — so the unit comes back through `arm_missing_periodic`
+                // rather than through the past instant that made this a loop.
+                (Stage::Remind, _) if exhausted => {
+                    tracing::warn!(error = %e, "could not record a push after every retry; standing the unit down until the repair pass");
+                    core.store.complete_job(job.id).await?;
+                }
                 (Stage::Dedupe | Stage::Title, _) if exhausted => {
                     tracing::warn!(error = %e, stage = job.stage.as_str(), "giving up on this unit for now");
                     core.store.complete_job(job.id).await?;
@@ -292,6 +300,7 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
         Stage::Consolidate => consolidate::run(core).await.and_then(detail),
         Stage::Associate => associate::run(core).await.and_then(detail),
         Stage::Retention => retention::run(core).await.and_then(detail),
+        Stage::Reap => reap::run(core).await.and_then(detail),
         Stage::Context => context::run(core).await.and_then(detail),
         Stage::Pursuit => pursuit::run(core)
             .await
@@ -302,7 +311,7 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
             }
             detail(serde_json::json!({ "armed": n }))
         }),
-        // `run_claimed` sends only the five above here, and a sixth arriving
+        // `run_claimed` sends only the sweeps above here, and a sixth arriving
         // silently unaccounted for is worse than a row saying so.
         _ => detail(serde_json::json!({})),
     };
@@ -546,6 +555,14 @@ impl Worker {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    /// Run the queue dry. What every stage test does after a capture.
+    pub async fn drain(core: &crate::core::Core) {
+        while crate::jobs::run_one(core).await.unwrap() {}
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::test_support::test_core;
@@ -773,9 +790,9 @@ mod tests {
     #[tokio::test]
     async fn a_refused_window_backs_off_further_every_time_it_is_refused() {
         let mut core = test_core().await;
-        core.synthesizer = Some(Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
+        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
             "HTTP 400: context length exceeded",
-        )));
+        ));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         let delay = |core: &Core| {
@@ -793,6 +810,15 @@ mod tests {
                 .unwrap()
             }
         };
+
+        // This measures one unit's backoff. Plan first so the window unit
+        // exists, then clear everything else capture queued beside it, so
+        // every iteration below claims the refusing window and nothing else.
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        sqlx::query("DELETE FROM jobs WHERE stage != 'segment_window'")
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
 
         // Wind each refusal's delay back so the attempt budget is spent
         // without sleeping, and record how long the unit asked to wait.
@@ -822,30 +848,12 @@ mod tests {
             gaps.iter().all(|g| *g >= backoff_secs(MAX_ATTEMPTS)),
             "gaps were {gaps:?}"
         );
-        // And the document does not hang waiting on a window nobody will take.
+        // And the document does not hang waiting on a window nobody will
+        // take: its passages are captured and searchable, with the one
+        // refused rewrite owed — partial, not failed.
         assert_eq!(
             core.store.get_corpus(&out.id).await.unwrap().status,
-            CorpusStatus::Failed
-        );
-    }
-
-    #[tokio::test]
-    async fn a_model_stage_job_with_no_model_is_closed_not_retried() {
-        // A dedupe unit left over from an `eager` base, reconfigured to run
-        // with no [infer.synthesize]: there is nothing that could ever run it,
-        // so it settles with a reason rather than sitting at the backoff
-        // ceiling for ever.
-        let mut core = test_core().await;
-        core.synthesizer = None;
-        core.judge = None;
-        core.store
-            .enqueue(Stage::Dedupe, "pair", "p1")
-            .await
-            .unwrap();
-        assert!(run_one(&core).await.unwrap(), "the job was claimed");
-        assert!(
-            !core.store.live_job(Stage::Dedupe, "p1").await.unwrap(),
-            "the unit is still armed"
+            CorpusStatus::Partial
         );
     }
 
@@ -1212,20 +1220,24 @@ mod tests {
 
         let src = core.store.get_corpus(&out.id).await.unwrap();
         assert_eq!(src.status, CorpusStatus::Ready);
-        assert_eq!(core.vectors.count().await.unwrap(), 2);
+        // Three vectors: the two synthesized artifacts, and the passage they
+        // superseded — which keeps its vector, hidden from results by status.
+        assert_eq!(core.vectors.count().await.unwrap(), 3);
     }
 
     #[tokio::test]
     async fn a_failing_stage_is_retried_then_gives_up_with_a_reason() {
         let mut core = test_core().await;
-        core.synthesizer = Some(Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::failing(
             "endpoint down",
-        )));
+        ));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         // Each attempt fails and pushes run_after forward; wind it back to
-        // exercise the attempt budget without sleeping.
-        for _ in 0..=MAX_ATTEMPTS {
+        // exercise the attempt budget without sleeping. The queue also holds
+        // the capture's embed and follow-on units, so drive well past the
+        // window's own budget rather than counting iterations against it.
+        for _ in 0..40 {
             sqlx::query("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
                 .await
@@ -1233,18 +1245,19 @@ mod tests {
             let _ = run_one(&core).await;
         }
 
-        // The model is a hard dependency: a source it never segmented has no
-        // chunks rather than paragraphs split on blank lines.
+        // Verbatim-first: the capture survives the model in full — its
+        // passages are the index — and only the rewrite is missing.
+        let rows = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(!rows.is_empty(), "the verbatim capture must survive");
         assert!(
-            core.store
-                .artifacts_for_corpus(&out.id)
-                .await
-                .unwrap()
-                .is_empty()
+            rows.iter()
+                .all(|c| c.provenance == crate::store::artifacts::Provenance::Passage),
+            "nothing synthesized can exist; the model never answered"
         );
         assert_eq!(
             core.store.get_corpus(&out.id).await.unwrap().status,
-            CorpusStatus::Failed
+            CorpusStatus::Partial,
+            "captured and searchable, with the one window's rewrite owed"
         );
         // The window says why, so Ops can name the lines and the error rather
         // than only reporting that something did not work.
@@ -1306,13 +1319,24 @@ mod tests {
         }
 
         for id in &ids {
-            let chunks = core.store.artifacts_for_corpus(id).await.unwrap();
-            assert_eq!(chunks.len(), 2, "source {id} has {} chunks", chunks.len());
+            let live = core
+                .store
+                .artifacts_for_corpus(id)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|c| c.in_results())
+                .count();
+            // Two synthesized artifacts plus the joint passage supersession
+            // leaves standing (no single artifact majority-covers it).
+            assert_eq!(live, 3, "source {id} has {live} live chunks");
             assert_eq!(
                 core.store.get_corpus(id).await.unwrap().status,
                 CorpusStatus::Ready
             );
         }
-        assert_eq!(core.vectors.count().await.unwrap(), 24);
+        // Per source: two synthesized artifacts plus the superseded passage's
+        // kept vector.
+        assert_eq!(core.vectors.count().await.unwrap(), 36);
     }
 }

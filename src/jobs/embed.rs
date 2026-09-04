@@ -361,6 +361,8 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
             "could not arm the neighbour query; the sweep will find its pairs"
         );
     }
+    // The judged capture reads its own time now — see `jobs::judgement` —
+    // so no per-artifact moments stage is armed here any more.
     // A merged artifact hides what it replaced only once it is itself in the
     // index, so the knowledge is never out of search on both sides at once.
     if chunk.provenance == crate::store::artifacts::Provenance::Merged
@@ -1095,6 +1097,16 @@ mod tests {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn an_embedded_artifact_arms_the_moments_read() {
+        let core = test_core().await;
+        let _out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Anything at all", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+    }
+
     /// A merged artifact over two captured roots, indexed and nothing more.
     async fn merged_over(core: &Core, roots: &[String]) -> crate::store::artifacts::Chunk {
         core.store
@@ -1628,7 +1640,7 @@ mod tests {
 
     #[test]
     fn splitting_by_lines_always_returns_something_smaller() {
-        let counter = crate::infer::budget::TokenCounter;
+        let counter = crate::infer::budget::TokenCounter::default();
         // A single line far over the limit, with no whitespace to cut on.
         let blob = "x".repeat(4000);
         let parts = split_by_lines(&blob, 100, &counter);
@@ -1823,8 +1835,8 @@ mod tests {
         // rather than a slow one.
         //
         // The exact total is what pins it, and it is now two things rather than
-        // one: three batch claims, plus one `relate` unit per artifact that
-        // reached the index. Either number drifting shows up here — an extra
+        // one: three batch claims, plus one `relate` unit and one `moments`
+        // unit per artifact that reached the index. Either number drifting shows up here — an extra
         // batch claim means the re-arm ran long, and a missing relate unit means
         // an artifact was indexed without ever being checked for duplicates,
         // which is the silent half.
@@ -1832,6 +1844,8 @@ mod tests {
         while crate::jobs::run_one(&core).await.unwrap() {
             claims += 1;
             assert!(
+                // One `Relate` unit per chunk rides on the embed; the bound
+                // is about batch claims, so those are allowed for.
                 claims <= 3 + chunks,
                 "the re-arm never terminated: {claims} claims"
             );

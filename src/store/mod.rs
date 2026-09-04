@@ -12,6 +12,7 @@ pub mod insights;
 pub mod jobs;
 pub mod lineage;
 pub mod links;
+pub mod moments;
 pub mod pairs;
 pub mod pursuits;
 pub mod segments;
@@ -146,7 +147,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 4] = [
+        const ADDITIVE: [(&str, &str, &str); 11] = [
             (
                 "artifacts",
                 "updated_at",
@@ -174,6 +175,55 @@ impl Store {
                 "search_events",
                 "opened_at",
                 "ALTER TABLE search_events ADD COLUMN opened_at INTEGER",
+            ),
+            // Nullable, no default, and NULL is the truth about every row that
+            // predates it: no reminder on that note had been completed,
+            // because nothing could record that it had.
+            (
+                "corpora",
+                "retired_at",
+                "ALTER TABLE corpora ADD COLUMN retired_at INTEGER",
+            ),
+            // Both nullable, no default. NULL on an old retired row truthfully
+            // says "never stamped", and the reap sweep stamps it fresh before
+            // judging rather than a migration inventing a date.
+            (
+                "artifacts",
+                "retired_at",
+                "ALTER TABLE artifacts ADD COLUMN retired_at INTEGER",
+            ),
+            (
+                "artifacts",
+                "reaped_at",
+                "ALTER TABLE artifacts ADD COLUMN reaped_at INTEGER",
+            ),
+            // Nullable, no default, and NULL says exactly what is true of every
+            // row written before it: this row has never been moved, so the
+            // instant it was read at is the instant it still holds.
+            (
+                "moments",
+                "moved_from",
+                "ALTER TABLE moments ADD COLUMN moved_from INTEGER",
+            ),
+            (
+                "moments",
+                "moved_at",
+                "ALTER TABLE moments ADD COLUMN moved_at INTEGER",
+            ),
+            // Both nullable, no default, and NULL is the truth about every row
+            // written before them. A moment with no `series_id` is counted the
+            // old way -- by the rows on its artifact -- and one with no
+            // `origin_corpus_id` resolves its note through the artifact it
+            // sits on, which is what every such row did when it was written.
+            (
+                "moments",
+                "series_id",
+                "ALTER TABLE moments ADD COLUMN series_id TEXT",
+            ),
+            (
+                "moments",
+                "origin_corpus_id",
+                "ALTER TABLE moments ADD COLUMN origin_corpus_id TEXT",
             ),
         ];
         for (table, column, ddl) in ADDITIVE {

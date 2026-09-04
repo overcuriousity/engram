@@ -69,6 +69,16 @@ pub struct AskResponse {
     /// number here that is in no excerpt is the model's own rather than
     /// something the base holds. Reported so the page can say which.
     pub unsupported: Vec<String>,
+    /// Every excerpt the answer was written from has been retired.
+    ///
+    /// Retired rows sit below the cliff and are normally never read for an
+    /// answer. The exception is a question whose whole match has been retired
+    /// — a completed reminder retires the note it was read from, and that note
+    /// may be the only place the base states the thing — where answering from
+    /// nothing is the worse of the two failures. Reported so the reader is
+    /// told which they are looking at, rather than being handed a confident
+    /// answer drawn entirely from what the base has put away.
+    pub retired_only: bool,
     /// The recorded question, when this door records — the UI, with feedback
     /// on. The page shows a verdict bar only when this is set.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,6 +171,7 @@ impl Core {
                     abstained: true,
                     // Nothing was shown and nothing was claimed.
                     unsupported: vec![],
+                    retired_only: false,
                     event_id: None,
                 };
                 // Emitted even though it is empty: a reader that waits for the
@@ -202,6 +213,7 @@ impl Core {
                     // A configuration failure, not a statement about the base.
                     abstained: false,
                     unsupported: vec![],
+                    retired_only: false,
                     event_id: None,
                 };
                 yield AskEvent::Retrieved {
@@ -419,6 +431,12 @@ impl Core {
                 );
             }
 
+            // Read off the excerpts the model was actually shown, not off the
+            // ranking: what the answer stands on is what was sent.
+            let retired_only = !citations.is_empty() && citations.iter().all(|c| c.retired);
+            if retired_only {
+                tracing::info!("ask: every excerpt the answer was written from is retired");
+            }
             let response = AskResponse {
                 abstained,
                 answer: answer.text,
@@ -426,6 +444,7 @@ impl Core {
                 dropped,
                 truncated: answer.truncated,
                 unsupported,
+                retired_only,
                 event_id: None,
             };
             // Recorded here rather than by either door, so one ask is one row
@@ -858,6 +877,34 @@ impl Core {
         // neighbour may appear, and the caller only ever hands it candidates it
         // could genuinely show.
         let ids: Vec<String> = live.iter().map(|(c, _, _)| c.id.clone()).collect();
+        // A neighbour is retired or not for the same reason a ranked hit is —
+        // its note was retired — and hard-coding `false` here was not a
+        // shortcut but a wrong answer. `AskResponse::retired_only` is read
+        // over every citation the model was shown, so one reached neighbour of
+        // a retired note flipped it false, and the page gave a confident
+        // answer with the "this came entirely from retired notes" caveat
+        // withheld — the completed-reminder case the field exists for.
+        let cids: Vec<String> = live
+            .iter()
+            .filter_map(|(c, _, _)| c.corpus_id.clone())
+            .collect();
+        // Not defaulted to empty. An empty set does not read as "the store
+        // could not say"; it reads as "nothing is retired", and that is what
+        // `retired_only` then reports over every citation the model was shown
+        // — a confident answer with the "this came entirely from retired
+        // notes" caveat withheld, which is the same wrong answer hard-coding
+        // `false` used to give, arriving by a different road.
+        //
+        // Best-effort still, the way everything in here is: a neighbour whose
+        // retirement cannot be read is a neighbour this pass does not add, and
+        // the answer keeps every hit that was already retrievable.
+        let retired = match self.store.retired_among(&cids).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read retirement for the reached neighbours; reaching no further");
+                return;
+            }
+        };
         let merged = retrieve::append_neighbours(ranked, ids, retrieve::NEIGHBOUR_MAX);
 
         for id in merged.into_iter().skip(ranked_len) {
@@ -865,9 +912,11 @@ impl Core {
                 continue;
             };
             let (c, via, reason) = live.swap_remove(i);
+            let corpus_id = c.corpus_id.unwrap_or_default();
+            let is_retired = retired.contains(&corpus_id);
             hits.push(SearchResult {
                 artifact_id: c.id,
-                corpus_id: c.corpus_id.unwrap_or_default(),
+                corpus_id,
                 title: c.title,
                 text: c.text,
                 category: c.category,
@@ -888,9 +937,12 @@ impl Core {
                 // assumed — in either direction.
                 weak: false,
                 primed: false,
+                due_at: None,
+                due_in: None,
                 in_sitting: false,
                 // The cliff was computed over scores this one was never in.
                 past_cliff: false,
+                retired: is_retired,
                 similarity: None,
                 titled_by_corpus: false,
                 // What makes a reached artifact tellable apart from a retrieved
@@ -1271,12 +1323,12 @@ mod tests {
         // A base where nothing matches closely. Cosine tops out at 1, so every
         // candidate is under this — which is the situation the kind exists for,
         // stated as a threshold rather than hoped for from a fake embedder.
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         core.ask(&req("chunk"), Door::Ui.by("me")).await.unwrap();
 
         let gaps = core
             .store
-            .open_gap_refs(core.embedder.model(), core.weak_below)
+            .open_gap_refs(core.embedder.model(), core.weak_below())
             .await
             .unwrap();
         let subjects: Vec<&str> = gaps
@@ -1295,12 +1347,12 @@ mod tests {
     async fn the_api_door_names_no_subjects() {
         let (mut core, _) = core_with_planner(Some(r#"{"need": ["mounting an E01"]}"#)).await;
         core.learn.enabled = true;
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         core.ask(&req("chunk"), Door::Api).await.unwrap();
 
         let gaps = core
             .store
-            .open_gap_refs(core.embedder.model(), core.weak_below)
+            .open_gap_refs(core.embedder.model(), core.weak_below())
             .await
             .unwrap();
         assert!(
@@ -2726,7 +2778,6 @@ mod tests {
     #[tokio::test]
     async fn consecutive_passages_are_stitched_into_one_excerpt_and_every_id_is_cited() {
         let mut core = test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Off;
         // One corpus, one segment, three abutting passages, all hits.
         let src = core
             .store
@@ -2739,6 +2790,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: from,
                 end_line: to,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some("Recovery".into()),
             category: None,
@@ -2828,6 +2880,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: line,
                 end_line: line,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some(title.into()),
             category: None,
@@ -2864,8 +2917,11 @@ mod tests {
                 last_verified_at: None,
                 weak: false,
                 primed: false,
+                due_at: None,
+                due_in: None,
                 in_sitting: false,
                 past_cliff: false,
+                retired: false,
                 similarity: None,
                 titled_by_corpus: false,
                 via: None,

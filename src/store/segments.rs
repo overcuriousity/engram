@@ -46,23 +46,17 @@ pub struct Segment {
     /// range describes where it came from, but cannot reproduce it when the
     /// splitter had to cut inside a line.
     pub text: String,
-    /// Leading lines of `text` that lie outside `start_line..=end_line`.
-    pub carry_lines: i64,
     pub state: SegmentState,
     pub attempts: i64,
     pub last_error: Option<String>,
 }
 
 /// One window as the splitter produced it, on its way into the table.
-///
-/// A struct rather than a tuple because the fourth number is the one that means
-/// nothing on its own: `(1, 40, text, 1)` cannot be read at a call site.
 #[derive(Debug, Clone)]
 pub struct NewSegment<'a> {
     pub start_line: i64,
     pub end_line: i64,
     pub text: &'a str,
-    pub carry_lines: i64,
 }
 
 fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
@@ -72,7 +66,6 @@ fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
         start_line: r.get("start_line"),
         end_line: r.get("end_line"),
         text: r.get("text"),
-        carry_lines: r.get("carry_lines"),
         state: SegmentState::parse(r.get::<String, _>("state").as_str()),
         attempts: r.get("attempts"),
         last_error: r.get("last_error"),
@@ -128,13 +121,16 @@ impl Store {
 
         for (idx, w) in windows.iter().enumerate() {
             sqlx::query(
+                // The `carry_lines` column stays in the schema at a constant 0
+                // — heading carry retired with the hand-rolled splitter, and a
+                // column write is cheaper than a migration nothing needs.
                 "INSERT INTO segments (corpus_id, idx, start_line, end_line, text, carry_lines)
-                 VALUES (?, ?, ?, ?, ?, ?)
+                 VALUES (?, ?, ?, ?, ?, 0)
                  ON CONFLICT(corpus_id, idx) DO UPDATE SET
                    start_line = excluded.start_line,
                    end_line = excluded.end_line,
                    text = excluded.text,
-                   carry_lines = excluded.carry_lines,
+                   carry_lines = 0,
                    no_promote = 0",
             )
             .bind(corpus_id)
@@ -142,7 +138,6 @@ impl Store {
             .bind(w.start_line)
             .bind(w.end_line)
             .bind(w.text)
-            .bind(w.carry_lines)
             .execute(&mut *tx)
             .await?;
         }
@@ -297,6 +292,18 @@ impl Store {
         Ok(())
     }
 
+    /// Does a write to this window append rather than replace?
+    ///
+    /// The re-read mark or a verbatim state, and both readers must agree.
+    /// `jobs::window::run` read the two together while `write_segment_artifacts`
+    /// read only the mark, so a verbatim window whose mark was unset took the
+    /// replacing branch and deleted the passages the promotion exists to keep —
+    /// while the caller went on to embed and supersede as if they stood.
+    pub async fn segment_write_appends(&self, corpus_id: &str, idx: i64) -> Result<bool> {
+        Ok(self.segment_keeps_artifacts(corpus_id, idx).await?
+            || self.segment_state(corpus_id, idx).await? == Some(SegmentState::Verbatim))
+    }
+
     /// Is this window mid-re-read, so that a write appends rather than replaces?
     pub async fn segment_keeps_artifacts(&self, corpus_id: &str, idx: i64) -> Result<bool> {
         Ok(sqlx::query_scalar::<_, i64>(
@@ -347,7 +354,6 @@ mod tests {
             start_line,
             end_line,
             text,
-            carry_lines: 0,
         }
     }
 
@@ -613,13 +619,11 @@ mod tests {
                     start_line: 1,
                     end_line: 5,
                     text: "a",
-                    carry_lines: 0,
                 },
                 NewSegment {
                     start_line: 6,
                     end_line: 9,
                     text: "b",
-                    carry_lines: 0,
                 },
             ],
         )
@@ -646,7 +650,6 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 text: "t",
-                carry_lines: 0,
             }],
         )
         .await

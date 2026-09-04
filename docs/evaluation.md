@@ -65,17 +65,14 @@ a bar — *Was this what you were looking for? Yes · No · Not sure* — and on
 that matched nothing there is *Nothing here has it*, which records a gap. Every
 pair comes from somebody pressing one of those. A long read used to count as a
 *Yes* on its own; it does not any more, because what it measured was a pane left
-open, which is an abandoned tab about as often as it is an answer. *Not sure* is
-not a verdict either: it leaves the search for the deck, which is where a
-question nobody could answer in the moment belongs. Only what none of these
-labelled reaches `/ui/judge`,
-where a recorded search comes back with the top five of its pool in the order
-the search gave them, the rest behind a fold, and you say which one you needed.
-Showing the order is a known cost: a person is likelier to confirm what came
-first, so the recall@10 and MRR read off deck verdicts lean slightly towards
-the ranker. Five in order is a question a person answers; twenty shuffled was
-one nobody answered twice. Scores are still withheld, and the query is still
-recorded in the moment and the verdict is not.
+open, which is an abandoned tab about as often as it is an answer. *Not sure*
+is not a verdict either: it leaves the search pending. There is no second
+screen — the deck that used to deal what the bar had not labelled is gone. A
+verdict is given at the moment of the search, against the list the search
+actually gave, by the person who made it; a search nobody ruled on in the
+moment simply stays unlabelled. Position bias remains: a person is likelier
+to confirm what came first, so recall@10 and MRR read off these verdicts lean
+slightly towards the ranker. Scores are withheld either way.
 
 ```bash
 engram --export-eval ~/engram-eval
@@ -184,19 +181,20 @@ The two cheap knobs tune themselves. Once fifty judgements exist
 (`feedback.tune.resweep_after`) re-runs a background sweep of recency weight ×
 per-source cap over every judged pair, against the live index. It needs no
 export, no frozen corpus and no re-embedding: both knobs only reorder what
-retrieval already returned, so a whole grid is seconds of vector reads. Like
-the assign search, it reads and never records — `Door::Judge`, `mark: false`.
+retrieval already returned, so a whole grid is seconds of vector reads. It
+reads and never records — `Door::Judge`, `mark: false`.
 It asks the whole grid about one query before moving to the next, so each query
 is embedded once however many pairs there are, and it takes the background lane
 rather than the interactive one: nobody is waiting on a replay of questions
 that were already answered, and thousands of searches on the fast lane would
 hold every worker off for the length of the run.
 
-Its two figures are a **replay**, not the header's. The counter at the top of
-`/ui/judge` is recall@10 and MRR over the positions the searches actually gave;
-a sweep's are those searches run again, now, under each setting, through a door
-that leaves priming out. Both are honest and neither substitutes for the other
-— read `MRR 0.50 → 0.60` against itself, never against the number above it.
+Its two figures are a **replay**, not the page's. The Retrieval measure on
+`/ui/insights` is recall@10 and MRR over the positions the searches actually
+gave; a sweep's are those searches run again, now, under each setting, through
+a door that leaves priming out. Both are honest and neither substitutes for
+the other — read `MRR 0.50 → 0.60` against itself, never against the measure
+beside it.
 
 A candidate is offered only when **at least two pairs are net better and
 neither aggregate is worse**. That floor is the whole safety of running it
@@ -204,7 +202,7 @@ automatically: on fifty pairs a single flipped pair is two points of recall,
 and an aggregate delta alone cannot tell one from a real improvement. Ties keep
 the current values.
 
-The recommendation appears on `/ui/judge` with the pairs that moved, and
+The recommendation appears on `/ui/insights` with the pairs that moved, and
 applying it rewrites `config.toml` — beside the file and renamed over it, so a
 crash mid-write leaves the operator's file as it was — and swaps the running
 parameters in one step. Only the newest sweep's recommendation stands: a later
@@ -257,4 +255,4 @@ to run *something* and call the question answered.
 | `src/eval/claims.rs` | Literal extraction and claim support. |
 | `src/eval/sweep.rs` | The runtime sweep: the grid, the gate, and the job a verdict starts. See 4½. |
 | `src/store/eval_runs.rs` | Every sweep, with the settings that produced it and whether it was applied. |
-| `/ui/judge` | Where pairs come from, and where a sweep reports. Its counter is not a stand-in for the measurement — it *is* recall@10 and MRR over the positions those searches actually gave. |
+| `/ui/insights` | Where a sweep reports and its recommendation is applied. The Retrieval measure is not a stand-in for the measurement — it *is* recall@10 and MRR over the positions those searches actually gave. The pairs themselves come from the verdict bars under results. |

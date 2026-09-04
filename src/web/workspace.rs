@@ -57,13 +57,15 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/search/{id}/gap", post(search_gap))
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/ask/{id}/keep", post(ask_keep))
+        // The microphone. Not a door onto anything: it is the keyboard, and
+        // what it answers with goes into the box for the operator to then do
+        // something with.
+        .route("/ui/transcribe", post(transcribe))
 }
 
 #[derive(Template)]
 #[template(path = "workspace.html")]
 struct WorkspaceTemplate {
-    /// Waiting judgements for the nav. See `state::judge_pending`.
-    judge_pending: Option<i64>,
     /// Whether the ask door is open. See `state::ask_enabled`. The `Ask`
     /// button is absent where it is false — the door is simply not there,
     /// rather than greyed out over a page that says so.
@@ -83,6 +85,10 @@ struct WorkspaceTemplate {
     /// Whether the image door is open, i.e. `[infer.vision]` is configured.
     /// Off, the control offers text only rather than a picker that fails.
     vision_enabled: bool,
+    /// Whether `[infer.transcribe]` is configured. Off, the box has no
+    /// microphone — the same rule the image door follows, and for the same
+    /// reason: a control that cannot work is worse than no control.
+    stt_enabled: bool,
     /// Whether this page asks the rail to say why each row ranked where it
     /// did — `/ui?explain=1`. Carried onto the form as a hidden field and
     /// named in `hx-params`, because that allowlist strips everything it does
@@ -97,14 +103,12 @@ struct WorkspaceTemplate {
     /// refining pass: without it no second request fires, ever, because it
     /// could only buy the same order back.
     search_reranks: bool,
-    /// Whether capture spends a synthesis call per segment, i.e. `eager`.
     ///
     /// At `earned` and `off` it spends none: the text is embedded as written,
     /// and at `earned` a window is rewritten later only where reading has
     /// earned it. The page has to say which of those is happening — promising
     /// "16 model calls" on a base that will make none is the page lying about
     /// what the button costs.
-    eager: bool,
     /// The ask the box was filled from, carried through the form so the
     /// capture records where the text came from. Empty on an ordinary visit.
     ///
@@ -150,6 +154,12 @@ struct WorkspaceTemplate {
     /// fragment is what the results endpoint returns when the box is emptied
     /// — one account of the idle state, however it is reached.
     idle: String,
+    /// Whether this page paints its idle state: the column under the box, and
+    /// no rail and no pane. Exactly the condition `idle` is computed from, and
+    /// deliberately not "the box is empty" — the ask and capture doors arrive
+    /// with a filled box and run nothing, so for them nothing is coming and
+    /// the idle column is what the page has to show.
+    idle_state: bool,
     /// Whether the base holds anything at all.
     ///
     /// Onboarding here is a property of an empty base rather than of a new
@@ -160,6 +170,11 @@ struct WorkspaceTemplate {
     /// the one that can, and the rest appears when there is something for it
     /// to act on.
     held: bool,
+    /// The two example phrasings under the box, in the reader's language. See
+    /// `moments::examples_for`: they are the classifier's own prototypes, so
+    /// what the page teaches and what the base recognises cannot drift apart.
+    example_remind: &'static str,
+    example_journal: &'static str,
     /// Always false here: the shared partials this page renders inline —
     /// `_ask_verb.html`, `_keyhint.html`, `_box_hint.html`, `_pane_idle.html`
     /// — mark themselves `hx-swap-oob` for the other caller, `HeldTemplate`,
@@ -182,6 +197,10 @@ struct WorkspaceTemplate {
 #[template(path = "_held.html")]
 struct HeldTemplate {
     ask_enabled: bool,
+    /// See `WorkspaceTemplate`: `_box_hint.html` is one of the partials this
+    /// swaps, and it reads these two.
+    example_remind: &'static str,
+    example_journal: &'static str,
     /// True by definition: this fragment exists only for the transition into
     /// it. The field is here because the partials branch on it.
     held: bool,
@@ -192,13 +211,16 @@ struct HeldTemplate {
 /// Serves `HeldTemplate`, and only where something really is held: a page that
 /// asked for this before its capture stored would swap in an Ask verb over a
 /// base that still cannot answer.
-async fn held_regions(tenant: Tenant) -> Result<Response> {
+async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Response> {
     let (corpora, _) = tenant.core.store.held_brief().await?;
     if corpora == 0 {
         return Err(crate::error::Error::NotFound);
     }
+    let (example_remind, example_journal) = examples(&headers);
     Ok(HtmlTemplate(HeldTemplate {
         ask_enabled: crate::web::state::ask_enabled(&tenant),
+        example_remind,
+        example_journal,
         held: true,
         oob: true,
     })
@@ -210,8 +232,19 @@ async fn held_regions(tenant: Tenant) -> Result<Response> {
 /// Split out because the three deep links differ only in what is in the box
 /// and what happens on first paint; a copy of this per door is how they come
 /// to disagree about the chips.
+/// The reader's language, off the request. A header that is absent, empty or
+/// unreadable is a reader we know nothing about, and English is what the page
+/// says then.
+fn examples(headers: &axum::http::HeaderMap) -> (&'static str, &'static str) {
+    let raw = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok());
+    crate::core::moments::examples_for(raw.unwrap_or(""))
+}
+
 async fn base_template(
     tenant: &Tenant,
+    headers: &axum::http::HeaderMap,
     q: String,
     category: String,
     open_with: &'static str,
@@ -237,43 +270,53 @@ async fn base_template(
     // The same condition the template's `load` trigger is written from, and
     // its complement: whatever will not be filled by a search on arrival is
     // filled by the idle rail here.
-    let idle = match q.is_empty() || !open_with.is_empty() {
-        true => crate::web::ui::rail_idle(tenant)
-            .await?
-            .render()
-            .map_err(|e| crate::error::Error::Internal(e.to_string()))?,
-        false => String::new(),
-    };
+    let idle_state = q.is_empty() || !open_with.is_empty();
+    // Rendered whatever state the page arrived in. It is the idle column's
+    // closing line now rather than the rail's contents, so there is no list to
+    // flicker under a result set that is about to arrive — and a deep link
+    // whose box is cleared has to find the line already there, because what
+    // comes back from the results endpoint is an out-of-band swap onto it.
+    let idle = crate::web::ui::idle_foot(tenant, false)
+        .await?
+        .render()
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
     // The slimmest read there is, and the same one the idle rail takes. Asked
     // unconditionally because the deep-link path renders no idle rail and
     // still has to know: a search URL against an empty base is a page that
     // must not offer Ask either.
     let (corpora, _) = tenant.core.store.held_brief().await?;
+    let (example_remind, example_journal) = examples(headers);
     Ok(WorkspaceTemplate {
-        judge_pending: crate::web::state::judge_pending(tenant).await,
         ask_enabled: crate::web::state::ask_enabled(tenant),
         q,
         facets,
         category,
         recommend: tenant.core.recommends(),
         vision_enabled: tenant.core.describer.is_some(),
+        stt_enabled: tenant.core.transcriber.is_some(),
         search_reranks: tenant.core.reranks_search(),
         // The deep-link door sets it; every other door onto this page is not
         // an operator looking into a ranking.
         explain: false,
-        eager: tenant.core.synthesis == crate::config::SynthesisMode::Eager,
         prefill_ask: String::new(),
         prefill_question: String::new(),
         open_with,
         idle,
+        idle_state,
+        example_remind,
+        example_journal,
         held: corpora > 0,
         oob: false,
     })
 }
 
-async fn page(tenant: Tenant, Query(p): Query<UiSearchParams>) -> Result<Response> {
+async fn page(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<UiSearchParams>,
+) -> Result<Response> {
     let explain = p.explain.unwrap_or(false);
-    let mut t = base_template(&tenant, p.q, p.category.unwrap_or_default(), "").await?;
+    let mut t = base_template(&tenant, &headers, p.q, p.category.unwrap_or_default(), "").await?;
     t.explain = explain;
     Ok(HtmlTemplate(t).into_response())
 }
@@ -301,6 +344,14 @@ struct CaptureForm {
     /// what it was written from — even if the operator rewrote every word of it.
     #[serde(default)]
     from_ask: Option<String>,
+    /// The viewer's zone, from the hidden `#box-tz` app.js fills on load — the
+    /// same field the echo under the box already reads its dates in.
+    ///
+    /// Without it the flagship path stored no zone at all: *remind me tomorrow
+    /// at 9*, echoed under the box in Berlin as 09:00, landed as a moment at
+    /// 09:00 UTC and the band underneath said 11:00.
+    #[serde(default)]
+    tz: Option<String>,
 }
 
 #[derive(Template)]
@@ -315,7 +366,14 @@ struct CapturedTemplate {
     near_dupe_percent: i64,
 }
 
-async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Response> {
+async fn capture_submit(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Form(f): Form<CaptureForm>,
+) -> Result<Response> {
+    // Which of the ten the reading of this text is instructed in: the account
+    // setting, or this browser's `Accept-Language` where it is on automatic.
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     // An answer the operator chose to keep is still a paste, and is stored as
     // one — the same pipeline, the same synthesis, no special case downstream.
     // What differs is only the trace: the origin says a model wrote it, and the
@@ -346,7 +404,14 @@ async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Re
         },
         None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
     };
-    let out = tenant.core.ingest_capture(capture).await?;
+    let out = tenant
+        .core
+        .ingest_capture(
+            capture
+                .with_lang(lang)
+                .with_tz(viewer_zone(f.tz.as_deref())),
+        )
+        .await?;
     Ok(HtmlTemplate(CapturedTemplate {
         id: out.id,
         duplicate: out.duplicate,
@@ -360,13 +425,34 @@ async fn capture_submit(tenant: Tenant, Form(f): Form<CaptureForm>) -> Result<Re
     .into_response())
 }
 
+/// The zone the box was typed in, as the zone table spells it.
+///
+/// A name that does not parse is dropped rather than refused: this is a hidden
+/// field the browser fills from `Intl`, nobody typed it, and a 400 here would
+/// lose the text of a capture over a zone database that disagrees with ours.
+/// Dropping it falls back to `time.default_tz`, which is the server's own zone.
+fn viewer_zone(tz: Option<&str>) -> Option<String> {
+    let name = tz.map(str::trim).filter(|t| !t.is_empty())?;
+    match name.parse::<chrono_tz::Tz>() {
+        Ok(z) => Some(z.name().to_string()),
+        Err(_) => {
+            tracing::warn!(tz = %name, "the box sent a zone the table does not know; reading its dates in the default");
+            None
+        }
+    }
+}
+
 /// The capture door: the workspace with the box already filled.
 ///
 /// The extension posts here and so does *keep this answer*, and neither knows
 /// anything about the three pages having folded into one. A prefill that names
 /// an ask nobody recorded is not an error worth a page for: the box is simply
 /// empty, which is what an ordinary visit looks like.
-async fn capture_door(tenant: Tenant, Query(p): Query<CapturePrefill>) -> Result<Response> {
+async fn capture_door(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<CapturePrefill>,
+) -> Result<Response> {
     let prefilled = match &p.from_ask {
         Some(id) => tenant.core.store.ask_event(id).await?,
         None => None,
@@ -375,7 +461,7 @@ async fn capture_door(tenant: Tenant, Query(p): Query<CapturePrefill>) -> Result
         Some(ev) => (ev.answer, ev.id, ev.question),
         None => (String::new(), String::new(), String::new()),
     };
-    let mut t = base_template(&tenant, q, String::new(), "capture").await?;
+    let mut t = base_template(&tenant, &headers, q, String::new(), "capture").await?;
     t.prefill_ask = prefill_ask;
     t.prefill_question = prefill_question;
     Ok(HtmlTemplate(t).into_response())
@@ -404,6 +490,11 @@ struct AnswerTemplate {
     /// marked in `answer`, so a reader can tell what the base holds from what
     /// the model wrote.
     unsupported: Vec<String>,
+    /// Every excerpt this was written from has been retired. Badged, because
+    /// an answer drawn entirely from what the base has put away is a different
+    /// kind of answer and the reader is the one who decides what to do about
+    /// it.
+    retired_only: bool,
     /// Set when the question was recorded; the verdict bar exists only then.
     event_id: Option<String>,
     /// The bar, rendered — empty when there is no event.
@@ -463,6 +554,72 @@ struct AskForm {
 /// GET-only, so the alternative is a GET that runs inference and writes a row —
 /// exactly what history, prefetchers and link scanners replay. The id is the
 /// guard, and it is spent on first use.
+/// The microphone under the box: one recording in, the words in it back as
+/// plain text.
+///
+/// Nothing is recorded and nothing is stored. A dictated query is a query
+/// somebody typed with their voice — the search it becomes is logged where
+/// every other search is, by the search endpoint, and this call is no more a
+/// capture than pressing a key is. So: no artifact, no activation, no job.
+///
+/// A closed door is a 404, like the ask door, and the page never provokes one:
+/// the button is not rendered where no speech model is configured. The answer
+/// is `text/plain` rather than a fragment because the destination is a
+/// textarea's value, not the DOM.
+async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> Result<Response> {
+    let Some(model) = tenant.core.transcriber.clone() else {
+        return Err(Error::NotFound);
+    };
+
+    let mut audio: Option<(Vec<u8>, String)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| Error::Validation(format!("multipart: {e}")))?
+    {
+        if field.name() != Some("audio") {
+            continue;
+        }
+        // Read before the bytes, which consume the field.
+        let mime = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| Error::Validation(format!("audio: {e}")))?;
+        audio = Some((bytes.to_vec(), mime));
+        break;
+    }
+    let Some((bytes, mime)) = audio else {
+        return Err(Error::Validation("no audio part".into()));
+    };
+    // A recording of nothing is a press and a release, which happens by
+    // accident on every touch screen. Answered as the empty transcript it is,
+    // without spending a call on it.
+    if bytes.is_empty() {
+        return Ok((
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            String::new(),
+        )
+            .into_response());
+    }
+
+    let text = model.transcribe(&bytes, &mime).await?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response())
+}
+
 async fn ask_submit(
     State(st): State<AppState>,
     tenant: Tenant,
@@ -632,6 +789,7 @@ fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
             .collect(),
         dropped: out.dropped,
         truncated: out.truncated,
+        retired_only: out.retired_only,
         abstained: out.abstained,
         unsupported: out.unsupported,
         verdict_bar: match &out.event_id {
@@ -742,21 +900,22 @@ async fn search_verdict(
     }
     let state = match f.verdict.as_str() {
         "hit" => {
-            // The same guard `judge::hit` states in full: `eval::export` drops
-            // any pair naming an artifact search will not return, so recording
-            // one here would raise the recall on the judging page while
-            // contributing nothing to `pairs.json`. The bar is not drawn over
-            // such an artifact at all — see `ui::artifact_detail` — so this is
-            // the write refusing what the page already refuses to offer.
+            // `eval::export` drops any pair naming an artifact search will
+            // not return, so recording one here would raise the recall on
+            // Insights while contributing nothing to `pairs.json`. The bar is
+            // not drawn over such an artifact at all — see
+            // `ui::artifact_detail` — so this is the write refusing what the
+            // page already refuses to offer.
             if !store.get_artifact(&f.artifact_id).await?.in_results() {
                 return Err(Error::Validation(
                     "that one is deprecated or superseded, so the benchmark can't hold it".into(),
                 ));
             }
-            // `NotFound` here is the store's guard, not a missing route: the
-            // deck can answer this search while the tab holding the bar is
-            // open, and `judge_hit` refuses to write over a verdict rather
-            // than replace it. The same line "no" gets, for the same reason.
+            // `NotFound` here is the store's guard, not a missing route:
+            // another tab can answer this search while the one holding this
+            // bar is open, and `judge_hit` refuses to write over a verdict
+            // rather than replace it. The same line "no" gets, for the same
+            // reason.
             match store
                 .judge_hit(&id, &f.artifact_id, Labeller::Confirm)
                 .await
@@ -768,8 +927,8 @@ async fn search_verdict(
         }
         "no" => {
             // The one answer that clears columns rather than filling them, so
-            // the one that can undo somebody else's work: the deck can judge
-            // this search while the tab holding the bar is open. Refused
+            // the one that can undo somebody else's work: another tab can
+            // judge this search while the one holding this bar is open. Refused
             // rather than applied, and said in the same words the rail's gap
             // button uses for the same situation.
             if !store.decline(&id).await? {
@@ -777,13 +936,12 @@ async fn search_verdict(
             }
             "no"
         }
-        // Not `Verdict::Discard`, which the deck's own key means and which says
-        // something else entirely: that the search was never real. A discard is
-        // dropped from the eval pairs, gone from the deck for good, and — alone
-        // among the verdicts — not exempt from the retention purge. Somebody
-        // unsure whether the result in front of them was the one has not said
-        // any of that. The deck's skip is what the label promises: the search
-        // stays a question and only sinks in the judging order.
+        // Not `Verdict::Discard`, which says something else entirely: that
+        // the search was never real. A discard is dropped from the eval pairs
+        // for good, and — alone among the verdicts — not exempt from the
+        // retention purge. Somebody unsure whether the result in front of them
+        // was the one has not said any of that. Skip is what the label
+        // promises: the search stays a question.
         "skip" => {
             // Not a verdict, so nothing can have got here first, and a search
             // already gone was refused by the ownership check above. What is
@@ -800,8 +958,8 @@ async fn search_verdict(
         }
         "none" => {
             // Only back over what this bar wrote — `Labeller::Confirm`. The
-            // undo appears after "no", which leaves the search pending, so the
-            // deck can deal it and record a hit while the tab is still open;
+            // undo appears after "no", which leaves the search pending, so
+            // another tab can record a hit on it while this one is still open;
             // unguarded, this button then erased a confirmed pair. The store
             // says so by matching nothing.
             match store.unjudge(&id, Labeller::Confirm).await {
@@ -812,6 +970,11 @@ async fn search_verdict(
         }
         v => return Err(Error::Validation(format!("unknown verdict {v}"))),
     };
+    // A verdict is what buys the next measurement. The deck used to spawn the
+    // sweep after each of its verdicts; the bar and the rail are the labellers
+    // now, so the check rides here — off the request path, and cheap when the
+    // thresholds say no.
+    crate::eval::sweep::maybe_spawn(&tenant.core);
     Ok(HtmlTemplate(SearchVerdictTemplate {
         event_id: id,
         artifact_id: f.artifact_id,
@@ -854,6 +1017,8 @@ async fn search_gap(
         true => "recorded as a gap: your base doesn't know this yet.",
         false => "nothing to record — that search was already judged.",
     };
+    // A gap is a verdict too, and counts towards the sweep's floor.
+    crate::eval::sweep::maybe_spawn(&tenant.core);
     Ok(axum::response::Html(format!(r#"<span class="muted">{line}</span>"#)).into_response())
 }
 
@@ -884,9 +1049,7 @@ async fn ask_carried(
 /// — and the same concession the capture door already made: `origin = "ask"`
 /// and the `ask` metadata, so what the base holds says a model wrote it, from
 /// which question, and from which artifacts. Nothing about it is special
-/// downstream, which is why this works whatever `synthesis` is set to: at
-/// `eager` the windows go to the synthesiser, at `off` and `earned` they are
-/// captured verbatim, and both end in artifacts with vectors.
+/// downstream: captured verbatim, ending in artifacts with vectors.
 ///
 /// The answer as the model wrote it, not as the operator retyped it: an
 /// operator who wants to edit first has `edit first` beside this, which is the
@@ -952,7 +1115,11 @@ struct CarriedForm {
 /// it bridged. It existed because a query typed on the rail and then retyped
 /// into ask was the cost of two pages with nothing carried between them —
 /// there is one box now, and the query is already in it.
-async fn ask_door(tenant: Tenant, Query(p): Query<AskPrefill>) -> Result<Response> {
+async fn ask_door(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Query(p): Query<AskPrefill>,
+) -> Result<Response> {
     if !tenant.core.asks() {
         return Err(crate::error::Error::NotFound);
     }
@@ -969,7 +1136,7 @@ async fn ask_door(tenant: Tenant, Query(p): Query<AskPrefill>) -> Result<Respons
         let q: String = url::form_urlencoded::byte_serialize(p.q.as_bytes()).collect();
         return Ok(axum::response::Redirect::to(&format!("/ui?q={q}")).into_response());
     }
-    let t = base_template(&tenant, p.q, String::new(), "ask").await?;
+    let t = base_template(&tenant, &headers, p.q, String::new(), "ask").await?;
     Ok(HtmlTemplate(t).into_response())
 }
 
@@ -1105,7 +1272,7 @@ mod tests {
             "what the application does, in one clause"
         );
         assert!(
-            html.contains("nobody else can search it"),
+            html.contains("nobody else can search this base"),
             "and the boundary, which is what a person wants before pasting \
              their own notes onto someone else's server"
         );
@@ -1119,12 +1286,21 @@ mod tests {
         );
     }
 
-    /// The gap between "captured" and "searchable" is a background job, and it
-    /// was invisible: a one-line receipt, then silence, then a search that
-    /// finds nothing. The queue fragment already reports the work and already
-    /// stops polling when it settles — it was only ever rendered on Insights.
+    /// An ordinary capture answers with nothing to render.
+    ///
+    /// It used to answer with three blocks: a receipt line, a sentence saying
+    /// what "segmenting 3/7" counts towards, and `_queue.html` polling itself.
+    /// They landed in `#capture-result`, a child of `.region-bar` — and on a
+    /// phone that bar is fixed to the bottom of the viewport with no height
+    /// bound, so it grew past the top of the screen and took the textarea with
+    /// it. Nothing scrolls a fixed element back.
+    ///
+    /// The acknowledgment is the "last kept" line in `_idle_foot.html`, which
+    /// the same `submit` that refreshes the rail swaps out of band. It names
+    /// the capture and links to it; a second line directly above the box was
+    /// never carrying anything it did not.
     #[tokio::test]
-    async fn the_capture_receipt_shows_the_work_that_is_still_running() {
+    async fn an_ordinary_capture_writes_nothing_over_the_box() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let res = app
@@ -1142,49 +1318,18 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let html = body_of(res).await;
         assert!(
-            html.contains(r#"hx-get="/ui/queue""#),
-            "the receipt fetches the queue that reports the work"
-        );
-        assert!(
-            html.contains(r#"hx-trigger="load""#),
-            "on load, so the progress is there without a second press"
+            html.trim().is_empty(),
+            "an ordinary capture still writes into the bar the box lives in: {html}"
         );
     }
 
-    /// The receipt now shows the queue, and the queue speaks in statuses — a
-    /// row reading "segmenting 3/7" over a paste is the first thing a new
-    /// reader sees and the last thing they can interpret. A tooltip would not
-    /// reach them: the camera path is the phone's, and a phone has no hover.
+    /// The two things that are not receipts still answer.
+    ///
+    /// A duplicate and a parked near-duplicate are states the operator cannot
+    /// learn any other way — a phone has no other surface that would say it —
+    /// and they are the reason this fragment still exists at all.
     #[tokio::test]
-    async fn the_receipt_says_what_the_work_below_it_means() {
-        let core = crate::core::test_support::test_core().await;
-        let (app, cookie) = app_with_cookie(core).await;
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/ui/capture")
-                    .header("cookie", &cookie)
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("text=LevelDB+tombstones+survive+compaction."))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let html = body_of(res).await;
-        assert!(
-            html.contains("searchable once it settles"),
-            "the receipt says what the row under it is counting towards: {html}"
-        );
-    }
-
-    /// A capture that stored nothing must not promise that something is being
-    /// read. Both the "searchable once it settles" line and the queue it polls
-    /// sat outside the branch, so a duplicate said "nothing was processed a
-    /// second time" and then, in the next sentence, that it was being read —
-    /// over a queue row that would sit parked at zero artifacts forever.
-    #[tokio::test]
-    async fn a_receipt_for_a_paste_nothing_processed_promises_no_processing() {
+    async fn a_capture_nothing_processed_still_says_so() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let post = |app: axum::Router, cookie: String| async move {
@@ -1204,24 +1349,88 @@ mod tests {
             body_of(res).await
         };
 
-        let first = post(app.clone(), cookie.clone()).await;
-        assert!(
-            first.contains("searchable once it settles") && first.contains(r#"hx-get="/ui/queue""#),
-            "the ordinary path still reports the work it started: {first}"
-        );
-
+        assert!(post(app.clone(), cookie.clone()).await.trim().is_empty());
         let again = post(app, cookie).await;
         assert!(
             again.contains("nothing was processed a second time"),
             "the second paste of the same text is a duplicate: {again}"
         );
-        assert!(
-            !again.contains("searchable once it settles"),
-            "and a duplicate must not say it is being read: {again}"
+        // And it still never promises reading it is not doing.
+        assert!(!again.contains("searchable once it settles"));
+        assert!(!again.contains(r#"hx-get="/ui/queue""#));
+    }
+
+    /// The whole of the language path, from the browser to the corpus.
+    ///
+    /// The setting is stamped at the door and never read at the job, because a
+    /// job holds a `Core` cached per tenant in a fixed-size LRU that knows no
+    /// subject: a setting that only took effect on eviction would be a setting
+    /// nobody could trust. So what the reading is instructed in is on the
+    /// corpus, and this is where it gets there.
+    #[tokio::test]
+    async fn a_capture_is_stamped_with_the_language_it_will_be_read_in() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let post = |app: axum::Router, cookie: String, text: &'static str, accept: &'static str| async move {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/ui/capture")
+                        .header("cookie", &cookie)
+                        .header("accept-language", accept)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(format!("text={text}")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        };
+
+        // On automatic — which is every account that has never opened Settings
+        // — the browser decides, and a regional tag is still its language.
+        post(
+            app.clone(),
+            cookie.clone(),
+            "eine+deutsche+notiz",
+            "de-DE,de;q=0.9,en;q=0.8",
+        )
+        .await;
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(
+            crate::infer::lang::of_corpus(&stored.metadata),
+            crate::infer::lang::Lang::De
         );
-        assert!(
-            !again.contains(r#"hx-get="/ui/queue""#),
-            "nor poll a queue that will never move for it: {again}"
+
+        // The account setting overrides the browser: somebody reading a German
+        // page in an English browser still wants their base in German.
+        core.store
+            .control
+            .set_lang(
+                crate::store::TEST_SUBJECT,
+                Some(crate::infer::lang::Lang::Fr),
+            )
+            .await
+            .unwrap();
+        post(app.clone(), cookie.clone(), "une+autre+note", "en-GB").await;
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(
+            crate::infer::lang::of_corpus(&stored.metadata),
+            crate::infer::lang::Lang::Fr
+        );
+
+        // And a language outside the ten is English rather than a refusal.
+        core.store
+            .control
+            .set_lang(crate::store::TEST_SUBJECT, None)
+            .await
+            .unwrap();
+        post(app, cookie, "a+third+note", "ja").await;
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(
+            crate::infer::lang::of_corpus(&stored.metadata),
+            crate::infer::lang::Lang::En
         );
     }
 
@@ -1341,13 +1550,18 @@ mod tests {
             html.contains(r#"title="Type or attach something first""#),
             "the disabled verb names what it wants: {html}"
         );
-        // The element, not the phrase: the same sentence is already on the
-        // label's `title`, so asserting the words alone would pass on a page
-        // where the only copy of them is the tooltip this exists to replace.
+        // The types are on the label's `title` and on the input's `aria-label`,
+        // and nowhere else. The third copy — a line of prose under the verb
+        // row — was one of four muted sentences stacked under the box, and it
+        // was the one saying least: the picker a phone opens names what it
+        // accepts itself.
         assert!(
-            html.contains(r#"class="muted hint attach-types""#),
-            "and Attach names its types where a finger can read them, not only \
-             in a tooltip: {html}"
+            html.contains(r#"aria-label="Attach a file"#),
+            "and Attach still names its types to a screen reader: {html}"
+        );
+        assert!(
+            !html.contains("attach-types"),
+            "but not a third time in prose: {html}"
         );
     }
 
@@ -1375,9 +1589,19 @@ mod tests {
             .await
             .unwrap();
         let html = body_of(res).await;
+        // Two examples and one clause, where four muted prose lines used to
+        // stack. The claim that typing searches is taught by a phrasing you
+        // can press rather than asserted at somebody — and the phrasings are
+        // the classifier's own prototypes, so the page cannot come to teach a
+        // wording the base has stopped recognising.
         assert!(
-            html.contains("Typing searches"),
+            html.contains("remind me"),
             "the one thing a first-time user cannot deduce from the page: {html}"
+        );
+        assert!(html.contains("chip-example"), "and it is pressable: {html}");
+        assert!(
+            html.contains("a sentence finds more than keywords do"),
+            "with the one true thing the old hint said kept: {html}"
         );
     }
 
@@ -1387,6 +1611,7 @@ mod tests {
             citations: vec![],
             dropped,
             truncated: false,
+            retired_only: false,
             abstained: false,
             unsupported: vec![],
             event_id: None,
@@ -1449,7 +1674,7 @@ mod tests {
             "a reranker serving search is what arms the refining pass"
         );
         assert!(
-            html.contains(r#"hx-params="q,category,rerank,explain,fold""#),
+            html.contains(r#"hx-params="q,category,rerank,explain,fold,tz""#),
             "hx-params is the allowlist for what rides a search GET; without \
              `rerank` on it the refining pass's own flag is filtered off the \
              wire and the server only ever runs the fast path — and `explain` \
@@ -1614,6 +1839,61 @@ mod tests {
         assert!(
             js.contains("getElementById('kept-from')") && js.contains("removeChild(kept)"),
             "a stored capture leaves its provenance behind on the page"
+        );
+    }
+
+    /// Emptying the box is not a statement that the answer is over. The box
+    /// keeps the question after an Ask on purpose, so select-all and Delete
+    /// went through `showIdle`, which hides `#pane` and `#rail` — taking the
+    /// streaming answer and the way back to the results with them, with
+    /// nothing to bring them back until another keystroke or a reload.
+    #[test]
+    fn emptying_the_box_does_not_take_away_an_answer_being_written() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        let body = &js[js
+            .find("function showIdle(force)")
+            .expect("the idle transition")..];
+        let body = &body[..body.find("function show(").expect("it ends")];
+        assert!(
+            body.contains("if (paneIsAsking() || (!force && paneIsBusy())) return;"),
+            "the idle transition asks what the pane is doing first: {body}"
+        );
+        assert!(
+            js.contains("function paneIsBusy()")
+                && js.contains("classList.contains('asking')")
+                && js.contains("getElementById('ask-result')"),
+            "and an ask in flight or an answer standing both count"
+        );
+    }
+
+    /// And the one caller that *is* a statement. A capture empties the box
+    /// itself, and the column it leaves is where the due band lives — so an
+    /// answer standing in the pane from an earlier Ask must not keep the band
+    /// hidden. `paneIsBusy` stayed true for the rest of the session once
+    /// `#ask-result` held anything, and a reminder captured after any
+    /// completed Ask appeared only after a full reload.
+    #[test]
+    fn a_capture_brings_the_column_back_over_an_answer_that_is_finished() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        let refresh = &js[js
+            .find("function refreshRail()")
+            .expect("the capture's rail refresh")..];
+        let refresh = &refresh[..refresh.find('}').expect("it ends")];
+        assert!(
+            refresh.contains("showIdle(true)"),
+            "the capture overrules a finished answer: {refresh}"
+        );
+        // But never an ask still arriving: `force` skips only the standing
+        // answer, and `paneIsAsking` is checked ahead of it.
+        let body = &js[js
+            .find("function showIdle(force)")
+            .expect("the idle transition")..];
+        let body = &body[..body.find("function show(").expect("it ends")];
+        assert!(
+            body.contains("paneIsAsking() ||"),
+            "an ask in flight is not overruled by anything: {body}"
         );
     }
 
@@ -1985,5 +2265,308 @@ mod tests {
                 "the server sends a `{name}` frame and the driver ignores it"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_unforced_note_is_a_plain_capture_on_the_receipt() {
+        // The cue table retired with the classifier: the web box files
+        // nothing at the door, and an entry chip appears only once the
+        // judged synthesis call has said so.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/capture")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("text=Dear+diary,+the+move+is+over."))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let html = body_of(res).await;
+        assert!(
+            !html.contains("Kept as today&rsquo;s entry"),
+            "nothing is filed at the door any more: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rails_recent_row_links_its_stamp_to_the_day() {
+        let html = workspace_held("/ui").await;
+        assert!(html.contains(r#"href="/ui/day/"#), "{html}");
+        assert!(html.contains("data-day-link"));
+        // The instant, so app.js can rebuild the path in the viewer's zone. The
+        // date in the href is UTC and the day page builds its window locally,
+        // so east of Greenwich every capture between local midnight and the
+        // offset linked to a page reading "Nothing on this day."
+        assert!(html.contains("data-day-at="), "{html}");
+    }
+
+    /// The two halves the server cannot check for itself: the zone the box
+    /// posts, and the day a stamp links to.
+    #[test]
+    fn the_box_sends_its_zone_and_a_day_link_is_rebuilt_locally() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("getElementById('box-tz')"),
+            "the capture reads the same hidden field the echo already does"
+        );
+        assert!(
+            js.contains("data-day-at"),
+            "a day link is rebuilt from the instant, in the viewer's zone: the              date the server wrote into the path is UTC"
+        );
+        assert!(
+            js.contains("function localDay("),
+            "and from the local parts, never sliced out of toISOString, which              is the UTC this exists to correct"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_capture_receipt_outlives_the_page_going_idle() {
+        // A capture empties the box, and an empty box hides `#pane`. With the
+        // receipt inside the pane, "Captured — view source" and the undo beside
+        // a note filed as today's entry were swapped in and hidden in the same
+        // turn: the undo for a wrongly-cued entry was unreachable without a
+        // reload.
+        let html = workspace_held("/ui").await;
+        let pane = html
+            .find(r#"<div id="pane""#)
+            .expect("the pane is on the page");
+        let receipt = html
+            .find(r#"<div id="capture-result">"#)
+            .expect("and so is the receipt");
+        assert!(
+            receipt < pane,
+            "the receipt is above the pane, not inside it: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_box_stores_the_zone_it_was_typed_in() {
+        // The flagship path. Without it *remind me tomorrow at 9* was echoed
+        // under the box as 09:00 in the viewer's zone and stored in the
+        // server's, and the band underneath then said something else.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let post = |app: axum::Router, cookie: String, body: &'static str| async move {
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/ui/capture")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            body_of(res).await
+        };
+
+        post(
+            app.clone(),
+            cookie.clone(),
+            "text=Remind+me+tomorrow+at+9&tz=Europe%2FBerlin",
+        )
+        .await;
+        let stored = core.store.recent_captures(1).await.unwrap();
+        let cid = stored[0].0.clone();
+        assert_eq!(
+            core.store.get_corpus(&cid).await.unwrap().metadata["tz"],
+            "Europe/Berlin"
+        );
+
+        // A zone the table does not know is dropped rather than stored: nobody
+        // typed this field, and a 400 would lose the text of the capture.
+        post(app, cookie, "text=Another+note+entirely&tz=Europe%2FBerlim").await;
+        let stored = core.store.recent_captures(1).await.unwrap();
+        let cid = stored[0].0.clone();
+        assert!(core.store.get_corpus(&cid).await.unwrap().metadata["tz"].is_null());
+    }
+
+    /// One `audio` part, with a cookie rather than the bearer token
+    /// `test_support::multipart` sends: this is a page's own fetch.
+    fn dictation(cookie: &str, mime: Option<&str>, body: &[u8]) -> Request<Body> {
+        const B: &str = "engramtestboundary";
+        let typed = match mime {
+            Some(m) => format!("Content-Type: {m}\r\n"),
+            None => String::new(),
+        };
+        let mut buf: Vec<u8> = format!(
+            "--{B}\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"recording\"\r\n{typed}\r\n"
+        )
+        .into_bytes();
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(format!("--{B}--\r\n").as_bytes());
+        Request::builder()
+            .uri("/ui/transcribe")
+            .method("POST")
+            .header("cookie", cookie)
+            .header("content-type", format!("multipart/form-data; boundary={B}"))
+            .body(Body::from(buf))
+            .unwrap()
+    }
+
+    /// A configured speech model puts the button on the box, and nothing else
+    /// about the page moves. Absent, there is no control at all — the rule the
+    /// image door follows.
+    #[tokio::test]
+    async fn the_microphone_is_on_the_box_only_where_a_speech_model_is_configured() {
+        let html = workspace("/ui").await;
+        assert!(
+            !html.contains("id=\"mic\""),
+            "shipped default has no microphone"
+        );
+
+        let core = crate::core::test_support::test_core_with_transcriber(std::sync::Arc::new(
+            crate::infer::fake::FakeTranscriber::default(),
+        ))
+        .await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_of(res).await;
+        assert!(html.contains("id=\"mic\""), "{html}");
+        assert!(
+            html.contains("box-with-mic"),
+            "the box has to leave room for it: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dictation_hands_back_the_words_and_stores_nothing() {
+        let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::saying(
+            "tombstones in leveldb",
+        ));
+        let core = crate::core::test_support::test_core_with_transcriber(heard.clone()).await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let res = app
+            .oneshot(dictation(
+                &cookie,
+                Some("audio/webm;codecs=opus"),
+                b"fake audio",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_of(res).await, "tombstones in leveldb");
+
+        assert_eq!(heard.calls(), 1);
+        assert_eq!(
+            heard.last_mime(),
+            "audio/webm;codecs=opus",
+            "the container the browser recorded in is passed through"
+        );
+        assert_eq!(heard.last_len(), b"fake audio".len());
+        // Dictation is typing. The search it becomes is recorded by the search
+        // endpoint like any other; this call leaves nothing behind on its own.
+        assert!(core.store.recent_captures(5).await.unwrap().is_empty());
+    }
+
+    /// A press and a release with nothing said. Answered as the empty
+    /// transcript it is, without a call to spend on it.
+    /// `MediaRecorder` has no WAV to give: Chrome and Firefox record
+    /// `audio/webm;codecs=opus`, Safari `audio/mp4`. whisper.cpp built without
+    /// `WHISPER_FFMPEG` reads WAV and nothing else, and answers HTTP 200
+    /// carrying `{"error": "failed to read audio data as wav"}` — so every
+    /// recording this page sent came back as a transcription failure. The
+    /// browser holds the decoder for its own output; the conversion is one
+    /// `decodeAudioData` on the client and costs the server nothing.
+    ///
+    /// Asserted over the source because the behaviour is a browser's. The
+    /// route itself still passes through whatever it is handed — the API and
+    /// the extension are other callers, and a whisper with ffmpeg behind it
+    /// takes any of it.
+    #[test]
+    fn the_recording_is_converted_to_wav_before_it_is_uploaded() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+        assert!(
+            js.contains("toWav(blob).then(send)"),
+            "the recorder's own container never reaches the upload"
+        );
+        assert!(
+            js.contains("var STT_RATE = 16000;"),
+            "and it is resampled to what whisper reads internally anyway"
+        );
+        // The one shape a minimal WAV reader takes without an argument: PCM,
+        // mono, 16-bit, every length known before a byte is written.
+        for spelling in [
+            "ascii(0, 'RIFF')",
+            "ascii(8, 'WAVE')",
+            "v.setUint16(20, 1, true)",
+            "v.setUint16(22, 1, true)",
+            "v.setUint16(34, 16, true)",
+            "type: 'audio/wav'",
+        ] {
+            assert!(
+                js.contains(spelling),
+                "the RIFF header is missing {spelling}"
+            );
+        }
+        // And a conversion that cannot be done is not a recording thrown away.
+        assert!(
+            js.contains(".catch(function () { return blob; })"),
+            "a browser that cannot decode its own output still uploads what it has"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_recording_costs_no_call() {
+        let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::default());
+        let core = crate::core::test_support::test_core_with_transcriber(heard.clone()).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(dictation(&cookie, Some("audio/webm"), b""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_of(res).await, "");
+        assert_eq!(heard.calls(), 0);
+    }
+
+    /// No speech model, no route: the same answer the ask door gives when
+    /// there is no ask model behind it.
+    #[tokio::test]
+    async fn there_is_no_transcription_route_without_a_speech_model() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(dictation(&cookie, Some("audio/webm"), b"audio"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A dead speech endpoint is the endpoint's failure, reported as one.
+    #[tokio::test]
+    async fn a_failing_speech_endpoint_is_a_bad_gateway() {
+        let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::failing(
+            "connection refused",
+        ));
+        let core = crate::core::test_support::test_core_with_transcriber(heard).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(dictation(&cookie, Some("audio/webm"), b"audio"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
     }
 }

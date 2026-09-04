@@ -119,6 +119,13 @@
     background: var(--color-bg-surface);
     border-top: 1px solid var(--color-border);
   }
+  /* Idle, the bar is the page: the idle column lives inside it, and fixed
+     to the bottom it left the top two-fifths of the screen empty over a
+     box nobody had typed in. It drops to the thumb with the first
+     keystroke, which is when a thumb needs it. */
+  html:not(.typing) .regions-rail-focus-source .region-bar {
+    position: static; border-top: 0; padding: 0; background: transparent;
+  }
   /* Not thumb furniture. The bar keeps the box, the verbs and the staged file
      — those are the application — and sheds everything that belongs to a page
      you are reading rather than to a box you are typing into with one hand:
@@ -143,11 +150,15 @@
      fitted against. Shown, it either earns the click or honestly does not. It
      goes on the first keystroke, like everywhere else, and the bar shrinks back
      to the box and the verbs. */
-  .regions-rail-focus-source .region-bar .hint,
   .regions-rail-focus-source .region-bar .chips,
   .regions-rail-focus-source .region-bar .facet-label,
   .regions-rail-focus-source .region-bar .keyhint,
   .regions-rail-focus-source .region-bar .row { display: none; }
+  /* The hint carries the two example chips, and on a phone they are the
+     only thing that says what the box is for — the narrow placeholder is
+     clipped around its thirtieth character. Shown while the box is empty,
+     gone with the first keystroke like the rest of the idle column. */
+  html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
 
   /* One line for the box, one for the verbs, and nothing else. The box starts
      at a single row here rather than growing into the screen: a phone has
@@ -243,21 +254,5 @@
   }
   table.grid td { border: none; height: auto; padding: 0.125rem 0; }
   table.grid tr:hover td { background: transparent; }
-
-  /* ── Judging, one-handed ──────────────────────────────────────────────
-     Three ways out of a card and a spacer between them is one line about
-     440px wide, on a screen that is 390: the page gained a horizontal scroll
-     and every card sat shifted off the left edge, which is where the misalign
-     came from. The bar wraps instead (`flex-wrap` is on `.judge-outs`), and
-     the spacer goes — it exists to push "Not a real search" away from the two
-     safe options, and a line of its own does that better. */
-  .judge-outs .spacer { display: none; }
-  /* Sticky against the viewport's bottom put it under the fixed tab bar, so
-     the bar that is supposed to always offer the way out was covered by it on
-     every card long enough to scroll. Same offset the search bar uses. */
-  .judge-outs { bottom: calc(46px + env(safe-area-inset-bottom)); }
-  /* 34px of indent is a tenth of the screen. Enough to read as nested, and
-     the rest goes back to the text. */
-  .judge-peek { margin-left: 1rem; }
 }
 

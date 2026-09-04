@@ -15,65 +15,76 @@ use crate::store::gaps::GapKind;
 /// being transitive a few dozen of them chain into one group with one name over
 /// holes that have nothing to do with each other. What replaces the guess is a
 /// measurement of the same quantity from the base's own recorded queries; see
-/// `link_threshold`.
+/// `unrelated_line`.
 pub const GAP_LINK_AT: f32 = 0.55;
 
-/// The line is never raised past this. A base whose queries genuinely do all sit
-/// close together — one operator, one narrow subject — would otherwise calibrate
-/// its way out of ever grouping anything.
-const GAP_LINK_CEILING: f32 = 0.9;
+/// Neither line is raised past this. A base whose queries genuinely do all sit
+/// close together — one operator, one narrow subject — would otherwise
+/// calibrate its way out of ever grouping or matching anything.
+pub const LINE_CEILING: f32 = 0.9;
 
-/// Below this many sampled vectors the sample describes the operator's week
-/// rather than the embedder, and the floor stands unmeasured.
-const MIN_CALIBRATION: usize = 30;
-
-/// The share of sampled pairs the line is put above. Almost every pair of two
-/// recorded queries is a pair of unrelated ones, so the 99th percentile of that
-/// distribution is about where "unrelated" stops — high enough that ordinary
-/// noise cannot chain, low enough to leave the genuinely-close band above it.
-const UNRELATED_PERCENTILE: f64 = 0.99;
+/// Below this many sampled pairs the sample describes the operator's week
+/// rather than the embedder, and the floors stand unmeasured. Thirty queries
+/// against each other make 435 pairs; thirty queries against thirty artifacts
+/// make 900 more.
+const MIN_PAIRS: usize = 400;
 
 /// The smallest group worth a name. A group of one is a question, and naming it
 /// is a model call spent restating it; an ungrouped gap already shows on the
 /// capture page under its own words.
 pub const MIN_CLUSTER: usize = 2;
 
-/// The cosine at or above which two gaps are the same hole, measured from the
-/// vectors this base has actually recorded.
+/// Where "unrelated" stops, measured from the base's own vectors: every
+/// recorded query against every other and against a sample of what is stored.
 ///
-/// Sampled from every recorded query rather than from the gaps alone, because
-/// what has to be measured is where *unrelated* questions land: the pairs in a
-/// broad sample are overwhelmingly unrelated, so their upper tail is the line.
-/// The result is rounded up to a hundredth and clamped to
-/// `[GAP_LINK_AT, GAP_LINK_CEILING]` — rounded because a line that moved by
-/// 0.001 between sweeps would re-key clusters that had not changed and pay for
-/// naming each of them again, and clamped because both ends of the measurement
-/// have a failure mode.
+/// Almost every pair in such a sample is a pair of unrelated things, so the
+/// bulk of the cosines is the embedder's noise band and the line is its upper
+/// edge: the median plus three robust standard deviations (1.4826 × the median
+/// absolute deviation). Robust rather than a percentile because the sample is
+/// not *all* unrelated — a question asked twice in different words, or asked
+/// of a document it is about, sits in the upper tail — and a 99th percentile
+/// of a few hundred pairs is a handful of exactly those.
 ///
-/// What this still does not measure is whether the groups it produces are the
-/// ones an operator would have drawn. That needs labels, and the operator's own
-/// actions on a group — dismissing one member against dismissing all of them —
-/// are the labels to gather; scoring linkage against them belongs with the rest
-/// of the harness, not here.
-pub fn link_threshold(sample: &[Vec<f32>]) -> f32 {
-    if sample.len() < MIN_CALIBRATION {
-        return GAP_LINK_AT;
-    }
-    let mut cos: Vec<f32> = Vec::with_capacity(sample.len() * (sample.len() - 1) / 2);
-    for i in 0..sample.len() {
-        for j in i + 1..sample.len() {
-            cos.push(cosine(&sample[i], &sample[j]));
+/// Rounded up to a hundredth: a line that moved by 0.001 between sweeps would
+/// re-key clusters that had not changed and pay for naming each of them
+/// again, and rounding down would put it back inside the band it was measured
+/// to sit above. `None` below `MIN_PAIRS`.
+///
+/// What this still does not measure is whether the groups and matches it
+/// produces are the ones an operator would have drawn. That needs labels, and
+/// the operator's own actions — dismissing one member against dismissing all
+/// of them — are the labels to gather; scoring against them belongs with the
+/// rest of the harness, not here.
+pub fn unrelated_line(queries: &[Vec<f32>], artifacts: &[Vec<f32>]) -> Option<f32> {
+    let mut cos: Vec<f32> = Vec::new();
+    for i in 0..queries.len() {
+        for j in i + 1..queries.len() {
+            cos.push(cosine(&queries[i], &queries[j]));
+        }
+        for a in artifacts {
+            cos.push(cosine(&queries[i], a));
         }
     }
-    if cos.is_empty() {
-        return GAP_LINK_AT;
+    if cos.len() < MIN_PAIRS {
+        return None;
     }
     cos.sort_by(f32::total_cmp);
-    let at = ((cos.len() - 1) as f64 * UNRELATED_PERCENTILE).round() as usize;
-    // Up, never down: rounding a measured percentile down would put the line
-    // back inside the band it was measured to sit above.
-    let measured = (cos[at] * 100.0).ceil() / 100.0;
-    measured.clamp(GAP_LINK_AT, GAP_LINK_CEILING)
+    let median = cos[cos.len() / 2];
+    let mut dev: Vec<f32> = cos.iter().map(|c| (c - median).abs()).collect();
+    dev.sort_by(f32::total_cmp);
+    let sigma = 1.4826 * dev[dev.len() / 2];
+    Some(((median + 3.0 * sigma) * 100.0).ceil() / 100.0)
+}
+
+/// A line above its floor: the measured one when there is one, clamped to
+/// `[floor, LINE_CEILING]`, the floor otherwise. `measured` at or below zero is
+/// "unmeasured".
+pub fn line_above(floor: f32, measured: f32) -> f32 {
+    if measured <= 0.0 {
+        floor
+    } else {
+        measured.clamp(floor, LINE_CEILING.max(floor))
+    }
 }
 
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -231,18 +242,20 @@ mod tests {
     fn too_small_a_sample_leaves_the_floor_where_it_is() {
         // Nothing to measure from is not a licence to move the line: a base with
         // three recorded queries would otherwise calibrate off three numbers.
-        assert_eq!(link_threshold(&[]), GAP_LINK_AT);
+        assert_eq!(unrelated_line(&[], &[]), None);
         assert_eq!(
-            link_threshold(&pseudo(MIN_CALIBRATION - 1, 64, 1.0)),
-            GAP_LINK_AT
+            unrelated_line(&pseudo(10, 64, 1.0), &pseudo(10, 64, 1.0)),
+            None
         );
+        assert_eq!(line_above(GAP_LINK_AT, 0.0), GAP_LINK_AT);
     }
 
     #[test]
     fn a_well_spread_embedder_measures_below_the_floor_and_keeps_it() {
         // Unrelated directions in 64 dimensions score far below 0.55, so the
         // measurement agrees with the floor and the floor stands.
-        assert_eq!(link_threshold(&pseudo(60, 64, 1.0)), GAP_LINK_AT);
+        let m = unrelated_line(&pseudo(40, 64, 1.0), &[]).unwrap();
+        assert_eq!(line_above(GAP_LINK_AT, m), GAP_LINK_AT);
     }
 
     #[test]
@@ -251,13 +264,32 @@ mod tests {
         // routinely score 0.9, linking at 0.55 chains all of them into one
         // group. The line moves up to sit above what was measured, and stops at
         // the ceiling so grouping does not become impossible.
-        let t = link_threshold(&pseudo(60, 64, 0.15));
+        let m = unrelated_line(&pseudo(40, 64, 0.15), &[]).unwrap();
+        let t = line_above(GAP_LINK_AT, m);
         assert!(t > GAP_LINK_AT, "{t}");
-        assert!(t <= GAP_LINK_CEILING, "{t}");
+        assert!(t <= LINE_CEILING, "{t}");
         // Rounded to a hundredth, so a line that moves at all moves visibly —
         // a threshold wobbling by 0.001 between sweeps would re-key unchanged
         // clusters and pay to name each of them again.
-        assert_eq!((t * 100.0).fract(), 0.0, "{t}");
+        assert_eq!((m * 100.0).fract(), 0.0, "{m}");
+    }
+
+    #[test]
+    fn a_related_tail_does_not_drag_the_line_up() {
+        // The prod shape: unrelated pairs in a narrow band around 0.5, and a
+        // few genuinely related ones near 0.9. A percentile of this sample
+        // lands on the related pairs; the robust estimate stays on the band.
+        let mut queries = pseudo(40, 64, 0.6);
+        // Ten near-duplicates of the first query: forty-five related pairs.
+        for _ in 0..10 {
+            queries.push(queries[0].iter().map(|x| x + 0.01).collect());
+        }
+        let band = unrelated_line(&pseudo(40, 64, 0.6), &[]).unwrap();
+        let tailed = unrelated_line(&queries, &[]).unwrap();
+        // Fifty-five pairs at ~1.0 out of 1225 is a 99th percentile of 1.0;
+        // the robust estimate moves by a few hundredths.
+        assert!((tailed - band).abs() <= 0.1, "{band} vs {tailed}");
+        assert!(tailed < 0.8, "{tailed}");
     }
 
     #[test]

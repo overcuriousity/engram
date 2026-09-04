@@ -173,6 +173,19 @@ pub struct StatusResponse {
     /// Absent rather than zeroed: four zeroes read like a faculty failing, and
     /// a faculty that was never switched on is not failing.
     pub learning: Option<Learning>,
+    /// What the last reap sweep did, or `None` while the sweep is off —
+    /// absent for the same honesty as `learning`.
+    pub reap: Option<ReapStatus>,
+}
+
+/// The reap line: the last run's counts, and how many retired rows still
+/// hold their text.
+#[derive(serde::Serialize)]
+pub struct ReapStatus {
+    pub judged: i64,
+    pub reaped: i64,
+    pub rescued: i64,
+    pub retired_waiting: i64,
 }
 
 /// The half of `status` that is not about machinery.
@@ -205,8 +218,10 @@ use crate::core::extract::extract;
 
 async fn ingest(
     tenant: Tenant,
+    headers: axum::http::HeaderMap,
     Json(req): Json<IngestRequest>,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let supplied = [
         req.text.is_some(),
         req.html.is_some(),
@@ -261,7 +276,7 @@ async fn ingest(
         // the same way it does for the MCP door. 202 when what it stored is
         // still to be read, as the upload doors answer.
         let u = parsed_url.as_ref().expect("one-of check guarantees a url");
-        let out = tenant.core.ingest_url(u, title, None).await?;
+        let out = tenant.core.ingest_url(u, title, None, lang).await?;
         let code = match (&out.status, out.duplicate) {
             (_, true) => StatusCode::OK,
             (
@@ -278,6 +293,7 @@ async fn ingest(
         .core
         .ingest_capture(
             crate::core::ingest::Capture::new(text, origin)
+                .with_lang(lang)
                 .with_title(title)
                 .with_source_url(parsed_url.map(|u| u.to_string())),
         )
@@ -298,6 +314,111 @@ pub struct CaptureQuery {
     pub title: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// The door's IANA zone, so a date in the text is read where it was written.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// `journal` to file the capture as an entry. Nothing else is accepted:
+    /// every other origin is what a door *is*, not what a caller asks for.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// `remind` to skip the classifier and date the note as a reminder.
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
+/// What the time features take from a capture request: the zone, the origin
+/// label, and a forced intent. Validated here so a typo is a 400 and not a
+/// silently ignored parameter.
+pub(crate) struct CaptureTime {
+    pub tz: Option<String>,
+    pub origin: &'static str,
+    /// The door itself, whatever `origin` ended up saying. `origin=journal`
+    /// overwrites the channel with a filing; this keeps it, for
+    /// `Capture::from_channel`.
+    pub channel: &'static str,
+    pub intent: Option<crate::core::moments::Intent>,
+}
+
+pub(crate) fn capture_time(
+    tz: Option<String>,
+    origin: Option<String>,
+    intent: Option<String>,
+    default_origin: &'static str,
+) -> Result<CaptureTime> {
+    // The zone gets the same treatment as the other two, which the doc above
+    // has always claimed it did. An unparseable name fell through `zone` to
+    // UTC, so `?tz=Europe/Berlim` was a 201 and every date in the note was
+    // read, stored and rendered two hours off — the silently ignored parameter
+    // this function exists to rule out. Kept as the zone table spells it, so
+    // what is stored is what the day page and the recurrence read back.
+    let tz = match tz.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        None => None,
+        Some(name) => match name.parse::<chrono_tz::Tz>() {
+            Ok(z) => Some(z.name().to_string()),
+            Err(_) => {
+                return Err(Error::Validation(format!(
+                    "tz={name}: not an IANA zone name"
+                )));
+            }
+        },
+    };
+    let origin = match origin.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+        None => default_origin,
+        Some("journal") => crate::core::ingest::ORIGIN_JOURNAL,
+        Some(other) => {
+            return Err(Error::Validation(format!(
+                "origin={other}: only `journal` can be asked for"
+            )));
+        }
+    };
+    let intent = match intent.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+        None => None,
+        Some("remind") => Some(crate::core::moments::Intent::Remind),
+        Some(other) => {
+            return Err(Error::Validation(format!(
+                "intent={other}: only `remind` can be asked for"
+            )));
+        }
+    };
+    Ok(CaptureTime {
+        tz,
+        origin,
+        channel: default_origin,
+        intent,
+    })
+}
+
+/// Refuse the three time fields on a capture that is not verbatim text.
+///
+/// They used to be validated and then silently dropped: only the text branch
+/// applies them, so `{"url": …, "tz": "Europe/Berlin"}` came back a success
+/// with any date in the fetched page read in the server's zone, and
+/// `origin=journal` on a URL was accepted and ignored.
+///
+/// Refused rather than honoured, because for a fetched page and an uploaded
+/// file two of the three cannot mean anything: `origin` there is the *reader*
+/// — `web`, `pdf`, `image`, decided by what came back — not a claim the caller
+/// gets to make, and `intent` is a statement about a sentence somebody typed.
+/// `tz` would mean something, and does not reach the segmentation path for
+/// those captures; saying so is the honest answer until it does.
+pub(crate) fn refuse_time_fields(
+    tz: Option<&str>,
+    origin: Option<&str>,
+    intent: Option<&str>,
+) -> Result<()> {
+    let named: Vec<&str> = [("tz", tz), ("origin", origin), ("intent", intent)]
+        .into_iter()
+        .filter(|(_, v)| v.is_some_and(|v| !v.trim().is_empty()))
+        .map(|(k, _)| k)
+        .collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Validation(format!(
+        "{} only applies to a text capture — a link or a file is read by the server, \
+         and its origin and any date in it come from what it turns out to be",
+        named.join(", ")
+    )))
 }
 
 /// Whether a body is one link and nothing else.
@@ -402,12 +523,14 @@ async fn capture(
     req: axum::extract::Request,
 ) -> Result<Response> {
     use axum::extract::FromRequest;
+    let lang = crate::web::state::capture_lang(&tenant, req.headers()).await;
     let content_type = req
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
+    let time = capture_time(q.tz.clone(), q.origin.clone(), q.intent.clone(), ORIGIN_WEB)?;
 
     if content_type.starts_with("text/plain") {
         let bytes = axum::body::Bytes::from_request(req, &())
@@ -424,14 +547,23 @@ async fn capture(
         let text = String::from_utf8(bytes.to_vec())
             .map_err(|_| Error::Validation("that body is not valid UTF-8 text".into()))?;
         let out = match only_a_url(&text) {
-            Some(u) => tenant.core.ingest_url(&u, q.title, q.note).await?,
+            Some(u) => {
+                // The body is one link, so this is a fetch and not a capture
+                // of what was sent. See `refuse_time_fields`.
+                refuse_time_fields(q.tz.as_deref(), q.origin.as_deref(), q.intent.as_deref())?;
+                tenant.core.ingest_url(&u, q.title, q.note, lang).await?
+            }
             None => {
                 tenant
                     .core
                     .ingest_capture(
-                        crate::core::ingest::Capture::new(text, ORIGIN_WEB)
+                        crate::core::ingest::Capture::new(text, time.origin)
+                            .from_channel(time.channel)
+                            .with_lang(lang)
                             .with_title(q.title)
-                            .with_note(q.note),
+                            .with_note(q.note)
+                            .with_tz(time.tz)
+                            .with_intent(time.intent),
                     )
                     .await?
             }
@@ -446,6 +578,17 @@ async fn capture(
         let (mut fields, files) = read_capture_parts(m).await?;
         let title = q.title.or_else(|| fields.remove("title"));
         let note = q.note.or_else(|| fields.remove("note"));
+        // Read out before `capture_time` takes them, so the refusal below can
+        // still name what the caller sent in the form as well as in the query.
+        let raw_tz = fields.remove("tz");
+        let raw_origin = fields.remove("origin");
+        let raw_intent = fields.remove("intent");
+        let time = capture_time(
+            q.tz.clone().or_else(|| raw_tz.clone()),
+            q.origin.clone().or_else(|| raw_origin.clone()),
+            q.intent.clone().or_else(|| raw_intent.clone()),
+            ORIGIN_WEB,
+        )?;
         let mut out: Vec<crate::core::ingest::IngestOutcome> = Vec::new();
 
         // A share sheet sends `url` and `text` for the same share, and the
@@ -457,6 +600,18 @@ async fn capture(
                 .get("text")
                 .and_then(|t| only_a_url(t).map(|u| u.to_string()))
         });
+        // Nothing here will be a text capture, so nothing here can carry the
+        // three fields. Judged after `shared_url` is resolved, because a `url`
+        // takes the text with it and a share that turns out to be a link is a
+        // fetch. Where a text part *is* captured they apply to it, and the
+        // files beside it are read on their own terms as they always were.
+        if shared_url.is_some() || !fields.contains_key("text") {
+            refuse_time_fields(
+                q.tz.as_deref().or(raw_tz.as_deref()),
+                q.origin.as_deref().or(raw_origin.as_deref()),
+                q.intent.as_deref().or(raw_intent.as_deref()),
+            )?;
+        }
         if let Some(raw) = shared_url {
             fields.remove("text");
             let u = url::Url::parse(&raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
@@ -469,7 +624,7 @@ async fn capture(
             out.push(
                 tenant
                     .core
-                    .ingest_url(&u, title.clone(), note.clone())
+                    .ingest_url(&u, title.clone(), note.clone(), lang)
                     .await?,
             );
         } else if let Some(text) = fields.remove("text") {
@@ -477,9 +632,12 @@ async fn capture(
                 tenant
                     .core
                     .ingest_capture(
-                        crate::core::ingest::Capture::new(text, ORIGIN_WEB)
+                        crate::core::ingest::Capture::new(text, time.origin)
+                            .with_lang(lang)
                             .with_title(title.clone())
-                            .with_note(note.clone()),
+                            .with_note(note.clone())
+                            .with_tz(time.tz.clone())
+                            .with_intent(time.intent),
                     )
                     .await?,
             );
@@ -495,6 +653,7 @@ async fn capture(
                         title.clone(),
                         note.clone(),
                         ORIGIN_WEB,
+                        lang,
                     )
                     .await?,
             );
@@ -549,9 +708,11 @@ async fn capture(
                 ceiling / (1024 * 1024)
             )));
         }
+        // A PDF or a photo, read by the server on its own terms.
+        refuse_time_fields(q.tz.as_deref(), q.origin.as_deref(), q.intent.as_deref())?;
         let out = tenant
             .core
-            .ingest_file(bytes.to_vec(), None, q.title, q.note, ORIGIN_WEB)
+            .ingest_file(bytes.to_vec(), None, q.title, q.note, ORIGIN_WEB, lang)
             .await?;
         return Ok((code_for(&out), Json(out)).into_response());
     }
@@ -660,8 +821,10 @@ async fn read_upload(
 /// A PDF is stored and queued; the reading happens in `Stage::Extract`.
 async fn upload(
     tenant: Tenant,
+    headers: axum::http::HeaderMap,
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let parts = read_upload(multipart, "file", &["note"]).await?;
     let Some(FilePart {
         filename,
@@ -721,6 +884,7 @@ async fn upload(
                 .core
                 .ingest_capture(
                     crate::core::ingest::Capture::new(text, ORIGIN_UPLOAD)
+                        .with_lang(lang)
                         .with_note(note)
                         .with_file(filename.as_deref(), size, "text/plain"),
                 )
@@ -740,6 +904,7 @@ async fn upload(
                     filename,
                     title_hint: None,
                     note,
+                    lang,
                 })
                 .await?;
             // 202, not 201: stored, but the extraction — the part that makes it
@@ -765,8 +930,10 @@ enum Kind {
 /// bytes are validated and stored here; the reading happens in a job.
 async fn upload_image(
     tenant: Tenant,
+    headers: axum::http::HeaderMap,
     multipart: axum::extract::Multipart,
 ) -> Result<(StatusCode, Json<crate::core::ingest::IngestOutcome>)> {
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let mut parts = read_upload(multipart, "image", &["note", "title_hint"]).await?;
     let Some(FilePart {
         filename, bytes, ..
@@ -781,6 +948,7 @@ async fn upload_image(
             filename,
             title_hint: parts.fields.remove("title_hint"),
             note: parts.fields.remove("note"),
+            lang,
         })
         .await?;
     // 202, not 201: stored, but the reading — the part that makes it a corpus
@@ -1386,13 +1554,31 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
             gaps_open: tenant
                 .core
                 .store
-                .count_open_gaps(tenant.core.embedder.model(), tenant.core.weak_below)
+                .count_open_gaps(tenant.core.embedder.model(), tenant.core.weak_below())
                 .await?,
         }),
     };
 
+    let reap = if tenant.core.reap.enabled && tenant.core.judge.is_some() {
+        let last = tenant.core.store.last_sweep_run("reap").await?;
+        let n = |d: &serde_json::Value, k: &str| d.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        let detail: serde_json::Value = last
+            .as_ref()
+            .and_then(|r| serde_json::from_str(&r.detail).ok())
+            .unwrap_or(serde_json::Value::Null);
+        Some(ReapStatus {
+            judged: n(&detail, "judged"),
+            reaped: n(&detail, "reaped"),
+            rescued: n(&detail, "rescued"),
+            retired_waiting: tenant.core.store.retired_unreaped_count().await?,
+        })
+    } else {
+        None
+    };
+
     Ok(Json(StatusResponse {
         learning,
+        reap,
         sources: corpus_rows
             .iter()
             .map(|r| (r.get("status"), r.get("n")))
@@ -1622,6 +1808,205 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         )
         .route("/vectors/sample", get(crate::web::vbg::sample))
         .route("/status", get(status))
+        .route("/moments", get(list_moments))
+        .route("/moments/{id}/done", post(moment_done))
+        .route("/moments/{id}/undone", post(moment_undone))
+        .route("/moments/{id}/snooze", post(moment_snooze))
+        .route("/moments/{id}/unsnooze", post(moment_unsnooze))
+        .route("/artifacts/{id}/moments", post(set_moment))
+}
+
+// ── Moments ──────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct MomentsQuery {
+    #[serde(default)]
+    pub from: Option<i64>,
+    #[serde(default)]
+    pub to: Option<i64>,
+    /// `due` (the default) or `event`.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// Reminders and dates in a window. `due` answers what the front page shows —
+/// open rows only, undated last; `event` answers what refers to the window.
+async fn list_moments(
+    tenant: Tenant,
+    Query(q): Query<MomentsQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let now = tenant.core.clock.now();
+    let from = q.from.unwrap_or(now);
+    let to =
+        q.to.unwrap_or(now + tenant.core.time.horizon_hours as i64 * 3_600);
+    let rows = match q.kind.as_deref().unwrap_or("due") {
+        // `now`, and never the caller's `from`. `open_due`'s first argument is
+        // the instant a snooze is measured against, not a window's lower
+        // bound — the query has no lower bound on `at` at all, because an
+        // overdue reminder is the one that most deserves to be listed. Passed
+        // `from`, a window a month out both listed every past-overdue row and
+        // un-hid everything snoozed between here and there as currently due.
+        "due" => tenant.core.store.open_due(now, to).await?,
+        "event" => tenant.core.store.event_moments_between(from, to).await?,
+        other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
+    };
+    Ok(Json(
+        serde_json::to_value(rows).map_err(|e| Error::Internal(e.to_string()))?,
+    ))
+}
+
+async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
+    tenant.core.complete_moment(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn moment_undone(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
+    // `Core::uncomplete_moment`, exactly as the band does it. Clearing
+    // `done_at` alone left this route unable to undo its own `done`: the
+    // recurrence's successor stayed armed, and the note the completion retired
+    // stayed retired, with no API route that could bring it back.
+    tenant.core.uncomplete_moment(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct SnoozeBody {
+    pub until: i64,
+}
+
+/// Put a reminder aside until an instant that is actually later than now.
+///
+/// Validated like `set_moment`, and then some. A snooze is read as the row's
+/// effective time everywhere the ladder is computed, and `snoozed_until IS
+/// NOT NULL` collapses the lead rungs to the single one at zero — so an
+/// `until` in the past does not merely fail to hide the row, it permanently
+/// removes the 48 h, 12 h, 3 h and 30 min pushes from it. `{"until": 0}` is a
+/// plausible way to spell "clear the snooze"; the route for that is
+/// `moment_unsnooze`, and this one says so rather than quietly obeying.
+///
+/// And a 404 where nothing was put aside: `snooze` answers whether a row
+/// moved, and a stale button on a page open since before a re-read replaced
+/// the row was told "snoozed" either way.
+async fn moment_snooze(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Json(b): Json<SnoozeBody>,
+) -> Result<StatusCode> {
+    let now = tenant.core.clock.now();
+    if !(YEAR_ONE..=END_OF_9999).contains(&b.until) {
+        return Err(Error::Validation(format!(
+            "until={}: outside the range a date can be spelled in",
+            b.until
+        )));
+    }
+    if b.until <= now {
+        return Err(Error::Validation(
+            "until must be in the future; to put a reminder back on the band, \
+             DELETE the snooze instead"
+                .into(),
+        ));
+    }
+    // And a reminder with no date has nothing to be put aside until. It is
+    // the band's question "when?", which `open_due` lists whatever any snooze
+    // says — so the 204 this used to answer drew "Snoozed — undo" over a row
+    // that went on standing directly underneath it. Named here rather than
+    // left to `snooze`'s `false`, which spells "no such row".
+    if let Some(m) = tenant.core.store.moment(&id).await?
+        && m.at.is_none()
+    {
+        return Err(Error::Validation(
+            "this reminder has no date, so there is nothing to put it aside until;              set a date first"
+                .into(),
+        ));
+    }
+    if !tenant.core.store.snooze(&id, b.until).await? {
+        return Err(Error::NotFound);
+    }
+    tenant.core.store.rearm_remind().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn moment_unsnooze(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
+    tenant.core.store.unsnooze(&id).await?;
+    tenant.core.store.rearm_remind().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The instants a moment may name: the range a calendar year can be spelled
+/// in, which is also the range every reader of a moment can do arithmetic in.
+const YEAR_ONE: i64 = -62_135_596_800;
+const END_OF_9999: i64 = 253_402_300_799;
+
+#[derive(serde::Deserialize)]
+pub struct NewMomentBody {
+    pub at: i64,
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// `due` (the default) or `event`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub rule: Option<String>,
+}
+
+/// The explicit door: a moment somebody set, on an artifact they name.
+async fn set_moment(
+    tenant: Tenant,
+    Path(aid): Path<String>,
+    Json(b): Json<NewMomentBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>)> {
+    tenant.core.store.get_artifact(&aid).await?;
+    let kind = match b.kind.as_deref().unwrap_or("due") {
+        "due" => crate::store::moments::Kind::Due,
+        "event" => crate::store::moments::Kind::Event,
+        other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
+    };
+    if let Some(rule) = b.rule.as_deref() {
+        crate::core::moments::validate_rule(rule).map_err(Error::Validation)?;
+    }
+    // As strictly as `kind`, `rule` and `tz` below. `at` was taken as given,
+    // and `i64::MIN` is a number a JSON body may carry: the band then computed
+    // `at - now` and took its `abs()` when the row was drawn — a panic under
+    // overflow checks, and "in 106751991167300 days" without them.
+    if chrono::DateTime::from_timestamp(b.at, 0).is_none()
+        || !(YEAR_ONE..=END_OF_9999).contains(&b.at)
+    {
+        return Err(Error::Validation(format!(
+            "at={}: seconds since the epoch, within the years 1 to 9999",
+            b.at
+        )));
+    }
+    // As strictly as `kind` and `rule` beside it. A name that does not parse
+    // fell through to UTC and stayed on the row, so a typo silently moved every
+    // occurrence of a recurrence by the caller's whole offset — and the row
+    // then said UTC, as though somebody had asked for it.
+    let tz = match b.tz.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        None => "UTC".to_string(),
+        Some(name) => match name.parse::<chrono_tz::Tz>() {
+            Ok(z) => z.name().to_string(),
+            Err(_) => {
+                return Err(Error::Validation(format!(
+                    "tz={name}: not an IANA zone name"
+                )));
+            }
+        },
+    };
+    let id = tenant
+        .core
+        .store
+        .insert_moment(&crate::store::moments::NewMoment {
+            artifact_id: aid,
+            kind,
+            at: Some(b.at),
+            tz,
+            rule: b.rule,
+            source: crate::store::moments::Source::Set,
+            span: None,
+            series_id: None,
+        })
+        .await?;
+    tenant.core.store.rearm_remind().await?;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": id }))))
 }
 
 #[cfg(test)]
@@ -1848,6 +2233,120 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A capture with one due moment on it, `cue`-sourced — which is what
+    /// makes the note a reminder's note, and so what makes completing the last
+    /// open reminder retire the corpus.
+    async fn corpus_with_due(core: &crate::core::Core, rule: Option<&str>) -> (String, String) {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        use chrono::TimeZone;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let at = chrono_tz::Tz::Europe__Berlin
+            .with_ymd_and_hms(2026, 9, 1, 9, 0, 0)
+            .unwrap()
+            .timestamp();
+        let id = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid,
+                kind: Kind::Due,
+                at: Some(at),
+                tz: "Europe/Berlin".into(),
+                rule: rule.map(str::to_string),
+                source: Source::Cue,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        (out.id, id)
+    }
+
+    #[tokio::test]
+    async fn undo_through_the_api_brings_the_note_back_with_the_row() {
+        // The band's undo and this one have to leave the same state behind.
+        // Clearing `done_at` alone left the note retired — out of
+        // `recent_captures`, demoted below the cliff in every search — with no
+        // API route anywhere that could bring it back.
+        let (app, token, core) = app_token_and_core().await;
+        let (cid, id) = corpus_with_due(&core, None).await;
+
+        let done = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(done.status(), StatusCode::NO_CONTENT);
+        assert!(
+            core.store.is_retired(&cid).await.unwrap(),
+            "completing the last reminder retires the note"
+        );
+
+        let undone = app
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/undone"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(undone.status(), StatusCode::NO_CONTENT);
+        assert!(
+            !core.store.is_retired(&cid).await.unwrap(),
+            "and undoing brings it back"
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_through_the_api_takes_the_next_occurrence_back_too() {
+        let (app, token, core) = app_token_and_core().await;
+        let (_, id) = corpus_with_due(&core, Some("FREQ=MONTHLY;BYMONTHDAY=1")).await;
+        app.clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.open_due(0, i64::MAX).await.unwrap().len(),
+            1,
+            "the successor is armed"
+        );
+
+        app.oneshot(post_json(
+            &format!("/api/v1/moments/{id}/undone"),
+            &token,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+        let open = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(
+            open.len(),
+            1,
+            "one open row, not the reopened one plus its successor"
+        );
+        assert_eq!(open[0].moment.id, id, "and it is the row that was undone");
     }
 
     fn get(uri: &str, token: Option<&str>) -> Request<Body> {
@@ -2229,7 +2728,7 @@ pub(crate) mod tests {
         b.body(Body::from(body.to_vec())).unwrap()
     }
 
-    fn post_json(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+    pub(crate) fn post_json(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
         Request::builder()
             .uri(uri)
             .method("POST")
@@ -2428,6 +2927,7 @@ pub(crate) mod tests {
                 filename: Some("plan.pdf".into()),
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap()
@@ -2461,6 +2961,7 @@ pub(crate) mod tests {
                 filename: Some("plan.pdf".into()),
                 title_hint: None,
                 note: None,
+                lang: crate::infer::lang::Lang::default(),
             })
             .await
             .unwrap()
@@ -3735,6 +4236,81 @@ pub(crate) mod tests {
         assert_eq!(stored.title_hint.as_deref(), Some("A title"));
     }
 
+    /// Every door that takes text stamps the language it will be read in.
+    ///
+    /// One test over all three because the omission is invisible per door:
+    /// `with_lang` is a builder, so a branch that forgets it compiles, stores
+    /// the text, answers 201, and is only wrong six jobs later when the window
+    /// job reads `of_corpus` and gets English. Each of these three had
+    /// resolved `lang` at the top of its handler and then dropped it on one
+    /// arm while a sibling arm passed it.
+    #[tokio::test]
+    async fn every_door_that_takes_text_stamps_the_language() {
+        let (app, token, core) = app_token_and_core().await;
+        core.store
+            .control
+            .set_lang("user-1", Some(crate::infer::lang::Lang::De))
+            .await
+            .unwrap();
+        let id_of = |v: serde_json::Value| v["id"].as_str().unwrap().to_string();
+
+        // The JSON door, on its `text` arm — the `url` arm already passed it.
+        let ingested = id_of(
+            json_of(
+                app.clone()
+                    .oneshot(post_json(
+                        "/api/v1/corpora",
+                        &token,
+                        serde_json::json!({"text": "eine notiz durch die json-tür"}),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
+        // The raw-body door, on the arm that is prose rather than a link.
+        let raw = id_of(
+            json_of(
+                app.clone()
+                    .oneshot(raw_post(
+                        "/api/v1/capture",
+                        &token,
+                        "text/plain",
+                        "eine notiz durch die rohe tür".as_bytes(),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
+        // The multipart door, on its `text` field — the `url` field and the
+        // file parts already passed it.
+        let shared = id_of(
+            json_of(
+                app.clone()
+                    .oneshot(multipart(
+                        "/api/v1/capture",
+                        &token,
+                        &[("text", "eine notiz durch die teilen-tür")],
+                        &[],
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        );
+
+        for id in [&ingested, &raw, &shared] {
+            let stored = core.store.get_corpus(id).await.unwrap();
+            assert_eq!(
+                crate::infer::lang::of_corpus(&stored.metadata),
+                crate::infer::lang::Lang::De,
+                "{} was stored to be read in English",
+                stored.raw_text
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_multipart_share_of_three_files_is_three_corpora() {
         let (app, token) = app_and_token().await;
@@ -3920,13 +4496,96 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
+
+    /// The three fields reach only the text branch, so a capture that is not
+    /// verbatim text has to refuse them rather than take them and drop them.
+    ///
+    /// They were validated and then silently ignored: a client sending
+    /// `?tz=Europe/Berlin` with a link got a 201 and any date in the fetched
+    /// page read in the server's zone, and `origin=journal` on a link was
+    /// accepted and had no effect at all.
+    #[tokio::test]
+    async fn the_time_fields_are_refused_where_they_would_be_dropped() {
+        let (app, token) = app_and_token().await;
+        let text = |uri: &str, body: &str| {
+            Request::builder()
+                .uri(uri)
+                .method("POST")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "text/plain")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        // A body that is one link is a fetch, not a capture of what was sent.
+        for uri in [
+            "/api/v1/capture?tz=Europe/Berlin",
+            "/api/v1/capture?origin=journal",
+            "/api/v1/capture?intent=remind",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(text(uri, "https://example.com/a"))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} was accepted and dropped"
+            );
+        }
+        // A PDF or an image read by the server, same answer.
+        let res = app
+            .clone()
+            .oneshot(raw_post(
+                "/api/v1/capture?tz=Europe/Berlin",
+                &token,
+                "image/png",
+                &a_png(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        // A multipart carrying only files, same answer.
+        let res = app
+            .clone()
+            .oneshot(multipart(
+                "/api/v1/capture?tz=Europe/Berlin",
+                &token,
+                &[],
+                &[FilePart {
+                    field: "file",
+                    filename: "a.txt",
+                    mime: Some("text/plain"),
+                    body: b"a procedure worth keeping",
+                }],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        // But a multipart whose text part IS the capture still takes them.
+        let res = app
+            .oneshot(multipart(
+                "/api/v1/capture",
+                &token,
+                &[
+                    ("text", "Heute war ein langer Tag."),
+                    ("tz", "Europe/Berlin"),
+                ],
+                &[],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
 }
 
 #[cfg(test)]
 mod patch_tests {
     use super::tests::*;
+    use super::tests::{app_token_and_core, post_json};
     use crate::store::artifacts::{EmbedState, NewArtifact};
     use crate::vector::SearchFilter;
+    use crate::web::test_support::json_of;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -4252,5 +4911,456 @@ mod patch_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn bearer_get(uri: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn moments_are_listed_set_completed_and_snoozed_over_the_api() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let at = crate::store::now() + 600;
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({"at": at, "tz": "Europe/Berlin", "kind": "due", "rule": "FREQ=MONTHLY;BYMONTHDAY=1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let list = json_of(
+            app.clone()
+                .oneshot(bearer_get("/api/v1/moments?kind=due", &token))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(list[0]["moment"]["id"], id);
+        assert_eq!(list[0]["opening"], "Pay rent");
+        assert!(!list[0]["title"].as_str().unwrap_or_default().is_empty());
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let list = json_of(
+            app.clone()
+                .oneshot(bearer_get(
+                    &format!("/api/v1/moments?kind=due&to={}", at + 40 * 86_400),
+                    &token,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(list.as_array().unwrap().len(), 1, "the next occurrence");
+        assert_ne!(list[0]["moment"]["id"], id);
+        let next = list[0]["moment"]["id"].as_str().unwrap().to_string();
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{next}/snooze"),
+                &token,
+                serde_json::json!({"until": at + 60 * 86_400}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(
+            core.store
+                .moment(&next)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until
+                .is_some()
+        );
+    }
+
+    /// Two things the snooze route took on trust. `{"until": 0}` is a
+    /// plausible way to spell "put it back on the band", and written through
+    /// it did the opposite: `open_due` re-admitted the row, and
+    /// `snoozed_until IS NOT NULL` collapsed the lead ladder to its single
+    /// rung at zero, so the 48 h, 12 h, 3 h and 30 min pushes were gone for
+    /// good. And an id naming nothing answered 204.
+    #[tokio::test]
+    async fn a_snooze_into_the_past_is_refused_and_an_unknown_row_is_a_404() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let at = crate::store::now() + 600;
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({"at": at, "tz": "Europe/Berlin", "kind": "due"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+
+        for until in [0, -1, crate::store::now(), i64::MAX] {
+            let res = app
+                .clone()
+                .oneshot(post_json(
+                    &format!("/api/v1/moments/{id}/snooze"),
+                    &token,
+                    serde_json::json!({ "until": until }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "until={until}");
+        }
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .snoozed_until
+                .is_none(),
+            "nothing was written"
+        );
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v1/moments/no-such-row/snooze",
+                &token,
+                serde_json::json!({"until": at + 86_400}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `open_due`'s first argument is the instant a snooze is measured
+    /// against, not a window's lower bound. Handed the caller's `from`, a
+    /// window a month out listed every overdue row and treated everything
+    /// snoozed between here and there as currently due.
+    #[tokio::test]
+    async fn a_moments_window_in_the_future_does_not_unhide_a_snoozed_row() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let now = crate::store::now();
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({"at": now + 600, "tz": "Europe/Berlin", "kind": "due"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/snooze"),
+                &token,
+                serde_json::json!({"until": now + 30 * 86_400}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let list = json_of(
+            app.clone()
+                .oneshot(bearer_get(
+                    &format!(
+                        "/api/v1/moments?kind=due&from={}&to={}",
+                        now + 40 * 86_400,
+                        now + 47 * 86_400
+                    ),
+                    &token,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            list.as_array().unwrap().is_empty(),
+            "the row is put aside until it is not: {list}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_outside_the_subset_is_a_400_with_the_reason() {
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Pay rent", "api"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({"at": 1, "rule": "FREQ=HOURLY"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = json_of(res).await.to_string();
+        assert!(body.contains("HOURLY"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn capture_accepts_tz_origin_and_intent_and_refuses_other_origins() {
+        let (app, token, core) = app_token_and_core().await;
+        let text = |uri: &str, body: &str| {
+            Request::builder()
+                .uri(uri)
+                .method("POST")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "text/plain")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let res = app
+            .clone()
+            .oneshot(text(
+                "/api/v1/capture?tz=Europe/Berlin&origin=journal",
+                "Long day.",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        let c = core.store.get_corpus(&id).await.unwrap();
+        assert_eq!(c.origin, "journal");
+        assert_eq!(c.metadata["tz"], "Europe/Berlin");
+
+        let res = app
+            .clone()
+            .oneshot(text(
+                "/api/v1/capture?intent=remind",
+                "call the bank tomorrow",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().metadata["intent"],
+            "remind"
+        );
+
+        let res = app
+            .oneshot(text("/api/v1/capture?origin=mcp", "x"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_zone_the_table_does_not_know_is_refused_and_not_quietly_read_in_utc() {
+        // The doc on `capture_time` claims a typo is a 400 and not a silently
+        // ignored parameter, and the zone was the one field it was not true of:
+        // `zone` turned an unreadable name into UTC, so `?tz=Europe/Berlim` was
+        // a 201 with every date in the note two hours out.
+        let (app, token, core) = app_token_and_core().await;
+        let text = |uri: &str, body: &str| {
+            Request::builder()
+                .uri(uri)
+                .method("POST")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "text/plain")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let res = app
+            .clone()
+            .oneshot(text(
+                "/api/v1/capture?tz=Europe/Berlim",
+                "call the bank tomorrow",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_of(res).await["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Europe/Berlim")
+        );
+
+        // And a name it does know is stored as the table spells it.
+        let res = app
+            .oneshot(text(
+                "/api/v1/capture?tz=Europe%2FBerlin",
+                "call the bank tomorrow",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let id = json_of(res).await["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            core.store.get_corpus(&id).await.unwrap().metadata["tz"],
+            "Europe/Berlin"
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_a_moment_refuses_an_instant_no_reader_can_do_arithmetic_in() {
+        // `at` was taken as given. `i64::MIN` is a number a JSON body may
+        // carry, and the band computed `at - now` and took its `abs()` when
+        // the row was drawn: a panic under overflow checks, and nonsense —
+        // "in 106751991167300 days" — without them.
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+
+        for at in [i64::MIN, i64::MAX, -62_135_596_801i64, 253_402_300_800i64] {
+            let res = app
+                .clone()
+                .oneshot(post_json(
+                    &format!("/api/v1/artifacts/{aid}/moments"),
+                    &token,
+                    serde_json::json!({ "at": at }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "at={at}");
+        }
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "and nothing was written"
+        );
+        // A date somebody actually means still lands, past ones included.
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({ "at": -2_208_988_800i64, "kind": "event" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn setting_a_moment_refuses_a_zone_the_table_does_not_know() {
+        // As `kind` and `rule` beside it already were. A typo here moved every
+        // occurrence of the recurrence by the caller's whole offset, and the
+        // row then said UTC as though somebody had asked for it.
+        let (app, token, core) = app_token_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({ "at": 1_800_000_000i64, "tz": "Europe/Berlim" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "and nothing was written"
+        );
+
+        let res = app
+            .oneshot(post_json(
+                &format!("/api/v1/artifacts/{aid}/moments"),
+                &token,
+                serde_json::json!({ "at": 1_800_000_000i64, "tz": "Europe/Berlin" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert_eq!(
+            core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.tz,
+            "Europe/Berlin"
+        );
     }
 }

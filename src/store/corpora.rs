@@ -465,6 +465,54 @@ impl Store {
         Ok(())
     }
 
+    /// The one write to `origin` outside insert: a capture becoming, or
+    /// ceasing to be, a journal entry. A channel label, never content.
+    pub async fn set_corpus_origin(&self, id: &str, origin: &str) -> Result<()> {
+        let n = sqlx::query("UPDATE corpora SET origin = ?, updated_at = ? WHERE id = ?")
+            .bind(origin)
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if n == 0 {
+            return Err(crate::error::Error::NotFound);
+        }
+        Ok(())
+    }
+
+    /// The channel label and the metadata in one write.
+    ///
+    /// `set_entry` depends on both landing: turning an entry off removes
+    /// `origin_was` from the metadata and restores `origin` from what it held.
+    /// As two statements, a crash or an error between them left `origin =
+    /// journal` with `origin_was` already gone, and the next press fell
+    /// through to `web` — permanently rewriting a `cli`, `share` or
+    /// `extension` capture's channel to one it never came through, which is
+    /// exactly what the guard in `set_entry` exists to prevent.
+    pub async fn set_corpus_origin_and_metadata(
+        &self,
+        id: &str,
+        origin: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<()> {
+        // One statement, so there is no window to crash in — a transaction
+        // around a single UPDATE would only say the same thing at more length.
+        let n =
+            sqlx::query("UPDATE corpora SET origin = ?, metadata = ?, updated_at = ? WHERE id = ?")
+                .bind(origin)
+                .bind(metadata.to_string())
+                .bind(now())
+                .bind(id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        if n == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+
     /// Names a corpus after the fact. Capture makes no inference call by
     /// design, so the name arrives later — once synthesis has read the document
     /// and knows what it is about.
@@ -563,19 +611,77 @@ impl Store {
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
+    /// The last reminder read out of this note is done, so the note stops
+    /// being *recent*. Not a delete and not a hide: see `schema.sql`.
+    pub async fn retire_corpus(&self, corpus_id: &str, at: i64) -> Result<()> {
+        sqlx::query("UPDATE corpora SET retired_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(corpus_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The undo already on screen beside a completed reminder.
+    pub async fn unretire_corpus(&self, corpus_id: &str) -> Result<()> {
+        sqlx::query("UPDATE corpora SET retired_at = NULL WHERE id = ?")
+            .bind(corpus_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn is_retired(&self, corpus_id: &str) -> Result<bool> {
+        let at: Option<Option<i64>> =
+            sqlx::query_scalar("SELECT retired_at FROM corpora WHERE id = ?")
+                .bind(corpus_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(matches!(at, Some(Some(_))))
+    }
+
+    /// Which of these notes are retired, in one read. A result list asks once
+    /// for the whole page, the way `due_for` does.
+    pub async fn retired_among(
+        &self,
+        corpus_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        if corpus_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let marks = std::iter::repeat_n("?", corpus_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        // `AssertSqlSafe` because the string is assembled here — the values are
+        // bound, and the only thing spliced in is a run of `?` this function
+        // counted itself. Same idiom as `due_for`.
+        let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM corpora WHERE retired_at IS NOT NULL AND id IN ({marks})"
+        )));
+        for id in corpus_ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
+    }
+
     /// The newest few captures, by the columns a list row shows. This is the
     /// idle rail's read, and the idle rail renders on every box-clear:
     /// `list_corpora` is `SELECT *`, and `raw_text` there is the whole
     /// document, pulled to render a 60-character label. The prefix is chars,
     /// not bytes — SQLite's `substr` on text counts characters — and 400 of
     /// them is more than any label survives `markdown::snippet` with.
+    ///
+    /// Newest first, retired notes excluded — a reminder that is done is not
+    /// one of the last things you kept. The day page is where it stays
+    /// visible, because a day is a record of what actually happened.
     pub async fn recent_captures(
         &self,
         limit: i64,
     ) -> Result<Vec<(String, Option<String>, String, i64, String)>> {
         Ok(sqlx::query_as(
             "SELECT id, title_hint, origin, created_at, substr(raw_text, 1, 400) \
-             FROM corpora ORDER BY created_at DESC, id DESC LIMIT ?",
+             FROM corpora WHERE retired_at IS NULL \
+             ORDER BY created_at DESC, id DESC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -589,6 +695,27 @@ impl Store {
                 .bind(offset)
                 .fetch_all(&self.pool)
                 .await?;
+        Ok(rows.iter().map(row_to_corpus).collect())
+    }
+
+    /// Everything captured in a span of time, oldest first — a day, read in
+    /// the viewer's zone.
+    pub async fn corpora_between(&self, from: i64, to: i64) -> Result<Vec<Corpus>> {
+        let rows = sqlx::query("SELECT * FROM corpora WHERE created_at >= ? AND created_at < ? ORDER BY created_at, id")
+            .bind(from)
+            .bind(to)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(row_to_corpus).collect())
+    }
+
+    /// Entries that name a day in `metadata.day`: written on the day page
+    /// about a day other than the one they were written on.
+    pub async fn corpora_by_day(&self, day: &str) -> Result<Vec<Corpus>> {
+        let rows = sqlx::query("SELECT * FROM corpora WHERE json_extract(metadata, '$.day') = ? ORDER BY created_at, id")
+            .bind(day)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
@@ -766,6 +893,31 @@ mod tests {
         // A corpus deleted since is not a refusal: the artifact is still there
         // to read, it just no longer says where it came from.
         assert!(s.corpus_origin("gone").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_retired_corpus_leaves_the_recent_list_and_comes_back_on_undo() {
+        let s = Store::memory().await.unwrap();
+        let src = s
+            .insert_corpus("remind me friday to send the invoice", "ui", None)
+            .await
+            .unwrap();
+        assert_eq!(s.recent_captures(5).await.unwrap().len(), 1);
+
+        s.retire_corpus(&src.id, 1_700_000_000).await.unwrap();
+        assert!(
+            s.recent_captures(5).await.unwrap().is_empty(),
+            "a retired note is not a recent capture"
+        );
+        assert!(s.is_retired(&src.id).await.unwrap());
+
+        s.unretire_corpus(&src.id).await.unwrap();
+        assert_eq!(
+            s.recent_captures(5).await.unwrap().len(),
+            1,
+            "undo puts it back"
+        );
+        assert!(!s.is_retired(&src.id).await.unwrap());
     }
 
     #[tokio::test]

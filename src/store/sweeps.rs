@@ -82,6 +82,18 @@ impl Store {
         Ok(rows.iter().map(read_run).collect())
     }
 
+    /// The most recent run of one sweep, if it has ever run.
+    pub async fn last_sweep_run(&self, stage: &str) -> Result<Option<SweepRun>> {
+        let row = sqlx::query(
+            "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
+              WHERE stage = ? ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(stage)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(read_run))
+    }
+
     /// Keep the newest `MAX_RUNS` and forget the rest.
     pub async fn trim_sweep_runs(&self) -> Result<u64> {
         let res = sqlx::query(

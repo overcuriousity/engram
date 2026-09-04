@@ -1,3 +1,4 @@
+{{ echo|safe }}
 {# The id this rail was recorded under, handed straight back to the box: the
    next keystroke sends it, and the fold is onto this event rather than onto
    whatever this operator's other tab wrote last. Out of band because the form
@@ -22,7 +23,7 @@
      is outside the swapped target, so the fragment that fills the list is also
      what names it and the two cannot disagree. #}
   <div class="rail-act" hx-swap-oob="innerHTML:#rail-head">
-    <span class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}{% if reranked %} <span class="refined-tick" title="Order confirmed by the reranker">· refined</span>{% endif %}</span>
+    <span class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}{% if self.loose() > 0 && !all_weak %} · {{ self.loose() }} loose{% endif %}{% if reranked %} <span class="refined-tick" title="Order confirmed by the reranker">· refined</span>{% endif %}</span>
   </div>
   {# Said once, above the list, rather than repeated on every card: when the
      whole answer is loose the useful statement is about the search, not about
@@ -84,12 +85,21 @@
         {% else %}
         <span class="rail-rank mono">{{ r.rank }}</span>
         {% endif %}
+        {# Why this row is below the line, said on the row. A demoted hit with
+           no reason given is indistinguishable from a ranking that went
+           wrong. #}
+        {% if r.retired %}
+        <span class="badge">done reminder</span>
+        {% endif %}
         {% if r.primed %}
         {% if r.in_sitting %}
         <span class="badge" title="Moved up: you have been in this one already today">primed · seen</span>
         {% else %}
         <span class="badge" title="Moved up: opened, confirmed or cited more than the hits it passed">primed</span>
         {% endif %}
+        {% endif %}
+        {% if let Some(d) = r.due_in %}
+        <span class="badge badge-due" title="A reminder you set on this is due">due {{ d }}</span>
         {% endif %}
         {% if r.model_written %}
         {# Never silently indistinguishable from captured text. The count comes
@@ -127,15 +137,19 @@
          template, as a badge with the explanation hidden in a title attribute
          that only appears once you have hovered the thing you were unsure
          about. The badges stay, as the scannable form. #}
-      {% if r.primed || r.weak || r.model_written || r.why_ranked.is_some() %}
+      {% if r.primed || r.weak || r.model_written || r.due_in.is_some() || r.why_ranked.is_some() %}
       <p class="rail-why">
         {%- if r.primed %}{% if r.in_sitting %}moved up — you have been in this one already{% else %}moved up — opened, confirmed or cited more than the hits it passed{% endif %}{% endif -%}
         {%- if r.weak %}{% if r.primed %} · {% endif %}a loose match{% endif -%}
         {%- if r.model_written %}{% if r.primed || r.weak %} · {% endif %}written by a model{% if r.origin_count > 0 %} from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}{% endif %}{% endif -%}
+        {#- The due badge's own sentence. Every other badge on this row has one
+            here; that one's meaning lived in a title attribute, which is to say
+            nowhere on a phone. -#}
+        {%- if let Some(d) = r.due_in %}{% if r.primed || r.weak || r.model_written %} · {% endif %}a reminder on this is due {{ d }}{% endif -%}
         {#- The ranking's own answer, on the same line rather than a second one:
             two lines both saying why this row is here would be exactly the
             disagreement the explanation object exists to end. -#}
-        {%- if let Some(why) = r.why_ranked %}{% if r.primed || r.weak || r.model_written %} · {% endif %}{{ why }}{% endif -%}
+        {%- if let Some(why) = r.why_ranked %}{% if r.primed || r.weak || r.model_written || r.due_in.is_some() %} · {% endif %}{{ why }}{% endif -%}
       </p>
       {% endif %}
       {# Its own line, under the ones that say why this row is *here*. This says

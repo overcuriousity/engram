@@ -38,7 +38,12 @@ async-stream = "0.3"
 # Already in the tree by way of axum and sqlx; named here because this uses it
 # directly.
 tokio-stream = "0.1"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream"] }
+# `blocking` is for exactly one call: the one-time tokenizer download at boot,
+# which runs on its own OS thread — see `infer::budget::fetch_blocking`.
+# `multipart` is for exactly one other: the speech endpoint, which takes the
+# recording as a form part because that is the shape OpenAI's transcription
+# API has — every other role here posts JSON.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream", "blocking", "multipart"] }
 pulldown-cmark = "0.13.4"
 ammonia = "4.1.4"
 argon2 = { version = "0.5.3", features = ["std", "password-hash"] }
@@ -96,8 +101,12 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 # The IANA database, because the zone comes from the device
 # (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and a stored offset
 # cannot answer what happens across a DST boundary.
+regex = "1"
+iana-time-zone = "0.1"
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 crossterm = "0.29.0"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+text-splitter = { version = "0.32", features = ["markdown"] }
 
 [dev-dependencies]
 # `test-util` is not part of tokio's `full`. It carries the pausable clock the

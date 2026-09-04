@@ -1,6 +1,6 @@
 use super::{
-    Completer, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput, SynthesisBudget,
-    Synthesizer,
+    Completer, Describer, Embedder, Judgement, ProposedArtifact, Reranker, SegmentInput,
+    SegmentReply, SynthesisBudget, Synthesizer, Transcriber,
 };
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -16,6 +16,7 @@ pub const FAKE_BUDGET: SynthesisBudget = SynthesisBudget {
     context: crate::infer::context::ContextBudget {
         opening: 0,
         overlap: 0,
+        neighbors: 0,
     },
 };
 
@@ -191,9 +192,27 @@ impl Synthesizer for FakeSynthesizer {
                 tags: vec!["fake".into()],
                 corpus_lines: None,
                 caveats: vec![],
+                pinned: false,
             })
             .collect())
     }
+    /// A judged reply the way a model that obeys the hint would answer: the
+    /// door's forced intent, else "none", with no date and no links. A test
+    /// wanting a richer judgement brings its own synthesizer.
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
+        let judgement = input.judge.map(|j| crate::infer::Judgement {
+            intent: Some(j.forced_intent.clone().unwrap_or_else(|| "none".into())),
+            when: None,
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        Ok(crate::infer::SegmentReply {
+            artifacts: self.segment(input).await?,
+            judgement,
+        })
+    }
+
     fn budget(&self) -> SynthesisBudget {
         FAKE_BUDGET
     }
@@ -201,7 +220,12 @@ impl Synthesizer for FakeSynthesizer {
     /// Deterministic and obviously synthetic, so a test can assert on it. A
     /// configured failure applies here too: naming is a model call like any
     /// other, and the caller has to survive it failing.
-    async fn title(&self, text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
+    async fn title(
+        &self,
+        text: &str,
+        _artifact_titles: &[String],
+        _lang: crate::infer::lang::Lang,
+    ) -> Result<Option<String>> {
         if let Some(m) = &self.fail_with {
             return Err(self.refusal("title", m.clone()));
         }
@@ -260,8 +284,72 @@ impl Synthesizer for ParaphrasingSynthesizer {
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],
+            pinned: false,
         }])
     }
+    fn budget(&self) -> SynthesisBudget {
+        FAKE_BUDGET
+    }
+}
+
+/// Paraphrases on the first judged call and answers with a judgement; keeps
+/// the literals on the retry and answers with none.
+///
+/// The exact shape the window's retry has to merge. `parse_judged_response`
+/// gives `judgement: None` for a reply it had to salvage or that arrived
+/// truncated, and the retry is asked for over paraphrased *artifacts* — never
+/// over the judgement — so a reply that fixes the literals and loses the JUDGE
+/// block is an ordinary outcome, not a retraction.
+pub struct JudgingParaphraser {
+    drop_token: String,
+    judgement: Judgement,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl JudgingParaphraser {
+    pub fn new(drop_token: &str, judgement: Judgement) -> Self {
+        Self {
+            drop_token: drop_token.to_string(),
+            judgement,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl Synthesizer for JudgingParaphraser {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        Ok(self.segment_judged(input).await?.artifacts)
+    }
+
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<SegmentReply> {
+        let first = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            == 0;
+        let text = if first {
+            input.core.replace(&self.drop_token, "")
+        } else {
+            input.core.to_string()
+        };
+        Ok(SegmentReply {
+            artifacts: vec![ProposedArtifact {
+                text,
+                title: Some("read".into()),
+                category: Some("reference".into()),
+                tags: vec![],
+                corpus_lines: None,
+                caveats: vec![],
+                pinned: false,
+            }],
+            judgement: first.then(|| self.judgement.clone()),
+        })
+    }
+
     fn budget(&self) -> SynthesisBudget {
         FAKE_BUDGET
     }
@@ -289,6 +377,7 @@ impl Synthesizer for GreedySynthesizer {
                 tags: vec![],
                 corpus_lines: None,
                 caveats: vec![],
+                pinned: false,
             });
         }
         Ok(out)
@@ -328,6 +417,7 @@ impl Synthesizer for RecordingSynthesizer {
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],
+            pinned: false,
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -361,6 +451,7 @@ impl Synthesizer for MisreportingSynthesizer {
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
             caveats: vec![],
+            pinned: false,
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -547,6 +638,10 @@ pub struct ScriptedCompleter {
     /// Overridable so a test can make the window the binding constraint without
     /// writing a megabyte of artifact text to get there.
     context_tokens: std::sync::atomic::AtomicUsize,
+    /// The endpoint's "no" rather than its "not now": every call is refused
+    /// with `InferenceRejected`, which is what a 400 on the request itself
+    /// looks like from the caller's side and is never worth repeating.
+    rejects: Option<String>,
 }
 
 impl ScriptedCompleter {
@@ -556,7 +651,17 @@ impl ScriptedCompleter {
             calls: std::sync::atomic::AtomicUsize::new(0),
             prompts: std::sync::Mutex::new(Vec::new()),
             context_tokens: std::sync::atomic::AtomicUsize::new(4096),
+            rejects: None,
         }
+    }
+
+    /// Refuses every call the way an endpoint refuses a request it will never
+    /// accept. Distinct from an exhausted script, which is the endpoint that
+    /// did not answer.
+    pub fn rejecting(msg: &str) -> Self {
+        let mut s = Self::new(Vec::new());
+        s.rejects = Some(msg.to_string());
+        s
     }
     pub fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
@@ -575,6 +680,12 @@ impl Completer for ScriptedCompleter {
     async fn complete(&self, _system: &str, user: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.prompts.lock().unwrap().push(user.to_string());
+        if let Some(detail) = &self.rejects {
+            return Err(crate::error::Error::InferenceRejected {
+                role: "ask",
+                detail: detail.clone(),
+            });
+        }
         self.replies
             .lock()
             .unwrap()
@@ -652,6 +763,65 @@ impl Describer for FakeDescriber {
             }),
             Some(m) => Err(Error::Inference {
                 role: "vision",
+                detail: m.clone(),
+            }),
+            None => Ok(self.reply.clone()),
+        }
+    }
+}
+
+/// A microphone that always hears the same sentence, and can be asked what it
+/// was handed.
+pub struct FakeTranscriber {
+    pub reply: String,
+    pub fail_with: Option<String>,
+    calls: std::sync::atomic::AtomicUsize,
+    last_mime: std::sync::Mutex<String>,
+    last_len: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for FakeTranscriber {
+    fn default() -> Self {
+        Self::saying("the thing I said out loud")
+    }
+}
+
+impl FakeTranscriber {
+    pub fn saying(reply: &str) -> Self {
+        Self {
+            reply: reply.into(),
+            fail_with: None,
+            calls: Default::default(),
+            last_mime: Default::default(),
+            last_len: Default::default(),
+        }
+    }
+    pub fn failing(msg: &str) -> Self {
+        let mut t = Self::saying("");
+        t.fail_with = Some(msg.into());
+        t
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn last_mime(&self) -> String {
+        self.last_mime.lock().unwrap().clone()
+    }
+    pub fn last_len(&self) -> usize {
+        self.last_len.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Transcriber for FakeTranscriber {
+    async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.last_mime.lock().unwrap() = mime.to_string();
+        self.last_len
+            .store(audio.len(), std::sync::atomic::Ordering::SeqCst);
+        match &self.fail_with {
+            Some(m) => Err(Error::Inference {
+                role: "transcribe",
                 detail: m.clone(),
             }),
             None => Ok(self.reply.clone()),

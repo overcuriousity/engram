@@ -7,6 +7,7 @@ pub mod fetch;
 pub mod gaps;
 pub mod image;
 pub mod ingest;
+pub mod moments;
 pub mod pdf;
 pub mod ranking;
 pub mod recommend;
@@ -16,9 +17,9 @@ pub mod sitting;
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
 use crate::infer::openai::{
-    HttpCompleter, HttpDescriber, HttpEmbedder, HttpReranker, HttpSynthesizer,
+    HttpCompleter, HttpDescriber, HttpEmbedder, HttpReranker, HttpSynthesizer, HttpTranscriber,
 };
-use crate::infer::{Completer, Describer, Embedder, Reranker, Synthesizer};
+use crate::infer::{Completer, Describer, Embedder, Reranker, Synthesizer, Transcriber};
 use crate::store::Store;
 use crate::vector::VectorStore;
 use background::Background;
@@ -26,6 +27,11 @@ use std::sync::Arc;
 
 /// Entries kept in the query embedding cache.
 pub const QUERY_CACHE_CAPACITY: usize = 256;
+
+/// Where the measured weak line is kept between runs. Written by `calibrate`
+/// on every repair pass and read back by `adopt_measured_line` when a core is
+/// built, so a restart does not spend an hour at `weak_floor`.
+const CALIBRATION_KEY: &str = "calibration.line";
 
 /// Bounded cache of query embeddings.
 ///
@@ -59,6 +65,21 @@ pub struct QueryCache {
 pub struct Working {
     pub sittings: Arc<crate::core::sitting::Sittings>,
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
+    /// Where "unrelated" stops, as `Core::line` reads it — held here so that
+    /// every `Core` this subject is served through shares one measurement.
+    ///
+    /// It is not working memory in the sense the two above are: it is a
+    /// measurement of the base, and `meta.calibration.line` is where it
+    /// actually lives. It is here because the hourly pass opens its own
+    /// transient `Core` (`background::open_for_pass`) to calibrate on, and an
+    /// atomic per `Core` meant that measurement was taken, written to `meta`,
+    /// and then dropped with the core that took it — leaving whichever core is
+    /// serving requests running at `weak_floor`, the configured 0.35, until
+    /// some later pass happened to find it in the registry. A capture landing
+    /// in that window answered every open gap it came within 0.40 of, and the
+    /// next pass, calibrating properly, deleted all of it again as being under
+    /// the line.
+    pub line: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Default for Working {
@@ -66,6 +87,7 @@ impl Default for Working {
         Working {
             sittings: Arc::new(Default::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
+            line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -117,10 +139,8 @@ pub type CorpusLocks =
 pub struct Core {
     pub store: Store,
     pub vectors: Arc<dyn VectorStore>,
-    /// `None` when `[infer.synthesize]` is not configured — `synthesis = "off"`
-    /// with no synthesizer. Every stage that would call it checks before
-    /// arming, and `run_claimed` closes a unit that slipped through.
-    pub synthesizer: Option<Arc<dyn Synthesizer>>,
+    /// Always present: `[infer.synthesize]` is required — capture synthesizes.
+    pub synthesizer: Arc<dyn Synthesizer>,
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
     /// Where the configured reranker is consulted — `[infer.rerank].apply`.
@@ -145,6 +165,12 @@ pub struct Core {
     /// endpoint as the judges, its own response shape, background only.
     /// `None` with no synthesize role; gaps are then named by their terms.
     pub gap_namer: Option<Arc<dyn Completer>>,
+    /// The judge that rules on a retired artifact: still worth something, or
+    /// nothing the live base does not already say. Same endpoint as the other
+    /// judges, its own response shape — the reap verdict is not a duplicate
+    /// verdict, and asking it under that grammar could only ever fail to
+    /// parse. `None` with no synthesize role.
+    pub reaper: Option<Arc<dyn Completer>>,
     /// The model that writes an artifact from a pursuit. Same endpoint as the
     /// judges, its own response shape, background only. `None` with no
     /// synthesize role.
@@ -160,11 +186,11 @@ pub struct Core {
     pub planner: Option<Arc<dyn Completer>>,
     /// The vision model, when one is configured. `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
-    /// How much inference capture spends. See `SynthesisMode`.
-    pub synthesis: crate::config::SynthesisMode,
-    /// The window budget when there is no synthesizer to derive one from.
-    pub segment_tokens: usize,
-    /// Passage size at `off`/`earned`, already clamped to the embedder.
+    /// The speech model, when one is configured. `None` takes the microphone
+    /// off the search box. Nothing on any background path reads it: this is
+    /// the one model role that exists only for a control someone is holding.
+    pub transcriber: Option<Arc<dyn Transcriber>>,
+    /// Passage size, already clamped to the embedder.
     pub chunk_tokens: usize,
     pub counter: Arc<TokenCounter>,
     /// Writes that run off the request path. Shared by every clone of `Core`,
@@ -180,9 +206,16 @@ pub struct Core {
     /// Thresholds and budgets for duplicate hygiene. Read on the capture path
     /// and by the sweep, so it lives here rather than being passed down.
     pub consolidate: crate::config::ConsolidateConfig,
-    /// Cosine similarity below which a result is reported as only loosely
-    /// related. See `VectorConfig::weak_below`.
-    pub weak_below: f32,
+    /// The floor under the weak line. See `VectorConfig::weak_below` and
+    /// `Core::weak_below`.
+    pub weak_floor: f32,
+    /// Where "unrelated" stops under this base's embedder, as `f32` bits;
+    /// zero until `calibrate` has measured it or `adopt_measured_line` has
+    /// read the last measurement back. Shared by every clone of `Core` *and*
+    /// by every `Core` built for this subject — it lives on `Working`, which
+    /// the registry hands back on reopen. See `Working::line` for why that
+    /// matters and `core::gaps::unrelated_line` for what is measured.
+    pub line: Arc<std::sync::atomic::AtomicU32>,
     /// The recency decay's half-life and the pinned tag's boost — the two
     /// terms the vector store folds into one score and never reports back.
     /// Held here so the explanation reconstructs them from the same
@@ -215,6 +248,8 @@ pub struct Core {
     pub schedule: crate::config::ScheduleConfig,
     /// Whether the sitting may move a result. Carrying needs no setting.
     pub sitting: crate::config::SittingConfig,
+    pub time: crate::config::TimeConfig,
+    pub reap: crate::config::ReapConfig,
     /// Whether and how the area under the search box is filled. Read by the
     /// sweep and on the page-view path, so it lives here rather than being
     /// threaded down.
@@ -257,6 +292,106 @@ pub struct Core {
 }
 
 impl Core {
+    /// The measured line, or zero while unmeasured.
+    fn measured_line(&self) -> f32 {
+        f32::from_bits(self.line.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Cosine similarity below which a result is unrelated to what was asked:
+    /// the measured line when there is one, the configured floor otherwise.
+    ///
+    /// Read by the search path to label weak hits, by the gap store to decide
+    /// what is a gap, by `gaps::cover` to decide what answers one, and by the
+    /// pursuit sweep to decide what was engaged. All one line, because they
+    /// are all the one question — is this near that — asked of one embedder.
+    pub fn weak_below(&self) -> f32 {
+        crate::core::gaps::line_above(self.weak_floor, self.measured_line())
+    }
+
+    /// Cosine similarity at or above which two queries are about one thing.
+    /// The same measurement as `weak_below`, over a higher floor: a match has
+    /// to reach further than "not unrelated".
+    pub fn link_at(&self) -> f32 {
+        crate::core::gaps::line_above(crate::core::gaps::GAP_LINK_AT, self.measured_line())
+    }
+
+    /// Pin the weak line, for tests that assert on the labelling: the floor is
+    /// set and the measurement dropped, so `weak_below` returns exactly this.
+    pub fn set_weak_below(&mut self, at: f32) {
+        self.weak_floor = at;
+        self.line = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    }
+
+    /// Take up the last measurement this base recorded, for a core that has
+    /// not been calibrated in this process yet.
+    ///
+    /// `calibrate` writes the line to `meta` on every pass and nothing read it
+    /// back at startup: `line` began at zero, which `weak_below` reads as
+    /// "unmeasured" and answers with `weak_floor` — the configured 0.35 —
+    /// however many times this base had measured 0.60 before the restart. That
+    /// is not a conservative fallback. Every reader of the line treats it as
+    /// "below this, two things are unrelated", so a line an eighth of the way
+    /// down from where it belongs makes unrelated things related: a capture
+    /// closes gaps it does not answer, a search calls weak hits good, and the
+    /// first repair pass after the restart deletes the lot for being under the
+    /// line it should have been holding all along.
+    ///
+    /// Never overwrites a measurement already in hand — a second core opened
+    /// for a subject the registry is already serving adopts nothing, because
+    /// what `Working::line` holds is at least as fresh as what is in `meta`.
+    ///
+    /// A base that has never been calibrated has no key and keeps the floor,
+    /// which is what the floor is for.
+    pub async fn adopt_measured_line(&self) -> crate::error::Result<()> {
+        if self.measured_line() > 0.0 {
+            return Ok(());
+        }
+        let stored = self
+            .store
+            .meta_get(CALIBRATION_KEY)
+            .await?
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
+        if stored > 0.0 {
+            self.line
+                .store(stored.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Measure where "unrelated" stops from what this base holds — every
+    /// recorded query against the others and against a sample of stored
+    /// artifacts — and remember it, in memory for the readers above and in
+    /// the meta table for the next boot. Runs on the repair pass, so the line
+    /// follows the base as it grows and the embedder if it changes; a base
+    /// with too little recorded keeps the floors.
+    pub async fn calibrate(&self) -> crate::error::Result<f32> {
+        let queries = self.store.calibration_vecs(self.embedder.model()).await?;
+        let artifacts: Vec<Vec<f32>> = self
+            .vectors
+            .sample(crate::store::gaps::CALIBRATION_SAMPLE as usize)
+            .await?
+            .into_iter()
+            .map(|(_, v)| v)
+            .filter(|v| queries.first().is_none_or(|q| q.len() == v.len()))
+            .collect();
+        let line = match crate::core::gaps::unrelated_line(&queries, &artifacts) {
+            Some(l) => l,
+            None => self
+                .store
+                .meta_get(CALIBRATION_KEY)
+                .await?
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.0),
+        };
+        self.store
+            .meta_set(CALIBRATION_KEY, &line.to_string())
+            .await?;
+        self.line
+            .store(line.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        Ok(line)
+    }
+
     /// Build the running core from configuration. Lives here rather than in
     /// `main`, so the evaluation harness drives exactly the `Core` the binary
     /// does — a benchmark against a differently wired core measures the wrong
@@ -280,14 +415,24 @@ impl Core {
         // token-count estimation error.
         let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
 
-        let synth = cfg.infer.synthesize.as_ref();
+        let synth = &cfg.infer.synthesize;
+        // Built before the roles, not inside the struct literal, because the
+        // request side has to budget with the same counter the windowing side
+        // sizes with. Two counters that disagree is a prompt sized to N real
+        // tokens and estimated at 0.6N — room the endpoint does not have, and a
+        // non-retryable 400 on every sweep. See `HttpSynthesizer::counter`.
+        let counter = Arc::new(TokenCounter::load(
+            cfg.infer.tokenizer.as_deref(),
+            std::path::Path::new(&cfg.store.dir),
+        ));
         Core {
             store,
             vectors,
-            synthesizer: synth.map(|s| {
-                Arc::new(HttpSynthesizer::new(s).with_max_artifact_tokens(max_artifact_tokens))
-                    as Arc<dyn Synthesizer>
-            }),
+            synthesizer: Arc::new(
+                HttpSynthesizer::new(synth)
+                    .with_max_artifact_tokens(max_artifact_tokens)
+                    .with_counter(counter.clone()),
+            ),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
             reranker: cfg
                 .infer
@@ -300,31 +445,42 @@ impl Core {
                 .as_ref()
                 .map(|r| r.apply.clone())
                 .unwrap_or_default(),
-            completer: cfg
-                .infer
-                .ask
-                .as_ref()
-                .map(|a| Arc::new(HttpCompleter::new(a)) as Arc<dyn Completer>),
-            judge: synth.map(|s| Arc::new(HttpCompleter::for_judging(s)) as Arc<dyn Completer>),
-            link_judge: synth
-                .map(|s| Arc::new(HttpCompleter::for_link_judging(s)) as Arc<dyn Completer>),
-            gap_namer: synth
-                .map(|s| Arc::new(HttpCompleter::for_gap_naming(s)) as Arc<dyn Completer>),
-            generator: synth
-                .map(|s| Arc::new(HttpCompleter::for_generating(s)) as Arc<dyn Completer>),
+            completer: cfg.infer.ask.as_ref().map(|a| {
+                Arc::new(HttpCompleter::new(a).with_counter(counter.clone())) as Arc<dyn Completer>
+            }),
+            judge: Some(Arc::new(
+                HttpCompleter::for_judging(synth).with_counter(counter.clone()),
+            )),
+            link_judge: Some(Arc::new(
+                HttpCompleter::for_link_judging(synth).with_counter(counter.clone()),
+            )),
+            gap_namer: Some(Arc::new(
+                HttpCompleter::for_gap_naming(synth).with_counter(counter.clone()),
+            )),
+            reaper: Some(Arc::new(
+                HttpCompleter::for_reaping(synth).with_counter(counter.clone()),
+            )),
+            generator: Some(Arc::new(
+                HttpCompleter::for_generating(synth).with_counter(counter.clone()),
+            )),
             planner: cfg.infer.ask.as_ref().and_then(|a| {
-                a.plan
-                    .then(|| Arc::new(HttpCompleter::for_plan(&a.plan_on())) as Arc<dyn Completer>)
+                a.plan.then(|| {
+                    Arc::new(HttpCompleter::for_plan(&a.plan_on()).with_counter(counter.clone()))
+                        as Arc<dyn Completer>
+                })
             }),
             describer: cfg
                 .infer
                 .vision
                 .as_ref()
-                .map(|v| Arc::new(HttpDescriber::new(v, synth)) as Arc<dyn Describer>),
-            synthesis: cfg.infer.synthesis,
-            segment_tokens: cfg.infer.segment_tokens,
+                .map(|v| Arc::new(HttpDescriber::new(v, Some(synth))) as Arc<dyn Describer>),
+            transcriber: cfg
+                .infer
+                .transcribe
+                .as_ref()
+                .map(|t| Arc::new(HttpTranscriber::new(t)) as Arc<dyn Transcriber>),
             chunk_tokens: cfg.infer.embed.effective_chunk_tokens(),
-            counter: Arc::new(TokenCounter),
+            counter,
             background: Arc::new(Background::default()),
             clock: crate::core::context::Clock::System,
             query_cache: working.query_cache,
@@ -333,7 +489,11 @@ impl Core {
                 crate::core::ranking::RankingParams::from_vector(&cfg.vector),
             )),
             tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            weak_below: cfg.vector.weak_below,
+            weak_floor: cfg.vector.weak_below,
+            // From the subject's working memory, not a fresh atomic: see
+            // `Working::line`. A core built for one pass and dropped after it
+            // still hands its measurement to whichever core is serving.
+            line: working.line,
             recency_half_life_days: cfg.vector.recency_half_life_days.max(1),
             pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
@@ -345,6 +505,8 @@ impl Core {
             pursuit: cfg.pursuit.clone(),
             schedule: cfg.schedule.clone(),
             sitting: cfg.sitting.clone(),
+            time: cfg.time.clone(),
+            reap: cfg.reap.clone(),
             recommend: cfg.recommend.clone(),
             ui: cfg.ui.clone(),
             sittings: working.sittings,
@@ -404,12 +566,6 @@ impl Core {
         self.learn.enabled
     }
 
-    /// Is there a synthesizer to call? `false` means no `[infer.synthesize]`:
-    /// nothing that needs one is armed, offered, or run.
-    pub fn synthesizes(&self) -> bool {
-        self.synthesizer.is_some()
-    }
-
     /// Is there an ask model to call? `false` means no `[infer.ask]`: no ask
     /// page, no nav entry, no MCP tool, no `/api/ask`.
     pub fn asks(&self) -> bool {
@@ -457,6 +613,7 @@ pub mod test_support {
     use super::*;
     use crate::infer::fake::{
         FailingReranker, FakeCompleter, FakeDescriber, FakeEmbedder, FakeReranker, FakeSynthesizer,
+        FakeTranscriber,
     };
     use crate::vector::memory::MemoryVectors;
 
@@ -501,6 +658,14 @@ pub mod test_support {
         core
     }
 
+    /// A core whose speech model is the given fake, so the microphone is on
+    /// the page and answers.
+    pub async fn test_core_with_transcriber(t: Arc<FakeTranscriber>) -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.transcriber = Some(t);
+        core
+    }
+
     /// The shipped default: no `[infer.vision]`, image door closed.
     pub async fn test_core_without_vision() -> Core {
         let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
@@ -521,7 +686,7 @@ pub mod test_support {
         Core {
             store,
             vectors: Arc::new(MemoryVectors::new()),
-            synthesizer: Some(synthesizer),
+            synthesizer,
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
             // The shipped default: a configured reranker serves both places.
@@ -535,16 +700,18 @@ pub mod test_support {
             gap_namer: Some(Arc::new(FakeCompleter {
                 reply: Some(r#"{"label":"Fake topic"}"#.into()),
             })),
+            reaper: Some(Arc::new(FakeCompleter::default())),
             generator: Some(Arc::new(FakeCompleter::default())),
             // Off, unlike the shipped default: a test that wants a fan-out puts
             // a completer here, and every other test gets one round and no
             // extra call to account for.
             planner: None,
             describer: Some(Arc::new(FakeDescriber::default())),
-            synthesis: crate::config::SynthesisMode::Eager,
-            segment_tokens: crate::config::DEFAULT_SEGMENT_TOKENS,
+            // Off, like the shipped default: the tests that want a microphone
+            // put one here, and every other test renders the page without one.
+            transcriber: None,
             chunk_tokens: crate::config::DEFAULT_CHUNK_TOKENS,
-            counter: Arc::new(TokenCounter),
+            counter: Arc::new(TokenCounter::default()),
             background: Arc::new(Background::default()),
             clock: crate::core::context::Clock::System,
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
@@ -563,7 +730,8 @@ pub mod test_support {
             // realistic threshold would mark arbitrary results weak and every
             // search test would be asserting against noise. Tests that care
             // about the labelling set it themselves.
-            weak_below: 0.0,
+            weak_floor: 0.0,
+            line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             recency_half_life_days: 180,
             pinned_boost: 0.15,
             // Off in tests, whatever ships: the tests that need a log switch
@@ -582,6 +750,11 @@ pub mod test_support {
             pursuit: crate::config::PursuitConfig::default(),
             schedule: crate::config::ScheduleConfig::default(),
             sitting: crate::config::SittingConfig::default(),
+            // The fake embedder hashes text into eight dimensions, where two
+            // unrelated strings clear 0.80 by chance and the classifier fires on
+            // noise. Tests of the classifier hand it vectors directly.
+            time: crate::config::TimeConfig::default(),
+            reap: crate::config::ReapConfig::default(),
             // Off, unlike the shipped default: `recommends()` is two flags and
             // a test that leaves both alone must offer nothing. The
             // recommendation tests switch both on.
@@ -609,6 +782,123 @@ pub mod test_support {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    /// Deterministic stand-in for an embedder that puts everything close
+    /// together, the way bge-m3 does.
+    fn crowded(n: usize) -> Vec<Vec<f32>> {
+        let mut state = 0x2545_f491u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        (0..n)
+            .map(|_| {
+                (0..test_support::TEST_DIM)
+                    .map(|d| next() * 0.3 + if d == 0 { 1.0 } else { 0.0 })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The weak line is measured, not configured: with enough recorded
+    /// queries the base says where unrelated stops, every clone of `Core`
+    /// reads the one measurement, and the next boot finds it in meta. With
+    /// too few, the configured floor stands.
+    #[tokio::test]
+    async fn the_weak_line_is_measured_from_the_base_and_shared() {
+        let mut core = test_support::test_core().await;
+        core.weak_floor = 0.35;
+        let reader = core.clone();
+        assert_eq!(core.calibrate().await.unwrap(), 0.0);
+        assert_eq!(reader.weak_below(), 0.35);
+        assert_eq!(reader.link_at(), crate::core::gaps::GAP_LINK_AT);
+
+        for (i, v) in crowded(40).into_iter().enumerate() {
+            core.store
+                .record_search(
+                    crate::store::feedback::NewEvent {
+                        fold_onto: None,
+                        query: format!("q{i}"),
+                        door: crate::store::feedback::Door::Ui,
+                        scope: None,
+                        filters: "{}".into(),
+                        query_vec: v,
+                        embed_model: core.embedder.model().into(),
+                        candidates: vec![],
+                        answered: false,
+                    },
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+        let line = core.calibrate().await.unwrap();
+        assert!(line > 0.35, "{line}");
+        assert_eq!(
+            reader.weak_below(),
+            line.min(crate::core::gaps::LINE_CEILING)
+        );
+        assert!(reader.link_at() >= reader.weak_below());
+        assert_eq!(
+            core.store.meta_get("calibration.line").await.unwrap(),
+            Some(line.to_string())
+        );
+    }
+
+    /// A core built over a base that has already measured its line starts
+    /// with that line, rather than at the floor until some later pass gets
+    /// round to it.
+    ///
+    /// The bug this is against: `calibrate` runs on the hourly pass, which
+    /// opens a *transient* core to run it on, so the measurement was written
+    /// to meta and then dropped with the core that took it. Whatever core was
+    /// serving requests went on reading `weak_below` as the 0.35 floor, and a
+    /// capture landing in that window closed every gap it came within 0.40 of
+    /// — all of which the next pass then deleted as being under the line.
+    #[tokio::test]
+    async fn a_core_starts_from_the_line_the_base_last_measured() {
+        let mut core = test_support::test_core().await;
+        core.weak_floor = 0.35;
+        // Nothing recorded: no key, the floor stands, and adopting is a no-op
+        // rather than a zero written over it.
+        core.adopt_measured_line().await.unwrap();
+        assert_eq!(core.weak_below(), 0.35);
+
+        core.store.meta_set(CALIBRATION_KEY, "0.6").await.unwrap();
+        core.adopt_measured_line().await.unwrap();
+        assert_eq!(core.weak_below(), 0.6);
+
+        // A measurement in hand is never overwritten by a stored one: what the
+        // running process measured is at least as fresh as what is on disk.
+        core.store.meta_set(CALIBRATION_KEY, "0.4").await.unwrap();
+        core.adopt_measured_line().await.unwrap();
+        assert_eq!(core.weak_below(), 0.6);
+    }
+
+    /// Two cores built for one subject read one line, whichever of them
+    /// measured it. `Working` is what carries it across the two, and the
+    /// hourly pass's transient core is the one that matters: see
+    /// `background::open_for_pass`.
+    #[tokio::test]
+    async fn one_subjects_cores_share_the_measurement_whichever_took_it() {
+        let store = crate::store::Store::memory().await.unwrap();
+        let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        let working = Working::default();
+        // What the registry does on two cache misses for one subject — and
+        // what `open_for_pass` does beside whichever core is serving.
+        let serving = Core::from_config_with(&cfg, vectors.clone(), store.clone(), working.clone());
+        let passing = Core::from_config_with(&cfg, vectors, store, working);
+        assert_eq!(serving.measured_line(), 0.0);
+        passing
+            .line
+            .store(0.6f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            serving.measured_line(),
+            0.6,
+            "a measurement taken on a transient core did not reach the one serving"
+        );
+    }
 
     /// The one wiring decision `from_config` makes that is not a straight
     /// field copy: rerank is optional, and an absent block must leave search
@@ -773,8 +1063,11 @@ mod tests {
         assert!(core.reranker.is_some());
     }
 
-    #[tokio::test]
-    async fn a_core_without_roles_says_so() {
+    #[test]
+    fn a_config_still_setting_a_mode_is_refused_naming_the_reshape() {
+        // `synthesis = "off"` was a complete product state once. Since the
+        // 2026-09 capture reshape it is a removed key, and the refusal has to
+        // say what changed rather than parse silently into something else.
         let cfg_toml = r#"
         [server]
         bind = "127.0.0.1:8080"
@@ -799,17 +1092,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, cfg_toml).unwrap();
-        let cfg = crate::config::Config::load(Some(&path)).unwrap();
-        let store = Store::memory().await.unwrap();
-        let core = Core::from_config(
-            &cfg,
-            Arc::new(crate::vector::memory::MemoryVectors::new()),
-            store,
-        );
-        assert!(!core.synthesizes());
-        assert!(!core.asks());
-        assert!(core.synthesizer.is_none() && core.completer.is_none());
-        assert!(core.judge.is_none() && core.link_judge.is_none() && core.gap_namer.is_none());
-        assert_eq!(core.synthesis, crate::config::SynthesisMode::Off);
+        let err = crate::config::Config::load(Some(&path))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2026-09 capture reshape"), "{err}");
+        assert!(err.contains("infer.synthesis"), "{err}");
     }
 }

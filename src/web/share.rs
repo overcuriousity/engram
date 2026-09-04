@@ -30,7 +30,12 @@ use axum::routing::post;
 /// being written, not two documents being filed — and a caption kept as the
 /// image's note is a caption that comes back with the image, which is the only
 /// place it means anything.
-async fn share(tenant: Tenant, multipart: axum::extract::Multipart) -> Result<Response> {
+async fn share(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    multipart: axum::extract::Multipart,
+) -> Result<Response> {
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let (mut fields, files) = read_capture_parts(multipart).await?;
     let title = fields.remove("title");
 
@@ -70,14 +75,19 @@ async fn share(tenant: Tenant, multipart: axum::extract::Multipart) -> Result<Re
 
     let mut landing = None;
     if let Some(u) = shared_url {
-        let out = tenant.core.ingest_url(&u, title.clone(), None).await?;
+        let out = tenant
+            .core
+            .ingest_url(&u, title.clone(), None, lang)
+            .await?;
         landing = Some(out.id);
     }
     if let Some(text) = lone_text {
         let out = tenant
             .core
             .ingest_capture(
-                crate::core::ingest::Capture::new(text, ORIGIN_SHARE).with_title(title.clone()),
+                crate::core::ingest::Capture::new(text, ORIGIN_SHARE)
+                    .with_lang(lang)
+                    .with_title(title.clone()),
             )
             .await?;
         landing.get_or_insert(out.id);
@@ -97,6 +107,7 @@ async fn share(tenant: Tenant, multipart: axum::extract::Multipart) -> Result<Re
                 title.clone(),
                 note.clone(),
                 ORIGIN_SHARE,
+                lang,
             )
             .await?;
         first_file.get_or_insert(out.id);

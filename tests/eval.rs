@@ -172,8 +172,9 @@ async fn evaluate_ask() {
             let why = a.err().map(|e| e.to_string()).unwrap_or_default()
                 + &q.err().map(|e| format!(" {e}")).unwrap_or_default();
             eprintln!(
-                "no judged questions at {} ({}). Ask on /ui/ask with feedback.enabled, judge the \
-                 answers, run `engram --export-eval <dir>` and set ENGRAM_EVAL_DIR to it.",
+                "no judged questions at {} ({}). Ask with feedback.enabled, give a verdict \
+                 under each answer, run `engram --export-eval <dir>` and set \
+                 ENGRAM_EVAL_DIR to it.",
                 dir.display(),
                 why.trim()
             );
@@ -195,12 +196,8 @@ async fn evaluate_ask() {
     let translated = index(&core, &artifacts).await;
 
     let check_claims = std::env::var("ENGRAM_EVAL_CLAIMS").is_ok_and(|v| v == "1");
-    let claim_checker = engram::infer::openai::HttpCompleter::for_claim_checking(
-        cfg.infer
-            .synthesize
-            .as_ref()
-            .expect("the eval harness needs [infer.synthesize]"),
-    );
+    let claim_checker =
+        engram::infer::openai::HttpCompleter::for_claim_checking(&cfg.infer.synthesize);
 
     let mut recall: Vec<f64> = Vec::new();
     let mut all_cited = (0usize, 0usize);
@@ -499,7 +496,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
     let core = Core {
         store: Store::memory().await.unwrap(),
         vectors: Arc::new(engram::vector::memory::MemoryVectors::new()),
-        synthesizer: Some(Arc::new(engram::infer::fake::FakeSynthesizer::default())),
+        synthesizer: Arc::new(engram::infer::fake::FakeSynthesizer::default()),
         embedder: Arc::new(engram::infer::fake::FakeEmbedder::new(8)),
         reranker: None,
         rerank_apply: vec![],
@@ -507,14 +504,16 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         link_judge: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         gap_namer: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
+        reaper: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
+        time: engram::config::TimeConfig::default(),
+        reap: engram::config::ReapConfig::default(),
         generator: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
         // The harness measures the shipped default, which is one round.
         planner: None,
         describer: None,
-        synthesis: engram::config::SynthesisMode::Eager,
-        segment_tokens: engram::config::DEFAULT_SEGMENT_TOKENS,
+        transcriber: None,
         chunk_tokens: engram::config::DEFAULT_CHUNK_TOKENS,
-        counter: Arc::new(engram::infer::budget::TokenCounter),
+        counter: Arc::new(engram::infer::budget::TokenCounter::default()),
         background: Arc::new(engram::core::background::Background::default()),
         recommend: Default::default(),
         ui: Default::default(),
@@ -532,7 +531,8 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
             },
         )),
         tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        weak_below: 0.0,
+        weak_floor: 0.0,
+        line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         recency_half_life_days: 180,
         pinned_boost: 0.15,
         learn: engram::config::LearnConfig {

@@ -54,7 +54,7 @@
                   input[!event.isComposing] changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() && open_with.is_empty() %},
                   load{% endif %}"
-      hx-params="q,category,rerank,explain,fold"
+      hx-params="q,category,rerank,explain,fold,tz"
       hx-indicator="#search-spinner"{% if search_reranks %} data-rerank="true"{% endif %}>
   {# `/ui?explain=1` and nothing else. `hx-params` above is an allowlist, so
      the name has to appear in both places or the fragment is asked without it
@@ -69,6 +69,11 @@
      used to overwrite that window's query and its whole pool while its rail
      went on naming the id on every row. See `_results.html`. #}
   <span id="fold-of"></span>
+  {# The viewer's zone, filled by app.js on load. The echo under the box reads
+     a date out of what is being typed, and *tomorrow 09:00* is a different
+     second in Berlin than it is wherever the server is. Named in `hx-params`
+     above or the allowlist strips it. #}
+  <input type="hidden" name="tz" id="box-tz">
   {# A textarea from the first keystroke to the last. It grows to a ten-line
      cap and then scrolls inside itself; it never switches element type, and it
      never infers a verb from a length or a newline. What decides which of the
@@ -92,13 +97,18 @@
      name it twice.
 
      `data-placeholder-narrow` is the same sentence for a box one row tall on a
-     phone, where the long one is clipped around its thirtieth character — and
-     where the hint below is `display: none`, so that clipped placeholder is the
-     only thing left saying what the box is for. app.js swaps them. #}
-  <textarea class="box" name="q" rows="1"
+     phone, where the long one is clipped around its thirtieth character.
+     app.js swaps them. #}
+  {# The box and the one control that sits on it. A wrapper only so the
+     microphone can be positioned against the box's own right edge: everything
+     else about the box — its growth, its placeholders, its verbs — is
+     unchanged by it, and where no speech model is configured this is a plain
+     div around a textarea. #}
+  <div class="box-wrap">
+  <textarea class="box{% if stt_enabled %} box-with-mic{% endif %}" name="q" rows="1"
             aria-label="Search, ask, or capture"
-            placeholder="{% if held %}Describe the situation, ask a question, or paste anything worth keeping…{% else %}Paste anything worth keeping — a note, an article, a chunk of a chat.{% endif %}"
-            data-placeholder-narrow="{% if held %}Ask, search, or paste to keep…{% else %}Paste anything worth keeping…{% endif %}"
+            placeholder="{% if held %}Describe the situation, ask a question, or paste anything worth keeping…{% else %}Paste something to keep…{% endif %}"
+            data-placeholder-narrow="{% if held %}Ask, search, or paste to keep…{% else %}Paste something to keep…{% endif %}"
             {%- if !held %}
             {# The sentences this box will use once the base stops being empty,
                carried on the element rather than swapped in. The rest of the
@@ -109,6 +119,36 @@
             data-placeholder-held-narrow="Ask, search, or paste to keep…"
             {%- endif %}
             aria-describedby="box-hint">{{ q }}</textarea>
+  {% if stt_enabled %}
+  {# Hold to talk. Not a toggle: a held button is a recording whose end is
+     never in doubt, and there is no state to be left stuck in — let go, and
+     whatever the microphone heard is over.
+
+     A `button` rather than an icon someone bound a handler to, so it is in the
+     tab order and answers Space and Enter like every other control. The key
+     press is handled in app.js on `keydown`/`keyup` for the same reason the
+     pointer is: holding is the gesture, and a click event fires only once it
+     is already over.
+
+     The status line is `aria-live` and otherwise invisible: a microphone that
+     is listening has to say so to somebody who cannot see the button change
+     colour, and it is also where a refused permission is reported — the one
+     failure here that no amount of pressing fixes. #}
+  <button type="button" id="mic" class="mic" aria-describedby="mic-status"
+          title="Hold to dictate — what you say is typed into the box">
+    {# Presentational: the button is named by its own label below. #}
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+         stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+         aria-hidden="true">
+      <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+      <path d="M5 11a7 7 0 0 0 14 0"></path>
+      <path d="M12 18v3"></path>
+    </svg>
+    <span class="sr-only">Hold to dictate</span>
+  </button>
+  {% endif %}
+  </div>
+  {% if stt_enabled %}<span id="mic-status" class="mic-status" role="status" aria-live="polite"></span>{% endif %}
 {# The file, when there is one. It used to be an always-open drop zone and a
      staged box under it — two places for one idea, on a page that grew a row as
      you used it. The picker lives in the verb row below — for four commits it
@@ -185,7 +225,12 @@
        rail. Nothing here carries a tag any more — subject words have no
        vocabulary that can be closed, so `forensics` and `forensik` sat beside
        each other as two filters over one idea. #}
+    {# Chips qualify a search. On an idle page there is no search, and a chip
+       row marooned at the far end of the verb row was the loudest piece of
+       furniture on it. app.js reveals this on the first keystroke, on the
+       same event that hides the column below. #}
     {% if !facets.categories.is_empty() %}
+    <span id="kind-row" class="kind-row"{% if idle_state %} hidden{% endif %}>
     {# Labelled in the page, not only in `aria-label`: the row starts with
        "All", and an unlabelled "All" is not a statement about anything. #}
     <span class="label facet-label">Kind</span>
@@ -204,21 +249,21 @@
       </label>
       {% endfor %}
     </div>
+    </span>
     {% endif %}
-    {# The accepted types, in the page rather than only on the label's `title`,
-       which a pointer reads and nothing else does. Last in the row and given a
-       full basis by the stylesheet, so the buttons, the spacer and the chips
-       keep the one line they are laid out for and this sits under them.
-
-       It carries `hint`, which means the phone hides it along with the rest of
-       the prose in this bar. That is the bar's own rule and it is right: a
-       phone has about six hundred pixels of height and the results are what
-       they are for. Nothing is lost there — the picker a phone opens names
-       what it will accept itself, and the input keeps its `aria-label`. #}
-    <span class="muted hint attach-types">{% if vision_enabled %}A .txt file, a PDF or an image{% else %}A .txt file or a PDF{% endif %} — or drop one anywhere on the page.</span>
   </div>
   {% include "_box_hint.html" %}
 </form>
+
+{# Where a capture answers, and deliberately outside `#pane`.
+   It lived in the pane, which is hidden whenever the box is empty — and a
+   capture is the one act that empties the box itself. `refreshRail` clears the
+   box and calls `showIdle` in the same turn the receipt is swapped in, so
+   "Captured — view source" and the undo beside a note filed as today's entry
+   flashed and vanished, and the undo for a wrongly-cued entry was unreachable
+   without a reload. Under the box it survives the page going idle, which is
+   the state a finished capture leaves the page in. #}
+<div id="capture-result"></div>
 
 
 {# Present only when the box was filled from an answer. It rides the capture so
@@ -240,34 +285,65 @@
   <input type="hidden" name="from_ask" value="{{ prefill_ask }}">
 </div>
 {% endif %}
-{# Rough stand-in for the tokeniser, filled by app.js: enough to warn, never to
-   block. At `earned` and `off` capture makes no synthesis call, so the hint
-   must not price one. #}
-<p id="size-hint" class="muted" data-eager="{% if eager %}1{% else %}0{% endif %}" hidden></p>
+{# The idle column: everything the page shows when nobody has typed. One
+   element, because app.js hides and reveals it as a unit, and because the
+   three things in it are one statement — here is something you might want,
+   here is what you asked for, here is what I hold. The line that says how to
+   write to me is not among them: it lives under the box, where it still means
+   something once someone has started typing.
 
-{# The offer is for the state "no intent expressed yet". app.js removes it on
-   the first keystroke, and it does not come back when the box is cleared: once
-   there is an intent the offer is wrong, and reappearing because someone
-   corrected a typo is flicker. It returns on the next page view.
+   Hidden rather than removed on the first keystroke. Removing it is what made
+   a reminder armed by a capture invisible until a reload: the capture empties
+   the box, the idle state is correct again, and there was no longer a `#due`
+   in the document for the band to swap into.
 
-   `q.is_empty()` as well as the switch, because that state is a claim about
-   the page and not about the switch: a deep link, a reload or a
-   back-navigation renders the box filled with its results below, and app.js
-   only removes the area on a *keystroke* — which never comes on any of those.
-   Without this it sat beside real results and wrote a `recommended_shown` row
-   per view, inflating the denominator of the one hit rate it is measured by. #}
-{% if recommend && q.is_empty() %}
-<div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
-     hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
-{% endif %}
+   The offer stays speculative and the band has a hard reason, which is why
+   the band is below it: the eye lands last on the thing that earned the
+   space. #}
+<div id="idle"{% if !idle_state %} hidden{% endif %}>
+  {# `_box_hint.html` is NOT included here. It belongs to the box: the textarea
+     names it in `aria-describedby`, and the `#intent-echo` slot inside it is
+     what says what the box just read — both of which have to survive the first
+     keystroke, which is exactly when this column is hidden. Included a second
+     time it also gave the document two `#box-hint` and two `#intent-echo`
+     elements, and an out-of-band swap resolves the first match only, so this
+     copy was dead markup rendering the guidance sentence and both example
+     chips twice. #}
+  {# Fetched rather than rendered because the bundle originates in the browser
+     and the server does not have it at first paint.
 
+     Gated on the state, not merely hidden by it, and it is the one thing here
+     that is: a `load` trigger fires for an element inside a hidden parent as
+     readily as for a visible one, so an offer rendered onto a page that
+     arrived with results would fetch itself, write a `recommended_shown` row
+     and be seen by nobody — inflating the denominator of the one hit rate this
+     area is measured by. The same accounting is why app.js drops an offer
+     that *lands* after the keystroke that dismissed it: that card was never on
+     screen, and counting it would put a population that could not click into
+     the same denominator. An offer that did arrive in time is only hidden with
+     the column, and comes back with it when the box is emptied. #}
+  {% if recommend && idle_state %}
+  <div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
+       hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
+  {% endif %}
+  {# In the document whatever state the page arrived in, unlike the offer: it
+     records nothing by being fetched, and clearing a deep-link search has to
+     reach a complete idle state rather than half of one.
+
+     `load` rather than `intersect once`: the band is no longer below the fold
+     of a three-column page, and `intersect` never fires for an element inside
+     a hidden parent that is revealed later. #}
+  <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
+       hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
+  {{ idle|safe }}
+</div>
 {% include "_keyhint.html" %}
 </div>
 
 {# The rail holds what the current act produced, and says which act that was.
    The heading is filled by whichever fragment fills the list under it, so the
    two cannot disagree about what they are showing. #}
-<div id="rail" class="region-rail rail">
+<div id="rail" class="region-rail rail"{% if idle_state %} hidden{% endif %}>
   {# `.rail-act` on the slot itself, not only on the fragments that fill it:
      every filler — results, the ask driver, the idle fragment — hands this
      div *children* (`hx-swap-oob="innerHTML:…"` discards the wrapper), so a
@@ -289,10 +365,13 @@
      trigger above is about to fill the rail with results. A door that arrives
      with a filled box and runs nothing — ask, capture — renders it, because
      for those nothing is coming. #}
-  <div id="results" role="listbox" aria-label="Results">{{ idle|safe }}</div>
+  {# Empty on an idle page: the fragment that used to fill it is the idle
+     column's closing line now, and the rail's first content is the first
+     result set. #}
+  <div id="results" role="listbox" aria-label="Results"></div>
 </div>
 
-<div id="pane" class="region-focus pane">
+<div id="pane" class="region-focus pane"{% if idle_state %} hidden{% endif %}>
   {# What the retrieval did before the model was asked anything, when there was
      more of it than usual. Silent on an ask the first round already covered.
      When a plan does name something, those searches are otherwise a silent
@@ -321,7 +400,6 @@
      answer below it is the signal for everyone who can see it. #}
   <p id="ask-status" class="sr-only" role="status"></p>
   <div id="ask-result"></div>
-  <div id="capture-result"></div>
   {# The artifact swaps in *here*, never over the whole pane: the ask and
      capture targets above exist nowhere else on the page, and a result click
      that replaced the pane's innerHTML destroyed them — after which Ask

@@ -452,7 +452,7 @@ impl Verdict {
 /// Who gave a verdict. See `search_events.judged_by`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Labeller {
-    /// The judge deck, later and out of context. Stored as NULL, which is
+    /// The judge deck — retired; its rows remain. Stored as NULL, which is
     /// what every verdict before the column existed was.
     Deck,
     /// The bar under an opened result, or the gap button on the rail: at the
@@ -477,26 +477,7 @@ impl Labeller {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Candidate {
-    pub artifact_id: String,
-    pub rank: i64,
-    pub shown: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingEvent {
-    pub id: String,
-    pub query: String,
-    pub door: String,
-    pub created_at: i64,
-    /// Whether a result was ever opened from it. The card asks a different
-    /// question of a search nobody opened anything from.
-    pub opened: bool,
-    pub candidates: Vec<Candidate>,
-}
-
-/// What the deck deals: see `Store::next_pending`. One bind, `weak_below`.
+/// The answerable set: what `pending_count` counts. One bind, `weak_below`.
 ///
 /// An `EXISTS` and two `COALESCE`s, for three different absences. The `EXISTS`:
 /// an empty pool is not a card, because a search that returned nothing is a
@@ -519,9 +500,18 @@ pub struct PendingEvent {
 /// — and reading those as zero withheld every such search from the deck
 /// silently, when a keyword search that found something is exactly the card a
 /// person can answer.
+/// `skips = 0` is the same rule applied to the person rather than to the data:
+/// somebody looked at this search, said "not sure", and is not going to be
+/// asked it again. While the judge deck existed, `ORDER BY skips ASC` was that
+/// second asking and the count was honest. The deck is gone, nothing reads
+/// `skips` any more, and every skipped search stayed `judged_at IS NULL` for
+/// ever — permanently inflating the "N waiting" figure on Settings and
+/// Insights with questions that had already been answered as far as anyone was
+/// ever going to answer them. The column is still written, and is still what
+/// tells a skipped search from one nobody has seen.
 macro_rules! dealable {
     () => {
-        "judged_at IS NULL AND length(query) >= 3
+        "judged_at IS NULL AND skips = 0 AND length(query) >= 3
          AND EXISTS (SELECT 1 FROM search_candidates WHERE event_id = search_events.id)
          AND COALESCE((SELECT max(COALESCE(similarity, 1.0)) FROM search_candidates
                         WHERE event_id = search_events.id), 0) >= ?"
@@ -531,11 +521,10 @@ macro_rules! dealable {
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
     pub captured: i64,
-    /// Searches still waiting for a verdict *and* answerable — the same
-    /// `dealable!` set the deck deals and `pending_count` draws the nav from.
-    /// Every screen showing this says "waiting", and a number counting cards
-    /// nobody will ever be dealt is a queue that never empties: the pulse read
-    /// "12 waiting" over an empty deck while the nav beside it read nothing.
+    /// Searches still waiting for a verdict *and* answerable — the
+    /// `dealable!` set `pending_count` counts. Every screen showing this says
+    /// "waiting", and a number counting questions nobody can answer is a
+    /// queue that never empties.
     pub pending: i64,
     pub judged: i64,
     pub hits: i64,
@@ -548,13 +537,6 @@ pub struct Stats {
     pub mrr: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct Miss {
-    pub query: String,
-    /// `None` means the confirmed artifact was not in the stored pool at all.
-    pub rank: Option<i64>,
-}
-
 /// A query and the artifact a person said answered it.
 #[derive(Debug, Clone)]
 pub struct JudgedPair {
@@ -563,110 +545,11 @@ pub struct JudgedPair {
 }
 
 impl Store {
-    /// The next event to judge: never-skipped first, newest first within that.
-    ///
-    /// Newest first because a judgement is worth something only while the
-    /// situation is still in mind, and that memory is the most perishable part
-    /// of the whole dataset.
-    ///
-    /// Not every unjudged search is dealt. A query under three characters and a
-    /// search whose best match fell under `weak_below` are the cards nobody can
-    /// answer — a typo, or a hole the distance already says is one and
-    /// `GapKind::Unmatched` already counts. They stay pending, for that sweep;
-    /// they are just never asked about.
-    pub async fn next_pending(&self, weak_below: f32) -> Result<Option<PendingEvent>> {
-        let row = sqlx::query(concat!(
-            // `id DESC` breaks the tie: two searches within one second are
-            // ordinary, and `created_at` alone would leave SQLite to pick.
-            // Ids are uuid v7, so they sort by time down to the millisecond.
-            "SELECT id, query, door, created_at, opened_at FROM search_events WHERE ",
-            dealable!(),
-            " ORDER BY skips ASC, created_at DESC, id DESC LIMIT 1"
-        ))
-        .bind(weak_below)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(row) = row else { return Ok(None) };
-        self.hydrate(row).await.map(Some)
-    }
-
-    /// One event by id, judged or not.
-    ///
-    /// What undo needs: the event it just put back is not necessarily the one
-    /// the judging order now puts first, and the operator expects to land back
-    /// on the card they were looking at rather than somewhere else.
-    pub async fn pending_by_id(&self, event_id: &str) -> Result<Option<PendingEvent>> {
-        let row = sqlx::query(
-            "SELECT id, query, door, created_at, opened_at FROM search_events WHERE id = ?",
-        )
-        .bind(event_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(row) = row else { return Ok(None) };
-        self.hydrate(row).await.map(Some)
-    }
-
-    /// An event row plus the pool it recorded.
-    async fn hydrate(&self, row: sqlx::sqlite::SqliteRow) -> Result<PendingEvent> {
-        let id: String = row.get("id");
-        let candidates = sqlx::query(
-            "SELECT artifact_id, rank, shown FROM search_candidates
-             WHERE event_id = ? ORDER BY rank",
-        )
-        .bind(&id)
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| Candidate {
-            artifact_id: r.get("artifact_id"),
-            rank: r.get("rank"),
-            shown: r.get::<i64, _>("shown") == 1,
-        })
-        .collect();
-
-        Ok(PendingEvent {
-            id,
-            query: row.get("query"),
-            door: row.get("door"),
-            created_at: row.get("created_at"),
-            opened: row.get::<Option<i64>, _>("opened_at").is_some(),
-            candidates,
-        })
-    }
-
-    /// The query one event recorded, by id.
-    ///
-    /// Deliberately not `next_pending` with a filter: the judging order moves
-    /// under a screen that is already open, and the operator's own event is not
-    /// necessarily the one at the front of it. Judged events answer too — the
-    /// caller wants the text, not a verdict.
-    pub async fn event_query(&self, event_id: &str) -> Result<Option<String>> {
-        Ok(
-            sqlx::query_scalar("SELECT query FROM search_events WHERE id = ?")
-                .bind(event_id)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
-    }
-
-    /// Where this artifact stood in what the search returned, if it was in the
-    /// pool at all. `None` is the interesting answer: it means the search never
-    /// offered what turned out to be the right thing.
-    pub async fn rank_in_event(&self, event_id: &str, artifact_id: &str) -> Result<Option<i64>> {
-        Ok(sqlx::query_scalar(
-            "SELECT rank FROM search_candidates WHERE event_id = ? AND artifact_id = ?",
-        )
-        .bind(event_id)
-        .bind(artifact_id)
-        .fetch_optional(&self.pool)
-        .await?)
-    }
-
     /// Every write here is a verdict on a row that may not be there any more:
     /// retention expires events on a timer and Ops can purge them outright,
-    /// both of them under a judging screen that is already open. An UPDATE
-    /// matching nothing is not a recorded judgement, and reporting it as one
-    /// puts a number in front of the operator that no stored row supports.
+    /// both of them under a screen that is already open. An UPDATE matching
+    /// nothing is not a recorded judgement, and reporting it as one puts a
+    /// number in front of the operator that no stored row supports.
     fn judged_one(res: sqlx::sqlite::SqliteQueryResult) -> Result<()> {
         if res.rows_affected() == 0 {
             return Err(crate::error::Error::NotFound);
@@ -675,13 +558,11 @@ impl Store {
     }
 
     /// `AND judged_at IS NULL`, as `decline` and `gap_event` both carry: the
-    /// bar under an opened result is drawn against an unjudged search, and the
-    /// deck can answer that same search in the time a tab is left open. Without
-    /// the guard, Yes in the stale tab overwrote whatever the deck had recorded
-    /// — a gap became a hit, and `pairs.json` gained a pair nobody meant. The
-    /// deck cannot hit an already-judged event (it deals only unjudged ones),
-    /// so this costs it nothing: for the deck, `NotFound` still means what it
-    /// meant, a row that is no longer there.
+    /// bar under an opened result is drawn against an unjudged search, and
+    /// another tab can answer that same search in the time this one is left
+    /// open. Without the guard, Yes in the stale tab overwrote whatever was
+    /// recorded — a gap became a hit, and `pairs.json` gained a pair nobody
+    /// meant.
     pub async fn judge_hit(&self, event_id: &str, artifact_id: &str, by: Labeller) -> Result<()> {
         Self::judged_one(
             sqlx::query(
@@ -867,8 +748,16 @@ impl Store {
     pub async fn unjudge(&self, event_id: &str, by: Labeller) -> Result<()> {
         Self::judged_one(
             sqlx::query(
+                // `skips` goes back with the verdict. `dealable!` excludes a
+                // skipped event, so a search skipped once, judged later and
+                // then undone was `judged_at IS NULL` — outstanding — and
+                // still excluded from `pending_count` and `Stats::pending`
+                // for ever: genuinely waiting and invisible on Settings and
+                // Insights. An undo puts the row back where it was before
+                // anybody answered it.
                 "UPDATE search_events
-                 SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = NULL
+                 SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = NULL,
+                     skips = 0
                  WHERE id = ? AND judged_by IS ?",
             )
             .bind(event_id)
@@ -878,9 +767,15 @@ impl Store {
         )
     }
 
-    /// Not a verdict: the event stays pending and only sinks in the order. An
-    /// honest "I don't remember" must never cost anything, or it stops being
-    /// honest.
+    /// Not a verdict: the event keeps `judged_at IS NULL`, so it is never
+    /// counted as answered, never enters the eval pairs, and never becomes a
+    /// discard — an honest "I don't remember" must not cost the search
+    /// anything, or it stops being honest.
+    ///
+    /// What it does cost is being asked again: `dealable!` excludes a skipped
+    /// event, so the row leaves the "waiting" figure. The alternative, now that
+    /// the deck that re-dealt skipped cards is gone, is a question that is
+    /// counted as outstanding for ever and put to nobody.
     pub async fn skip_event(&self, event_id: &str) -> Result<()> {
         Self::judged_one(
             sqlx::query("UPDATE search_events SET skips = skips + 1 WHERE id = ?")
@@ -890,23 +785,20 @@ impl Store {
         )
     }
 
-    /// How many searches are waiting for a verdict.
+    /// How many searches are waiting for a verdict — the `pending` figure in
+    /// `Stats`, split out so the tests can pin the answerable set on its own.
     ///
-    /// Split out of `feedback_stats`, which runs half a dozen queries and two
-    /// joins: this one is read on every page render to draw the nav, and the
-    /// nav must not cost what the ops page costs.
-    ///
-    /// It is not the single indexed count it once was — the nav counts what the
-    /// deck will actually deal, or it reads "12 waiting" over an empty deck —
-    /// so `dealable!` is two correlated subqueries per row it looks at. Both
+    /// Not a single indexed count — the figure counts what can actually be
+    /// answered, or it reads "12 waiting" over questions nobody can take — so
+    /// `dealable!` is two correlated subqueries per row it looks at. Both
     /// seek `search_candidates` by `event_id`, which leads the primary key and
     /// `idx_candidates_similarity`, so each is an index seek rather than a
     /// scan; what it costs is that pair of seeks per unjudged event. With
     /// `retain_days = 0` — the default, where nothing is ever trimmed — that
     /// set only grows, and the events this predicate holds back (a query under
-    /// three characters, a pool of nothing) stay in it forever. If the nav ever
-    /// becomes the slow part of a page, that is the thing to measure.
-    pub async fn pending_count(&self, weak_below: f32) -> Result<i64> {
+    /// three characters, a pool of nothing) stay in it forever. If this count
+    /// ever becomes the slow part of a page, that is the thing to measure.
+    pub(crate) async fn pending_count(&self, weak_below: f32) -> Result<i64> {
         Ok(sqlx::query_scalar(concat!(
             "SELECT count(*) FROM search_events WHERE ",
             dealable!()
@@ -971,28 +863,6 @@ impl Store {
                 / n;
         }
         Ok(s)
-    }
-
-    /// The queries whose confirmed answer fell outside the first ten. The list
-    /// that is actually read: an aggregate says something is wrong, this says
-    /// what.
-    pub async fn misses(&self, limit: i64) -> Result<Vec<Miss>> {
-        Ok(sqlx::query(
-            "SELECT e.query AS query, c.rank AS rank FROM search_events e
-             LEFT JOIN search_candidates c
-               ON c.event_id = e.id AND c.artifact_id = e.expect_id
-             WHERE e.verdict = 'hit' AND (c.rank IS NULL OR c.rank >= 10)
-             ORDER BY e.judged_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| Miss {
-            query: r.get("query"),
-            rank: r.get("rank"),
-        })
-        .collect())
     }
 
     /// Every judgement that names an answer: the dataset a tuning sweep
@@ -1650,8 +1520,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_nav_count_reads_the_pool_through_an_index() {
-        // `pending_count` draws the nav on every page render, and `dealable!`
+    async fn the_waiting_count_reads_the_pool_through_an_index() {
+        // `pending_count` backs the waiting figure, and `dealable!`
         // asks two things of `search_candidates` for every unjudged event it
         // looks at. Both have to be index reads: with `retain_days = 0` — the
         // default, where nothing is trimmed — the set they run over only
@@ -1670,7 +1540,7 @@ mod tests {
         .collect();
         assert!(
             plan.iter().all(|l| !l.contains("SCAN search_candidates")),
-            "the nav scans the pool table: {plan:#?}"
+            "the waiting count scans the pool table: {plan:#?}"
         );
         assert_eq!(
             plan.iter()
@@ -1706,8 +1576,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_cannot_erase_a_verdict_somebody_else_gave() {
-        // The bar is drawn against an unjudged search, and the deck can answer
-        // the same search while the tab holding it is open. "No" clears the
+        // The bar is drawn against an unjudged search, and another tab can
+        // answer the same search while the one holding it is open. "No" clears the
         // verdict columns, so without a guard it is the one answer on the bar
         // that deletes a confirmed pair out of the eval set.
         let store = Store::memory().await.unwrap();
@@ -1722,7 +1592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_search_that_returned_nothing_is_not_dealt_with_labelling_off() {
+    async fn a_search_that_returned_nothing_is_not_counted_with_labelling_off() {
         // `weak_below = 0.0` turns the labelling off, and at that setting the
         // outer `COALESCE` in `dealable!` reads an empty pool as `0 >= 0` and
         // lets it through — a card with no options, which is unanswerable
@@ -1732,7 +1602,6 @@ mod tests {
         let mut empty = ev("nothing here", Door::Ui);
         empty.candidates.clear();
         store.record_search(empty, 0).await.unwrap();
-        assert!(store.next_pending(0.0).await.unwrap().is_none());
         assert_eq!(store.pending_count(0.0).await.unwrap(), 0);
     }
 
@@ -1752,11 +1621,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saying_no_leaves_the_search_a_question_for_the_deck() {
+    async fn saying_no_leaves_the_search_pending() {
         // "No" clears nothing into a verdict — it is a person saying the thing
         // in front of them was not it, which is not the same as saying the
-        // base has nothing. So the search goes back to the deck, marked as
-        // having been spoken for by a person rather than by the deck.
+        // base has nothing. So the search stays an open question, marked as
+        // having been spoken for by a person.
         let store = Store::memory().await.unwrap();
         let id = store.record_search(ev("ntfs", Door::Ui), 0).await.unwrap();
         assert!(store.decline(&id).await.unwrap());
@@ -1764,64 +1633,54 @@ mod tests {
         assert_eq!((s.judged, s.hits), (0, 0));
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("confirm"));
         assert_eq!(
-            store.next_pending(0.0).await.unwrap().map(|e| e.id),
-            Some(id),
-            "and the search goes to the deck, still a question"
+            store.pending_count(0.0).await.unwrap(),
+            1,
+            "and the search stays a question"
         );
     }
 
     #[tokio::test]
-    async fn a_search_too_short_or_too_loose_to_judge_is_never_dealt() {
+    async fn a_search_too_short_or_too_loose_to_judge_is_never_counted() {
         // A two-letter query and a search whose best match was under the
-        // weak line are the cards nobody can answer: a typo, or a hole the
+        // weak line are the questions nobody can answer: a typo, or a hole the
         // distance already says is one (`GapKind::Unmatched`). They stay
-        // recorded and stay pending — the gap sweep reads them — but the deck
-        // does not deal them and the badge does not count them.
+        // recorded and stay pending — the gap sweep reads them — but the
+        // waiting count leaves them out.
         let store = Store::memory().await.unwrap();
         seed(&store, "ab", &["a1"]).await;
         let mut loose = ev("fat32", Door::Ui);
         loose.candidates[0].similarity = Some(0.2);
         store.record_search(loose, 0).await.unwrap();
-        assert!(store.next_pending(0.3).await.unwrap().is_none());
         assert_eq!(store.pending_count(0.3).await.unwrap(), 0);
 
         let id = seed(&store, "ntfs", &["a1"]).await;
-        assert_eq!(
-            store.next_pending(0.3).await.unwrap().map(|e| e.id),
-            Some(id.clone())
-        );
         assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
 
-        // Every screen that says "waiting" counts the same set. The pulse used
-        // to read its number off a plain `judged_at IS NULL` and say "12
-        // waiting" over a deck that had nothing left to deal.
+        // Every screen that says "waiting" counts the same set — the number
+        // used to be read off a plain `judged_at IS NULL` and said "12
+        // waiting" over questions nobody could answer.
         assert_eq!(
             store.feedback_stats(0.3).await.unwrap().pending,
             store.pending_count(0.3).await.unwrap()
         );
 
-        // And the card knows whether anything was opened from it.
-        assert!(!store.next_pending(0.3).await.unwrap().unwrap().opened);
+        // Opening a result from it is not a verdict; it stays a question.
         store.open_event(&id, "a1").await.unwrap();
-        assert!(store.next_pending(0.3).await.unwrap().unwrap().opened);
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
     }
 
     #[tokio::test]
-    async fn a_search_the_vector_half_never_scored_is_still_dealt() {
+    async fn a_search_the_vector_half_never_scored_is_still_counted() {
         // A hit found by the lexical half alone carries no similarity — the
-        // embedder is down, or the query was answered on keywords. Reading that
-        // absence as a zero withheld every such search from the deck and from
-        // the count, silently, when a keyword search that found something is
-        // exactly the card a person can answer. Only a measured similarity
-        // under the line, or a pool with nothing in it, is undealable.
+        // embedder is down, or the query was answered on keywords. Reading
+        // that absence as a zero withheld every such search from the count,
+        // silently, when a keyword search that found something is exactly the
+        // question a person can answer. Only a measured similarity under the
+        // line, or a pool with nothing in it, is unanswerable.
         let store = Store::memory().await.unwrap();
         let mut lexical = ev("fat32", Door::Ui);
         lexical.candidates[0].similarity = None;
-        let id = store.record_search(lexical, 0).await.unwrap();
-        assert_eq!(
-            store.next_pending(0.35).await.unwrap().map(|e| e.id),
-            Some(id)
-        );
+        store.record_search(lexical, 0).await.unwrap();
         assert_eq!(store.pending_count(0.35).await.unwrap(), 1);
 
         let mut empty = ev("ntfs", Door::Ui);
@@ -1830,8 +1689,8 @@ mod tests {
         assert_eq!(
             store.pending_count(0.35).await.unwrap(),
             1,
-            "a search that returned nothing is a hole, not a card: there is no
-             list to point at, so the deck has no question to ask. It is not
+            "a search that returned nothing is a hole, not a question: there is
+             no list to point at, so there is nothing to answer. It is not
              lost — `store::gaps` raises it as an unmatched gap, which is what
              `a_search_that_returned_nothing_is_an_unmatched_gap` holds it to."
         );
@@ -1846,14 +1705,11 @@ mod tests {
             .unwrap();
         store.judge_hit(&id, "a1", Labeller::Confirm).await.unwrap();
         assert_eq!(judged_by(&store, &id).await.as_deref(), Some("confirm"));
-        // Taking it back returns the search to the deck with nothing on it —
+        // Taking it back leaves the search an open question with nothing on it —
         // no verdict, no expectation, and no record of who once gave one.
         store.unjudge(&id, Labeller::Confirm).await.unwrap();
         assert_eq!(judged_by(&store, &id).await, None);
-        assert_eq!(
-            store.next_pending(0.0).await.unwrap().map(|e| e.id),
-            Some(id)
-        );
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -2018,36 +1874,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_newest_unjudged_event_comes_up_first() {
-        // Judging is worth something because the situation is still in mind,
-        // and that memory is the most perishable part of the dataset.
+    async fn skipping_judges_nothing_and_stops_waiting() {
+        // Not a verdict: an honest "I don't remember" must never cost the
+        // search anything, or it stops being honest — so `judged` stays 0, the
+        // event never enters the pairs and never becomes a discard.
+        //
+        // But it does stop being counted as waiting. The deck that re-dealt a
+        // skipped card is gone; nothing asks this again, and a figure every
+        // screen labels "waiting" must not include questions that have been put
+        // to somebody and are never going to be put to anybody else.
         let store = Store::memory().await.unwrap();
-        seed(&store, "older", &["a"]).await;
-        seed(&store, "newer", &["b"]).await;
+        let id = seed(&store, "not sure", &["a"]).await;
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 1);
+        store.skip_event(&id).await.unwrap();
+        let s = store.feedback_stats(0.0).await.unwrap();
+        assert_eq!((s.pending, s.judged), (0, 0), "{s:?}");
+    }
+
+    #[tokio::test]
+    async fn undoing_a_verdict_on_a_skipped_search_puts_it_back_in_the_waiting_figure() {
+        // Skipped once, judged later, then undone: `judged_at` went back to
+        // NULL while `skips` stayed, and `dealable!` excludes a skipped event
+        // — so the search was outstanding and invisible on Settings and
+        // Insights at the same time, for ever.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "not sure yet", &["a"]).await;
+        store.skip_event(&id).await.unwrap();
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 0);
+        store.judge_hit(&id, "a", Labeller::Deck).await.unwrap();
+        store.unjudge(&id, Labeller::Deck).await.unwrap();
         assert_eq!(
-            store.next_pending(0.0).await.unwrap().unwrap().query,
-            "newer"
+            store.pending_count(0.0).await.unwrap(),
+            1,
+            "an undo puts the row back where it was before anybody answered"
         );
     }
 
     #[tokio::test]
-    async fn a_skipped_event_sinks_below_the_ones_never_looked_at() {
-        let store = Store::memory().await.unwrap();
-        seed(&store, "older", &["a"]).await;
-        let newer = seed(&store, "newer", &["b"]).await;
-        store.skip_event(&newer).await.unwrap();
-        assert_eq!(
-            store.next_pending(0.0).await.unwrap().unwrap().query,
-            "older"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_judged_event_does_not_come_back() {
+    async fn a_judged_event_stops_waiting() {
         let store = Store::memory().await.unwrap();
         let id = seed(&store, "only one", &["a"]).await;
         store.judge_hit(&id, "a", Labeller::Deck).await.unwrap();
-        assert!(store.next_pending(0.0).await.unwrap().is_none());
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -2127,12 +1995,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_deck_does_not_write_over_what_the_searcher_confirmed() {
-        // The race the other three writes are guarded for, read from the deck's
-        // side: a card is dealt, and before the operator answers it the person
-        // who made that search opens a result and presses Yes. G on the stale
-        // card used to turn their hit into a gap — the pair gone from
-        // `pairs.json`, and `expect_id` left naming an artifact on a `gap` row.
+    async fn a_later_verdict_does_not_write_over_what_the_searcher_confirmed() {
+        // The race the other three writes are guarded for, from the other
+        // side: before a second surface answers, the person who made that
+        // search opens a result and presses Yes. A stale write used to turn
+        // their hit into a gap — the pair gone from `pairs.json`, and
+        // `expect_id` left naming an artifact on a `gap` row.
         let store = Store::memory().await.unwrap();
         let id = seed(&store, "already answered", &["a"]).await;
         store.judge_hit(&id, "a", Labeller::Confirm).await.unwrap();
@@ -2221,7 +2089,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_answer_outside_the_pool_counts_as_a_find_and_a_miss() {
+    async fn an_answer_outside_the_pool_counts_as_a_find() {
         // The whole point of the "none of these" path: an artifact the ranker
         // never returned. It has no rank, so it contributes nothing to MRR and
         // it drags recall down — which is the truth about that search.
@@ -2236,7 +2104,6 @@ mod tests {
         assert_eq!(s.finds, 1);
         assert_eq!(s.recall_at_10, 0.0);
         assert_eq!(s.mrr, 0.0);
-        assert_eq!(store.misses(10).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -2254,26 +2121,6 @@ mod tests {
         assert_eq!((s.gaps, s.discards, s.hits), (1, 1, 0));
         // Neither can score: one has no answer, the other was not a question.
         assert_eq!(s.mrr, 0.0);
-    }
-
-    #[tokio::test]
-    async fn an_event_is_read_by_id_not_by_judging_order() {
-        // The assign screen asks for the event it was opened on. A capture
-        // landing while it is open takes the front of the judging order, and
-        // must not take the query off the screen with it.
-        let store = Store::memory().await.unwrap();
-        let older = seed(&store, "older", &["a"]).await;
-        seed(&store, "newer", &["b"]).await;
-
-        assert_eq!(
-            store.next_pending(0.0).await.unwrap().unwrap().query,
-            "newer"
-        );
-        assert_eq!(
-            store.event_query(&older).await.unwrap().as_deref(),
-            Some("older")
-        );
-        assert_eq!(store.event_query("no such event").await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -2303,7 +2150,7 @@ mod tests {
         // delete an eval pair silently and move recall for no visible reason.
         let store = Store::memory().await.unwrap();
         let kept = seed(&store, "judged", &["a"]).await;
-        let gone = seed(&store, "never looked at", &["a"]).await;
+        seed(&store, "never looked at", &["a"]).await;
         store.judge_hit(&kept, "a", Labeller::Deck).await.unwrap();
         sqlx::query("UPDATE search_events SET created_at = ?")
             .bind(now() - 40 * 86_400)
@@ -2312,11 +2159,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.expire_feedback(30).await.unwrap(), 1);
-        assert_eq!(
-            store.event_query(&kept).await.unwrap().as_deref(),
-            Some("judged")
-        );
-        assert_eq!(store.event_query(&gone).await.unwrap(), None);
+        let left: Vec<String> = sqlx::query_scalar("SELECT query FROM search_events")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, vec!["judged".to_string()]);
     }
 
     #[tokio::test]
@@ -2349,7 +2196,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
-        assert!(store.next_pending(0.0).await.unwrap().is_none());
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 0);
     }
 
     #[tokio::test]

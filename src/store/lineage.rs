@@ -785,6 +785,7 @@ mod tests {
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: a,
                 end_line: b,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             title: None,
             category: None,
@@ -817,7 +818,8 @@ mod tests {
                 corpus_id: c1.id.clone(),
                 span: Some(crate::store::artifacts::CorpusSpan {
                     start_line: 1,
-                    end_line: 3
+                    end_line: 3,
+                    source: crate::store::artifacts::SpanSource::Located,
                 })
             }]
         );

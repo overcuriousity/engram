@@ -7,9 +7,7 @@
 //! model again next pass.
 
 use crate::core::Core;
-use crate::core::gaps::{
-    GAP_LINK_AT, MIN_CLUSTER, cluster, cluster_key, link_threshold, terms_label,
-};
+use crate::core::gaps::{MIN_CLUSTER, cluster, cluster_key, terms_label};
 use crate::error::Result;
 use crate::store::gaps::{GapCluster, GapKind};
 
@@ -62,6 +60,17 @@ pub struct SweepReport {
     pub removed: usize,
 }
 
+/// How far past the weak line a capture has to reach to answer a gap. A gap
+/// is a question whose best hit sat *under* the line, and the line is where
+/// unrelated things stop; a hit that just clears it is the first thing that is
+/// not noise, not yet an answer. Read the other way round by `repair_once`,
+/// which drops coverage recorded under a line that has since moved up.
+pub const COVER_MARGIN: f32 = 0.05;
+
+pub fn cover_line(core: &Core) -> f32 {
+    core.weak_below() + COVER_MARGIN
+}
+
 /// Does this capture answer anything the base could not?
 ///
 /// One filtered vector query per open gap, against this document's artifacts
@@ -99,7 +108,7 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
     }
     let mut open = core
         .store
-        .open_gaps(core.embedder.model(), core.weak_below)
+        .open_gaps(core.embedder.model(), core.weak_below())
         .await?;
     if open.gaps.is_empty() {
         return Ok(0);
@@ -174,7 +183,7 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
         // half never returned. It cannot close a gap, because closing one is a
         // claim about distance.
         let Some(sim) = hit.similarity else { continue };
-        if sim < core.weak_below {
+        if sim < cover_line(core) {
             continue;
         }
         // Warned and skipped rather than returned: the vector store can hand
@@ -218,17 +227,9 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
 pub async fn sweep(core: &Core) -> Result<SweepReport> {
     let open = core
         .store
-        .open_gaps(core.embedder.model(), core.weak_below)
+        .open_gaps(core.embedder.model(), core.weak_below())
         .await?;
-    // Measured from the base's own recorded queries rather than taken from the
-    // constant, and only when there is something to group: `link_threshold`
-    // reads a sample of every stored query vector, which is work worth nothing
-    // when there is at most one gap to place.
-    let link_at = if open.gaps.len() < MIN_CLUSTER {
-        GAP_LINK_AT
-    } else {
-        link_threshold(&core.store.calibration_vecs(core.embedder.model()).await?)
-    };
+    let link_at = core.link_at();
     let vecs: Vec<&[f32]> = open.gaps.iter().map(|g| g.vec.as_slice()).collect();
     let groups = cluster(&vecs, link_at);
 
@@ -451,18 +452,18 @@ mod tests {
         core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
         let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         let corpus = captured(&core, "Mounting an E01 image read-only.").await;
         // Just under whatever this document actually scores: the capture
         // reaches the line.
-        core.weak_below = best_similarity(&core, &v, &corpus).await - 0.01;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
 
         let closed = cover(&core, &corpus).await.unwrap();
 
         assert_eq!(closed, 1);
         assert!(
             core.store
-                .open_gaps(core.embedder.model(), core.weak_below)
+                .open_gaps(core.embedder.model(), core.weak_below())
                 .await
                 .unwrap()
                 .gaps
@@ -481,10 +482,10 @@ mod tests {
         core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
         gap_search(&core, "how do I mount an E01", v.clone()).await;
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         let corpus = captured(&core, "Trimming a systemd journal.").await;
         // Just over what this document scores: nothing here came close.
-        core.weak_below = best_similarity(&core, &v, &corpus).await + 0.01;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await + 0.01);
 
         assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
         assert!(
@@ -513,9 +514,11 @@ mod tests {
         let answerable = vec![1.0, 0.0, 0.0, 0.0];
         gap_search(&core, "what does a torn write look like", dangling.clone()).await;
         let answerable_id = gap_search(&core, "how do I mount an E01", answerable.clone()).await;
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         let corpus = captured(&core, "Mounting an E01 image read-only.").await;
-        core.weak_below = best_similarity(&core, &answerable, &corpus).await - 0.01;
+        core.set_weak_below(
+            best_similarity(&core, &answerable, &corpus).await - 0.01 - COVER_MARGIN,
+        );
 
         // Closer to the first gap than anything the capture wrote, and pointing
         // at a row that is not there.
@@ -562,16 +565,16 @@ mod tests {
         core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
         let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         let corpus = captured(&core, "Mounting an E01 image read-only.").await;
-        core.weak_below = best_similarity(&core, &v, &corpus).await - 0.01;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
         assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
 
         core.delete_corpus(&corpus).await.unwrap();
 
         assert!(
             core.store
-                .open_gaps(core.embedder.model(), core.weak_below)
+                .open_gaps(core.embedder.model(), core.weak_below())
                 .await
                 .unwrap()
                 .gaps
@@ -592,9 +595,9 @@ mod tests {
         core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
         gap_search(&core, "how do I mount an E01", v.clone()).await;
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         let corpus = captured(&core, "Mounting an E01 image read-only.").await;
-        core.weak_below = best_similarity(&core, &v, &corpus).await - 0.01;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
         let before = embedder.calls();
 
         assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
@@ -625,7 +628,7 @@ mod tests {
         );
         let (rows, loose) = core
             .store
-            .gap_rows(core.embedder.model(), core.weak_below)
+            .gap_rows(core.embedder.model(), core.weak_below())
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -656,7 +659,7 @@ mod tests {
         assert_eq!(sweep(&core).await.unwrap(), SweepReport::default());
         let (rows, loose) = core
             .store
-            .gap_rows(core.embedder.model(), core.weak_below)
+            .gap_rows(core.embedder.model(), core.weak_below())
             .await
             .unwrap();
         assert!(rows.is_empty());
@@ -675,7 +678,7 @@ mod tests {
         assert_eq!((r.clusters, r.named), (1, 0));
         let (rows, _) = core
             .store
-            .gap_rows(core.embedder.model(), core.weak_below)
+            .gap_rows(core.embedder.model(), core.weak_below())
             .await
             .unwrap();
         assert_eq!(rows[0].labelled_by, "terms");
@@ -687,7 +690,7 @@ mod tests {
         assert_eq!(sweep(&core).await.unwrap().named, 1);
         assert_eq!(
             core.store
-                .gap_rows(core.embedder.model(), core.weak_below)
+                .gap_rows(core.embedder.model(), core.weak_below())
                 .await
                 .unwrap()
                 .0[0]
@@ -757,7 +760,7 @@ mod tests {
         let after = sweep(&core).await.unwrap();
         assert!(
             core.store
-                .open_gaps(core.embedder.model(), core.weak_below)
+                .open_gaps(core.embedder.model(), core.weak_below())
                 .await
                 .unwrap()
                 .capped,
@@ -772,7 +775,7 @@ mod tests {
 
         let (rows, _) = core
             .store
-            .gap_rows(core.embedder.model(), core.weak_below)
+            .gap_rows(core.embedder.model(), core.weak_below())
             .await
             .unwrap();
         let mut seen = std::collections::HashSet::new();

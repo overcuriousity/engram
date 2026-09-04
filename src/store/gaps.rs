@@ -358,10 +358,11 @@ fn pursuit_text(queries_json: &str) -> String {
         .unwrap_or_default()
 }
 
-/// How many stored query vectors the linkage calibration reads, per table.
+/// How many stored query vectors `Core::calibrate` reads, per table, and how
+/// many artifact vectors it samples against them.
 ///
 /// Every recorded search and question counts, not only the gaps: what
-/// `core::gaps::link_threshold` measures is what *unrelated* queries score
+/// `core::gaps::unrelated_line` measures is what *unrelated* pairs score
 /// under this embedder, and a sample drawn from one topic's worth of holes is
 /// the one sample that cannot say. Two hundred a side is 79,800 pairs, well
 /// under what the sweep's own clustering already costs.
@@ -702,8 +703,8 @@ impl Store {
 
     /// Query vectors from every recorded search and question under this
     /// embedder — gap or not, judged or not — newest first, `CALIBRATION_SAMPLE`
-    /// of each. What `core::gaps::link_threshold` measures the embedder's own
-    /// geometry from.
+    /// of each. What `Core::calibrate` measures the embedder's own geometry
+    /// from.
     pub async fn calibration_vecs(&self, embed_model: &str) -> Result<Vec<Vec<f32>>> {
         let mut out = Vec::new();
         for sql in [
@@ -847,10 +848,18 @@ impl Store {
     ///
     /// The cascades on `corpus_id` and `artifact_id` are untouched and still do
     /// their half: delete the capture that closed a gap and the gap comes back.
-    pub async fn trim_gap_coverage(&self) -> Result<u64> {
+    ///
+    /// Also dropped: coverage scored under `below`. The line a capture has to
+    /// reach is measured from the base and moves as it grows; a coverage
+    /// recorded when the line sat inside the embedder's noise band said a
+    /// shopping reminder was answered by a document on Windows versions, and
+    /// once the line is where it belongs that row is wrong by the same rule
+    /// that wrote it.
+    pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
         Ok(sqlx::query(
             "DELETE FROM gap_coverage
-              WHERE (kind = 'ask'
+              WHERE score < ?
+                 OR (kind = 'ask'
                      AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = gap_coverage.gap_id))
                  OR (kind IN ('search', 'unmatched')
                      AND NOT EXISTS (SELECT 1 FROM search_events WHERE id = gap_coverage.gap_id))
@@ -860,6 +869,7 @@ impl Store {
                      AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = gap_coverage.gap_id))
                  OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject')",
         )
+        .bind(below)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -1186,7 +1196,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.trim_gap_coverage().await.unwrap(),
+            store.trim_gap_coverage(0.0).await.unwrap(),
             0,
             "the repair pass collected a coverage whose subject still exists"
         );
@@ -1206,7 +1216,39 @@ mod tests {
             .execute(&store.pool)
             .await
             .unwrap();
-        assert_eq!(store.trim_gap_coverage().await.unwrap(), 1);
+        assert_eq!(store.trim_gap_coverage(0.0).await.unwrap(), 1);
+    }
+
+    /// The line a capture had to reach moves up once it is measured, and a
+    /// coverage recorded under the old one is wrong by the rule that wrote it.
+    #[tokio::test]
+    async fn coverage_under_the_line_is_collected_by_the_repair_pass() {
+        let store = Store::memory().await.unwrap();
+        let id =
+            uncovered_subject(&store, "how do ticks work", "job priority", vec![0.0, 1.0]).await;
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "job priority is a column".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .cover_gap(GapKind::Subject, &id, &src.id, &made[0].id, 0.52)
+            .await
+            .unwrap();
+        assert_eq!(store.trim_gap_coverage(0.5).await.unwrap(), 0);
+        assert_eq!(store.trim_gap_coverage(0.6).await.unwrap(), 1);
     }
 
     /// The rule every kind here already applies: no vector, no grouping, so it
@@ -1615,7 +1657,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(store.trim_gap_coverage().await.unwrap(), 1);
+        assert_eq!(store.trim_gap_coverage(0.0).await.unwrap(), 1);
 
         let left: Vec<String> = sqlx::query("SELECT gap_id FROM gap_coverage")
             .fetch_all(&store.pool)
@@ -1626,7 +1668,7 @@ mod tests {
             .collect();
         assert_eq!(left, vec![kept], "the coverage of a gap that still exists");
         // And a second pass has nothing left to do.
-        assert_eq!(store.trim_gap_coverage().await.unwrap(), 0);
+        assert_eq!(store.trim_gap_coverage(0.0).await.unwrap(), 0);
     }
 
     #[tokio::test]

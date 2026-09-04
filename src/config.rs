@@ -36,6 +36,10 @@ pub struct Config {
     #[serde(default)]
     pub sitting: SittingConfig,
     #[serde(default)]
+    pub time: TimeConfig,
+    #[serde(default)]
+    pub reap: ReapConfig,
+    #[serde(default)]
     pub recommend: RecommendConfig,
     #[serde(default)]
     pub ui: UiConfig,
@@ -356,23 +360,43 @@ impl Default for AssociateConfig {
 /// appearing in result lists cannot fill the tank for one open to fire,
 /// however often it is listed.
 ///
-/// `resynthesize_after_unconfirmed` is the `eager` counterpart: an artifact
-/// shown this many times with no confirmation recorded against it is
-/// re-synthesised from its segment. `0` disables it, and it ships disabled —
-/// re-synthesising changes what an existing base contains without anyone
-/// asking, so it is a default the harness moves.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct PromoteConfig {
     pub activation_above: f64,
-    pub resynthesize_after_unconfirmed: i64,
+    /// Cosine at or above which an artifact counts as traceable to a passage
+    /// it covers by span, when it copied no line of it.
+    ///
+    /// A span is a claim the splitter can verify for a passage and only guess
+    /// for a rewrite, so supersession asks for corroboration on top of the
+    /// majority. That corroboration used to be a line of the passage appearing
+    /// verbatim in the artifact — which is exactly what synthesis is *for* not
+    /// producing. Prose came back rewritten, no line matched, and the verbatim
+    /// passage stayed in results beside the artifact written from it: two hits
+    /// for one note, every time, on every capture that was not code.
+    ///
+    /// This is the second way to be traceable, and free: both vectors are
+    /// already stored by the time supersession runs, so it is two reads and a
+    /// cosine, never a model call.
+    ///
+    /// It is not the dedupe threshold and must not be read as one. `[consolidate]
+    /// auto_supersede` compares two *independent* artifacts, where a cosine
+    /// cannot tell "runs on ext4" from "does not run on ext4" and a judge
+    /// stands behind every hide. Here the relation is known by construction —
+    /// this artifact is the output of synthesizing this window — and the only
+    /// open question is which passage of that one window it came from. So the
+    /// bar is set to separate passages of a single document from each other,
+    /// not to assert that two texts say the same thing.
+    ///
+    /// Above 1.0 switches the path off, leaving the verbatim rule alone.
+    pub traceable_min: f32,
 }
 
 impl Default for PromoteConfig {
     fn default() -> Self {
         Self {
             activation_above: 3.0,
-            resynthesize_after_unconfirmed: 0,
+            traceable_min: 0.75,
         }
     }
 }
@@ -382,7 +406,7 @@ impl Default for PromoteConfig {
 /// or the answer was assembled by hand. Runs behind `[learn]`, which is the
 /// switch: the events it reads are the ones recording writes, and the sweep it
 /// rides on is the associative pass. The grouping line is not a key: it is
-/// measured, like the gap clusters', by `core::gaps::link_threshold`.
+/// measured, like the gap clusters', by `Core::calibrate`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct PursuitConfig {
@@ -465,6 +489,72 @@ impl Default for SittingConfig {
         // reason above it, and a derived `Default` would put that reason a
         // refactor away from the value it explains.
         Self { prime: false }
+    }
+}
+
+/// A sense of time: what counts as due, what the front page calls coming up,
+/// and the floor under the classifier.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TimeConfig {
+    /// A due reminder inside this many hours is shown on the front page and
+    /// may lift a search hit.
+    pub horizon_hours: u64,
+    /// Dates a note refers to inside this many days are listed under "Coming up".
+    pub coming_up_days: u64,
+    /// Let an open due reminder lift a hit, bounded by `associate.prime_lift`.
+    pub lift: bool,
+    /// IANA zone for doors that send none. Empty means the server's.
+    pub default_tz: String,
+}
+
+impl Default for TimeConfig {
+    fn default() -> Self {
+        Self {
+            horizon_hours: 48,
+            coming_up_days: 7,
+            lift: true,
+            default_tz: String::new(),
+        }
+    }
+}
+
+/// The reap sweep: revisit long-retired artifacts, bury what the live base
+/// already states, rewrite what it does not. Runs only where a judge model is
+/// configured — the rules alone nominate, they never tombstone.
+///
+/// The one stage that destroys captured text, which is why every field of it
+/// is written out in `config.example.toml` rather than left to these defaults:
+/// a sweep an operator cannot find is one they cannot turn off. And why
+/// `enabled = true` here is only the default *inside a `[reap]` block*: a file
+/// with no such block does not run the sweep at all, whatever this says. See
+/// `Config::disable_undeclared_reap`.
+///
+/// Nothing is lost — `graveyard` keeps the text and the judge's reason
+/// permanently — but a buried artifact leaves search, FTS and the vector store.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ReapConfig {
+    pub enabled: bool,
+    pub interval_mins: u64,
+    /// How long an artifact must have been retired before it is judged at all.
+    pub min_age_days: u64,
+    /// Model calls per run — the sweep's whole inference budget.
+    pub max_judged_per_run: u64,
+    /// Rescue rewrites per run, so one bad judging batch cannot flood the
+    /// live base with model-written text.
+    pub max_rescues_per_run: u64,
+}
+
+impl Default for ReapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_mins: 1440,
+            min_age_days: 90,
+            max_judged_per_run: 20,
+            max_rescues_per_run: 3,
+        }
     }
 }
 
@@ -780,10 +870,15 @@ pub struct VectorConfig {
     /// hit for a perfect match. The similarity is read separately — see
     /// `VectorStore::search` — and compared here.
     ///
-    /// Normalised embeddings put unrelated text around 0.0–0.2 and genuinely
-    /// related text well above 0.4, so the default sits between them. Raise it
-    /// to be told more often that nothing really matched; `0.0` turns the
-    /// labelling off.
+    /// A floor, not the line. Where unrelated text lands depends on the
+    /// embedder — around 0.0–0.2 for most, 0.45–0.6 under bge-m3, the default
+    /// — and a constant that is right for one is inside the noise band of
+    /// another, where it labels nothing weak, closes every gap on every
+    /// capture, and counts every open as a strong hit. So the line is
+    /// measured from the base's own recorded queries on the repair pass
+    /// (`Core::calibrate`) and never sits below this. Raise it to be told more
+    /// often that nothing really matched; `0.0` leaves the measurement alone
+    /// and turns the labelling off only until there is one.
     #[serde(default = "default_weak_below")]
     pub weak_below: f32,
     /// Chunks one document may contribute to a result list. `0` lets a single
@@ -832,50 +927,10 @@ pub struct TierConfig {
     pub structured_output: bool,
 }
 
-/// How much inference capture spends. `Off` embeds the source text verbatim
-/// and calls nothing; `Earned` does the same at capture and synthesizes later
-/// where use has shown it is worth it; `Eager` is one synthesis call per
-/// segment at capture — what engram did before the other two existed.
-///
-/// `Earned` is the default. What a base is for is answering, and capture
-/// cannot know which of ten thousand paragraphs will ever be asked about — so
-/// synthesising all of them spends a model call per segment on text most of
-/// which is never retrieved, and replaces the operator's own words with a
-/// rewrite before anyone has asked for one. At `earned` the source goes in as
-/// it was written and stays that way; a window is rewritten when reading has
-/// shown it is worth rewriting, and every artifact in the base can name the
-/// use that earned it. `eager` remains supported for a base that wants
-/// everything pre-written and is willing to pay for it up front.
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SynthesisMode {
-    Off,
-    #[default]
-    Earned,
-    Eager,
-}
-
-impl SynthesisMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SynthesisMode::Off => "off",
-            SynthesisMode::Earned => "earned",
-            SynthesisMode::Eager => "eager",
-        }
-    }
-}
-
-/// The window budget when no synthesizer is configured to derive one from.
-/// Estimator tokens. A synthesizer configured later whose context is smaller
-/// than the windows already stored means re-capturing; there is no migration.
-pub const DEFAULT_SEGMENT_TOKENS: usize = 4096;
 /// The retrieval unit. A target, not a ceiling: see the spec on why it is
 /// fixed rather than derived from the embedder's capacity.
 pub const DEFAULT_CHUNK_TOKENS: usize = 384;
 
-fn default_segment_tokens() -> usize {
-    DEFAULT_SEGMENT_TOKENS
-}
 fn default_chunk_tokens() -> usize {
     DEFAULT_CHUNK_TOKENS
 }
@@ -888,15 +943,22 @@ fn default_chunk_tokens() -> usize {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(try_from = "RawInferConfig")]
 pub struct InferConfig {
-    pub synthesis: SynthesisMode,
-    pub segment_tokens: usize,
-    /// `None` is allowed only at `synthesis = "off"`.
-    pub synthesize: Option<SynthesizeRole>,
+    /// Path or http(s) URL of a HF-format tokenizer.json. A URL is fetched
+    /// once and cached beside the store. Unset: the bundled default (Qwen
+    /// family). See `TokenCounter::load` — never a startup failure.
+    pub tokenizer: Option<String>,
+    /// Required: capture synthesizes, and a base without a chat model is not
+    /// a state this product has since the 2026-09 capture reshape.
+    pub synthesize: SynthesizeRole,
     pub embed: EmbedRole,
     /// `None` closes the ask door: no page, no nav entry, no tool.
     pub ask: Option<AskRole>,
     pub rerank: Option<RerankRole>,
     pub vision: Option<VisionRole>,
+    /// The speech model behind the microphone in the search box. `None` — the
+    /// default — takes the button off the page rather than leaving one that
+    /// fails, the same way an absent `vision` closes the image door.
+    pub transcribe: Option<TranscribeRole>,
 }
 
 /// The file's shape, before tiers are folded into the roles. Every endpoint
@@ -907,9 +969,7 @@ pub struct RawInferConfig {
     #[serde(default)]
     tiers: HashMap<String, TierConfig>,
     #[serde(default)]
-    synthesis: SynthesisMode,
-    #[serde(default = "default_segment_tokens")]
-    segment_tokens: usize,
+    tokenizer: Option<String>,
     #[serde(default)]
     synthesize: Option<RawSynthesizeRole>,
     embed: EmbedRole,
@@ -919,6 +979,8 @@ pub struct RawInferConfig {
     rerank: Option<RerankRole>,
     #[serde(default)]
     vision: Option<RawVisionRole>,
+    #[serde(default)]
+    transcribe: Option<TranscribeRole>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -949,6 +1011,8 @@ struct RawSynthesizeRole {
     context_opening_tokens: usize,
     #[serde(default = "default_context_overlap_tokens")]
     context_overlap_tokens: usize,
+    #[serde(default = "default_context_neighbor_tokens")]
+    context_neighbor_tokens: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1055,6 +1119,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
                     structured_output: s.structured_output.unwrap_or(st.structured_output),
                     context_opening_tokens: s.context_opening_tokens,
                     context_overlap_tokens: s.context_overlap_tokens,
+                    context_neighbor_tokens: s.context_neighbor_tokens,
                 })
             }
         };
@@ -1125,13 +1190,24 @@ impl TryFrom<RawInferConfig> for InferConfig {
         };
 
         Ok(InferConfig {
-            synthesis: raw.synthesis,
-            segment_tokens: raw.segment_tokens,
-            synthesize,
+            tokenizer: raw.tokenizer,
+            synthesize: synthesize.ok_or_else(|| {
+                "[infer.synthesize] is required: capture synthesizes, and engram has run \
+                 nothing without a chat model since the 2026-09 capture reshape — the \
+                 embed-only mode `synthesis = \"off\"` named went with it. Point it at a \
+                 tier, or give it its own `base_url` and `model` — see config.example.toml."
+                    .to_string()
+            })?,
             embed: raw.embed,
             ask,
             rerank: raw.rerank,
             vision,
+            // Folded by hand nowhere: unlike vision, this role never borrows
+            // the synthesize endpoint. A server that transcribes speech is not
+            // the server that writes chat completions — the one installation
+            // where it would be is a proxy in front of both, and there the
+            // address is worth writing twice rather than inherited by silence.
+            transcribe: raw.transcribe,
         })
     }
 }
@@ -1201,6 +1277,11 @@ pub struct SynthesizeRole {
     /// Zero disables it.
     #[serde(default = "default_context_overlap_tokens")]
     pub context_overlap_tokens: usize,
+    /// Tokens of nearest-neighbor artifacts shown to a judged capture call,
+    /// so it can resolve references against what the base already holds and
+    /// name the artifacts this capture relates to. Zero disables the block.
+    #[serde(default = "default_context_neighbor_tokens")]
+    pub context_neighbor_tokens: usize,
 }
 
 fn default_true() -> bool {
@@ -1221,6 +1302,10 @@ fn default_context_opening_tokens() -> usize {
 
 fn default_context_overlap_tokens() -> usize {
     150
+}
+
+fn default_context_neighbor_tokens() -> usize {
+    1024
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1718,6 +1803,39 @@ impl RerankStyle {
     }
 }
 
+/// The speech-to-text model the microphone in the search box speaks to.
+/// Optional: absent means there is no microphone.
+///
+/// An OpenAI-compatible `POST {base_url}/audio/transcriptions`, which is what
+/// whisper.cpp's server, faster-whisper-server, vLLM and the hosted APIs all
+/// answer. Both endpoint fields are required once the section exists — there
+/// is no tier to fall back to and no other role's address to borrow, so an
+/// under-specified block would be a microphone that fails on first press.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TranscribeRole {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// A minute, not the fifteen the other roles take. What waits on this call
+    /// is a person holding a button, and a transcription that has not come back
+    /// within a minute is one they have given up on.
+    #[serde(default = "default_transcribe_timeout_secs")]
+    pub timeout_secs: u64,
+    /// An ISO-639-1 code sent with every recording, or nothing at all.
+    ///
+    /// Worth setting where the operator speaks one language: whisper detects
+    /// the language from the audio and is at its worst at that on the two or
+    /// three words a search query usually is — a German query comes back as
+    /// English words that sound like it. Naming it skips the detection.
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+fn default_transcribe_timeout_secs() -> u64 {
+    60
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthConfig {
     pub mode: AuthMode,
@@ -1923,6 +2041,7 @@ impl Config {
         cfg.validate()?;
         cfg.warn_on_file_secrets(path);
         cfg.warn_on_defaulted_store(&raw);
+        cfg.disable_undeclared_reap(&raw);
         cfg.warn_on_inert_settings();
         cfg.warn_on_inferred_ceiling_param();
         cfg.warn_on_unplaced_plan_cost();
@@ -1949,6 +2068,31 @@ impl Config {
     fn refuse_removed_keys(raw: &config::Config) -> Result<(), ConfigError> {
         // `[learn]` is the replacement for all three: recording, the links
         // learned from it, and the pursuits that read both.
+        // The 2026-09 capture reshape: there are no synthesis modes. Capture
+        // is verbatim-first and decides per paste; [infer.synthesize] is
+        // required; the window budget is always derived from its context.
+        // `promote.resynthesize_after_unconfirmed` retired with `eager` too,
+        // and is merely ignored: it shipped disabled, so the common file says
+        // `= 0` and loses nothing by the key going quiet.
+        const RESHAPED: [&str; 2] = ["infer.synthesis", "infer.segment_tokens"];
+        let found: Vec<String> = RESHAPED
+            .iter()
+            .filter(|key| raw.get::<config::Value>(key).is_ok())
+            .map(|key| format!("  {key}"))
+            .collect();
+        if !found.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "this config sets keys removed in the 2026-09 capture reshape:\n{}\nThere are \
+                 no synthesis modes any more: [infer.synthesize] is required, capture stores \
+                 verbatim passages first and synthesizes what fits one call, and larger \
+                 corpora earn synthesis through use. Delete the keys.\n\nA base that ran \
+                 `synthesis = \"off\"` had no chat endpoint at all, and now needs one: point \
+                 [infer.synthesize] at a tier or give it its own `base_url` and `model`. \
+                 config.example.toml has both shapes.",
+                found.join("\n")
+            )));
+        }
+
         const REMOVED: [(&str, &str); 3] = [
             ("feedback.enabled", "[learn] enabled"),
             ("associate.enabled", "[learn] enabled"),
@@ -2040,13 +2184,6 @@ impl Config {
                 // costs a hash and stays on. What stops is the background
                 // sweep, which is a stream of model calls about pairs.
                 resolve!("consolidate.enabled", self.consolidate.enabled, false);
-                // With nothing promoted, `earned` is `off` with a synthesizer
-                // requirement attached. Resolving it here is what lets the
-                // five-section config start.
-                if raw.get::<config::Value>("infer.synthesis").is_err() {
-                    self.infer.synthesis = SynthesisMode::Off;
-                    resolved.push(("infer.synthesis", SynthesisMode::Off.as_str().into()));
-                }
             }
             LearnMode::Learning => {
                 resolve!("learn.enabled", self.learn.enabled, true);
@@ -2189,28 +2326,19 @@ impl Config {
                 c.auto_supersede, c.review_min
             )));
         }
-        if self.infer.synthesis != SynthesisMode::Off && self.infer.synthesize.is_none() {
-            return Err(ConfigError::Invalid(format!(
-                "infer.synthesis = \"{}\" needs [infer.synthesize]; only \"off\" runs without a \
-                 synthesizer",
-                self.infer.synthesis.as_str()
-            )));
-        }
-        if let Some(v) = &self.infer.vision
-            && v.base_url.is_none()
-            && self.infer.synthesize.is_none()
-        {
-            return Err(ConfigError::Invalid(
-                "infer.vision has no base_url or tier and there is no [infer.synthesize] to \
-                 borrow an endpoint from"
-                    .into(),
-            ));
-        }
         self.infer
             .embed
             .templates()
             .validate()
             .map_err(ConfigError::Invalid)?;
+        let tz = self.time.default_tz.trim();
+        if !tz.is_empty() && tz.parse::<chrono_tz::Tz>().is_err() {
+            return Err(ConfigError::Invalid(format!(
+                "time.default_tz {tz:?} is not an IANA zone name (e.g. \"Europe/Berlin\"): \
+                 left standing, every capture from a door that sends no zone would be \
+                 silently read and stamped in UTC"
+            )));
+        }
         Ok(())
     }
 
@@ -2227,6 +2355,45 @@ impl Config {
     /// the process's working directory rather than the base the operator has.
     /// An empty base and a refusal are both survivable; an empty base that
     /// says nothing is not. Say which paths are in force, once, at startup.
+    /// The one sweep that destroys captured text, running because nobody said
+    /// otherwise.
+    ///
+    /// `ReapConfig::default().enabled` is `true` and `config.example.toml`
+    /// spells every field out, so a new install that starts from the example
+    /// has made the choice. A base that predates the sweep has not: it upgrades
+    /// with no `[reap]` section at all and, ninety days later, begins moving
+    /// artifact text into the graveyard and deleting vector points, with the
+    /// only other gate being whether a judge model happens to be configured.
+    /// Nothing is lost — the graveyard keeps the text and the reason — but a
+    /// stage an operator cannot find is one they cannot turn off, and the block
+    /// is documented precisely so it is not a surprise.
+    ///
+    /// So the section is the consent, and its absence is the refusal. The
+    /// default inside the block stays `true` — an operator who writes `[reap]`
+    /// and only sets `min_age_days` means the sweep — but a file that never
+    /// mentions it does not run it, whatever the default says. Nothing else in
+    /// the configuration destroys text, so nothing else needs this; here it is
+    /// the difference between a stage an operator chose and one an upgrade
+    /// chose for them.
+    ///
+    /// A warning was the previous answer and it was not one: it names the right
+    /// facts to somebody already reading the log, ninety days before the first
+    /// burial, in a line that scrolls past on every boot.
+    fn disable_undeclared_reap(&mut self, raw: &config::Config) {
+        if !self.reap.enabled || raw.get::<config::Value>("reap").is_ok() {
+            return;
+        }
+        self.reap.enabled = false;
+        tracing::info!(
+            min_age_days = self.reap.min_age_days,
+            interval_mins = self.reap.interval_mins,
+            "no [reap] section: the reap sweep stays off. It is the one stage that \
+             destroys captured text, so it runs only where a file asks for it. Write \
+             `[reap] enabled = true`, or the whole block from config.example.toml, to \
+             turn it on."
+        );
+    }
+
     fn warn_on_defaulted_store(&self, raw: &config::Config) {
         if raw.get::<config::Value>("store").is_ok() {
             return;
@@ -2240,21 +2407,11 @@ impl Config {
     }
 
     fn warn_on_inert_settings(&self) {
-        if self.infer.synthesis == SynthesisMode::Earned && !self.learn.enabled {
+        if !self.learn.enabled {
             tracing::warn!(
-                "infer.synthesis = \"earned\" with learn.enabled = false: activation never \
-                 moves, so nothing is ever promoted — this is `off` under another name."
-            );
-        }
-        if self.infer.synthesis == SynthesisMode::Earned
-            && self.learn.mode == LearnMode::Learning
-            && self.promote.activation_above.is_infinite()
-        {
-            tracing::warn!(
-                "infer.synthesis = \"earned\" at learn.mode = \"learning\": activation is \
-                 recorded but nothing reads it, so no window is ever promoted. That is what \
-                 the mode is for — run the harness here, then move to \"full\" — but the \
-                 synthesizer is idle until you do."
+                "learn.enabled = false: activation never moves, so a large corpus's windows \
+                 are never promoted — only captures small enough to synthesize at capture \
+                 are ever rewritten."
             );
         }
     }
@@ -2284,15 +2441,13 @@ impl Config {
     /// The roles whose output-ceiling name is a guess: `reasoning_effort` set,
     /// `ceiling_param` not. Each with the effort the guess is made from.
     fn inferred_ceiling_params(&self) -> Vec<(&'static str, &str)> {
-        let synth = self.infer.synthesize.as_ref();
+        let s = &self.infer.synthesize;
         let mut roles: Vec<(&str, Option<&str>, Option<CeilingParam>)> = Vec::new();
-        if let Some(s) = synth {
-            roles.push((
-                "infer.synthesize",
-                s.reasoning_effort.as_deref(),
-                s.ceiling_param,
-            ));
-        }
+        roles.push((
+            "infer.synthesize",
+            s.reasoning_effort.as_deref(),
+            s.ceiling_param,
+        ));
         if let Some(a) = &self.infer.ask {
             roles.push(("infer.ask", a.reasoning_effort.as_deref(), a.ceiling_param));
         }
@@ -2302,8 +2457,8 @@ impl Config {
         if let Some(v) = &self.infer.vision {
             roles.push((
                 "infer.vision",
-                v.inherited_reasoning_effort(synth),
-                v.ceiling_param(synth),
+                v.inherited_reasoning_effort(Some(s)),
+                v.ceiling_param(Some(s)),
             ));
         }
         // The planning call infers its name the same way (`for_plan`), off a
@@ -2382,9 +2537,7 @@ impl Config {
         let mut c = self.clone();
         const R: &str = "REDACTED";
         c.vector.api_key = c.vector.api_key.map(|_| R.into());
-        if let Some(s) = c.infer.synthesize.as_mut() {
-            s.api_key = s.api_key.as_ref().map(|_| R.into());
-        }
+        c.infer.synthesize.api_key = c.infer.synthesize.api_key.as_ref().map(|_| R.into());
         c.infer.embed.api_key = c.infer.embed.api_key.map(|_| R.into());
         if let Some(a) = c.infer.ask.as_mut() {
             a.api_key = a.api_key.as_ref().map(|_| R.into());
@@ -2397,6 +2550,9 @@ impl Config {
         }
         if let Some(v) = c.infer.vision.as_mut() {
             v.api_key = v.api_key.as_ref().map(|_| R.into());
+        }
+        if let Some(t) = c.infer.transcribe.as_mut() {
+            t.api_key = t.api_key.as_ref().map(|_| R.into());
         }
         if let Some(o) = c.auth.oidc.as_mut() {
             o.client_secret = o.client_secret.as_ref().map(|_| R.into());
@@ -2448,9 +2604,8 @@ impl Config {
                 per_source_cap: 3,
             },
             infer: InferConfig {
-                synthesis: SynthesisMode::Eager,
-                segment_tokens: DEFAULT_SEGMENT_TOKENS,
-                synthesize: Some(SynthesizeRole {
+                tokenizer: None,
+                synthesize: SynthesizeRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,
@@ -2463,7 +2618,8 @@ impl Config {
                     structured_output: true,
                     context_opening_tokens: 200,
                     context_overlap_tokens: 150,
-                }),
+                    context_neighbor_tokens: 1024,
+                },
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "e".into(),
@@ -2492,6 +2648,7 @@ impl Config {
                 }),
                 rerank: None,
                 vision: None,
+                transcribe: None,
             },
             auth: AuthConfig {
                 mode: AuthMode::Local,
@@ -2512,6 +2669,8 @@ impl Config {
             pursuit: PursuitConfig::default(),
             schedule: ScheduleConfig::default(),
             sitting: SittingConfig::default(),
+            time: TimeConfig::default(),
+            reap: ReapConfig::default(),
             recommend: RecommendConfig::default(),
             ui: UiConfig::default(),
         }
@@ -2626,6 +2785,32 @@ mod tests {
     }
 
     #[test]
+    fn the_example_config_carries_the_reap_block() {
+        // Read as text before it is parsed, for the reason the background and
+        // recommend blocks are: `#[serde(default)]` would fill every one of
+        // these numbers in on a file that never mentions reaping, and a
+        // load-and-compare test would pass over a sweep nobody can find. This
+        // one destroys captured text, so "documented" is the assertion that
+        // matters most, and every key it turns on is named one at a time.
+        let path = std::path::Path::new("config.example.toml");
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(raw.contains("\n[reap]\n"), "the block is documented");
+        for key in [
+            "enabled",
+            "interval_mins",
+            "min_age_days",
+            "max_judged_per_run",
+            "max_rescues_per_run",
+        ] {
+            assert!(raw.contains(&format!("\n{key} = ")), "{key} is unnamed");
+        }
+        let cfg = Config::load(Some(path)).unwrap();
+        assert!(cfg.reap.enabled);
+        assert_eq!(cfg.reap.min_age_days, 90);
+        assert_eq!(cfg.reap.max_rescues_per_run, 3);
+    }
+
+    #[test]
     fn the_example_config_carries_the_capture_block() {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert_eq!(cfg.capture.min_extracted_chars, 200);
@@ -2657,13 +2842,7 @@ mod tests {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert!(
             cfg.infer.ask.as_ref().unwrap().ceiling_param.is_none()
-                && cfg
-                    .infer
-                    .synthesize
-                    .as_ref()
-                    .unwrap()
-                    .ceiling_param
-                    .is_none(),
+                && cfg.infer.synthesize.ceiling_param.is_none(),
             "the example config pins a ceiling name it should be leaving to the guess"
         );
     }
@@ -2687,19 +2866,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
-        assert_eq!(
-            cfg.infer.synthesize.as_ref().unwrap().timeout_secs,
-            DEFAULT_TIMEOUT_SECS
-        );
+        assert_eq!(cfg.infer.synthesize.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(
             cfg.infer.ask.as_ref().unwrap().timeout_secs,
             DEFAULT_TIMEOUT_SECS
         );
-        assert_eq!(
-            cfg.infer.synthesize.as_ref().unwrap().reasoning_effort,
-            None
-        );
+        assert_eq!(cfg.infer.synthesize.reasoning_effort, None);
     }
 
     #[test]
@@ -2914,6 +3087,38 @@ mod tests {
         p
     }
 
+    /// The section is the consent, and its absence is the refusal.
+    ///
+    /// `ReapConfig::default()` is `enabled = true` under `#[serde(default)]`, so
+    /// every config file written before the sweep existed — which is every one
+    /// of them — deserialized into a base that would begin burying artifact
+    /// text ninety days later. It is the one stage that destroys captured text,
+    /// and a warning ninety days ahead in a boot log is not a decision anybody
+    /// made.
+    #[test]
+    fn a_config_that_never_mentions_reap_does_not_run_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load(Some(&write(&dir, MINIMAL))).unwrap();
+        assert!(!cfg.reap.enabled, "an undeclared sweep stays off");
+
+        // A file that says `[reap]` and nothing else means the sweep: the
+        // default inside the block is unchanged, and writing the block is the
+        // act that turns it on.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load(Some(&write(&dir, &format!("{MINIMAL}\n[reap]\n")))).unwrap();
+        assert!(cfg.reap.enabled);
+        assert_eq!(cfg.reap.min_age_days, ReapConfig::default().min_age_days);
+
+        // And off is still off.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load(Some(&write(
+            &dir,
+            &format!("{MINIMAL}\n[reap]\nenabled = false\n"),
+        )))
+        .unwrap();
+        assert!(!cfg.reap.enabled);
+    }
+
     const MINIMAL: &str = r#"
 [server]
 bind = "127.0.0.1:8080"
@@ -2952,9 +3157,10 @@ username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
 "#;
 
-    /// The five sections the issue names, one mode, and nothing else. No
-    /// synthesizer, no tiers, no ask: the base this starts is capture, hybrid
-    /// search and whatever `[infer.embed]` can reach.
+    /// The smallest config that starts, one mode, and nothing else. The
+    /// synthesizer is in it because it is required — capture synthesizes —
+    /// but no ask, no vision, no learning: capture, hybrid search, and the
+    /// one model `[infer.synthesize]` names.
     const FIVE_SECTIONS: &str = r#"
 [server]
 bind = "127.0.0.1:8080"
@@ -2962,6 +3168,15 @@ bind = "127.0.0.1:8080"
 [vector]
 url = "http://localhost:6334"
 collection = "chunks"
+
+[infer.tiers.efficient]
+base_url = "http://localhost:8000/v1"
+model = "qwen"
+context_tokens = 32768
+max_output_tokens = 8192
+
+[infer.synthesize]
+tier = "efficient"
 
 [infer.embed]
 base_url = "http://localhost:8000/v1"
@@ -2988,10 +3203,6 @@ mode = "off"
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(cfg.learn.mode, LearnMode::Off);
         assert!(!cfg.learn.enabled);
-        // `earned` would have refused this file for having no synthesizer, and
-        // the promotion it wanted one for cannot happen at `off` anyway.
-        assert_eq!(cfg.infer.synthesis, SynthesisMode::Off);
-        assert!(cfg.infer.synthesize.is_none());
         assert!(!cfg.consolidate.enabled);
         assert!(!cfg.sitting.prime);
         assert_eq!(cfg.associate.spread_max, 0);
@@ -3044,9 +3255,6 @@ mode = "off"
         // Nothing new is written into the corpus either: a sweep that
         // generates while it measures is measuring its own inputs.
         assert!(cfg.pursuit.min_engagement.is_infinite());
-        // Synthesis is not the mode's business here: `learning` is about what
-        // moves a rank, and an eager base still writes what it always wrote.
-        assert_eq!(cfg.infer.synthesis, SynthesisMode::Earned);
         assert!(cfg.consolidate.enabled);
     }
 
@@ -3099,7 +3307,6 @@ mode = "off"
         let dump = Config::load(Some(&p)).unwrap().redacted();
         assert!(dump.contains("learn.mode = \"off\""), "{dump}");
         assert!(dump.contains("consolidate.enabled = false"), "{dump}");
-        assert!(dump.contains("infer.synthesis = off"), "{dump}");
         assert!(dump.contains("promote.activation_above = inf"), "{dump}");
     }
 
@@ -3115,6 +3322,47 @@ mode = "off"
             cfg.infer.rerank.is_none(),
             "rerank must default to disabled"
         );
+    }
+
+    #[test]
+    fn transcription_is_off_until_an_endpoint_is_named() {
+        // The microphone is a door like the image door: shipped shut, opened
+        // by naming a server. Nothing about the button is a preference — the
+        // page asks whether the role exists and renders it or does not.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        assert!(
+            Config::load(Some(&p)).unwrap().infer.transcribe.is_none(),
+            "speech-to-text must default to unconfigured"
+        );
+
+        let stt = "\n[infer.transcribe]\nbase_url = \"http://localhost:8090/v1\"\nmodel = \"whisper-1\"\n";
+        let p = write(&dir, &format!("{MINIMAL}{stt}"));
+        let role = Config::load(Some(&p)).unwrap().infer.transcribe.unwrap();
+        assert_eq!(role.base_url, "http://localhost:8090/v1");
+        assert_eq!(role.model, "whisper-1");
+        assert_eq!(role.timeout_secs, 60, "a person is holding the button");
+        assert!(
+            role.language.is_none(),
+            "detection unless a language is named"
+        );
+
+        let p = write(&dir, &format!("{MINIMAL}{stt}language = \"de\"\n"));
+        let role = Config::load(Some(&p)).unwrap().infer.transcribe.unwrap();
+        assert_eq!(role.language.as_deref(), Some("de"));
+    }
+
+    #[test]
+    fn the_transcription_key_is_redacted_in_the_dump() {
+        // `--print-config` is a thing operators paste into issues.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let stt = "\n[infer.transcribe]\nbase_url = \"http://localhost:8090/v1\"\nmodel = \"whisper-1\"\napi_key = \"sk-not-in-the-dump\"\n";
+        let p = write(&dir, &format!("{MINIMAL}{stt}"));
+        let dump = Config::load(Some(&p)).unwrap().redacted();
+        assert!(!dump.contains("sk-not-in-the-dump"), "{dump}");
+        assert!(dump.contains("REDACTED"), "{dump}");
     }
 
     #[test]
@@ -3186,6 +3434,23 @@ mode = "off"
     }
 
     #[test]
+    fn a_misspelt_default_zone_is_refused_at_startup() {
+        // "Europe/Berlim" parses as no zone and fell back to UTC without a
+        // word — the exact silent misread the capture-time zone plumbing was
+        // built to refuse.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[time]\ndefault_tz = \"Europe/Berlim\"\n"),
+        );
+        assert!(matches!(
+            Config::load(Some(&p)),
+            Err(ConfigError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn redacted_hides_secrets() {
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -3225,9 +3490,9 @@ mode = "off"
         assert_eq!(v.timeout_secs, 120);
         // Its own ceiling, sent on every call like every other role's.
         assert_eq!(v.max_output_tokens, 4096);
-        let (url, key) = v.resolve(cfg.infer.synthesize.as_ref());
-        assert_eq!(url, cfg.infer.synthesize.as_ref().unwrap().base_url);
-        assert_eq!(key, cfg.infer.synthesize.as_ref().unwrap().api_key);
+        let (url, key) = v.resolve(Some(&cfg.infer.synthesize));
+        assert_eq!(url, cfg.infer.synthesize.base_url);
+        assert_eq!(key, cfg.infer.synthesize.api_key);
     }
 
     /// How a request is read is a property of the server reading it, so the
@@ -3241,8 +3506,8 @@ mode = "off"
             &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
         );
         let mut cfg = Config::load(Some(&p)).unwrap();
-        cfg.infer.synthesize.as_mut().unwrap().ceiling_param = Some(CeilingParam::MaxTokens);
-        let synth = cfg.infer.synthesize.as_ref().unwrap().clone();
+        cfg.infer.synthesize.ceiling_param = Some(CeilingParam::MaxTokens);
+        let synth = cfg.infer.synthesize.clone();
         let v = cfg.infer.vision.as_mut().expect("configured");
 
         assert_eq!(v.ceiling_param(Some(&synth)), Some(CeilingParam::MaxTokens));
@@ -3273,8 +3538,8 @@ mode = "off"
             &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
         );
         let mut cfg = Config::load(Some(&p)).unwrap();
-        cfg.infer.synthesize.as_mut().unwrap().reasoning_effort = Some("high".into());
-        let synth = cfg.infer.synthesize.as_ref().unwrap().clone();
+        cfg.infer.synthesize.reasoning_effort = Some("high".into());
+        let synth = cfg.infer.synthesize.clone();
         let v = cfg.infer.vision.as_mut().expect("configured");
 
         assert_eq!(
@@ -3331,7 +3596,7 @@ mode = "off"
             .vision
             .as_ref()
             .unwrap()
-            .resolve(cfg.infer.synthesize.as_ref());
+            .resolve(Some(&cfg.infer.synthesize));
         assert_eq!(url, "http://vision:9000/v1");
         assert_eq!(key.as_deref(), Some("vk"));
         assert!(!cfg.redacted().contains("\"vk\""), "vision key leaked");
@@ -3427,18 +3692,12 @@ mode = "off"
         .expect("tiered config parses");
 
         // A minimal block: the one field that had no default has one now.
-        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().output_ratio, 8.0);
+        assert_eq!(cfg.infer.synthesize.output_ratio, 8.0);
 
-        assert_eq!(
-            cfg.infer.synthesize.as_ref().unwrap().base_url,
-            "http://localhost:8000/v1"
-        );
-        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().model, "qwen");
-        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().context_tokens, 32768);
-        assert_eq!(
-            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
-            16384
-        );
+        assert_eq!(cfg.infer.synthesize.base_url, "http://localhost:8000/v1");
+        assert_eq!(cfg.infer.synthesize.model, "qwen");
+        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
         assert_eq!(
             cfg.infer.ask.as_ref().unwrap().base_url,
             "http://localhost:8000/v1"
@@ -3489,10 +3748,7 @@ mode = "off"
             131072,
             "unset fields come from the tier"
         );
-        assert_eq!(
-            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
-            16384
-        );
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
     }
 
     /// A typo in a tier name must be a startup failure naming the typo, never a
@@ -3545,11 +3801,8 @@ mode = "off"
             "the example must show a tier"
         );
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
-        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().context_tokens, 32768);
-        assert_eq!(
-            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
-            16384
-        );
+        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
+        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
         assert_eq!(cfg.infer.ask.as_ref().unwrap().context_tokens, 32768);
         assert_eq!(cfg.infer.ask.as_ref().unwrap().max_output_tokens, 4096);
     }
@@ -3636,8 +3889,8 @@ mode = "off"
             "with no tier to take one from, the role keeps its own two minutes"
         );
         assert_eq!(
-            v.resolve(cfg.infer.synthesize.as_ref()).0,
-            cfg.infer.synthesize.as_ref().unwrap().base_url
+            v.resolve(Some(&cfg.infer.synthesize)).0,
+            cfg.infer.synthesize.base_url
         );
     }
 
@@ -3653,7 +3906,7 @@ mode = "off"
         // And the endpoint it named is still the one it calls.
         let v = cfg.infer.vision.as_ref().expect("configured");
         assert_eq!(
-            v.resolve(cfg.infer.synthesize.as_ref()).0,
+            v.resolve(Some(&cfg.infer.synthesize)).0,
             "http://vision:9000/v1"
         );
     }
@@ -3953,93 +4206,57 @@ mode = "off"
     "#;
 
     #[test]
-    fn synthesis_defaults_to_earned_and_parses_the_three_modes() {
+    fn a_config_without_a_synthesizer_is_refused_as_required() {
         let _guard = env_guard();
-        let cfg = load_infer(&format!(
+        let err = load_infer(&format!(
             "{BARE_PREAMBLE}
-            [infer.synthesize]
-            tier = \"efficient\"
-            output_ratio = 8.0
             [infer.ask]
             tier = \"efficient\"
             "
         ))
-        .unwrap();
-        assert_eq!(cfg.infer.synthesis, SynthesisMode::Earned);
-        assert_eq!(cfg.infer.segment_tokens, DEFAULT_SEGMENT_TOKENS);
-        for (word, mode) in [
-            ("off", SynthesisMode::Off),
-            ("earned", SynthesisMode::Earned),
-            ("eager", SynthesisMode::Eager),
-        ] {
-            let cfg = load_infer(&format!(
-                "{BARE_PREAMBLE}
-                [infer]
-                synthesis = \"{word}\"
-                [infer.synthesize]
-                tier = \"efficient\"
-                output_ratio = 8.0
-                [infer.ask]
-                tier = \"efficient\"
-                "
-            ))
-            .unwrap();
-            assert_eq!(cfg.infer.synthesis, mode, "{word}");
-        }
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("[infer.synthesize] is required"), "{err}");
+        assert!(err.contains("2026-09 capture reshape"), "{err}");
     }
 
     #[test]
-    fn off_needs_neither_synthesize_nor_ask() {
+    fn the_reshaped_keys_are_refused_by_name() {
         let _guard = env_guard();
-        let cfg = load_infer(&format!(
-            "{BARE_PREAMBLE}
-            [infer]
-            synthesis = \"off\"
-            segment_tokens = 2048
-            "
-        ))
-        .unwrap();
-        assert!(cfg.infer.synthesize.is_none());
-        assert!(cfg.infer.ask.is_none());
-        assert_eq!(cfg.infer.segment_tokens, 2048);
-    }
-
-    #[test]
-    fn earned_and_eager_refuse_to_start_without_a_synthesizer() {
-        let _guard = env_guard();
-        for word in ["earned", "eager"] {
+        for key in ["synthesis = \"earned\"", "segment_tokens = 2048"] {
             let err = load_infer(&format!(
                 "{BARE_PREAMBLE}
                 [infer]
-                synthesis = \"{word}\"
+                {key}
+                [infer.synthesize]
+                tier = \"efficient\"
                 "
             ))
             .unwrap_err()
             .to_string();
-            assert!(err.contains("infer.synthesize"), "{word}: {err}");
-            assert!(err.contains(word), "{word}: {err}");
+            assert!(err.contains("2026-09 capture reshape"), "{key}: {err}");
         }
     }
 
     #[test]
-    fn vision_without_an_endpoint_of_its_own_needs_the_synthesizer() {
+    fn vision_borrows_the_synthesizer_or_stands_on_its_own_address() {
         let _guard = env_guard();
-        let err = load_infer(&format!(
+        // No address of its own: the required synthesizer is there to borrow.
+        let cfg = load_infer(&format!(
             "{BARE_PREAMBLE}
-            [infer]
-            synthesis = \"off\"
+            [infer.synthesize]
+            tier = \"efficient\"
             [infer.vision]
             model = \"llava\"
             "
         ))
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("infer.vision"), "{err}");
+        .unwrap();
+        assert!(cfg.infer.vision.is_some());
         // With its own address it stands alone.
         let cfg = load_infer(&format!(
             "{BARE_PREAMBLE}
-            [infer]
-            synthesis = \"off\"
+            [infer.synthesize]
+            tier = \"efficient\"
             [infer.vision]
             model = \"llava\"
             base_url = \"http://localhost:9000/v1\"
@@ -4055,8 +4272,8 @@ mode = "off"
         let _guard = env_guard();
         let cfg = load_infer(&format!(
             "{BARE_PREAMBLE}
-            [infer]
-            synthesis = \"off\"
+            [infer.synthesize]
+            tier = \"efficient\"
             "
         ))
         .unwrap();
@@ -4064,8 +4281,8 @@ mode = "off"
         assert_eq!(cfg.infer.embed.effective_chunk_tokens(), 384);
         let cfg = load_infer(&format!(
             "{BARE_PREAMBLE_NO_EMBED}
-            [infer]
-            synthesis = \"off\"
+            [infer.synthesize]
+            tier = \"efficient\"
             [infer.embed]
             base_url = \"http://localhost:8000/v1\"
             model = \"small\"
@@ -4093,7 +4310,6 @@ mode = "off"
         ))
         .unwrap();
         assert_eq!(cfg.promote.activation_above, 3.0);
-        assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 0);
         // Opt-out now: promotion reads activation, and activation only moves
         // while searches are recorded.
         assert!(cfg.learn.enabled);
@@ -4106,14 +4322,12 @@ mode = "off"
             tier = \"efficient\"
             [promote]
             activation_above = 2.5
-            resynthesize_after_unconfirmed = 12
             [learn]
             enabled = false
             "
         ))
         .unwrap();
         assert_eq!(cfg.promote.activation_above, 2.5);
-        assert_eq!(cfg.promote.resynthesize_after_unconfirmed, 12);
         assert!(!cfg.learn.enabled);
     }
 

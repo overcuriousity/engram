@@ -136,5 +136,32 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                 2
             }
         },
+        args::Verb::Remind(_) | args::Verb::Journal(_) => {
+            let (text, origin, intent) = match &verb {
+                args::Verb::Remind(t) => (t.clone(), None, Some("remind")),
+                args::Verb::Journal(t) => (t.clone(), Some("journal"), None),
+                _ => unreachable!("the arm this match is inside"),
+            };
+            match capture::run_text(
+                &endpoint,
+                text,
+                cli.title.as_deref(),
+                cli.note.as_deref(),
+                origin,
+                intent,
+                &face,
+            )
+            .await
+            {
+                Ok(id) => {
+                    println!("{id}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    2
+                }
+            }
+        }
     }
 }

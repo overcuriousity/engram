@@ -10,7 +10,7 @@
 
 use crate::core::Core;
 use crate::error::{Error, Result};
-use crate::store::artifacts::{CorpusSpan, NewArtifact};
+use crate::store::artifacts::{CorpusSpan, NewArtifact, SpanSource};
 use crate::store::jobs::MAX_ATTEMPTS;
 use crate::store::segments::SegmentState;
 
@@ -42,14 +42,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     if w.state == SegmentState::Done {
         return Ok(());
     }
-    // No synthesizer: the unit cannot run, and `run_claimed` closes it before
-    // it gets here. Said again at the call so a direct caller gets an answer
-    // and not a panic.
-    let Some(synth) = core.synthesizer.clone() else {
-        return Err(Error::Validation(
-            "[infer.synthesize] is not configured; this window cannot be synthesized".into(),
-        ));
-    };
+    let synth = core.synthesizer.clone();
 
     let all_texts: Vec<&str> = all.iter().map(|s| s.text.as_str()).collect();
     let ctx = crate::infer::context::WindowContext::build(
@@ -64,6 +57,27 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // every window after it.
     let text = w.text.clone();
 
+    // The judged path: a capture small enough to be one window is judged by
+    // the same call that rewrites it — intent, events, links — against the
+    // base's nearest artifacts. A multi-window corpus is not: a manual's
+    // window is not a reminder, and its links wait for the sweeps.
+    // Which of the ten system prompts this window's calls are made with. Off
+    // the corpus, because that is where the door stamped it.
+    let lang = crate::infer::lang::of_corpus(&core.store.get_corpus(corpus_id).await?.metadata);
+
+    let judging = all.len() == 1;
+    let neighbors = if judging {
+        neighbor_context(core, corpus_id, idx).await
+    } else {
+        Vec::new()
+    };
+    let shown_ids: Vec<String> = neighbors.iter().map(|n| n.id.clone()).collect();
+    let ask = if judging {
+        Some(build_judge_ask(core, corpus_id, neighbors).await?)
+    } else {
+        None
+    };
+
     // The failure this catches is a unit retrying an over-context window against
     // the endpoint with growing backoff and no terminal state. Per-unit budgets
     // made it quieter than it used to be, not rarer: the other thirty-three
@@ -71,14 +85,12 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // window that can never fit keeps asking at the six-hour ceiling with
     // nothing in the journal naming the cause.
     //
-    // The ceiling is twice the budget rather than the budget itself, because
-    // that is what the splitter actually promises: it flushes once the buffer
-    // has *reached* the budget, and `flush` then prepends the carried heading,
-    // so a window legitimately lands somewhat over. Twice is the bound
-    // `text_with_no_structure_still_splits_by_line_cap` has always asserted.
-    // What must never happen is unbounded — the corpus that came back fifteen
-    // times its budget.
-    let window_budget = super::synthesize::segment_budget(core);
+    // The ceiling is twice the budget rather than the budget itself: the
+    // splitter aims under it but a hard-cut line can land a window somewhat
+    // over, and `text_with_no_structure_still_splits_within_budget` asserts
+    // the same bound. What must never happen is unbounded — the corpus that
+    // came back fifteen times its budget.
+    let window_budget = super::synthesize::segment_budget(core, lang);
     let window_tokens = core.counter.count(&text);
     debug_assert!(
         window_tokens <= window_budget * 2,
@@ -96,14 +108,16 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
 
     let permit = core.gate.background().await;
     let first = synth
-        .segment(crate::infer::SegmentInput {
+        .segment_judged(crate::infer::SegmentInput {
             core: &text,
             context: &ctx,
+            judge: ask.as_ref(),
+            lang,
         })
         .await;
     permit.finished();
-    let mut chunks = match first {
-        Ok(c) => c,
+    let mut reply = match first {
+        Ok(r) => r,
         Err(e) => {
             let reason = e.to_string();
             tracing::warn!(
@@ -125,7 +139,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // not, one more attempt sometimes gets it right; a second failure is stored
     // with a flag rather than dropped, because a visible warning beats losing
     // the chapter.
-    if paraphrased(&chunks, &text) {
+    if paraphrased(&reply.artifacts, &text) {
         tracing::warn!(
             corpus_id,
             window = idx,
@@ -133,14 +147,28 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         );
         let permit = core.gate.background().await;
         let second = synth
-            .segment(crate::infer::SegmentInput {
+            .segment_judged(crate::infer::SegmentInput {
                 core: &text,
                 context: &ctx,
+                judge: ask.as_ref(),
+                lang,
             })
             .await;
         permit.finished();
         match second {
-            Ok(second) => chunks = second,
+            Ok(second) => {
+                // The retry was asked for over paraphrased *artifacts*; the
+                // judgement is a separate block and a missing one is not a
+                // retraction. `parse_judged` answers `judgement: None` for a
+                // reply it had to salvage or that arrived truncated, so
+                // replacing the whole reply threw away a JUDGE block the first
+                // call had already given — and with it the reminder a capture
+                // like "erinnere mich Freitag, /mnt/backup prüfen" was made
+                // for. The retry's own judgement still wins where it has one.
+                let first_judgement = reply.judgement.take();
+                reply = second;
+                reply.judgement = reply.judgement.take().or(first_judgement);
+            }
             // The first reply parsed; it merely paraphrased. Keeping it and
             // letting `flag_unverified` mark what went missing beats losing a
             // window we can already read.
@@ -155,9 +183,15 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         }
     }
 
-    if !ctx.is_empty() {
+    let judgement = reply.judgement.take();
+    let mut chunks = reply.artifacts;
+    let neighbor_texts: Vec<&str> = ask
+        .as_ref()
+        .map(|a| a.neighbors.iter().map(|n| n.text.as_str()).collect())
+        .unwrap_or_default();
+    if !ctx.is_empty() || !neighbor_texts.is_empty() {
         let before = chunks.len();
-        chunks.retain(|c| !from_context_only(&c.text, &text, &ctx));
+        chunks.retain(|c| !from_context_only(&c.text, &text, &ctx, &neighbor_texts));
         let dropped = before - chunks.len();
         if dropped > 0 {
             // A rising count here means the configured model is ignoring the
@@ -172,22 +206,48 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         }
     }
 
-    // The span is ours to compute. Without the carried heading, which is
-    // prepended text from further up the document and occupies none of this
-    // window's lines.
-    let body: String = text
-        .lines()
-        .skip(w.carry_lines as usize)
-        .collect::<Vec<_>>()
-        .join("\n");
-    for c in &mut chunks {
-        c.corpus_lines = Some(resolve_span(&c.text, &body, &w, c.corpus_lines));
+    // The floor under the prompt's "a short note is one artifact". Logged at
+    // info like the context drop above: a rising count is the configured
+    // model ignoring the prompt, and a number in the journal beats a base
+    // full of restated judgements.
+    let allowance = artifact_allowance(window_tokens);
+    if chunks.len() > allowance {
+        tracing::info!(
+            corpus_id,
+            window = idx,
+            proposed = chunks.len(),
+            allowance,
+            "more artifacts than the window can carry; keeping the located ones"
+        );
+        chunks = within_allowance(chunks, &text, allowance);
     }
 
-    let keep = core.store.segment_keeps_artifacts(corpus_id, idx).await?;
+    // The span is ours to compute, against the window's own text. Computed
+    // beside the chunks rather than written back over `corpus_lines`: that
+    // field is the model's claim, and the resolved span is what became of it —
+    // one of them is evidence and the other is not, so they stopped being the
+    // same value.
+    let body: String = text.clone();
+    let spans: Vec<CorpusSpan> = chunks
+        .iter()
+        .map(|c| resolve_span(&c.text, &body, &w, c.corpus_lines))
+        .collect();
+
+    // A verbatim window read by the model is definitionally a promotion:
+    // its passages are the index until the artifacts land, and they are
+    // superseded rather than deleted. The stored flag covers the armed path;
+    // the state covers a window run directly, so no route through here can
+    // ever throw verbatim text away.
+    let keep = core.store.segment_write_appends(corpus_id, idx).await?;
     let written =
-        write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks)).await?;
+        write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks, spans)).await?;
     flag_unverified(core, &written, &text).await?;
+    // What is actually searchable afterwards. On a promotion that is what
+    // `embed_written` hands back and not what was written: an oversize artifact
+    // is replaced by siblings and its own row goes away, so anchoring the
+    // judgement to `written` could anchor it to an id that no longer exists —
+    // and `apply` would lose the reminder to a foreign key.
+    let mut live = written;
     if keep {
         // The replacements have to be searchable before the originals stop
         // being. `supersede_covered` takes the passages out of results, and the
@@ -197,41 +257,98 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         // and for all of it this window's lines are reachable from neither
         // side. Embedded here, inline, so the swap is a swap.
         //
-        // A refusal leaves the passages standing and the artifacts queued: the
-        // window is captured either way, the corpus embed job below will pick
-        // the artifacts up, and the next settle re-runs this. Hiding readable
-        // text behind text nothing can find is the one outcome not worth
-        // risking, so it is the direction this fails in.
-        let embedded = embed_written(core, &written).await;
-        if let Err(e) = &embedded {
-            tracing::warn!(
-                corpus_id,
-                window = idx,
-                error = %e,
-                "the promoted window's artifacts could not be embedded; \
-                 leaving its passages in results"
-            );
+        // A refusal leaves the passages standing and the artifacts queued, and
+        // the window goes back to `failed` so that something comes for it. It
+        // used to be marked `done` here with a comment claiming the next settle
+        // would re-run it: nothing re-runs a `done` window — `settle` and
+        // `finish` both read it as resolved and `reconcile` skips it — so one
+        // embedder outage during a promotion left the verbatim passages *and*
+        // their synthesized replacements in results, permanently, with
+        // `keep_artifacts` spent. `write_segment_artifacts` is idempotent under
+        // that flag, so the retry costs a model call and writes nothing twice.
+        match embed_written(core, &live).await {
+            Ok(embedded) => {
+                // A promotion: what the window's artifacts cover, they
+                // supersede, and the passages' access comes with them. Under
+                // the corpus lock as a second locked step —
+                // `write_segment_artifacts` took and released it.
+                {
+                    let _corpus = core.corpus_lock(corpus_id).await;
+                    let n = crate::jobs::promote::supersede_covered(
+                        core,
+                        corpus_id,
+                        idx,
+                        &embedded,
+                        crate::store::now(),
+                    )
+                    .await?;
+                    tracing::info!(
+                        corpus_id,
+                        window = idx,
+                        superseded = n,
+                        "promotion superseded its covered passages"
+                    );
+                }
+                live = embedded;
+            }
+            Err(e) => {
+                let reason = format!("the promoted window could not be embedded: {e}");
+                tracing::warn!(
+                    corpus_id,
+                    window = idx,
+                    error = %e,
+                    "the promoted window's artifacts could not be embedded; \
+                     leaving its passages in results and the window for a retry"
+                );
+                core.store
+                    .set_segment_state(corpus_id, idx, SegmentState::Failed, Some(&reason))
+                    .await?;
+                settle(core, corpus_id).await?;
+                return Err(e);
+            }
         }
-        if let Ok(written) = &embedded {
-            // A promotion: what the window's artifacts cover, they supersede,
-            // and the passages' access comes with them. Under the corpus lock
-            // as a second locked step — `write_segment_artifacts` took and
-            // released it.
-            let _corpus = core.corpus_lock(corpus_id).await;
-            let n = crate::jobs::promote::supersede_covered(
-                core,
-                corpus_id,
-                idx,
-                written,
-                crate::store::now(),
-            )
-            .await?;
-            tracing::info!(
+    }
+    // The judgement, once the artifacts it is about stand. Anchored to the
+    // first live one; a judgement that cannot be applied is a warning — the
+    // artifacts are already the capture.
+    //
+    // A judged window may legitimately have written none. The prompt forbids
+    // an artifact that only restates the note's intent or its dates, so a
+    // note that is nothing but a reminder leaves the model nothing to write,
+    // and the verbatim passage this window was going to promote stays as the
+    // record. It is a live row of this corpus, so it is what the moment hangs
+    // on — anchoring only to synthesized artifacts silently dropped the one
+    // reminder such a capture exists to set.
+    if let Some(j) = judgement {
+        let anchor = match live.iter().find(|c| c.in_results()) {
+            Some(c) => Some(c.id.clone()),
+            None => core
+                .store
+                .artifacts_for_segment(corpus_id, idx)
+                .await?
+                .into_iter()
+                .find(|c| c.in_results())
+                .map(|c| c.id),
+        };
+        match anchor {
+            Some(anchor) => {
+                if let Err(e) =
+                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids, &text)
+                        .await
+                {
+                    tracing::warn!(
+                        corpus_id,
+                        error = %e,
+                        "the judgement could not be applied; the artifacts stand"
+                    );
+                }
+            }
+            None => tracing::warn!(
                 corpus_id,
                 window = idx,
-                superseded = n,
-                "promotion superseded its covered passages"
-            );
+                "the judgement has nothing to hang on: the window wrote no artifact \
+                 and holds no passage"
+            ),
         }
     }
     core.store
@@ -348,6 +465,164 @@ async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
     .unwrap_or(MAX_ATTEMPTS))
 }
 
+/// The base's nearest artifacts to this capture, shown to the judged call so
+/// it can resolve references and name relations. Best-effort throughout: any
+/// failure is "no neighbors", never a failed window.
+/// How many neighbours the reserved budget buys, and what each one gets.
+/// `None` where it buys none.
+///
+/// Five shares, and a floor under each: a neighbour cut to a dozen tokens is a
+/// title and half a sentence, which tells the model nothing and costs the same
+/// fence overhead as a useful one.
+///
+/// The floor is what the *count* gives way to, not the budget. `max(64)` alone
+/// overran the reservation on every budget under 320 — five slices of 64 out
+/// of, say, 200 tokens, which is the share reserved for neighbours spent one
+/// and a half times over, against a ceiling the whole point of which is that
+/// the prompt fits. Fewer neighbours, each still worth reading, is the trade a
+/// narrow budget actually offers — and all the way down to none of them, which
+/// is why the count is capped and never raised. Clamping it up to one slot was
+/// the same overrun at the bottom of the range: a 32-token reservation buying
+/// a 64-token neighbour.
+///
+/// The property, at every budget: `per * slots <= budget`.
+fn neighbour_shares(budget: usize) -> Option<(usize, usize)> {
+    let per = (budget / 5).max(64);
+    match budget / per {
+        0 => None,
+        slots => Some((per, slots.min(5))),
+    }
+}
+
+/// Is this neighbour near enough to be worth putting in front of the model?
+///
+/// `neighbours` is a nearest-k with no floor of its own, so before this a
+/// capture with no neighbours at all still had the five nearest artifacts in
+/// the base pasted into its prompt. That is not merely tokens spent for
+/// nothing. The prompt tells the model not to extract from context, a small
+/// local model obeys that unevenly, and `from_context_only` then drops what it
+/// wrote — so a one-sentence capture whose window yielded exactly one artifact
+/// yielded none, and reached the base as an untitled verbatim passage with
+/// nothing in the captured list and any reminder read off it hanging on a row
+/// with no name.
+///
+/// `Core::weak_below` is the line, because "is this near that" is one question
+/// asked of one embedder and this is another reader of it.
+///
+/// `None` is kept rather than dropped, as everywhere else that reads this
+/// field: it is the store having no opinion, which is not the same as a low
+/// value.
+pub(crate) fn worth_showing(similarity: Option<f32>, weak_below: f32) -> bool {
+    !similarity.is_some_and(|s| s < weak_below)
+}
+
+async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::infer::Neighbor> {
+    let budget = core.synthesizer.budget().context.neighbors;
+    if budget == 0 {
+        return Vec::new();
+    }
+    // Worked out before the lookup, so a budget that can afford nothing costs
+    // no vector search and no stray embedding either.
+    let Some((per, slots)) = neighbour_shares(budget) else {
+        return Vec::new();
+    };
+    let Ok(rows) = core.store.artifacts_for_segment(corpus_id, idx).await else {
+        return Vec::new();
+    };
+    let Some(seed) = rows
+        .iter()
+        .find(|c| c.provenance == crate::store::artifacts::Provenance::Passage)
+    else {
+        return Vec::new();
+    };
+    // The seed passage may not be embedded yet — the window unit and the
+    // corpus embed job race at capture. Embedding it here is idempotent and
+    // cheap next to the model call this context is for.
+    let mut hits = core
+        .vectors
+        .neighbours(&seed.id, 8)
+        .await
+        .unwrap_or_default();
+    if hits.is_empty() {
+        let _ = crate::jobs::embed::run(core, &seed.id).await;
+        hits = core
+            .vectors
+            .neighbours(&seed.id, 8)
+            .await
+            .unwrap_or_default();
+    }
+    let mut out = Vec::new();
+    let weak_below = core.weak_below();
+    for h in hits {
+        if h.payload.corpus_id == corpus_id {
+            continue;
+        }
+        if !worth_showing(h.similarity, weak_below) {
+            continue;
+        }
+        // Cut against the per-neighbor budget with the counter the budget is
+        // written in; the fence overhead is already in `ContextBudget::total`.
+        // A character ratio here was the same defect as in `cut_chars`: on a
+        // script the estimator's 3.5 does not describe, the neighbours ran well
+        // over the share reserved for them.
+        // The share pays for the whole entry, not just its text: `[id: <uuid>]`
+        // and the title are prompt tokens like any other, and leaving them out
+        // put five neighbours' worth of header over a reservation whose only
+        // job is that the prompt fits. A share that the header alone would
+        // exhaust buys nothing worth reading, so that neighbour is skipped.
+        let overhead = crate::infer::context::NEIGHBOR_HEADER_TOKENS
+            + h.payload
+                .title
+                .as_deref()
+                .map(|t| core.counter.count(t))
+                .unwrap_or(0);
+        let Some(room) = per.checked_sub(overhead).filter(|r| *r >= 16) else {
+            continue;
+        };
+        let text = core
+            .counter
+            .cut(&h.payload.text, room, true)
+            .unwrap_or_default();
+        out.push(crate::infer::Neighbor {
+            id: h.payload.artifact_id,
+            title: h.payload.title,
+            text,
+        });
+        if out.len() == slots {
+            break;
+        }
+    }
+    out
+}
+
+/// The clock, the zone, and what the door already said — the judged call's
+/// frame of reference.
+async fn build_judge_ask(
+    core: &Core,
+    corpus_id: &str,
+    neighbors: Vec<crate::infer::Neighbor>,
+) -> Result<crate::infer::JudgeAsk> {
+    use chrono::TimeZone;
+    let src = core.store.get_corpus(corpus_id).await?;
+    let tz_name = src.metadata["tz"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| crate::core::moments::default_zone_name(&core.time.default_tz));
+    let tz = crate::core::moments::zone(Some(&tz_name));
+    let now_local = tz
+        .timestamp_opt(src.created_at, 0)
+        .single()
+        .map(|d| d.format("%Y-%m-%d %H:%M (%A)").to_string())
+        .unwrap_or_default();
+    Ok(crate::infer::JudgeAsk {
+        now_local,
+        tz: tz.name().to_string(),
+        forced_intent: src.metadata["intent"].as_str().map(String::from),
+        neighbors,
+    })
+}
+
 /// Where an artifact sits in the source document.
 ///
 /// Asking the model for `corpus_lines`, checking the answer, and having a third
@@ -358,32 +633,49 @@ async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
 /// hint for the case where nothing matches at all. Nothing here can disagree
 /// with the artifact, so nothing here has anything to report.
 ///
-/// `body` is the window without its carried heading — text prepended from
-/// further up the document, occupying none of the window's own lines. Both
-/// paths have to discount it: `locate_span` because it searches `body`, and the
-/// hint because the model numbered its lines from the top of what it was shown,
-/// and line 1 of that is the carried heading. Correcting only the first left
-/// every hinted span in a continuing section `carry_lines` too far down.
+/// `body` is the window's own text: the model numbered its lines from the top
+/// of what it was shown, so a hinted line k is source line
+/// `start_line + k - 1`.
+///
+/// Which of the three roads was taken comes back with the answer, in
+/// `CorpusSpan::source`. All three produce lines that address the same
+/// document and render the same; they are not worth the same as evidence, and
+/// `promote` reads the difference before it hides a verbatim passage.
 pub(crate) fn resolve_span(
     artifact: &str,
     body: &str,
     w: &crate::store::segments::Segment,
     hint: Option<(i64, i64)>,
-) -> (i64, i64) {
-    let shift = w.start_line - 1 - w.carry_lines;
+) -> CorpusSpan {
+    let shift = w.start_line - 1;
     let hinted = hint.map(|(a, b)| (a + shift, b + shift));
-    let span = crate::infer::verify::locate_span(artifact, body, w.start_line)
-        .or(hinted)
-        .unwrap_or((w.start_line, w.end_line));
-    // A span outside its own window would render as the wrong text.
+    let found = crate::infer::verify::locate_span(artifact, body, w.start_line);
+    let (span, source) = match (found, hinted) {
+        (Some(s), _) => (s, SpanSource::Located),
+        (None, Some(h)) => (h, SpanSource::Claimed),
+        (None, None) => ((w.start_line, w.end_line), SpanSource::Unplaced),
+    };
+    // A span outside its own window would render as the wrong text. What the
+    // clamp does to the *source* is the point: lines it had to move are no
+    // longer the ones anybody claimed, so a hint pointing outside the window
+    // comes back placing nothing rather than placing an artifact at whichever
+    // edge it was dragged to.
     let clamped = (
         span.0.clamp(w.start_line, w.end_line),
         span.1.clamp(w.start_line, w.end_line),
     );
     if clamped.0 <= clamped.1 {
-        clamped
+        CorpusSpan {
+            start_line: clamped.0,
+            end_line: clamped.1,
+            source: if clamped == span {
+                source
+            } else {
+                SpanSource::Unplaced
+            },
+        }
     } else {
-        (w.start_line, w.end_line)
+        CorpusSpan::unplaced(w.start_line, w.end_line)
     }
 }
 
@@ -418,9 +710,12 @@ pub(crate) async fn write_segment_artifacts(
     new: Vec<NewArtifact>,
 ) -> Result<Vec<crate::store::artifacts::Chunk>> {
     let _corpus = core.corpus_lock(corpus_id).await;
+    // The same question `run` asks, asked the same way: the mark *or* a
+    // verbatim state. Read as the mark alone, this deleted a promotion's
+    // passages out from under a caller that had decided to keep them.
     let keep = core
         .store
-        .segment_keeps_artifacts(corpus_id, segment_idx)
+        .segment_write_appends(corpus_id, segment_idx)
         .await?;
     if keep {
         // A promotion re-run: the process died between the insert and `done`.
@@ -465,6 +760,48 @@ pub(crate) async fn write_segment_artifacts(
     core.store.insert_artifacts(corpus_id, &new).await
 }
 
+/// The most artifacts a window of `input_tokens` may yield.
+///
+/// One per thirty tokens, never fewer than one. A 9B model told "if a passage
+/// covers three techniques, emit three" and then handed a JUDGE block naming
+/// three things wrote a one-sentence reminder up as six artifacts, four of
+/// them restating the judgement. The prompt now forbids that; this is the
+/// floor under the prompt, because a prompt is a request and a truncation is
+/// not. Thirty is generous: a three-line bug report of seventy tokens still
+/// gets two, and a chapter gets a hundred.
+pub(crate) fn artifact_allowance(input_tokens: usize) -> usize {
+    (input_tokens / 30).max(1)
+}
+
+/// The artifacts that fit the allowance, located ones first.
+///
+/// When the model over-delivers, what is kept is what can be traced to the
+/// window: an artifact whose text locates verbatim in the source is evidence,
+/// a rewrite is a claim. Among equals the model's own order stands, which is
+/// what a stable sort gives.
+///
+/// The allowance never cuts into the evidence. Every located artifact is
+/// kept even when there are more of them than the allowance permits — a
+/// window that really does reproduce five of its own passages has said so
+/// five times — and the allowance decides only how many rewrites ride along
+/// behind them.
+pub(crate) fn within_allowance(
+    mut chunks: Vec<crate::infer::ProposedArtifact>,
+    window: &str,
+    allowance: usize,
+) -> Vec<crate::infer::ProposedArtifact> {
+    if chunks.len() <= allowance {
+        return chunks;
+    }
+    chunks.sort_by_key(|c| crate::infer::verify::locate_span(&c.text, window, 1).is_none());
+    let located = chunks
+        .iter()
+        .filter(|c| crate::infer::verify::locate_span(&c.text, window, 1).is_some())
+        .count();
+    chunks.truncate(allowance.max(located));
+    chunks
+}
+
 /// Did this artifact come from a context block rather than from the window?
 ///
 /// The prompt says not to extract from context, and a small local model obeys
@@ -474,15 +811,26 @@ pub(crate) async fn write_segment_artifacts(
 /// properly; located nowhere, keep — that is an artifact the model reworded
 /// hard, which flag_unverified has always handled and which must not start
 /// silently disappearing.
+///
+/// `neighbors` are checked alongside the context blocks and are not optional.
+/// The prompt labels that block "context only" like the rest, but neighbour
+/// text lives on `JudgeAsk`, not on `WindowContext`, so `blocks()` never sees
+/// it — and at the shipped `context_neighbor_tokens = 1024` it is the largest
+/// context block on the prompt, larger than the opening and the overlap
+/// together. The one block with no structural guard was the one most worth
+/// guarding: a neighbour is an artifact the base already holds, so a model
+/// restating one writes a second copy of it.
 pub(crate) fn from_context_only(
     text: &str,
     core_text: &str,
     ctx: &crate::infer::context::WindowContext,
+    neighbors: &[&str],
 ) -> bool {
     if crate::infer::verify::locate_span(text, core_text, 1).is_some() {
         return false;
     }
     ctx.blocks()
+        .chain(neighbors.iter().copied())
         .any(|b| crate::infer::verify::locate_span(text, b, 1).is_some())
 }
 
@@ -537,17 +885,20 @@ pub(crate) async fn flag_unverified(
 pub(crate) fn proposed_to_new(
     segment_idx: i64,
     proposed: Vec<crate::infer::ProposedArtifact>,
+    spans: Vec<CorpusSpan>,
 ) -> Vec<NewArtifact> {
+    // Positional, so they have to be the same list: `spans` is built by
+    // mapping over the chunks after the context-block drop, and nothing may
+    // filter between.
+    debug_assert_eq!(proposed.len(), spans.len());
+    let mut spans = spans.into_iter();
     proposed
         .into_iter()
         .enumerate()
         .map(|(i, p)| NewArtifact {
             ordinal: i as i64,
             text: p.text,
-            corpus_span: p.corpus_lines.map(|(a, b)| CorpusSpan {
-                start_line: a,
-                end_line: b,
-            }),
+            corpus_span: spans.next(),
             title: p.title,
             category: p.category,
             tags: p.tags,
@@ -559,6 +910,50 @@ pub(crate) fn proposed_to_new(
 
 #[cfg(test)]
 mod tests {
+
+    /// A neighbour under the weak line is not shown. The capture that made
+    /// this necessary: one sentence about working hours, whose five nearest
+    /// artifacts were five unrelated ones, one of which the model restated —
+    /// and `from_context_only` dropped it, leaving the capture with no
+    /// artifact at all.
+    #[test]
+    fn a_neighbour_below_the_line_is_not_put_in_front_of_the_model() {
+        assert!(super::worth_showing(Some(0.71), 0.6));
+        assert!(
+            super::worth_showing(Some(0.6), 0.6),
+            "the line is inclusive"
+        );
+        assert!(!super::worth_showing(Some(0.59), 0.6));
+        // No opinion is not a low score: an exact lexical match reaches here
+        // with nothing set, and it is the opposite of weak.
+        assert!(super::worth_showing(None, 0.6));
+        // A base that has never measured its line runs at `weak_floor`, and a
+        // floor of zero keeps everything — which is what it meant before.
+        assert!(super::worth_showing(Some(0.0), 0.0));
+    }
+
+    /// The reservation is a ceiling, and the count is what gives way to the
+    /// floor under each share. `clamp(1, 5)` raised the count instead, so a
+    /// budget under the floor bought one neighbour worth twice what was
+    /// reserved for all of them.
+    #[test]
+    fn the_neighbour_shares_never_add_up_to_more_than_was_reserved() {
+        for budget in 0..2_000usize {
+            if let Some((per, slots)) = super::neighbour_shares(budget) {
+                assert!(
+                    per * slots <= budget,
+                    "budget {budget}: {slots} × {per} is over the reservation"
+                );
+                assert!((1..=5).contains(&slots), "budget {budget}: {slots} slots");
+                assert!(per >= 64, "budget {budget}: {per} is not worth reading");
+            }
+        }
+        assert_eq!(super::neighbour_shares(0), None);
+        assert_eq!(super::neighbour_shares(32), None, "no share worth a fence");
+        assert_eq!(super::neighbour_shares(64), Some((64, 1)));
+        assert_eq!(super::neighbour_shares(200), Some((64, 3)));
+        assert_eq!(super::neighbour_shares(1_024), Some((204, 5)));
+    }
 
     #[tokio::test]
     async fn a_windows_attempts_are_read_from_this_tenants_row_only() {
@@ -642,7 +1037,7 @@ mod tests {
         assert!(
             windows[1..]
                 .iter()
-                .all(|w| w.state == SegmentState::Pending),
+                .all(|w| w.state == SegmentState::Verbatim),
             "a unit segmented a window that was not its own"
         );
     }
@@ -770,26 +1165,16 @@ mod tests {
             .ingest("alpha line\n\nbravo line", "web", None)
             .await
             .unwrap();
+        // Capture writes the passages and arms the window with `keep`: the
+        // one run below is already the promotion-shaped read.
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
         run(&core, &unit_target(&out.id, 0)).await.unwrap();
-        let before = core
-            .store
-            .artifact_ids_for_segment(&out.id, 0)
-            .await
-            .unwrap();
 
-        // The keep mark is what makes the re-read a promotion.
-        core.store.reset_segment(&out.id, 0, true).await.unwrap();
-        run(&core, &unit_target(&out.id, 0)).await.unwrap();
-
-        let after = core
-            .store
-            .artifact_ids_for_segment(&out.id, 0)
-            .await
-            .unwrap();
-        let written: Vec<String> = after
-            .into_iter()
-            .filter(|id| !before.contains(id))
+        let rows = core.store.artifacts_for_segment(&out.id, 0).await.unwrap();
+        let written: Vec<String> = rows
+            .iter()
+            .filter(|c| c.provenance != crate::store::artifacts::Provenance::Passage)
+            .map(|c| c.id.clone())
             .collect();
         assert!(!written.is_empty(), "the fixture must promote something");
         for c in core.store.artifacts_by_ids(&written).await.unwrap() {
@@ -820,9 +1205,8 @@ mod tests {
         let mut core = test_core().await;
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        core.synthesizer = Some(std::sync::Arc::new(
-            crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"),
-        ));
+        core.synthesizer =
+            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"));
 
         let err = run(&core, &unit_target(&out.id, 0)).await.unwrap_err();
         assert!(err.retryable(), "the window is still owed a call");
@@ -836,16 +1220,15 @@ mod tests {
         );
     }
 
-    /// A window fixture for the span tests: the text is irrelevant to them, the
-    /// line range and the carried heading are the whole point.
-    fn window(start_line: i64, end_line: i64, carry_lines: i64) -> crate::store::segments::Segment {
+    /// A window fixture for the span tests: the text is irrelevant to them,
+    /// the line range is the whole point.
+    fn window(start_line: i64, end_line: i64) -> crate::store::segments::Segment {
         crate::store::segments::Segment {
             corpus_id: "c".into(),
             idx: 1,
             start_line,
             end_line,
             text: String::new(),
-            carry_lines,
             state: SegmentState::Pending,
             attempts: 0,
             last_error: None,
@@ -853,55 +1236,39 @@ mod tests {
     }
 
     #[test]
-    fn a_hinted_span_discounts_the_carried_heading_too() {
-        // The window covers source lines 50-60 and opens with one heading
-        // carried from further up, so the model's line 2 is source line 50.
-        // The artifact is reworded past recognition, which is exactly when the
-        // hint is all there is — and the path that used it was the one place
-        // the carried heading was still being counted.
-        let w = window(50, 60, 1);
-        let body = "first body line\nsecond body line";
-        assert_eq!(
-            resolve_span(
-                "nothing here matches the source at all",
-                body,
-                &w,
-                Some((2, 3))
-            ),
-            (50, 51)
-        );
-    }
-
-    #[test]
-    fn a_window_carrying_nothing_reads_the_hint_straight_through() {
-        let w = window(50, 60, 0);
+    fn an_unlocatable_artifact_reads_the_hint_against_the_window() {
+        let w = window(50, 60);
+        // The lines are the hint's, shifted onto the document — and they come
+        // back marked as what they are: a claim, which places the artifact
+        // without verifying it.
         assert_eq!(
             resolve_span("unlocatable", "a\nb", &w, Some((2, 3))),
-            (51, 52)
+            CorpusSpan::claimed(51, 52)
         );
     }
 
     #[test]
     fn the_artifacts_own_text_beats_the_hint() {
         // `locate_span` reads the artifact; the hint is only a claim about it.
-        let w = window(50, 60, 1);
+        let w = window(50, 60);
         let body = "first body line\nsecond body line";
         assert_eq!(
             resolve_span("second body line", body, &w, Some((9, 9))),
-            (51, 51)
+            CorpusSpan::located(51, 51)
         );
     }
 
     #[test]
     fn a_hint_pointing_outside_the_window_falls_back_to_the_whole_window() {
-        let w = window(50, 60, 1);
-        // Discounting the carry can push a hint of line 1 — the heading
-        // itself — below the window's first line. Clamping keeps it inside.
+        let w = window(50, 60);
         assert_eq!(
-            resolve_span("unlocatable", "a\nb", &w, Some((1, 1))),
-            (50, 50)
+            resolve_span("unlocatable", "a\nb", &w, Some((-3, -3))),
+            CorpusSpan::unplaced(50, 50)
         );
-        assert_eq!(resolve_span("unlocatable", "a\nb", &w, None), (50, 60));
+        assert_eq!(
+            resolve_span("unlocatable", "a\nb", &w, None),
+            CorpusSpan::unplaced(50, 60)
+        );
     }
 
     #[test]
@@ -919,20 +1286,103 @@ mod tests {
         assert!(!from_context_only(
             "the window says something quite specific here",
             core_text,
-            &ctx
+            &ctx,
+            &[]
         ));
         // Drawn from a context block and nowhere in the window: drop.
         assert!(from_context_only(
             "the following window describes another procedure",
             core_text,
-            &ctx
+            &ctx,
+            &[]
         ));
         // Located nowhere at all — a heavily reworded artifact. Keep it, so it
         // reaches flag_unverified the way it does today instead of vanishing.
         assert!(!from_context_only(
             "an entirely reworded statement about unrelated matters",
             core_text,
-            &ctx
+            &ctx,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn the_allowance_is_one_artifact_per_thirty_tokens_and_never_zero() {
+        assert_eq!(artifact_allowance(0), 1);
+        assert_eq!(artifact_allowance(20), 1);
+        assert_eq!(artifact_allowance(29), 1);
+        assert_eq!(artifact_allowance(70), 2);
+        assert_eq!(artifact_allowance(3000), 100);
+    }
+
+    #[test]
+    fn over_allowance_keeps_located_artifacts_first_then_the_models_order() {
+        let window = "erinnere mich an den Gastroentereologentermin, Freitag 13:45 uhr.";
+        let art = |text: &str| crate::infer::ProposedArtifact {
+            text: text.into(),
+            title: None,
+            category: None,
+            tags: vec![],
+            corpus_lines: None,
+            caveats: vec![],
+            pinned: false,
+        };
+        let chunks = vec![
+            art("The note references a specific future event on Friday at 13:45."),
+            art("erinnere mich an den Gastroentereologentermin, Freitag 13:45 uhr."),
+            art("The reminder is set for Friday, 2026-09-05 at 13:45."),
+        ];
+        let kept = within_allowance(chunks, window, 1);
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].text.starts_with("erinnere mich"));
+
+        // The evidence is never cut: three located artifacts survive an
+        // allowance of one, and only the rewrites behind them are dropped.
+        let chunks = vec![
+            art("The reminder is set for Friday, 2026-09-05 at 13:45."),
+            art("erinnere mich an den Gastroentereologentermin,"),
+            art("Freitag 13:45 uhr."),
+        ];
+        let kept = within_allowance(chunks, window, 1);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|c| !c.text.starts_with("The reminder")));
+
+        // Under the allowance nothing moves.
+        let chunks = vec![art("b"), art("a")];
+        let kept = within_allowance(chunks, window, 5);
+        assert_eq!(
+            kept.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
+    }
+
+    /// The NEIGHBORS block is on the prompt and was on no guard. A neighbour is
+    /// an artifact the base already holds, so restating one is a duplicate of
+    /// something already stored — the exact outcome this check exists to stop.
+    #[test]
+    fn an_artifact_restating_a_neighbour_is_recognised() {
+        use crate::infer::context::WindowContext;
+
+        let core_text = "the window says something quite specific here";
+        let ctx = WindowContext {
+            opening: None,
+            before: None,
+            after: None,
+        };
+        let neighbors = ["PUID is Microsoft's per-user identifier for a licence"];
+
+        assert!(from_context_only(
+            "PUID is Microsoft's per-user identifier for a licence",
+            core_text,
+            &ctx,
+            &neighbors
+        ));
+        // The window still wins: material in both places belongs to the window.
+        assert!(!from_context_only(
+            "the window says something quite specific here",
+            core_text,
+            &ctx,
+            &neighbors
         ));
     }
 
@@ -954,13 +1404,11 @@ mod tests {
                         start_line: 1,
                         end_line: 2,
                         text: "l1\nl2",
-                        carry_lines: 0,
                     },
                     crate::store::segments::NewSegment {
                         start_line: 3,
                         end_line: 4,
                         text: "l3\nl4",
-                        carry_lines: 0,
                     },
                 ],
             )

@@ -7,19 +7,17 @@ use crate::infer::budget::TokenCounter;
 use crate::infer::split::{Window, split_into_segments};
 use crate::store::artifacts::{CorpusSpan, NewArtifact, Provenance};
 use crate::store::corpora::CorpusStatus;
+use crate::store::segments::SegmentState;
 
 /// A document's name, derived locally: longer than this is a paragraph.
 pub const TITLE_MAX: usize = 80;
 
-/// One verbatim slice of a window: the retrieval unit at `off` and `earned`.
+/// One verbatim slice of a window: the retrieval unit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passage {
-    /// The heading this text sits under, as the document wrote it — the
-    /// carried heading of a continuation, or the most recent heading inside
-    /// the window above it. Never inferred.
+    /// The heading this text sits under, as the document wrote it. Never
+    /// inferred.
     pub title: Option<String>,
-    /// The slice itself. A carried heading is *not* in here: it is not one of
-    /// the lines the span names, and the embedding input would carry it twice.
     pub text: String,
     pub start_line: i64,
     pub end_line: i64,
@@ -111,78 +109,40 @@ fn strip_links(bare: &str) -> String {
     out
 }
 
-/// The first heading among the next `n` lines, with all `n` consumed.
-///
-/// Consuming all of them is the whole point. The carried lines belong to the
-/// window above rather than to this passage's body, so the iterator must be
-/// left standing just past them — and `find` alone stops at the heading, which
-/// leaves every carried line after it to be read as body text. `flush` emits a
-/// carry of 0 or 1 today, and at 1 the two spellings agree; at 2 they would
-/// not, and every passage span below here would quietly shift by a line.
-fn carried_heading<'a>(lines: &mut impl Iterator<Item = &'a str>, n: usize) -> Option<String> {
-    let carried: Vec<&str> = lines.take(n).collect();
-    carried
-        .into_iter()
-        .find(|l| is_heading(l))
-        .map(heading_title)
-}
-
 /// Split one window into passages sized to the embedder.
 ///
 /// The same splitter that made the window, called again with the retrieval
-/// budget, over the window's *body* — its text minus the heading the outer
-/// split carried in (`carry_lines`), which belongs to the document further up
-/// and occupies none of this window's lines. Passage spans therefore partition
-/// `start_line..=end_line` and never cross the window: promotion later
-/// supersedes a whole number of them.
+/// budget. Passage spans partition `start_line..=end_line` and never cross
+/// the window: promotion later supersedes a whole number of them.
 ///
-/// Titles: a continuation passage takes the heading the inner split carried
-/// into it (and that heading leaves its `text`); a passage that contains a
-/// heading is titled by the first one it contains; a passage with neither
-/// takes the last heading seen above it, the window's own carried heading
-/// included. `is_heading` knows Markdown `#` headings only, so plain text
+/// Titles: a passage that contains a heading is titled by the first one it
+/// contains; a passage without one takes the last heading seen above it in
+/// this window. `is_heading` knows Markdown `#` headings only, so plain text
 /// yields untitled passages — nothing is inferred to fill the gap.
 pub fn split_passages(
     window: &Window,
     counter: &TokenCounter,
     chunk_tokens: usize,
 ) -> Vec<Passage> {
-    let carry = window.carry_lines.max(0) as usize;
-    let mut lines = window.text.lines();
-    let outer_heading: Option<String> = (carry > 0)
-        .then(|| carried_heading(&mut lines, carry))
-        .flatten();
-    let body: String = lines.collect::<Vec<_>>().join("\n");
-
-    let inner = split_into_segments(&body, counter, chunk_tokens.max(1));
+    let inner = split_into_segments(&window.text, counter, chunk_tokens.max(1));
     let mut out = Vec::with_capacity(inner.len());
-    let mut last_heading: Option<String> = outer_heading;
+    let mut last_heading: Option<String> = None;
     for p in inner {
-        let pc = p.carry_lines.max(0) as usize;
-        let mut plines = p.text.lines();
-        let carried: Option<String> = (pc > 0).then(|| carried_heading(&mut plines, pc)).flatten();
-        let own: Vec<&str> = plines.collect();
+        let own: Vec<&str> = p.text.lines().collect();
         let inside: Option<String> = own.iter().find(|l| is_heading(l)).map(|l| heading_title(l));
-        let title = carried
-            .clone()
-            .or_else(|| inside.clone())
-            .or_else(|| last_heading.clone());
-        // What the next passage inherits if the splitter carries nothing: the
-        // last heading seen in document order.
+        let title = inside.or_else(|| last_heading.clone());
         if let Some(h) = own.iter().rev().find(|l| is_heading(l)) {
             last_heading = Some(heading_title(h));
-        } else if carried.is_some() {
-            last_heading = carried.clone();
         }
-        // Body line k is document line `window.start_line + k - 1`: the body
-        // starts where the window's own lines start. Clamped, because a cut
-        // long line can put more text lines in the body than the document has.
+        // Window line k is document line `window.start_line + k - 1`. Clamped,
+        // because a hard-cut long line can put more text lines in the window's
+        // text than the document has.
         let start =
             (window.start_line + p.start_line - 1).clamp(window.start_line, window.end_line);
         let end = (window.start_line + p.end_line - 1).clamp(start, window.end_line);
         out.push(Passage {
             title,
-            text: own.join("\n"),
+            text: p.text,
             start_line: start,
             end_line: end,
         });
@@ -190,10 +150,10 @@ pub fn split_passages(
     out
 }
 
-/// The whole of capture at `off` and `earned`: split into windows, write them
-/// `verbatim`, split each window into passages, write those, name the document
-/// without a model, and finish the corpus the way a synthesized one finishes.
-/// No inference call anywhere on this path.
+/// The whole of capture: split into windows, write them `verbatim`, split
+/// each window into passages, write those, name the document without a model,
+/// and finish the corpus. No inference call anywhere on this path — the one
+/// call a small capture gets is *armed* here and made by the window job.
 ///
 /// Idempotent per segment: a process that dies between two segments' inserts
 /// re-runs this, and a segment that already owns rows is left alone.
@@ -202,7 +162,10 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     let windows = split_into_segments(
         &src.raw_text,
         &core.counter,
-        super::synthesize::segment_budget(core),
+        // Against the prompt this corpus will be synthesized with: the split
+        // decides how much text one call is handed, so it has to be measured
+        // against the same overhead that call will carry.
+        super::synthesize::segment_budget(core, crate::infer::lang::of_corpus(&src.metadata)),
     );
     if windows.is_empty() {
         tracing::warn!(corpus_id, "source has no usable text");
@@ -218,7 +181,6 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
             start_line: w.start_line,
             end_line: w.end_line,
             text: w.text.as_str(),
-            carry_lines: w.carry_lines,
         })
         .collect();
     core.store.upsert_segments(corpus_id, &rows).await?;
@@ -244,10 +206,9 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
             .map(|(i, p)| NewArtifact {
                 ordinal: i as i64,
                 text: p.text,
-                corpus_span: Some(CorpusSpan {
-                    start_line: p.start_line,
-                    end_line: p.end_line,
-                }),
+                // Found, not claimed: a passage *is* these lines — it was cut
+                // from them, and its text is theirs verbatim.
+                corpus_span: Some(CorpusSpan::located(p.start_line, p.end_line)),
                 title: p.title,
                 category: None,
                 tags: vec![],
@@ -270,7 +231,31 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     // Renumbers, measures coverage (green: the passages partition the
     // document), arms the embed and moves the corpus on. The same function a
     // synthesized corpus reaches through its last window's settle.
-    super::synthesize::finish(core, corpus_id).await
+    super::synthesize::finish(core, corpus_id).await?;
+
+    // The size fork. One window = the whole capture fits one synthesis call:
+    // arm that call now instead of waiting for use to earn it. `keep_artifacts`
+    // puts the window job on its promotion path — append, embed inline,
+    // supersede the covered passages — so a failed or slow call leaves the
+    // verbatim capture searchable and the job retryable. Guarded like
+    // promotion is: a window already read, or put back by an operator's undo,
+    // is not re-armed by a re-run of capture.
+    if windows.len() == 1
+        && core.store.segment_state(corpus_id, 0).await? == Some(SegmentState::Verbatim)
+        && !core.store.segment_no_promote(corpus_id, 0).await?
+    {
+        core.store.reset_segment(corpus_id, 0, true).await?;
+        core.store
+            .rearm_idle_seq(
+                crate::store::jobs::Stage::SegmentWindow,
+                "segment",
+                &crate::jobs::window::unit_target(corpus_id, 0),
+                0,
+            )
+            .await?;
+        tracing::info!(corpus_id, "small capture: synthesis armed at capture");
+    }
+    Ok(())
 }
 
 /// A corpus title with no model: the first heading, else the first non-empty
@@ -299,20 +284,19 @@ mod tests {
     use crate::infer::budget::TokenCounter;
     use crate::infer::split::Window;
 
-    fn window(text: &str, start_line: i64, carry_lines: i64) -> Window {
-        let own = text.lines().count() as i64 - carry_lines;
+    fn window(text: &str, start_line: i64) -> Window {
+        let own = text.lines().count() as i64;
         Window {
             text: text.to_string(),
             start_line,
             end_line: start_line + own - 1,
-            carry_lines,
         }
     }
 
     #[test]
     fn a_window_that_fits_is_one_passage_whose_span_is_the_window() {
-        let w = window("para one\n\npara two", 10, 0);
-        let p = split_passages(&w, &TokenCounter, 1000);
+        let w = window("para one\n\npara two", 10);
+        let p = split_passages(&w, &TokenCounter::default(), 1000);
         assert_eq!(p.len(), 1);
         assert_eq!((p[0].start_line, p[0].end_line), (10, 12));
         assert_eq!(p[0].text, "para one\n\npara two");
@@ -326,8 +310,8 @@ mod tests {
             .map(|i| format!("paragraph {i} ").repeat(8))
             .collect();
         let text = paras.join("\n\n");
-        let w = window(&text, 1, 0);
-        let p = split_passages(&w, &TokenCounter, 40);
+        let w = window(&text, 1);
+        let p = split_passages(&w, &TokenCounter::default(), 40);
         assert!(p.len() > 1, "{}", p.len());
         assert_eq!(p[0].start_line, 1);
         assert_eq!(p.last().unwrap().end_line, w.end_line);
@@ -341,15 +325,12 @@ mod tests {
     }
 
     #[test]
-    fn the_carried_heading_becomes_the_title_and_leaves_the_text() {
-        // A continuation window: the splitter carried "## Recovery" in from
-        // the previous window as line 1 of its text.
-        let w = window("## Recovery\nstep three\nstep four", 40, 1);
-        let p = split_passages(&w, &TokenCounter, 1000);
+    fn a_window_opening_with_a_heading_titles_its_passage_by_it() {
+        let w = window("## Recovery\nstep three\nstep four", 40);
+        let p = split_passages(&w, &TokenCounter::default(), 1000);
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].title.as_deref(), Some("Recovery"));
-        assert_eq!(p[0].text, "step three\nstep four");
-        assert_eq!((p[0].start_line, p[0].end_line), (40, 41));
+        assert_eq!((p[0].start_line, p[0].end_line), (40, 42));
     }
 
     #[test]
@@ -359,9 +340,9 @@ mod tests {
             "mount words ".repeat(12),
             "more mount words ".repeat(12)
         );
-        let w = window(&body, 1, 0);
-        let p = split_passages(&w, &TokenCounter, 40);
-        assert!(p.len() >= 3, "{}", p.len());
+        let w = window(&body, 1);
+        let p = split_passages(&w, &TokenCounter::default(), 40);
+        assert!(p.len() >= 2, "{}", p.len());
         // The heading opens its own passage, which holds the heading line
         // verbatim and is titled by it; the intro line before it stands alone
         // and untitled.
@@ -384,20 +365,19 @@ mod tests {
     }
 
     #[test]
-    fn a_continuation_window_with_no_inner_heading_keeps_the_outer_one_throughout() {
+    fn a_windows_heading_titles_every_passage_under_it() {
         let body = format!(
             "## Outer\n{}\n\n{}",
             "first part words ".repeat(12),
             "second part words ".repeat(12)
         );
-        let w = window(&body, 20, 1);
-        let p = split_passages(&w, &TokenCounter, 40);
+        let w = window(&body, 20);
+        let p = split_passages(&w, &TokenCounter::default(), 40);
         assert!(p.len() >= 2);
         assert!(
             p.iter().all(|x| x.title.as_deref() == Some("Outer")),
             "{p:?}"
         );
-        assert!(p.iter().all(|x| !x.text.contains("## Outer")));
     }
 
     #[test]
@@ -466,17 +446,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_at_off_writes_passages_marks_segments_verbatim_and_finishes() {
-        let mut core = crate::core::test_support::test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Off;
-        core.synthesizer = None;
+    async fn capture_writes_passages_marks_segments_verbatim_and_finishes() {
+        let core = crate::core::test_support::test_core().await;
         let text = format!(
             "# Manual\n\n## Install\n{}\n\n## Recover\n{}",
-            "install words ".repeat(40),
-            "recover words ".repeat(40)
+            "install words ".repeat(600),
+            "recover words ".repeat(600)
         );
         let out = core.ingest(&text, "web", None).await.unwrap();
-        // The Synthesize job is what capture queued; run it.
+        // The Synthesize job is what capture queued; run it. Multi-window on
+        // purpose: this test is about the pure verbatim path, and a capture
+        // small enough for one call would arm its synthesis at capture.
         assert!(crate::jobs::run_one(&core).await.unwrap());
 
         let s = core.store.get_corpus(&out.id).await.unwrap();
@@ -532,8 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_at_off_is_idempotent_per_segment() {
-        let mut core = crate::core::test_support::test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Off;
+        let core = crate::core::test_support::test_core().await;
         let out = core
             .ingest("one line\n\nanother line", "web", None)
             .await
@@ -558,8 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_passage_never_gets_a_relate_unit() {
-        let mut core = crate::core::test_support::test_core().await;
-        core.synthesis = crate::config::SynthesisMode::Off;
+        let core = crate::core::test_support::test_core().await;
         let out = core
             .ingest("some verbatim text", "web", None)
             .await

@@ -1,0 +1,116 @@
+{# The band under the recommendation. Drawn around something or not at all:
+   with nothing due the div is empty and unbordered.
+
+   `refresh` is app.js's own event, fired when the box is emptied — by a
+   capture, or by hand. The band replaces itself in place, so what the column
+   shows on its way back is what is due now and not what was due a minute ago.
+
+   And it polls itself, at a rate it sets each time it lands: the trigger is on
+   the fragment rather than on the page, so the swap that reports a capture
+   settling is also the swap that drops the two-second poll back to the five
+   minutes an idle band costs. It does not stop — `due::refresh_in` never
+   answers `None`, and the doc comment there says why at length: rows arrive
+   from the CLI, the extension and other windows, and a band that stopped
+   watching for them went stale in silence. Five minutes is the floor, which is
+   what a background tab costs.
+
+   `head` draws the "Due" heading, for the page that wants one. Inside the
+   swapped element and never around it: a heading in the page outside this div
+   is a heading over whatever the band next becomes, including nothing.
+
+   `just` is the row the viewer acted on, shown struck through with its undo
+   for this render only — its own undo: what undoes a snooze is not what
+   undoes a completion.
+   `hx-vals` on the container is inherited by every button in it, so each
+   action carries the viewer's zone — and `since`, which is when this render
+   happened. The band keeps no state anywhere else: a row created after the
+   stamp its own predecessor reported is a row the viewer has not seen. #}
+<div id="due" class="due{% if !rows.is_empty() || just.is_some() %} due-filled{% endif %}"
+     hx-post="/ui/due" hx-swap="outerHTML"
+     hx-trigger="refresh{% if let Some(s) = refresh_in %}, every {{ s }}s{% endif %}"
+     hx-vals='{"tz": "{{ tz }}", "since": "{{ since }}", "all": "{% if all %}1{% else %}0{% endif %}", "head": "{% if head %}1{% else %}0{% endif %}"}'>
+{% if head && (!rows.is_empty() || just.is_some() || !events.is_empty()) %}<h2>Due</h2>{% endif %}
+{% if let Some(j) = just %}
+  <p class="due-row due-done muted"><span class="due-title">{{ j.verb }}</span>
+    <button class="btn btn-ghost btn-sm" hx-post="{{ j.undo }}" hx-target="#due" hx-swap="outerHTML">undo</button></p>
+{% endif %}
+{% for r in rows %}
+  {# `due-new` is on a row whose moment did not exist when this band last
+     rendered. Without it the band grows in silence while you are looking
+     somewhere else, and "fills itself while you watch" is a claim nothing on
+     screen supports. It drives one short animation and means nothing after
+     it. #}
+  {# `--heat` is the whole of the colour: 0 six hours out or further, 1 once
+     due. The stylesheet mixes against it and nothing else, and app.js keeps it
+     moving between polls — the band re-reads at most every five minutes, and a
+     gradient that only steps five times an hour is not a gradient. #}
+  <div class="due-row{% if r.overdue %} due-overdue{% endif %}{% if r.undated %} due-undated{% endif %}{% if r.fresh %} due-new{% endif %}"
+       {% if !r.undated %}style="--heat: {{ r.heat }}" data-due-at="{{ r.at }}"{% endif %}>
+    <a class="due-title" href="/ui/artifacts/{{ r.artifact_id }}" title="{{ r.title }}">{{ r.title }}</a>
+    {# The date lives in the title because `when` gives it up as soon as it
+       turns into a countdown, and which day a thing is due is not losable. #}
+    <span class="due-when"{% if !r.undated %} title="{{ r.full }}"{% endif %}><span class="due-count">{{ r.when }}</span>{% if r.recurring %} <span title="repeats">↻</span>{% endif %}</span>
+    {% if r.source != "set" %}<span class="muted due-source" title="read from the note, not set by you">read</span>{% endif %}
+    <span class="due-acts">
+      <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/done" hx-target="#due" hx-swap="outerHTML">done</button>
+      {% if r.undated %}
+      {# No disclosure here: a row with no date is asking for one, and the
+         field is the whole of what the row is for. Behind a "later" it would
+         be the one thing hidden on the one row that exists to collect it. #}
+      <form class="due-date" hx-post="/ui/moments/{{ r.id }}/date" hx-target="#due" hx-swap="outerHTML">
+        <input type="datetime-local" name="when" class="input" required>
+        <button class="btn btn-ghost btn-sm" type="submit">set date</button>
+      </form>
+      {# The row most likely to be a misreading is the one asking for a date it
+         never had, so this sits beside the field rather than behind a fold. #}
+      {% if r.source != "set" %}
+      <button class="btn btn-ghost btn-sm due-notmine" hx-post="/ui/moments/{{ r.id }}/not-a-reminder"
+              hx-target="#due" hx-swap="outerHTML" title="I never asked to be reminded of this">not a reminder</button>
+      {% endif %}
+      {% else %}
+      {# Seven controls on one line was the front page's own clutter problem
+         one scale down: done, three snoozes, a date field and its button, all
+         competing on a row whose subject is four words long. `done` is what a
+         person presses; everything else is a second thought, and opens when
+         there is one. #}
+      <details class="due-later">
+        <summary>later</summary>
+        <span class="due-snooze">snooze
+          <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/snooze" hx-vals='{"until":"hour"}' hx-target="#due" hx-swap="outerHTML">1h</button>
+          <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/snooze" hx-vals='{"until":"tomorrow"}' hx-target="#due" hx-swap="outerHTML">tomorrow</button>
+          <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/snooze" hx-vals='{"until":"monday"}' hx-target="#due" hx-swap="outerHTML">Monday</button>
+        </span>
+        <form class="due-date" hx-post="/ui/moments/{{ r.id }}/date" hx-target="#due" hx-swap="outerHTML">
+          <input type="datetime-local" name="when" class="input" required>
+          <button class="btn btn-ghost btn-sm" type="submit">move</button>
+        </form>
+        {# Only on a row the stage put here. A reminder somebody set themselves
+           is not a misreading, and offering to un-read it would be offering to
+           undo their own typing. #}
+        {% if r.source != "set" %}
+        <button class="btn btn-ghost btn-sm due-notmine" hx-post="/ui/moments/{{ r.id }}/not-a-reminder"
+                hx-target="#due" hx-swap="outerHTML" title="I never asked to be reminded of this">not a reminder</button>
+        {% endif %}
+      </details>
+      {% endif %}
+    </span>
+  </div>
+{% endfor %}
+{# The fold. A button and not a `<details>`: the band swaps itself out on
+   every poll, and a disclosure's open state lives in the DOM node that gets
+   replaced — it would shut under the reader, on the five, while they were
+   reading it. The state rides in `hx-vals` instead, like the zone, and the
+   button's own value overrides the container's for the request it sends. #}
+{% if hidden > 0 %}
+  <p class="due-fold"><button class="btn btn-ghost btn-sm" hx-post="/ui/due" hx-vals='{"all": "1"}'
+       hx-target="#due" hx-swap="outerHTML">{{ hidden }} more · show all</button></p>
+{% else if all %}
+  <p class="due-fold"><button class="btn btn-ghost btn-sm" hx-post="/ui/due" hx-vals='{"all": "0"}'
+       hx-target="#due" hx-swap="outerHTML">show less</button></p>
+{% endif %}
+{% if !events.is_empty() %}
+  <p class="muted due-coming">Coming up:
+    {% for e in events %}<a href="/ui/artifacts/{{ e.artifact_id }}" title="{{ e.span }}">{{ e.title }}</a> <span class="due-when">{{ e.when }}</span>{% if !loop.last %} · {% endif %}{% endfor %}
+  </p>
+{% endif %}
+</div>

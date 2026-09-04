@@ -183,7 +183,7 @@ pub async fn run_sweep(core: &Core) -> Result<()> {
     if pairs.is_empty() {
         return Ok(());
     }
-    let judged = core.store.feedback_stats(core.weak_below).await?.judged;
+    let judged = core.store.feedback_stats(core.weak_below()).await?.judged;
     let current = *core.ranking.read().expect("ranking lock");
 
     let grid = grid(current);
@@ -314,7 +314,7 @@ impl Drop for Sweeping {
 
 async fn sweep_if_due(core: &Core) -> Result<()> {
     let tune = &core.feedback.tune;
-    let judged = core.store.feedback_stats(core.weak_below).await?.judged;
+    let judged = core.store.feedback_stats(core.weak_below()).await?.judged;
     if judged < tune.min_judgements {
         return Ok(());
     }

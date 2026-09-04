@@ -124,6 +124,9 @@ pub fn format_search_results(
                     "lifted: opened, confirmed or cited more than what it passed".to_string(),
                 );
             }
+            if let Some(d) = &r.due_in {
+                facts.push(format!("due {d}"));
+            }
             if r.in_sitting {
                 facts.push("lifted: open in this sitting".to_string());
             }
@@ -140,6 +143,65 @@ pub fn format_search_results(
         .collect::<Vec<_>>()
         .join("\n\n---\n\n");
     format!("{head}{body}")
+}
+
+/// How far ahead the `due` tool looks, from a number that came off the wire.
+///
+/// Clamped before the cast, and that is the whole point of the function. A
+/// `u64` past `i64::MAX` casts to a negative — `u64::MAX` becomes -1, for a
+/// horizon an hour *behind* now and a window that can never hold anything —
+/// and anything past `i64::MAX / 3_600` overflows the multiply, which in a
+/// debug build is a panic raised inside the tool handler. A century is
+/// further ahead than any due list means.
+pub(crate) fn due_horizon(now: i64, hours: u64) -> i64 {
+    const MAX_HORIZON_HOURS: u64 = 100 * 365 * 24;
+    now.saturating_add(hours.min(MAX_HORIZON_HOURS) as i64 * 3_600)
+}
+
+/// The `due` tool's answer: three sections, each row in its own zone, and one
+/// line when there is nothing.
+pub(crate) fn format_due(rows: &[crate::store::moments::DueRow], now: i64) -> String {
+    if rows.is_empty() {
+        return "_Nothing is due._".to_string();
+    }
+    let mut overdue = vec![];
+    let mut due = vec![];
+    let mut undated = vec![];
+    for r in rows {
+        let line = match r.moment.at {
+            None => format!("- **{}** (id: {})", r.title, r.moment.id),
+            Some(at) => format!(
+                "- **{}** — {} (id: {})",
+                r.title,
+                crate::web::due::when_words(
+                    at,
+                    now,
+                    crate::core::moments::zone(Some(&r.moment.tz))
+                ),
+                r.moment.id
+            ),
+        };
+        match r.moment.at {
+            None => undated.push(line),
+            Some(at) if at < now => overdue.push(line),
+            Some(_) => due.push(line),
+        }
+    }
+    let mut out = String::new();
+    for (head, lines) in [
+        ("## Overdue", overdue),
+        ("## Due", due),
+        ("## Undated", undated),
+    ] {
+        if lines.is_empty() {
+            continue;
+        }
+        out.push_str(head);
+        out.push('\n');
+        out.push_str(&lines.join("\n"));
+        out.push_str("\n\n");
+    }
+    out.trim_end().to_string()
 }
 
 /// One hit's stages, in the order they ran. Named rather than counted: an
@@ -250,6 +312,26 @@ impl CoreSource {
             CoreSource::Tenant(tenants, subject) => Ok(tenants.get(subject).await?.core),
         }
     }
+
+    /// Which of the ten a capture through this door is read in.
+    ///
+    /// The account setting alone: MCP is a program talking to a program and
+    /// sends no `Accept-Language`, so there is no browser to fall back to and
+    /// the fallback is English. A control database that will not answer is not
+    /// a reason to refuse the capture.
+    async fn lang(&self, core: &Core) -> crate::infer::lang::Lang {
+        match self {
+            CoreSource::Fixed(_) => Default::default(),
+            CoreSource::Tenant(_, subject) => core
+                .store
+                .control
+                .lang(subject)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -313,6 +395,26 @@ pub struct IngestParams {
     /// beside the text, never inside it.
     #[serde(default)]
     pub note: Option<String>,
+    /// `journal` to file `text` as today's diary entry. Nothing else is
+    /// accepted.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// The IANA time zone the text was written in (e.g. `Europe/Berlin`), so
+    /// a date in it is read there.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// `remind` to store `text` as a reminder: it is dated at capture and
+    /// comes back from `due` when its time approaches.
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DueParams {
+    /// How far ahead counts as due. The server's `time.horizon_hours` (48)
+    /// when absent.
+    #[serde(default)]
+    pub horizon_hours: Option<u64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -386,23 +488,44 @@ impl PkdbTools {
             return "Ingest failed: supply exactly one of `text`, `url` or `file_base64`."
                 .to_string();
         }
+        // Before `capture_time` takes them: the three fields reach only the
+        // text branch, and a client told "Stored" while its zone was dropped
+        // has been lied to.
+        if p.text.is_none()
+            && let Err(e) = crate::web::api::refuse_time_fields(
+                p.tz.as_deref(),
+                p.origin.as_deref(),
+                p.intent.as_deref(),
+            )
+        {
+            return format!("Ingest failed: {e}");
+        }
+        let time = match crate::web::api::capture_time(p.tz, p.origin, p.intent, ORIGIN_MCP) {
+            Ok(t) => t,
+            Err(e) => return format!("Ingest failed: {e}"),
+        };
+        let lang = self.source.lang(&core).await;
         let outcome = if let Some(text) = p.text {
             core.ingest_capture(
-                Capture::new(text, ORIGIN_MCP)
+                Capture::new(text, time.origin)
+                    .with_lang(lang)
+                    .from_channel(time.channel)
                     .with_title(p.title)
-                    .with_note(p.note),
+                    .with_note(p.note)
+                    .with_tz(time.tz)
+                    .with_intent(time.intent),
             )
             .await
         } else if let Some(raw) = p.url {
             match url::Url::parse(&raw) {
-                Ok(u) => core.ingest_url(&u, p.title, p.note).await,
+                Ok(u) => core.ingest_url(&u, p.title, p.note, lang).await,
                 Err(e) => Err(Error::Validation(format!("url: {e}"))),
             }
         } else {
             let encoded = p.file_base64.expect("the one-of check");
             match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
                 Ok(bytes) => {
-                    core.ingest_file(bytes, p.filename, p.title, p.note, ORIGIN_MCP)
+                    core.ingest_file(bytes, p.filename, p.title, p.note, ORIGIN_MCP, lang)
                         .await
                 }
                 Err(e) => Err(Error::Validation(format!("file_base64 is not base64: {e}"))),
@@ -491,6 +614,26 @@ impl PkdbTools {
             "{head}\n\n{}",
             page_of(&body, p.offset.unwrap_or(0), p.max_chars)
         )
+    }
+
+    #[tool(
+        name = "due",
+        description = "What the operator has asked to be reminded of: overdue, due \
+                       within the horizon (default 48h), and reminders still waiting \
+                       for a date. Read-only; `done` and `snooze` are on the web UI \
+                       and the REST API."
+    )]
+    async fn due(&self, Parameters(p): Parameters<DueParams>) -> String {
+        let core = match self.source.core().await {
+            Ok(c) => c,
+            Err(e) => return format!("Due failed: {e}"),
+        };
+        let now = core.clock.now();
+        let horizon = due_horizon(now, p.horizon_hours.unwrap_or(core.time.horizon_hours));
+        match core.store.open_due(now, horizon).await {
+            Ok(rows) => format_due(&rows, now),
+            Err(e) => format!("Due failed: {e}"),
+        }
     }
 
     #[tool(
@@ -814,7 +957,10 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: None,
@@ -850,6 +996,7 @@ mod tests {
             truncated: false,
             abstained: false,
             unsupported: unsupported.iter().map(|s| s.to_string()).collect(),
+            retired_only: false,
             event_id: None,
         }
     }
@@ -951,7 +1098,10 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: via.map(str::to_string),
@@ -973,6 +1123,27 @@ mod tests {
             ..Default::default()
         });
         r
+    }
+
+    #[test]
+    fn a_horizon_off_the_wire_is_clamped_before_it_is_cast() {
+        let now = 1_000_000;
+        assert_eq!(
+            due_horizon(now, 48),
+            now + 48 * 3_600,
+            "the ordinary case is untouched"
+        );
+        assert_eq!(
+            due_horizon(now, 0),
+            now,
+            "and so is asking for nothing ahead"
+        );
+        // Both of the shapes an unclamped `as i64 * 3_600` got wrong: a
+        // negative horizon, and an overflowing multiply.
+        let century = 100 * 365 * 24 * 3_600;
+        assert_eq!(due_horizon(now, u64::MAX), now + century);
+        assert_eq!(due_horizon(now, i64::MAX as u64 / 3_600 + 1), now + century);
+        assert!(due_horizon(now, u64::MAX) > now, "never behind the caller");
     }
 
     #[test]
@@ -1138,6 +1309,13 @@ mod tests {
         assert!(format_search_results(&[s], None).contains("lifted: open in this sitting"));
     }
 
+    #[test]
+    fn a_result_with_a_reminder_due_says_when() {
+        let mut d = hit("rent", None);
+        d.due_in = Some("in 2 h".into());
+        assert!(format_search_results(&[d], None).contains("due in 2 h"));
+    }
+
     /// Search is a dead end without this: it hands back one passage and the
     /// corpus id, and the answer is often the paragraph after the one that
     /// matched. `read` hands back the document, verbatim.
@@ -1231,6 +1409,9 @@ mod tests {
             filename: None,
             title: None,
             note: None,
+            origin: None,
+            tz: None,
+            intent: None,
         }
     }
 
@@ -1436,5 +1617,91 @@ mod tests {
         let tools = PkdbTools::over(core);
         assert!(!tools.routes().has_route("ask"));
         assert!(tools.routes().has_route("search"));
+    }
+
+    fn due_row(title: &str, at: Option<i64>) -> crate::store::moments::DueRow {
+        crate::store::moments::DueRow {
+            moment: crate::store::moments::Moment {
+                id: format!("m-{title}"),
+                artifact_id: "a".into(),
+                kind: crate::store::moments::Kind::Due,
+                at,
+                until: None,
+                tz: "UTC".into(),
+                rule: None,
+                source: crate::store::moments::Source::Set,
+                span: None,
+                done_at: None,
+                snoozed_until: None,
+                notified_at: None,
+                moved_from: None,
+                moved_at: None,
+                series_id: None,
+                origin_corpus_id: None,
+                created_at: 0,
+            },
+            title: title.into(),
+            opening: title.into(),
+        }
+    }
+
+    #[test]
+    fn the_due_tool_answers_in_three_sections_or_one_line() {
+        let now = 1_000_000;
+        let out = format_due(
+            &[
+                due_row("late", Some(now - 60)),
+                due_row("soon", Some(now + 3_600)),
+                due_row("someday", None),
+            ],
+            now,
+        );
+        let (o, d, u) = (
+            out.find("## Overdue").unwrap(),
+            out.find("## Due").unwrap(),
+            out.find("## Undated").unwrap(),
+        );
+        assert!(o < d && d < u, "{out}");
+        assert!(
+            out.contains("**late**") && out.contains("id: m-late"),
+            "{out}"
+        );
+        assert_eq!(format_due(&[], now), "_Nothing is due._");
+    }
+
+    #[tokio::test]
+    async fn ingest_takes_a_journal_origin_and_refuses_any_other() {
+        let core = crate::core::test_support::test_core().await;
+        let tools = PkdbTools::over(core.clone());
+        let out = tools
+            .ingest(Parameters(IngestParams {
+                text: Some("Long day.".into()),
+                url: None,
+                file_base64: None,
+                filename: None,
+                title: None,
+                note: None,
+                origin: Some("journal".into()),
+                tz: Some("Europe/Berlin".into()),
+                intent: None,
+            }))
+            .await;
+        assert!(out.starts_with("Stored") || out.contains('`'), "{out}");
+        let recent = core.store.recent_captures(1).await.unwrap();
+        assert_eq!(recent[0].2, "journal");
+        let refused = tools
+            .ingest(Parameters(IngestParams {
+                text: Some("x".into()),
+                url: None,
+                file_base64: None,
+                filename: None,
+                title: None,
+                note: None,
+                origin: Some("api".into()),
+                tz: None,
+                intent: None,
+            }))
+            .await;
+        assert!(refused.contains("only `journal`"), "{refused}");
     }
 }

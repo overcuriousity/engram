@@ -9,8 +9,11 @@
   {# Carries the reason it is dead. app.js clears `disabled` the moment there
      is something to act on, so the title only ever describes the state that
      renders it — and a permanently grey button with no stated reason is
-     indistinguishable from a broken one. #}
-  <button class="btn btn-accent" type="button" data-verb="ask" disabled
+     indistinguishable from a broken one.
+
+     app.js lends the accent to whichever verb the box's content shape
+     suggests; see the verb-arming sync(). #}
+  <button class="btn" type="button" data-verb="ask" disabled
           title="Type or attach something first">Ask</button>
   {%- endif -%}
 </span>

@@ -12,16 +12,27 @@ use crate::error::{Error, Result};
 /// `--help` lists both.
 #[derive(clap::Args, Debug, Default, Clone)]
 pub struct CliArgs {
-    /// Capture a file, a link, or `-` for standard input. Repeatable:
-    /// `engram -c *.pdf` is one invocation and several corpora.
-    #[arg(short = 'c', value_name = "PATH|URL|-", num_args = 1.., conflicts_with_all = ["search", "ask"])]
+    /// Capture a file, a link, a sentence, or `-` for standard input.
+    /// Repeatable: `engram -c *.pdf` is one invocation and several corpora.
+    /// An argument that names no file and looks like no path is the note
+    /// itself — see `cli::capture::read_target`. Several arguments are several
+    /// captures only where each one addresses something; an unquoted sentence
+    /// is joined back together — see `cli::capture::run`.
+    #[arg(short = 'c', value_name = "PATH|URL|TEXT|-", num_args = 1.., conflicts_with_all = ["search", "ask", "remind", "journal"])]
     pub capture: Vec<String>,
     /// Search. A leading bare integer is how many hits are wanted.
-    #[arg(short = 's', value_name = "[N] QUERY", num_args = 1.., conflicts_with_all = ["capture", "ask"])]
+    #[arg(short = 's', value_name = "[N] QUERY", num_args = 1.., conflicts_with_all = ["capture", "ask", "remind", "journal"])]
     pub search: Vec<String>,
     /// Ask one question across the base.
-    #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search"])]
+    #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search", "remind", "journal"])]
     pub ask: Vec<String>,
+    /// Capture as a reminder: the classifier is skipped and the note is dated.
+    /// `-` reads stdin, as `-a` does.
+    #[arg(short = 'r', value_name = "TEXT", num_args = 1.., conflicts_with_all = ["capture", "search", "ask", "journal", "show", "status"])]
+    pub remind: Vec<String>,
+    /// Capture as today's journal entry.
+    #[arg(short = 'j', value_name = "TEXT", num_args = 1.., conflicts_with_all = ["capture", "search", "ask", "remind", "show", "status"])]
+    pub journal: Vec<String>,
     /// What to call this capture. Refused with every verb but `-c`, for the
     /// reason `--tag` is refused with `-a`: a search has no title to set.
     #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show", "status"])]
@@ -38,10 +49,20 @@ pub struct CliArgs {
     ///
     /// Refused with `--show` for the plainer version of the same reason: one
     /// artifact named by id is not a list there is anything to narrow.
-    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status"])]
+    ///
+    /// And refused with `-r` and `-j`, which do not carry them either: a
+    /// reminder and a journal entry are captures the server tags for itself.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status", "remind", "journal"])]
     pub tags: Vec<String>,
-    /// Narrow a search to artifacts in this category. Refused with `-a`, like `--tag`.
-    #[arg(long, value_name = "CATEGORY", conflicts_with_all = ["ask", "show", "status"])]
+    /// Narrow a search to artifacts in this category. Refused with `-a`, like
+    /// `--tag` — and with `-r` and `-j` for the same reason `--tag` is: those
+    /// two doors post a capture and answer with what they made, and a filter
+    /// they accept and then drop is worse than one they refuse.
+    #[arg(
+        long,
+        value_name = "CATEGORY",
+        conflicts_with_all = ["ask", "show", "status", "remind", "journal"]
+    )]
     pub category: Option<String>,
     /// Print the results as JSON instead of for a person.
     ///
@@ -49,7 +70,10 @@ pub struct CliArgs {
     /// body for a person to read and has no JSON form, and being handed the
     /// human rendering after asking for JSON is the failure this whole rule is
     /// about.
-    #[arg(long, conflicts_with_all = ["ask", "show"])]
+    ///
+    /// `-r` and `-j` refuse it too: both print their own one-line receipt and
+    /// have no JSON form, so the flag was accepted and silently dropped.
+    #[arg(long, conflicts_with_all = ["ask", "show", "remind", "journal"])]
     pub json: bool,
     /// Never colour, never animate, never leave ASCII.
     #[arg(long)]
@@ -61,7 +85,11 @@ pub struct CliArgs {
     ///
     /// There is nothing to follow behind the other three verbs: they finish
     /// when their response arrives.
-    #[arg(long, conflicts_with_all = ["search", "ask", "show", "status"])]
+    ///
+    /// Refused with `-r` and `-j` for the reason `--tag` is refused with `-a`:
+    /// those two doors post once and answer with what they made, and `--watch`
+    /// was parsed, accepted and then dropped on the floor by both.
+    #[arg(long, conflicts_with_all = ["search", "ask", "show", "status", "remind", "journal"])]
     pub watch: bool,
     /// Read one artifact in full: a rank from the last search, a leading piece
     /// of an id, or a whole id.
@@ -109,6 +137,10 @@ pub enum Verb {
         query: String,
     },
     Ask(String),
+    /// `-r`: a reminder, dated at capture.
+    Remind(String),
+    /// `-j`: today's entry.
+    Journal(String),
     /// What the base holds and what it has been learning.
     Status,
     /// One artifact, read in full. Carries what the operator typed rather than
@@ -137,6 +169,8 @@ pub fn verb(
         !args.capture.is_empty(),
         !args.search.is_empty(),
         !args.ask.is_empty(),
+        !args.remind.is_empty(),
+        !args.journal.is_empty(),
         args.show.is_some(),
         args.status,
     ]
@@ -154,7 +188,7 @@ pub fn verb(
         // prompt below would then be handed EOF.
         if named > 0 {
             return Err(Error::Validation(
-                "`-c`, `-s`, `-a`, `--show` and `--status` are the client half \
+                "`-c`, `-s`, `-a`, `-r`, `-j`, `--show` and `--status` are the client half \
                  of this binary; run them on their own, without the server's \
                  own flags"
                     .into(),
@@ -168,7 +202,7 @@ pub fn verb(
         // this is here for the caller that built `CliArgs` itself — which is
         // every test, and one day some other entry point.
         return Err(Error::Validation(
-            "one verb at a time: `-c`, `-s`, `-a`, `--show` or `--status`".into(),
+            "one verb at a time: `-c`, `-s`, `-a`, `-r`, `-j`, `--show` or `--status`".into(),
         ));
     }
 
@@ -191,6 +225,12 @@ pub fn verb(
     }
     if !args.ask.is_empty() {
         return Ok(Some(Verb::Ask(read(&args.ask, stdin)?)));
+    }
+    if !args.remind.is_empty() {
+        return Ok(Some(Verb::Remind(read(&args.remind, stdin)?)));
+    }
+    if !args.journal.is_empty() {
+        return Ok(Some(Verb::Journal(read(&args.journal, stdin)?)));
     }
     if !args.search.is_empty() {
         // A leading integer is a count only when something is left to be the
@@ -472,5 +512,32 @@ mod tests {
             ..Default::default()
         };
         assert!(verb(&a, true, false, piped("")).is_err());
+    }
+
+    #[test]
+    fn a_reminder_and_an_entry_are_verbs_of_their_own() {
+        let r = CliArgs {
+            remind: vec!["call".into(), "the".into(), "bank".into()],
+            ..Default::default()
+        };
+        assert!(
+            matches!(verb(&r, false, false, || Ok(String::new())), Ok(Some(Verb::Remind(t))) if t == "call the bank")
+        );
+        let j = CliArgs {
+            journal: vec!["long".into(), "day".into()],
+            ..Default::default()
+        };
+        assert!(
+            matches!(verb(&j, false, false, || Ok(String::new())), Ok(Some(Verb::Journal(t))) if t == "long day")
+        );
+        let both = CliArgs {
+            remind: vec!["x".into()],
+            capture: vec!["y".into()],
+            ..Default::default()
+        };
+        assert!(
+            verb(&both, false, false, || Ok(String::new())).is_err(),
+            "one verb at a time"
+        );
     }
 }

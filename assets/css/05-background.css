@@ -12,6 +12,12 @@
   pointer-events: none;
   z-index: -1;
   /* Low enough that body text never competes with it; the draw itself also
-     works in low alphas, this is the ceiling. */
+     works in low alphas, this is the ceiling.
+
+     Loud enough to be the empty page's picture, and it steps back the moment
+     there is text to read: app.js puts `typing` on <html> with the first
+     keystroke and takes it off when the box empties. */
   opacity: 0.72;
+  transition: opacity 400ms ease;
 }
+html.typing #vec-bg { opacity: 0.18; }

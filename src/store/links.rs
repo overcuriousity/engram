@@ -91,6 +91,55 @@ pub struct Link {
     pub created_at: i64,
 }
 
+impl Store {
+    /// A relation the capture-time synthesis call named, over both texts it
+    /// was shown. Lands `related` with the model's reason — the judged state,
+    /// not the learning one, because a model explicitly asserted it — and an
+    /// operator's `dismissed` stays unbeatable.
+    ///
+    /// The judged revisions are stamped here, exactly as `set_link_state`
+    /// stamps them, and they are not optional. `embed_rev` is `NOT NULL
+    /// DEFAULT 0`, so a NULL `judged_rev_a` makes `reopen_stale_judged_links`'
+    /// `a.embed_rev IS NOT l.judged_rev_a` read `0 IS NOT NULL` — true for
+    /// every row, forever. Left unstamped, every relation a model asserted was
+    /// demoted to `learning` with its reason erased on the very next associate
+    /// sweep, decayed under `prune_learning_links` until it was deleted, and
+    /// spent a judge call on the way past. The subselects read the same rows
+    /// the synthesis call was made against.
+    pub async fn relate_synthesized(&self, a: &str, b: &str, reason: &str) -> Result<()> {
+        let (a, b) = canonical(a, b);
+        sqlx::query(
+            "INSERT INTO artifact_links
+                   (a_id, b_id, weight, bumped_at, queries, cues, state, reason,
+                    judged_rev_a, judged_rev_b, created_at)
+             VALUES (?, ?, 1.0, ?, 0, '[]', 'related', ?,
+                     (SELECT embed_rev FROM artifacts WHERE id = ?),
+                     (SELECT embed_rev FROM artifacts WHERE id = ?), ?)
+             ON CONFLICT(a_id, b_id) DO UPDATE SET
+               state = CASE WHEN artifact_links.state = 'dismissed'
+                            THEN artifact_links.state ELSE 'related' END,
+               reason = CASE WHEN artifact_links.state = 'dismissed'
+                             THEN artifact_links.reason ELSE excluded.reason END,
+               judged_rev_a = CASE WHEN artifact_links.state = 'dismissed'
+                                   THEN artifact_links.judged_rev_a
+                                   ELSE excluded.judged_rev_a END,
+               judged_rev_b = CASE WHEN artifact_links.state = 'dismissed'
+                                   THEN artifact_links.judged_rev_b
+                                   ELSE excluded.judged_rev_b END",
+        )
+        .bind(a)
+        .bind(b)
+        .bind(now())
+        .bind(reason)
+        .bind(a)
+        .bind(b)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
 /// The pair in the order the table stores it. `a_id < b_id` is a CHECK, so this
 /// is not a convention that can be forgotten at one call site.
 pub fn canonical<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
@@ -1396,6 +1445,63 @@ mod tests {
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(l.state, LinkState::Learning);
         assert_eq!(l.reason, None, "the judge read text that no longer exists");
+    }
+
+    /// A relation the model asserted must survive the very next sweep.
+    ///
+    /// `relate_synthesized` left `judged_rev_a`/`judged_rev_b` NULL, and
+    /// `embed_rev` is `NOT NULL DEFAULT 0`, so `0 IS NOT NULL` matched every
+    /// row: every synthesized link was demoted to `learning` with its reason
+    /// erased on the first `associate` sweep after it was written, then decayed
+    /// until it was pruned — and spent a judge call on the way past.
+    #[tokio::test]
+    async fn a_synthesized_relation_is_not_reopened_by_the_next_sweep() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        store
+            .relate_synthesized(&a, &b, "both describe the same procedure")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.reopen_stale_judged_links(100).await.unwrap(),
+            0,
+            "the judged revisions were stamped, so nothing is stale"
+        );
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(
+            l.reason.as_deref(),
+            Some("both describe the same procedure")
+        );
+        assert_eq!((l.judged_rev_a, l.judged_rev_b), (Some(0), Some(0)));
+
+        // And it still reopens for the reason it should: the text moved.
+        store
+            .update_artifact_text(&a, "alpha, rewritten")
+            .await
+            .unwrap();
+        assert_eq!(store.reopen_stale_judged_links(100).await.unwrap(), 1);
+    }
+
+    /// An operator's dismissal outranks the model, and the stamp must not be
+    /// the hole that lets a re-assertion in through the back.
+    #[tokio::test]
+    async fn a_dismissed_pair_keeps_its_dismissal_and_its_stamp() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, 0)
+            .await
+            .unwrap();
+        store.dismiss_link(&a, &b).await.unwrap();
+        store
+            .relate_synthesized(&a, &b, "the model disagrees")
+            .await
+            .unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.state, LinkState::Dismissed);
+        assert_ne!(l.reason.as_deref(), Some("the model disagrees"));
     }
 
     #[tokio::test]

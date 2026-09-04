@@ -71,13 +71,21 @@ pub enum Stage {
     /// of this faculty is that the learning is a sweep and the read is one
     /// vector query.
     Context,
+    /// Push what is due. Armed at the next due moment by every write that can
+    /// move it, never on a period.
+    Remind,
+    /// The periodic reap sweep: judge long-retired artifacts, bury the
+    /// worthless in the graveyard, rewrite the valuable. Collection-targeted
+    /// like `Consolidate`, so at most one sits in the queue; model calls are
+    /// bounded by `reap.max_judged_per_run`.
+    Reap,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 17] = [
+    pub const ALL: [Stage; 19] = [
         Stage::Synthesize,
         Stage::Enrich,
         Stage::SegmentWindow,
@@ -95,6 +103,8 @@ impl Stage {
         Stage::Retention,
         Stage::ArmDedupe,
         Stage::Context,
+        Stage::Remind,
+        Stage::Reap,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -116,6 +126,8 @@ impl Stage {
             Stage::Retention => "retention",
             Stage::ArmDedupe => "arm_dedupe",
             Stage::Context => "context",
+            Stage::Remind => "remind",
+            Stage::Reap => "reap",
         }
     }
     /// Is someone waiting on this? `0` foreground, `1` background.
@@ -149,7 +161,9 @@ impl Stage {
             | Stage::Generate
             | Stage::Retention
             | Stage::ArmDedupe
-            | Stage::Context => 1,
+            | Stage::Context
+            | Stage::Remind
+            | Stage::Reap => 1,
         }
     }
 
@@ -172,6 +186,8 @@ impl Stage {
             "retention" => Some(Stage::Retention),
             "arm_dedupe" => Some(Stage::ArmDedupe),
             "context" => Some(Stage::Context),
+            "remind" => Some(Stage::Remind),
+            "reap" => Some(Stage::Reap),
             _ => None,
         }
     }
@@ -409,6 +425,48 @@ impl Store {
         .bind(stage.class())
         .execute(&self.control.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Arm a unit at an absolute time, or move a waiting one there. A running
+    /// row is left alone: the run re-arms at its end. Attempts reset, because
+    /// this is new information and not a retry.
+    pub async fn arm_at(
+        &self,
+        stage: Stage,
+        target_kind: &str,
+        target_id: &str,
+        run_after: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class, empty_runs)
+             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, 0)
+             ON CONFLICT(subject, stage, target_id) DO UPDATE SET
+               state = 'pending', run_after = excluded.run_after, attempts = 0, empty_runs = 0,
+               last_error = NULL, claimed_at = NULL, class = excluded.class
+             WHERE jobs.state IN ('pending', 'done', 'failed')",
+        )
+        .bind(&self.subject)
+        .bind(stage.as_str())
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(run_after)
+        .bind(now())
+        .bind(stage.class())
+        .execute(&self.control.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A waiting unit that has nothing to wait for. Marked done rather than
+    /// deleted, so the row keeps its history and `arm_at` can wake it again.
+    pub async fn disarm(&self, stage: Stage, target_id: &str) -> Result<()> {
+        sqlx::query("UPDATE jobs SET state = 'done' WHERE subject = ? AND stage = ? AND target_id = ? AND state = 'pending'")
+            .bind(&self.subject)
+            .bind(stage.as_str())
+            .bind(target_id)
+            .execute(&self.control.pool)
+            .await?;
         Ok(())
     }
 
@@ -693,6 +751,33 @@ impl Store {
         .await?;
         let oldest: Option<i64> = row.get("oldest");
         Ok(oldest.map(|t| (now() - t).max(0)))
+    }
+
+    /// Is a capture of this tenant's still moving through the pipeline?
+    ///
+    /// Not `oldest_pending_age().is_some()`, which is what the due band asked
+    /// and is true on every live install forever: `rearm_periodic` parks each
+    /// periodic sweep as a `pending` row with `run_after` months out, so a base
+    /// that has finished every capture it ever took still reports a pending
+    /// job. A caller asking "is the operator waiting for something" got "yes",
+    /// always, and polled at the two-second rate meant for a capture in flight.
+    ///
+    /// `class = 0` is the column that already draws this line — the capture
+    /// pipeline the operator is watching, against work nobody stands in front
+    /// of — and `run_after` excludes a unit whose turn has not come.
+    ///
+    pub async fn foreground_work_in_flight(&self) -> Result<bool> {
+        let r: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM jobs
+              WHERE subject = ? AND class = 0
+                AND (state = 'running' OR (state = 'pending' AND run_after <= ?))
+              LIMIT 1",
+        )
+        .bind(&self.subject)
+        .bind(now())
+        .fetch_optional(&self.control.pool)
+        .await?;
+        Ok(r.is_some())
     }
 }
 
@@ -1577,6 +1662,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_parked_sweep_is_not_a_capture_in_flight() {
+        let s = Store::memory().await.unwrap();
+        assert!(
+            !s.foreground_work_in_flight().await.unwrap(),
+            "an idle base"
+        );
+
+        // What every live install looks like: the periodic units sit `pending`
+        // with their turn months away. `oldest_pending_age` says yes to this
+        // forever, which is why the due band polled at two seconds on a base
+        // that had finished every capture it ever took.
+        s.arm_at(
+            Stage::Consolidate,
+            "sweep",
+            "consolidate",
+            crate::store::now() + 86_400,
+        )
+        .await
+        .unwrap();
+        assert!(
+            s.oldest_pending_age().await.unwrap().is_some(),
+            "the old question says yes"
+        );
+        assert!(
+            !s.foreground_work_in_flight().await.unwrap(),
+            "and it is nobody's capture"
+        );
+
+        // A capture actually moving.
+        s.enqueue(Stage::Synthesize, "corpus", "src-1")
+            .await
+            .unwrap();
+        assert!(s.foreground_work_in_flight().await.unwrap());
+        // Still true once claimed: it is in flight, not waiting to be.
+        let j = s.claim_job().await.unwrap().unwrap();
+        assert!(
+            s.foreground_work_in_flight().await.unwrap(),
+            "running counts"
+        );
+        s.control.complete_job(j.id).await.unwrap();
+        assert!(
+            !s.foreground_work_in_flight().await.unwrap(),
+            "and it is over when it is done"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_work_is_the_capture_pipeline_and_nothing_parked() {
+        // Since the reshape, the reminder is written by the capture
+        // pipeline's own window job — class 0 — so class alone draws the
+        // line the band polls against.
+        let s = Store::memory().await.unwrap();
+        while let Some(j) = s.claim_job().await.unwrap() {
+            s.control.complete_job(j.id).await.unwrap();
+        }
+        assert!(!s.foreground_work_in_flight().await.unwrap());
+        s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
+        assert!(
+            s.foreground_work_in_flight().await.unwrap(),
+            "the operator is waiting for this one"
+        );
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.control.complete_job(j.id).await.unwrap();
+        assert!(!s.foreground_work_in_flight().await.unwrap());
+
+        // Class 1 is what the query was narrowed to escape: `remind` is the
+        // periodic notifier, parked months out.
+        s.arm_at(
+            Stage::Remind,
+            "sweep",
+            "remind",
+            crate::store::now() + 86_400,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !s.foreground_work_in_flight().await.unwrap(),
+            "a parked sweep is nobody's capture"
+        );
+    }
+
+    #[tokio::test]
     async fn stuck_running_jobs_are_reclaimed_after_a_crash() {
         let s = Store::memory().await.unwrap();
         s.enqueue(Stage::Synthesize, "corpus", "src-1")
@@ -1773,5 +1940,11 @@ mod tests {
 
         assert!(!a.live_job(Stage::Consolidate, "collection").await.unwrap());
         assert!(b.live_job(Stage::Consolidate, "collection").await.unwrap());
+    }
+
+    #[test]
+    fn the_two_time_stages_round_trip_and_are_background() {
+        assert_eq!(Stage::parse("remind"), Some(Stage::Remind));
+        assert_eq!(Stage::Remind.class(), 1);
     }
 }

@@ -210,7 +210,14 @@ mod tests {
         let out = core.ingest(&body, "web", None).await.unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
 
-        // Exactly what the crash leaves: windows, no units.
+        // Exactly what a crash mid-promotion leaves: windows put back to
+        // pending, and no units queued against them.
+        for w in core.store.segments_for_corpus(&out.id).await.unwrap() {
+            core.store
+                .reset_segment(&out.id, w.idx, true)
+                .await
+                .unwrap();
+        }
         sqlx::query("DELETE FROM jobs WHERE stage = 'segment_window'")
             .execute(&core.store.control.pool)
             .await
@@ -238,7 +245,6 @@ mod tests {
             start_line,
             end_line,
             text,
-            carry_lines: 0,
         }
     }
 

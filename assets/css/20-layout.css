@@ -27,6 +27,10 @@
   gap: 1rem;
   align-items: start;
   grid-template-columns: [rail] 22rem [focus] minmax(0, 1fr);
+  /* The containing block for the column handle, which is absolutely positioned
+     precisely so that it is *not* a grid item: placed in flow it would take a
+     track of its own, or open an implicit row under the two that are there. */
+  position: relative;
 }
 
 /* A grid child defaults to `min-width: auto`, which resolves to min-content:
@@ -78,6 +82,67 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
   body:has(.regions-rail-focus-source) > .shell { padding-bottom: 1rem; }
 }
 
+/* And the standalone artifact page, which is the same two panes with no rail
+   beside them and was pinned to nothing at all.
+
+   Every rule above is scoped to `.regions-rail-focus-source`, the workspace's
+   own arrangement, so `regions-split` matched none of them — while the split
+   inside it still carried the `max-height: min(60vh, 45rem)` that the pane
+   overrides and this page did not. The two together are what that screen was:
+   an artifact clipped at three fifths of the window with the other two fifths
+   empty underneath it, on the one page whose whole subject is that artifact and
+   the lines it came from.
+
+   Written out rather than folded into the selectors above, because the chain is
+   not the same chain: there is no `.region-focus` and no `#pane-content` here —
+   the fragment's own root is the region's only child. */
+body:has(.regions-split) {
+  display: flex; flex-direction: column; min-height: 100dvh;
+}
+body:has(.regions-split) > .shell {
+  flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column;
+}
+body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
+
+@media (width >= 62rem) {
+  body:has(.regions-split) { height: 100dvh; overflow: hidden; }
+  body:has(.regions-split) > .shell { padding-bottom: 1rem; }
+  /* One row, and it may shrink: `.regions` is `align-items: start`, so its
+     child was content-sized and the grid's own height meant nothing — the
+     fragment simply grew past the pinned region and out of the window, which
+     is the same defect in the other direction. `minmax(0, 1fr)` plus
+     `align-self: stretch` is what the workspace does one row lower down; see
+     `grid-template-rows: auto minmax(0, 1fr)` in 40-workspace.css. */
+  .regions-split { grid-template-rows: minmax(0, 1fr); }
+  /* The fragment's root is the flex column here — the job
+     `#pane-content > [data-terms]` does in the workspace. */
+  .regions-split > [data-terms] {
+    display: flex; flex-direction: column; align-self: stretch;
+    flex: 1; min-height: 0;
+  }
+  /* The row-axis `min-height: 0` a grid needs before `stretch` has a height to
+     hand its columns; see the same note on the workspace's split in
+     40-workspace.css. */
+  .regions-split .split {
+    flex: 1; min-height: 0; align-items: stretch; grid-template-rows: minmax(0, 1fr);
+  }
+  .regions-split .split > * { min-height: 0; }
+  .regions-split .split > :first-child { max-height: none; }
+  .regions-split .split > :nth-child(2) {
+    display: flex; flex-direction: column; max-height: none;
+  }
+  .regions-split .raw { max-height: none; flex: 1; min-height: 0; }
+  /* Hiding the source hands the artifact the width, not the page: the page is
+     not what scrolls here either. */
+  .regions-split.hide-source .split > :first-child {
+    display: flex; overflow-y: auto;
+  }
+  .regions-split.hide-source .split > :first-child > .card {
+    min-height: 12rem; overflow-y: auto;
+  }
+  .regions-split.hide-source .split > :first-child > .row-handle { display: block; }
+}
+
 /* One region. Two of them, and the difference is what the region holds rather
    than how wide the page fancies being — which is the distinction the three
    old shell widths were a clumsy proxy for.
@@ -90,13 +155,6 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    anchor: the inner grid is never centred, only the shell is. */
 .regions-focus { grid-template-columns: minmax(0, 68rem); }
 .regions-focus > * { grid-column: 1 / -1; }
-/* The judge card is a working surface, not prose. Every line in it is bounded
-   by something other than the measure — the query is one line, each candidate
-   is clamped to two — so a reading column leaves half a wide window empty and
-   buys nothing for it, while the full table width would set snippet lines too
-   long to track back to their own left edge. Between the two. */
-.regions-judge { grid-template-columns: minmax(0, 86rem); }
-.regions-judge > * { grid-column: 1 / -1; }
 .regions-table { grid-template-columns: minmax(0, 1fr); }
 /* One column, centred in the window rather than anchored to its left edge.
    For the pages that are not part of the workspace and have nothing to line
@@ -119,8 +177,20 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    that split having room to be two columns instead of two stacked halves.
 
    So the rail gives some back rather than the grid growing a column. */
+/* `--rail-w` rather than the number, so the boundary is one a reader can move.
+   19rem is what it is until somebody drags it; see `resizableColumns` in
+   app.js, which writes the property onto this element and remembers it. */
 @container shell (width >= 90rem) {
-  .regions-rail-focus-source { grid-template-columns: [rail] 19rem [focus] minmax(0, 1fr); }
+  .regions-rail-focus-source { grid-template-columns: [rail] var(--rail-w, 19rem) [focus] minmax(0, 1fr); }
+}
+
+/* The rail boundary is offered exactly where that 19rem track is in effect:
+   wide enough for three regions, and with something in the pane. Idle, the rail
+   is `minmax(0, 40rem)` beside a placeholder and there is no division to make. */
+@container shell (width >= 90rem) {
+  .regions-rail-focus-source:is(.pane-open, .answering) > .col-handle {
+    display: block; left: var(--rail-w, 19rem); width: 1rem;
+  }
 }
 
 /* Until something is opened into it, the pane holds one line of placeholder
@@ -183,7 +253,9 @@ body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 
    on the pages that are that wide, and simply runs wider than the reading
    column on the pages that are not. Always the same width beats sometimes
    lining up. */
-.topbar { border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; }
+/* Painted, not transparent: the projection's axes ran straight through the
+   nav, which made the chrome look like part of the picture. */
+.topbar { border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; background: var(--color-bg-surface); }
 nav.top {
   display: flex; gap: 0.25rem; align-items: center;
   max-width: 110rem; margin: 0 auto; padding: 0.75rem 1rem;

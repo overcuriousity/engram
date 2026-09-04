@@ -3,6 +3,7 @@ pub mod context;
 pub mod facts;
 pub mod fake;
 pub mod gate;
+pub mod lang;
 pub mod openai;
 pub mod prompt;
 pub mod split;
@@ -22,6 +23,76 @@ pub struct ProposedArtifact {
     /// them. The model is already holding this segment, so asking for these
     /// costs output tokens rather than another call.
     pub caveats: Vec<String>,
+    /// The model says this artifact records a decision or commitment the
+    /// operator made — the shape the `pinned` boost exists for. Honored only
+    /// on the judged capture path; a promotion never pins.
+    pub pinned: bool,
+}
+
+/// One nearest artifact shown to a judged synthesis call: id-addressable, so
+/// the reply's links can only name what was actually on the table.
+#[derive(Debug, Clone)]
+pub struct Neighbor {
+    pub id: String,
+    pub title: Option<String>,
+    pub text: String,
+}
+
+/// What a judged call is given to judge with: the clock, the zone, what the
+/// capture door already said, and the base's nearest artifacts.
+#[derive(Debug, Clone)]
+pub struct JudgeAsk {
+    /// "2026-09-04 09:00 (Friday)" — local wall clock at capture.
+    pub now_local: String,
+    /// "Europe/Berlin".
+    pub tz: String,
+    /// The door forced an intent (`metadata.intent`): a hint, not a bypass.
+    pub forced_intent: Option<String>,
+    pub neighbors: Vec<Neighbor>,
+}
+
+/// A relation the model asserted between this capture and a shown neighbor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProposedLink {
+    pub artifact_id: String,
+    pub reason: String,
+}
+
+/// The judged half of a capture-time synthesis reply.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Judgement {
+    /// "remind" | "journal" | "none".
+    pub intent: Option<String>,
+    /// Local ISO-8601, no zone — the reminder's instant.
+    pub when: Option<String>,
+    /// An iCalendar RRULE, when the note says it repeats.
+    pub rule: Option<String>,
+    /// Local ISO-8601 datetimes the note states without being the reminder.
+    pub events: Vec<String>,
+    pub links: Vec<ProposedLink>,
+}
+
+impl Judgement {
+    /// Whether the model said anything about the note as a moment in time.
+    ///
+    /// The one caller that matters is the judged parse: a reply with no
+    /// artifacts is a failure when this is false and the whole point of the
+    /// call when it is true. `intent: "none"` is an answer, not a claim —
+    /// the model saying the note is neither a reminder nor a journal entry
+    /// leaves nothing behind, so it does not count.
+    pub fn says_something(&self) -> bool {
+        matches!(self.intent.as_deref(), Some("remind") | Some("journal"))
+            || !self.events.is_empty()
+            || !self.links.is_empty()
+    }
+}
+
+/// One synthesis reply: the artifacts, and — on the judged path — what the
+/// model made of the note as a moment in time.
+#[derive(Debug, Clone)]
+pub struct SegmentReply {
+    pub artifacts: Vec<ProposedArtifact>,
+    pub judgement: Option<Judgement>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,12 +113,31 @@ pub struct SynthesisBudget {
 pub struct SegmentInput<'a> {
     pub core: &'a str,
     pub context: &'a crate::infer::context::WindowContext,
+    /// `Some` on the judged capture path: the same call also reads intent,
+    /// events, and links. `None` for a promotion's window.
+    pub judge: Option<&'a JudgeAsk>,
+    /// Which of the ten system prompts this call is made with.
+    ///
+    /// Carried per call rather than held on the synthesizer, because it is a
+    /// property of the document and not of the endpoint: one base holds a
+    /// German note and an English paper, and the language each was captured in
+    /// is stamped on its corpus. See `infer::lang`.
+    pub lang: crate::infer::lang::Lang,
 }
 
 #[async_trait]
 pub trait Synthesizer: Send + Sync {
     /// Segment one window of text. Windowing itself is the caller's job.
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>>;
+    /// The judged form: the same call, its reply also carrying the judgement
+    /// when `input.judge` was given. Defaulted so a test double that has no
+    /// opinion about moments needs no code for them.
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<SegmentReply> {
+        Ok(SegmentReply {
+            artifacts: self.segment(input).await?,
+            judgement: None,
+        })
+    }
     fn budget(&self) -> SynthesisBudget;
     /// A short name for a whole document, given its opening and the titles of
     /// the artifacts drawn from it.
@@ -56,7 +146,12 @@ pub trait Synthesizer: Send + Sync {
     /// leaves the corpus unnamed rather than inventing a name for it. Defaulted
     /// rather than required because most implementations of this trait are test
     /// doubles that have no opinion about titles.
-    async fn title(&self, _text: &str, _artifact_titles: &[String]) -> Result<Option<String>> {
+    async fn title(
+        &self,
+        _text: &str,
+        _artifact_titles: &[String],
+        _lang: crate::infer::lang::Lang,
+    ) -> Result<Option<String>> {
         Ok(None)
     }
 }
@@ -196,6 +291,19 @@ pub trait Completer: Send + Sync {
     /// the two together exceed it. Reserving less than this is how a request
     /// that would have fit becomes a 400.
     fn max_output_tokens(&self) -> usize;
+}
+
+/// Turns one recording into the words in it. Nothing is stored: what comes
+/// back is typed into the box, and the box is what the operator then does
+/// something with.
+#[async_trait]
+pub trait Transcriber: Send + Sync {
+    /// `mime` is the recording's own content type — whatever the browser's
+    /// recorder produced, which is `audio/webm` on Chrome and Firefox and
+    /// `audio/mp4` on Safari. Passed through rather than converted: the
+    /// endpoint reads the container, and re-encoding here would mean shipping
+    /// a codec to do work the model's own loader already does.
+    async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String>;
 }
 
 /// Reads a captured image into text. One call per image; the caller has

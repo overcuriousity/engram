@@ -1,0 +1,9 @@
+{# What capture will do with the box, said before it is pressed: synthesized
+   into structured artifacts, or stored verbatim window by window. Counted by
+   the same tokenizer and budget the fork itself uses — exact, no model call,
+   riding the search response the box already makes on every keystroke.
+
+   Always swapped, including empty. See `_box_hint.html`. #}
+<span id="intent-echo" class="intent-echo" hx-swap-oob="true">
+{%- if !kind.is_empty() %}<span class="intent-echo-kind">{{ kind }}</span> &middot; {{ detail }}{% endif -%}
+</span>

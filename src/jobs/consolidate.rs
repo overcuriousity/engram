@@ -198,17 +198,29 @@ pub(crate) async fn repair_lifecycle_drift(core: &Core) -> Result<usize> {
     if dirty.is_empty() {
         return Ok(0);
     }
-    let rows: Vec<crate::vector::LifecycleRow> = dirty.iter().map(lifecycle_row_of).collect();
-    core.vectors.apply_lifecycle(&rows).await?;
-    // Only after the payload write returns. Clearing first would turn a failed
+    // A reaped row is the one dirty state whose repair is not a payload
+    // write: its text is in the graveyard and its point should not exist, so
+    // finishing the reap's interrupted delete is the fix — rewriting the
+    // payload would keep a point whose row has no text behind it.
+    let (reaped, standing): (Vec<_>, Vec<_>) = dirty.iter().partition(|c| c.reaped_at.is_some());
+    if !reaped.is_empty() {
+        let ids: Vec<String> = reaped.iter().map(|c| c.id.clone()).collect();
+        core.vectors.delete_artifacts(&ids).await?;
+    }
+    let rows: Vec<crate::vector::LifecycleRow> =
+        standing.iter().map(|c| lifecycle_row_of(c)).collect();
+    if !rows.is_empty() {
+        core.vectors.apply_lifecycle(&rows).await?;
+    }
+    // Only after the vector writes return. Clearing first would turn a failed
     // write into permanent drift that nothing is left to notice.
     let ids: Vec<String> = dirty.iter().map(|c| c.id.clone()).collect();
     core.store.clear_lifecycle_dirty(&ids).await?;
     tracing::info!(
-        repaired = rows.len(),
+        repaired = ids.len(),
         "finished lifecycle writes that never reached the vector store"
     );
-    Ok(rows.len())
+    Ok(ids.len())
 }
 
 pub async fn run(core: &Core) -> Result<Outcome> {
@@ -1174,6 +1186,43 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_empty(),
             "a pair naming a retired artifact must leave the pending queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reaped_row_whose_point_survived_is_repaired_by_deletion() {
+        // The reap's point-delete can fail after the row is buried, leaving
+        // the marker set against a standing point. Pushing the row's status
+        // into that payload would keep a point whose row has no text — the
+        // repair for a reaped row is the delete that did not finish.
+        let core = test_core().await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        core.store
+            .set_artifact_status(&ids[0], ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        // A negative age floor, because the row was retired this same second
+        // and `bury` re-checks `reap_candidates`' predicate — the sweep's own
+        // `min_age_days` is what stands there in production.
+        core.store.bury(&ids[0], "{}", -60).await.unwrap();
+        core.store.mark_lifecycle_dirty(&ids[0]).await.unwrap();
+
+        assert_eq!(repair_lifecycle_drift(&core).await.unwrap(), 1);
+        assert!(
+            core.vectors
+                .payloads_of(std::slice::from_ref(&ids[0]))
+                .await
+                .unwrap()
+                .is_empty(),
+            "the standing point must be deleted, not rewritten"
+        );
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the marker must clear with the delete"
         );
     }
 

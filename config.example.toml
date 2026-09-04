@@ -123,23 +123,26 @@ per_source_cap = 3
 # you can raise output_ratio's window and lower timeout_secs considerably.
 
 [infer]
-# How much inference capture spends.
-#   "off"    — split the text into verbatim passages, embed them, call nothing.
-#              [infer.synthesize] and [infer.ask] may be left out entirely.
-#   "earned" — the same capture; synthesis runs later where use has shown it
-#              is worth it. Needs [infer.synthesize]. The default.
-#   "eager"  — one synthesis call per segment at capture.
+# Capture is verbatim-first: your text goes in as you wrote it, split into
+# passages and embedded, searchable before any model answers. A paste that
+# fits one synthesis call is then rewritten immediately — structured
+# artifacts that supersede the passages they cover, with the originals kept
+# reachable — and anything larger earns its rewrites through use, window by
+# window (see [promote]). [infer.synthesize] is required: capture
+# synthesizes, and there is no mode key any more.
 #
-# "earned" is the default because capture cannot know which paragraph will be
-# asked about. Your text goes in as you wrote it; a window is rewritten once
-# reading has shown the rewrite is worth making, and every synthesized artifact
-# in the base can name the use that earned it. Choose "eager" when you want
-# everything pre-written and are willing to pay a model call per segment for
-# text most of which is never retrieved.
-synthesis = "earned"
-# Window size when there is no [infer.synthesize] to derive one from, in
-# engram's estimator tokens. Ignored when a synthesizer is configured.
-# segment_tokens = 4096
+# Upgrading from before the 2026-09 reshape: `infer.synthesis` and
+# `infer.segment_tokens` are refused at startup rather than ignored, so delete
+# them. There is no embed-only mode any more either — a base that ran
+# `synthesis = "off"` had no chat endpoint and now needs one, either a `tier`
+# below or a `base_url` and `model` of its own.
+# How tokens are counted for every budget: threshold, windows, prompts. A
+# HF-format tokenizer.json, as a path or an http(s) link. A link is fetched
+# once and cached beside the store; a changed link re-fetches. Unset, the
+# bundled Qwen-family tokenizer counts, and if nothing loads a pessimistic
+# character estimate does — a tokenizer here is an accuracy upgrade, never a
+# startup requirement. Gated HF repos: download by hand and use a path.
+# tokenizer = "https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json"
 
 # The working tier: everything that runs unattended, in bulk, and is paid for
 # by the corpus rather than by a person waiting.
@@ -241,6 +244,13 @@ output_ratio = 8.0
 # ceiling than the tier's:
 # max_output_tokens = 8192
 # Pacing lives in `[pacing]` at the bottom of this file.
+# Tokens of nearest-neighbour artifacts from the rest of the base shown to a
+# small capture's synthesis call, so it can resolve references ("the migration
+# issue" → which one), name what this capture relates to, and write what the
+# base does not already hold. Read with the capture's own just-stored vectors
+# — no extra embedding call. 0 turns the block off; promotion's window calls
+# never carry it.
+# context_neighbor_tokens = 1024
 # Tokens of the document's verbatim opening prepended to every window, so an
 # artifact from deep in a long document still knows what product, version and
 # platform it belongs to — which is what the caveats field asks for and what a
@@ -273,10 +283,11 @@ dim = 768
 # engram splits the artifact instead, but it splits sooner and cheaper if this
 # number is honest. 2048 is the model's window; use the server's if lower.
 max_input_tokens = 2048
-# Passage size at synthesis = "off"/"earned", in estimator tokens: about a
-# paragraph and a half, which is about one idea. Clamped to what the embedder
-# will take (max_input_tokens * 0.8). Argued, not measured — the judge
-# harness is what is allowed to move it.
+# Passage size for verbatim passages, and the cap each synthesized artifact
+# is asked to fit, so every artifact embeds whole: about a paragraph and a
+# half, which is about one idea. Clamped to what the embedder will take
+# (max_input_tokens * 0.8). Argued, not measured — the judge harness is what
+# is allowed to move it.
 # chunk_tokens = 384
 # The recipe. `{text}` is the query or the body; `{title}` is the artifact's
 # title. A document with no title takes the `_untitled` template — the model
@@ -373,6 +384,40 @@ tier = "deep"
 # block names one, and from the synthesize role when it has no endpoint of its
 # own — in both cases because it is then the same server.
 # ceiling_param = "max_tokens"
+
+# Speaking instead of typing. Optional and disabled by default: with this block
+# absent there is no microphone on the search box — not a greyed-out one, no
+# control at all, the same rule the image door above follows.
+#
+# The button is held down while you talk, and what comes back is appended to
+# whatever is already in the box. Nothing is stored and nothing is recorded:
+# dictation is typing, and the search it becomes is logged where every other
+# search is.
+#
+# `base_url` and `model` are both required once this block exists. There is no
+# tier to inherit from and no other role's address to borrow — a server that
+# transcribes speech is not the server that writes chat completions, and the
+# one installation where it is has a proxy in front of both, where the address
+# is worth writing twice. The endpoint is an OpenAI-compatible
+# POST {base_url}/audio/transcriptions, which whisper.cpp's server,
+# faster-whisper-server, vLLM and the hosted APIs all answer.
+#
+# Not probed at startup, unlike the other roles: the small speech servers serve
+# only the transcription route, so a probe would warn about an endpoint that
+# works. The first press is the check.
+# [infer.transcribe]
+# base_url = "http://localhost:8090/v1"
+# model = "whisper-1"
+# api_key = ""
+# Seconds before one recording is given up on. Defaults to 60, not the fifteen
+# minutes the background roles take: what is waiting on this call is a person
+# holding a button.
+# timeout_secs = 60
+# An ISO-639-1 code sent with every recording. Unset, the model detects the
+# language from the audio — which is where it is weakest, since a search query
+# is two or three words, and a German one comes back as the English words that
+# sound like it. Worth naming where one person speaks one language.
+# language = "de"
 
 # ── Authentication ──────────────────────────────────────────────────────────
 # Exactly one mode is active.
@@ -576,8 +621,9 @@ confirmed = 3.0
 cited = 0.5
 
 # ── Promotion ────────────────────────────────────────────────────────────────
-# At synthesis = "earned", when a passage has earned its window a synthesis
-# call. Read against [activation] and above the capture baseline, which decays
+# The large side of capture's size fork: when a passage has earned its window
+# a synthesis call. (A capture that fits one call was synthesized at capture.)
+# Read against [activation] and above the capture baseline, which decays
 # at the same rate as what use adds and is subtracted decayed before the
 # comparison: so 3.0 is one confirmation, or three openings, at any age.
 # Checked only when a passage is opened, confirmed or cited by an answer —
@@ -586,11 +632,31 @@ cited = 0.5
 # artifacts inherit the access the passages earned.
 [promote]
 activation_above = 3.0
-# At synthesis = "eager": an artifact shown this many times with no
-# confirmation recorded against it is re-read from its source segment. 0
-# disables it, and it ships disabled — re-synthesising changes what an
-# existing base contains without anyone asking.
-resynthesize_after_unconfirmed = 0
+# Cosine at or above which a rewritten artifact counts as traceable to a
+# passage it already covers by a majority of its lines, and so may supersede
+# it. Checked only when the artifact copied no line of the passage verbatim,
+# which is the normal case for prose: synthesis resolves pronouns and completes
+# fragments, so nothing matches word for word and — before this key existed —
+# the verbatim passage stayed in results beside the artifact written from it.
+#
+# Not a duplicate-detection threshold. [consolidate] auto_supersede compares two
+# independent artifacts and has a judge behind it, because a cosine cannot tell
+# "runs on ext4" from "does not run on ext4". Here the relation is known: this
+# artifact came out of synthesizing this window, and the only question is which
+# passage of that window. Set it to separate passages of one document from each
+# other, not to assert that two texts agree.
+#
+# Read only where the artifact's span placed it in the window — the splitter
+# found its words at those lines, or the model named them. Where nothing placed
+# it and the span fell back to the whole window, no similarity supersedes
+# anything at any setting: that span covers every passage in the window at once,
+# so the cosine would no longer be asking which passage the artifact is, only
+# whether two passages of one document are about the same subject — which they
+# are.
+#
+# Above 1.0 switches the check off: only a verbatim line then supersedes
+# anything, which is how it behaved before.
+traceable_min = 0.75
 
 # ── Pursuits ─────────────────────────────────────────────────────────────────
 # A coherent run of searches, what was opened and pivoted through, and — when
@@ -701,6 +767,60 @@ month_cycle = 0.0
 # never moves, and a hit it lifted says so on the row.
 prime = false
 
+[time]
+# A due reminder inside this many hours is shown on the front page, and may
+# lift a search hit by the same bounded step a primed hit gets.
+horizon_hours = 48
+# Dates a note refers to inside this many days are listed under "Coming up".
+coming_up_days = 7
+# An open due reminder lifts a hit, bounded, and the row says so. Extracted
+# dates never lift.
+lift = true
+# IANA zone for doors that send none (the API without ?tz=, MCP without tz).
+# Empty means the server's own zone, as the host names it — and UTC where the
+# platform cannot say. Name a zone here if the server's own is not the one your
+# notes are written in.
+default_tz = ""
+
+# ── Reaping ──────────────────────────────────────────────────────────────────
+# The sweep that revisits long-retired artifacts and decides, one model call
+# each, whether the live base already says what they say. A worthless one is
+# buried: its text is copied into the `graveyard` table and wiped from the
+# artifact, and its vector point is deleted. A valuable one is rewritten into a
+# fresh artifact.
+#
+# This is the only stage in the base that destroys text an operator captured,
+# so read it before leaving it on. Nothing is lost — `graveyard` is permanent
+# by design, and every burial keeps the judge's one-line reason with it — but a
+# buried artifact is out of search, out of FTS and out of the vector store, and
+# putting one back is a manual read of that table.
+#
+# It runs only where a judge model is configured. The free rules nominate; they
+# never tombstone on their own.
+[reap]
+# The sweep at all. Off means retired artifacts keep their text forever, which
+# is what every base did before this stage existed.
+#
+# This whole section is the consent: a config file that does not mention [reap]
+# does not run the sweep, whatever the default below says. It is the one stage
+# that destroys captured text, so an upgrade never turns it on for you — you
+# do, by writing this block.
+enabled = true
+# How often the sweep runs. Once a day: the backlog it drains accumulated over
+# months, and there is nothing to be gained by draining it faster.
+interval_mins = 1440
+# How long an artifact must have been retired before it is judged at all. The
+# clock is `artifacts.retired_at`, and a row retired before that column existed
+# is given a fresh one on the first sweep rather than a date invented for it —
+# so an upgrade waits this long again before anything is judged.
+min_age_days = 90
+# Model calls per run, and so the sweep's whole inference budget. Rows over the
+# cap stay candidates, oldest first, and come back on the next run.
+max_judged_per_run = 20
+# Rewrites per run, bounded separately: one bad judging batch must not be able
+# to flood the live base with model-written text.
+max_rescues_per_run = 3
+
 # ── Scheduling ───────────────────────────────────────────────────────────────
 # The queue is the scheduler. Whether somebody is waiting on a unit is a
 # constant per stage rather than a setting: a priority you can set wrong
@@ -748,8 +868,9 @@ age_after_mins = 60
 # bounds a shared GPU — but it serves no gap and starts none. The gap is sized
 # against a generation; an encoder answering a batch of 32 in about a second is
 # not one, and pacing it spends nearly the whole budget on the one role that
-# needs no protecting. At `synthesis = "earned"`, where capture generates
-# nothing at all, that was most of what this setting did.
+# needs no protecting. A large capture generates nothing at capture time, so
+# what this paces is mostly promotion, the judged links, and the one synthesis
+# call a small capture arms.
 cooldown_secs = 0
 
 [capture]

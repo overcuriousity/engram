@@ -9,20 +9,37 @@ pub struct ContextBudget {
     pub opening: usize,
     /// Tokens of each neighbouring window, on both sides.
     pub overlap: usize,
+    /// Tokens of nearest-neighbor artifacts shown to a judged capture call.
+    pub neighbors: usize,
 }
 
 /// The fence lines and their labels, which are prompt text like any other and
-/// have to be paid for out of the same budget.
-const FENCE_TOKENS: usize = 40;
+/// have to be paid for out of the same budget. Sized for all four block kinds,
+/// the NEIGHBORS and JUDGE fences included.
+///
+/// Counted rather than guessed at, because 60 was a guess and it was short.
+/// The opening, preceding and following fences are two lines each, the INPUT
+/// fence carries a sentence about line numbers and the artifact ceiling, and
+/// the JUDGE block spells out the local time, the zone and — where the door
+/// said one — the forced intent before its own fence. See
+/// `prompt::synthesis_prompt`, which is what these numbers describe.
+const FENCE_TOKENS: usize = 160;
+
+/// What one entry of the NEIGHBORS block costs before a word of its text:
+/// `[id: <uuid>] ` and the two newlines around it. A UUID is not one token —
+/// it is a couple of dozen — and with five neighbours that alone was most of
+/// the overrun this budget was under-reserving by. The title is counted for
+/// real beside it; only the fixed part is a constant.
+pub const NEIGHBOR_HEADER_TOKENS: usize = 28;
 
 impl ContextBudget {
     /// Everything the context blocks cost, fences included. This is subtracted
     /// from the window so the assembled prompt still fits the model.
     pub fn total(&self) -> usize {
-        if self.opening == 0 && self.overlap == 0 {
+        if self.opening == 0 && self.overlap == 0 && self.neighbors == 0 {
             return 0;
         }
-        self.opening + 2 * self.overlap + FENCE_TOKENS
+        self.opening + 2 * self.overlap + self.neighbors + FENCE_TOKENS
     }
 }
 
@@ -105,7 +122,11 @@ fn head_lines(text: &str, limit: usize, counter: &TokenCounter) -> Option<String
     if !taken.is_empty() {
         return Some(taken.join("\n"));
     }
-    cut_chars(text, limit, true)
+    // Not one whole line fits. That is not a pathological case here — it is the
+    // corpus this whole mechanism exists for, pasted with no line boundaries at
+    // all — and no context is worse than context cut mid-word, so the budget is
+    // spent on characters, counted the way every other budget in the prompt is.
+    counter.cut(text, limit, true)
 }
 
 /// As many trailing whole lines as fit, in their original order.
@@ -115,27 +136,7 @@ fn tail_lines(text: &str, limit: usize, counter: &TokenCounter) -> Option<String
     if !taken.is_empty() {
         return Some(taken.join("\n"));
     }
-    cut_chars(text, limit, false)
-}
-
-/// Not one whole line fits. That is not a pathological case here — it is the
-/// corpus this whole mechanism exists for, pasted with no line boundaries at
-/// all — and no context is worse than context cut mid-word, so the budget is
-/// spent on characters. 3.5 per token is the ratio the estimate uses.
-fn cut_chars(text: &str, limit: usize, from_start: bool) -> Option<String> {
-    if limit == 0 || text.is_empty() {
-        return None;
-    }
-    let max_chars = (limit * 7 / 2).max(16);
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
-        return Some(text.to_string());
-    }
-    Some(if from_start {
-        chars[..max_chars].iter().collect()
-    } else {
-        chars[chars.len() - max_chars..].iter().collect()
-    })
+    counter.cut(text, limit, false)
 }
 
 fn take_lines<'a>(
@@ -187,13 +188,14 @@ mod tests {
         ContextBudget {
             opening: 30,
             overlap: 20,
+            neighbors: 0,
         }
     }
 
     #[test]
     fn the_first_window_gets_no_opening_and_no_preceding_context() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 0, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 0, budget(), &TokenCounter::default());
         assert_eq!(c.opening, None, "window 0 already contains the opening");
         assert_eq!(c.before, None, "window 0 has nothing before it");
         assert!(c.after.is_some(), "window 0 has a window after it");
@@ -202,7 +204,7 @@ mod tests {
     #[test]
     fn the_last_window_gets_no_following_context() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter::default());
         assert_eq!(c.after, None);
         assert!(c.before.is_some());
         assert!(c.opening.is_some());
@@ -211,7 +213,7 @@ mod tests {
     #[test]
     fn a_middle_window_gets_all_three_blocks_from_the_right_places() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default());
 
         assert!(
             c.opening
@@ -236,7 +238,7 @@ mod tests {
 
     #[test]
     fn every_block_stays_inside_its_budget() {
-        let counter = TokenCounter;
+        let counter = TokenCounter::default();
         let w = windows();
         let c = WindowContext::build(&refs(&w), 1, budget(), &counter);
         assert!(counter.count(c.opening.as_deref().unwrap()) <= 30);
@@ -251,7 +253,7 @@ mod tests {
         // newlines used to re-derive as the whole document for window 0 and as
         // nothing at all for every window after it.
         let w: Vec<String> = (0..4).map(|i| format!("part{i} ").repeat(40)).collect();
-        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter::default());
         assert!(
             c.before.as_deref().unwrap().contains("part1"),
             "got {:?}",
@@ -268,7 +270,12 @@ mod tests {
     #[test]
     fn a_zero_budget_produces_nothing() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 1, ContextBudget::default(), &TokenCounter);
+        let c = WindowContext::build(
+            &refs(&w),
+            1,
+            ContextBudget::default(),
+            &TokenCounter::default(),
+        );
         assert_eq!(c, WindowContext::default());
         assert!(c.is_empty());
         assert_eq!(c.blocks().count(), 0);
@@ -277,7 +284,7 @@ mod tests {
     #[test]
     fn an_index_past_the_end_produces_nothing() {
         let w = windows();
-        let c = WindowContext::build(&refs(&w), 9, budget(), &TokenCounter);
+        let c = WindowContext::build(&refs(&w), 9, budget(), &TokenCounter::default());
         assert_eq!(c, WindowContext::default());
     }
 
@@ -286,8 +293,8 @@ mod tests {
         // A retry rebuilds context from the stored windows alone, so the same
         // rows must always give the same bytes.
         let w = windows();
-        let a = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter);
-        let b = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter);
+        let a = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default());
+        let b = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default());
         assert_eq!(a, b);
     }
 
@@ -295,13 +302,13 @@ mod tests {
     fn blocks_yields_every_populated_block() {
         let w = windows();
         assert_eq!(
-            WindowContext::build(&refs(&w), 1, budget(), &TokenCounter)
+            WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default())
                 .blocks()
                 .count(),
             3
         );
         assert_eq!(
-            WindowContext::build(&refs(&w), 0, budget(), &TokenCounter)
+            WindowContext::build(&refs(&w), 0, budget(), &TokenCounter::default())
                 .blocks()
                 .count(),
             1

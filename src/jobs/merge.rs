@@ -417,6 +417,8 @@ mod tests {
             status: ArtifactStatus::Active,
             last_verified_at: None,
             cues: vec![],
+            retired_at: None,
+            reaped_at: None,
         }
     }
 

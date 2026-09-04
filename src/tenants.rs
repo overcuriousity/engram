@@ -310,8 +310,29 @@ impl Tenants {
             .vectors
             .open(&self.alias(&user), self.cfg.infer.embed.dim)
             .await?;
+        // Before the core, because building one parses the tokenizer and this
+        // is an `async fn`: see `TokenCounter::warm`. Memoized, so every open
+        // after the first is a lookup.
+        crate::infer::budget::TokenCounter::warm(
+            self.cfg.infer.tokenizer.as_deref(),
+            std::path::Path::new(&self.cfg.store.dir),
+        )
+        .await;
         let core =
             Core::from_config_with(&self.cfg, vectors, store, self.working_for(&user.subject));
+        // One `meta` read, before this core serves anything. `weak_below`
+        // reads an unmeasured line as the configured floor, and the floor is
+        // low enough that a base running at it calls unrelated things related
+        // — see `Core::adopt_measured_line`. A failure here leaves the floor
+        // standing, which is the state this call exists to shorten, not one it
+        // can make worse.
+        if let Err(e) = core.adopt_measured_line().await {
+            tracing::warn!(
+                subject = %user.subject,
+                error = %e,
+                "could not read the stored weak line; the floor stands until the next pass"
+            );
+        }
         self.on_first_open(&core, &user.subject, trigger);
         Ok(Tenant { core, user })
     }

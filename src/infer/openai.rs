@@ -1,9 +1,10 @@
 use super::{
     Completer, Completion, Delta, Describer, Embedder, ProposedArtifact, Reranker, SegmentInput,
-    SynthesisBudget, Synthesizer, prompt,
+    SynthesisBudget, Synthesizer, Transcriber, prompt,
 };
 use crate::config::{
     AskRole, CeilingParam, EmbedRole, RerankRole, RerankStyle, SynthesizeRole, TierConfig,
+    TranscribeRole,
 };
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -188,8 +189,27 @@ impl Endpoint {
     /// caller that wants the body as a stream is not forced to buffer it into
     /// JSON first.
     async fn post(&self, path: &str, body: serde_json::Value) -> Result<reqwest::Response> {
+        self.send(self.client.post(url(&self.base_url, path)).json(&body))
+            .await
+    }
+
+    /// The same call with a form body instead of JSON. One role needs it —
+    /// transcription, whose API takes the recording as a file part — and it
+    /// goes through here rather than around it so that a speech endpoint's
+    /// failures are judged, logged and classified like every other role's.
+    async fn post_multipart(
+        &self,
+        path: &str,
+        form: reqwest::multipart::Form,
+    ) -> Result<reqwest::Response> {
+        self.send(self.client.post(url(&self.base_url, path)).multipart(form))
+            .await
+    }
+
+    /// Send a request that is already built, and judge what comes back: the
+    /// key, the timing log, and which of the two failure kinds a bad status is.
+    async fn send(&self, mut req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let role = self.role;
-        let mut req = self.client.post(url(&self.base_url, path)).json(&body);
         if let Some(k) = &self.api_key {
             req = req.bearer_auth(k);
         }
@@ -451,12 +471,25 @@ pub struct HttpSynthesizer {
     max_artifact_tokens: usize,
     reasoning_effort: Option<String>,
     structured_output: bool,
+    /// What a prompt costs, counted the way the windowing side counts it.
+    ///
+    /// Not `TokenCounter::default()`. The estimator and the bundled tokenizer
+    /// agree closely on English and do not agree at all on Cyrillic, Polish or
+    /// Turkish — the reason `synthesize.rs` sizes windows per language. Once
+    /// `WindowContext::build` and `segment_budget` moved to the real
+    /// tokenizer, a Russian window sized to N real tokens was *estimated* here
+    /// at roughly 0.6N, `ceiling_for_prompt` handed back the difference as room
+    /// to answer in, and the endpoint answered 400. `checked_ceiling_for_prompt`
+    /// could not catch it either: it shared the undercount.
+    counter: std::sync::Arc<crate::infer::budget::TokenCounter>,
 }
 
 /// What a chat message list costs as a prompt: the text of every `content`,
 /// which is everything an endpoint counts that this side controls.
-fn message_tokens(messages: &serde_json::Value) -> usize {
-    let counter = crate::infer::budget::TokenCounter;
+fn message_tokens(
+    messages: &serde_json::Value,
+    counter: &crate::infer::budget::TokenCounter,
+) -> usize {
     messages
         .as_array()
         .map(|ms| {
@@ -486,12 +519,22 @@ impl HttpSynthesizer {
                 context: crate::infer::context::ContextBudget {
                     opening: cfg.context_opening_tokens,
                     overlap: cfg.context_overlap_tokens,
+                    neighbors: cfg.context_neighbor_tokens,
                 },
             },
             max_artifact_tokens: 1024,
             reasoning_effort: cfg.reasoning_effort.clone(),
             structured_output: cfg.structured_output,
+            counter: Default::default(),
         }
+    }
+
+    /// The tokenizer the rest of the system budgets with, handed over during
+    /// wiring. Without it this side falls back to the estimator, which is what
+    /// every test runs on and what an install with no loadable tokenizer gets.
+    pub fn with_counter(mut self, c: std::sync::Arc<crate::infer::budget::TokenCounter>) -> Self {
+        self.counter = c;
+        self
     }
 
     /// Caps chunk size so the embedder never receives an oversized chunk.
@@ -506,8 +549,12 @@ impl HttpSynthesizer {
     /// constraint, which is the only thing that reliably stops a small local
     /// model closing an array with a brace or dropping a required field. The
     /// calls that want prose rather than JSON — titles — pass `None`.
-    async fn chat(&self, messages: serde_json::Value, schema: Option<&str>) -> Result<String> {
-        let spent = message_tokens(&messages);
+    async fn chat(
+        &self,
+        messages: serde_json::Value,
+        schema: Option<(&str, serde_json::Value)>,
+    ) -> Result<String> {
+        let spent = message_tokens(&messages, &self.counter);
         let mut body = json!({
             "messages": messages,
             "temperature": 0.2,
@@ -515,8 +562,8 @@ impl HttpSynthesizer {
         if let Some(effort) = &self.reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
-        if let Some(name) = schema.filter(|_| self.structured_output) {
-            body["response_format"] = response_format(name, prompt::artifacts_schema());
+        if let Some((name, value)) = schema.filter(|_| self.structured_output) {
+            body["response_format"] = response_format(name, value);
         }
         // The same invariant every other caller keeps: prompt plus ceiling has
         // to fit the window as the server counts both. `segment`'s first call
@@ -537,29 +584,59 @@ impl HttpSynthesizer {
     }
 }
 
-#[async_trait]
-impl Synthesizer for HttpSynthesizer {
-    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
-        let user = prompt::user_prompt(input.core, 1, self.max_artifact_tokens, input.context);
+impl HttpSynthesizer {
+    /// One synthesis call, judged or plain: the same transport, prompt
+    /// scaffold, and one repair attempt; only the schema, the JUDGE block,
+    /// and the parse differ.
+    async fn run_segment(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
+        let judged = input.judge.is_some();
+        // Fixed for both calls of this segment, the repair included: a repair
+        // that changed language would be a second system prompt over the first
+        // one's reply.
+        let system = prompt::synthesizer_system(input.lang);
+        let user = prompt::user_prompt(
+            input.core,
+            1,
+            self.max_artifact_tokens,
+            input.context,
+            input.judge,
+        );
+        let schema = || {
+            if judged {
+                ("judged_artifacts", prompt::judged_artifacts_schema())
+            } else {
+                ("artifacts", prompt::artifacts_schema())
+            }
+        };
+        let parse = |body: &str| -> Result<crate::infer::SegmentReply> {
+            if judged {
+                prompt::parse_judged_response(body)
+            } else {
+                Ok(crate::infer::SegmentReply {
+                    artifacts: prompt::parse_response(body)?,
+                    judgement: None,
+                })
+            }
+        };
         let first = self
             .chat(
                 json!([
-                    {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
+                    {"role":"system","content": system},
                     {"role":"user","content": user}
                 ]),
-                Some("artifacts"),
+                Some(schema()),
             )
             .await?;
 
-        match prompt::parse_response(&first) {
-            Ok(chunks) => Ok(chunks),
+        match parse(&first) {
+            Ok(reply) => Ok(reply),
             Err(e) => {
                 // One repair attempt with the parser error fed back. Beyond
                 // that the caller falls back to a structural split.
                 tracing::warn!(error = %e, "synthesizer returned unparsable output; repairing");
                 let repair = prompt::repair_prompt(&first, &e.to_string());
                 let messages = json!([
-                    {"role":"system","content": prompt::SYNTHESIZER_SYSTEM},
+                    {"role":"system","content": system},
                     {"role":"user","content": user},
                     {"role":"assistant","content": first},
                     {"role":"user","content": repair}
@@ -573,7 +650,7 @@ impl Synthesizer for HttpSynthesizer {
                 // what happens when the repair fails in any case.
                 if crate::infer::budget::checked_ceiling_for_prompt(
                     self.budget.context_tokens,
-                    message_tokens(&messages),
+                    message_tokens(&messages, &self.counter),
                     self.budget.max_output_tokens,
                 )
                 .is_none()
@@ -586,21 +663,37 @@ impl Synthesizer for HttpSynthesizer {
                     return Err(e);
                 }
 
-                let second = self.chat(messages, Some("artifacts")).await?;
-                prompt::parse_response(&second)
+                let second = self.chat(messages, Some(schema())).await?;
+                parse(&second)
             }
         }
+    }
+}
+
+#[async_trait]
+impl Synthesizer for HttpSynthesizer {
+    async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
+        Ok(self.run_segment(input).await?.artifacts)
+    }
+
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
+        self.run_segment(input).await
     }
 
     fn budget(&self) -> SynthesisBudget {
         self.budget
     }
 
-    async fn title(&self, text: &str, artifact_titles: &[String]) -> Result<Option<String>> {
+    async fn title(
+        &self,
+        text: &str,
+        artifact_titles: &[String],
+        lang: crate::infer::lang::Lang,
+    ) -> Result<Option<String>> {
         let out = self
             .chat(
                 json!([
-                    {"role":"system","content": prompt::TITLE_SYSTEM},
+                    {"role":"system","content": prompt::title_system(lang)},
                     {"role":"user","content": prompt::title_prompt(text, artifact_titles)}
                 ]),
                 None,
@@ -943,9 +1036,19 @@ pub struct HttpCompleter {
     /// format so the endpoint constrains decoding. `None` for the ask role,
     /// whose answer is prose for a person to read.
     response_schema: Option<(&'static str, serde_json::Value)>,
+    /// See `HttpSynthesizer::counter` — the same disagreement, on the path
+    /// that carries whole artifacts into a judge call.
+    counter: std::sync::Arc<crate::infer::budget::TokenCounter>,
 }
 
 impl HttpCompleter {
+    /// The tokenizer the rest of the system budgets with, handed over during
+    /// wiring.
+    pub fn with_counter(mut self, c: std::sync::Arc<crate::infer::budget::TokenCounter>) -> Self {
+        self.counter = c;
+        self
+    }
+
     pub fn new(cfg: &AskRole) -> Self {
         Self {
             ep: Endpoint::new(
@@ -960,6 +1063,7 @@ impl HttpCompleter {
             max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: None,
+            counter: Default::default(),
         }
     }
 
@@ -1024,6 +1128,17 @@ impl HttpCompleter {
         Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))
     }
 
+    /// The judge that rules on a retired artifact, on the judges' endpoint.
+    ///
+    /// Its own completer for the reason `for_link_judging` is: the response
+    /// format lives in the struct, and reap asks a question the dedupe grammar
+    /// cannot express. Sharing `for_judging` meant every reap verdict came back
+    /// as `{"verdict":{"relation":…}}` and failed to parse, so the sweep judged
+    /// each nominee at full cost and acted on none of them.
+    pub fn for_reaping(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("reap", prompt::reap_schema()))
+    }
+
     /// The model that writes an artifact from a pursuit, on the judges'
     /// endpoint: background work in a fixed shape, like every other judge.
     pub fn for_generating(cfg: &SynthesizeRole) -> Self {
@@ -1054,6 +1169,7 @@ impl HttpCompleter {
             response_schema: cfg
                 .structured_output
                 .then_some(("need", prompt::plan_schema())),
+            counter: Default::default(),
         }
     }
 
@@ -1071,6 +1187,7 @@ impl HttpCompleter {
             max_output_tokens: cfg.max_output_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
             response_schema: cfg.structured_output.then_some(schema),
+            counter: Default::default(),
         }
     }
 }
@@ -1091,8 +1208,7 @@ impl Completer for HttpCompleter {
     /// same structurally impossible request forever. `InferenceRejected` is
     /// permanent, which is what a prompt too large for its window is.
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        let counter = crate::infer::budget::TokenCounter;
-        let spent = counter.count(system) + counter.count(user);
+        let spent = self.counter.count(system) + self.counter.count(user);
         let Some(ceiling) = crate::infer::budget::checked_ceiling_for_prompt(
             self.context_tokens,
             spent,
@@ -1308,6 +1424,102 @@ impl Describer for HttpDescriber {
     }
 }
 
+/// The microphone's other end: one recording in, the words in it out.
+pub struct HttpTranscriber {
+    ep: Endpoint,
+    language: Option<String>,
+}
+
+impl HttpTranscriber {
+    pub fn new(cfg: &TranscribeRole) -> Self {
+        Self {
+            ep: Endpoint::new(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.api_key.as_deref(),
+                cfg.timeout_secs,
+                "transcribe",
+            ),
+            language: cfg.language.clone(),
+        }
+    }
+}
+
+/// The extension to send the recording under.
+///
+/// Not decoration: whisper.cpp's server and faster-whisper-server both pick
+/// the demuxer from the part's filename, and a WebM container arriving as
+/// `audio.bin` is refused before any model sees it. The subtype is the
+/// extension in every container a browser records — the map exists for
+/// `audio/mpeg`, where it is not.
+fn audio_extension(mime: &str) -> &str {
+    let subtype = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim();
+    match subtype {
+        "mpeg" => "mp3",
+        "x-wav" | "wave" => "wav",
+        // An empty or unrecognised type is still a recording, and the one
+        // format a browser produces without saying so is WebM.
+        // `application/octet-stream` says the same nothing: it is what a
+        // multipart part with no `Content-Type` is read as, and passing it
+        // through named the file `recording.octet-stream`, which the local
+        // servers refuse — they pick the demuxer from the name.
+        "" | "octet-stream" => "webm",
+        other => other,
+    }
+}
+
+#[async_trait]
+impl Transcriber for HttpTranscriber {
+    async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String> {
+        let role = "transcribe";
+        let part = reqwest::multipart::Part::bytes(audio.to_vec())
+            .file_name(format!("recording.{}", audio_extension(mime)))
+            .mime_str(mime.split(';').next().unwrap_or("application/octet-stream"))
+            .map_err(|e| Error::Inference {
+                role,
+                detail: e.to_string(),
+            })?;
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model", self.ep.model.clone())
+            // Plain text would spare the parse, but `json` is the format every
+            // one of these servers agrees on: the OpenAI default, and what the
+            // local ones implement first.
+            .text("response_format", "json");
+        if let Some(l) = &self.language {
+            form = form.text("language", l.clone());
+        }
+        let body: serde_json::Value = self
+            .ep
+            .post_multipart("audio/transcriptions", form)
+            .await?
+            .json()
+            .await
+            .map_err(|e| Error::Inference {
+                role,
+                detail: e.to_string(),
+            })?;
+        // Silence is a legitimate answer — a button pressed and released with
+        // nothing said — so an empty string is returned rather than raised. A
+        // reply with no `text` at all is a different thing: the endpoint
+        // answered something this is not the client for.
+        body.get("text")
+            .and_then(|t| t.as_str())
+            .map(|t| t.trim().to_string())
+            .ok_or_else(|| Error::Inference {
+                role,
+                detail: "the reply carried no `text` field".into(),
+            })
+    }
+}
+
 /// One cheap reachability check per role at startup. Failure is a warning, not
 /// a fatal error: ingest is designed to survive a dead inference endpoint.
 pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
@@ -1372,8 +1584,10 @@ mod tests {
 
     fn window(text: &str) -> SegmentInput<'_> {
         SegmentInput {
+            lang: crate::infer::lang::Lang::En,
             core: text,
             context: &EMPTY_CONTEXT,
+            judge: None,
         }
     }
     use crate::config::{AskRole, EmbedRole, RerankRole, RerankStyle, SynthesizeRole};
@@ -1407,6 +1621,7 @@ mod tests {
             structured_output: true,
             context_opening_tokens: 200,
             context_overlap_tokens: 150,
+            context_neighbor_tokens: 0,
         }
     }
     fn ask_cfg(base: String) -> AskRole {
@@ -1526,7 +1741,7 @@ mod tests {
         // call would constrain a one-line title into a JSON object.
         let server = echoing_server("A Good Title").await;
         let t = HttpSynthesizer::new(&synthesize_cfg(server.uri()))
-            .title("some text", &[])
+            .title("some text", &[], crate::infer::lang::Lang::En)
             .await
             .unwrap();
 
@@ -1638,7 +1853,15 @@ mod tests {
         // A long unparsable reply. The repair prompt carries it twice — once as
         // the assistant turn, once quoted back in the repair instruction — so
         // this leaves the window with less room than the configured ceiling.
-        let long_prose = "sorry, here is prose ".repeat(533);
+        //
+        // With slack, deliberately. At 533 the repair prompt cleared the
+        // `max_output_tokens` line below by nine tokens, which made this test a
+        // measurement of the system prompt's length: a line removed from
+        // `SYNTHESIZER_SYSTEM` dropped it under and failed a test about the
+        // repair's arithmetic. The subject here is that arithmetic, so the
+        // fixture is sized to be plainly over the line rather than exactly on
+        // it.
+        let long_prose = "sorry, here is prose ".repeat(700);
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1656,8 +1879,12 @@ mod tests {
             .await;
 
         // A ceiling that is half its window, which is the shape the shipped
-        // example config uses and the one where this fails.
+        // example config uses and the one where this fails. Doubled first:
+        // the system prompt grew with the judged contract, and this test is
+        // about the repair's arithmetic, not about a window too small for
+        // the scaffolding itself.
         let mut cfg = synthesize_cfg(server.uri());
+        cfg.context_tokens *= 2;
         cfg.max_output_tokens = cfg.context_tokens / 2;
         let context = cfg.context_tokens;
         HttpSynthesizer::new(&cfg)
@@ -1668,7 +1895,7 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2, "the repair call was not made");
         let repair: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-        let prompt = message_tokens(&repair["messages"]);
+        let prompt = message_tokens(&repair["messages"], &Default::default());
         let ceiling = repair["max_tokens"].as_u64().expect("a ceiling is sent") as usize;
         assert!(
             prompt > cfg.max_output_tokens,
@@ -2088,7 +2315,7 @@ mod tests {
 
         let body = sent_body(&server).await;
         let sent = body["max_tokens"].as_u64().unwrap() as usize;
-        let counter = crate::infer::budget::TokenCounter;
+        let counter = crate::infer::budget::TokenCounter::default();
         let prompt = counter.count("s") + counter.count(&user);
         assert!(
             sent < cfg.max_output_tokens,
@@ -2760,5 +2987,122 @@ mod tests {
         assert_eq!(body["max_tokens"].as_u64(), Some(1024), "{body}");
         assert_eq!(body["messages"][0]["content"], serde_json::json!("s"));
         assert_eq!(body["temperature"], serde_json::json!(0.3));
+    }
+
+    fn transcribe_cfg(base: String) -> TranscribeRole {
+        TranscribeRole {
+            base_url: base,
+            model: "whisper-1".into(),
+            api_key: Some("secret".into()),
+            timeout_secs: 60,
+            language: None,
+        }
+    }
+
+    /// The one role that posts a form. What the endpoint has to receive is the
+    /// audio under `file`, the model beside it, and the key in the header —
+    /// and the part has to carry a filename with the container's extension, or
+    /// the local servers refuse it before a model is loaded.
+    #[tokio::test]
+    async fn the_transcriber_posts_the_recording_as_a_file_part() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .and(header("authorization", "Bearer secret"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": " hello  "})),
+            )
+            .mount(&server)
+            .await;
+
+        let out = HttpTranscriber::new(&transcribe_cfg(server.uri()))
+            .transcribe(b"\x1a\x45\xdf\xa3fake webm", "audio/webm;codecs=opus")
+            .await
+            .unwrap();
+        // Trimmed: whisper returns its text with a leading space, every time,
+        // and that space would land in the search box.
+        assert_eq!(out, "hello");
+
+        let reqs = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&reqs[0].body);
+        assert!(body.contains("name=\"file\""), "{body}");
+        assert!(body.contains("filename=\"recording.webm\""), "{body}");
+        assert!(body.contains("whisper-1"), "{body}");
+        assert!(
+            !body.contains("name=\"language\""),
+            "no language is a language to detect, not an empty field: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_language_is_sent_with_the_recording() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": "ja"})),
+            )
+            .mount(&server)
+            .await;
+
+        let mut cfg = transcribe_cfg(server.uri());
+        cfg.language = Some("de".into());
+        HttpTranscriber::new(&cfg)
+            .transcribe(b"audio", "audio/webm")
+            .await
+            .unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&reqs[0].body);
+        assert!(body.contains("name=\"language\""), "{body}");
+        assert!(body.contains("de"), "{body}");
+    }
+
+    /// A reply this is not the client for is an error, and an empty one is not:
+    /// a button pressed with nothing said transcribes to nothing, and the box
+    /// is simply left as it was.
+    #[tokio::test]
+    async fn silence_is_an_answer_and_a_foreign_reply_is_not() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": ""})))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            HttpTranscriber::new(&transcribe_cfg(server.uri()))
+                .transcribe(b"a", "audio/webm")
+                .await
+                .unwrap(),
+            ""
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"error": "nope"})),
+            )
+            .mount(&server)
+            .await;
+        assert!(
+            HttpTranscriber::new(&transcribe_cfg(server.uri()))
+                .transcribe(b"a", "audio/webm")
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_recording_is_named_after_the_container_it_is_in() {
+        // The servers that read the extension are the ones this is for, and
+        // Safari's recorder is the reason the map is not just the subtype.
+        assert_eq!(audio_extension("audio/webm;codecs=opus"), "webm");
+        assert_eq!(audio_extension("audio/mp4"), "mp4");
+        assert_eq!(audio_extension("audio/ogg"), "ogg");
+        assert_eq!(audio_extension("audio/mpeg"), "mp3");
+        assert_eq!(audio_extension("audio/x-wav"), "wav");
+        assert_eq!(audio_extension(""), "webm");
+        assert_eq!(audio_extension("application/octet-stream"), "webm");
     }
 }

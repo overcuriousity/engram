@@ -55,6 +55,7 @@
 
   --color-danger: #b3382c;  --color-danger-dim: rgba(179, 56, 44, 0.1);
   --color-warning: #9a6a1a; --color-warning-dim: rgba(154, 106, 26, 0.1);
+  --color-due: #b5651d;
   --color-success: #2f7a4f; --color-success-dim: rgba(47, 122, 79, 0.1);
 
   color-scheme: light;
@@ -94,6 +95,7 @@
 
     --color-danger: #e05252;  --color-danger-dim: rgba(224, 82, 82, 0.15);
     --color-warning: #e8a839; --color-warning-dim: rgba(232, 168, 57, 0.15);
+    --color-due: #e0a060;
     --color-success: #4caf7d; --color-success-dim: rgba(76, 175, 125, 0.15);
 
     color-scheme: dark;
@@ -122,6 +124,7 @@
 
     --color-danger: #e05252;  --color-danger-dim: rgba(224, 82, 82, 0.15);
     --color-warning: #e8a839; --color-warning-dim: rgba(232, 168, 57, 0.15);
+    --color-due: #e0a060;
     --color-success: #4caf7d; --color-success-dim: rgba(76, 175, 125, 0.15);
 
     color-scheme: dark;

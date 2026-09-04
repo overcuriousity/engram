@@ -13,16 +13,23 @@
 use super::ProposedArtifact;
 use crate::error::{Error, Result};
 
-pub const SYNTHESIZER_SYSTEM: &str = r#"You turn reference material into atomic, self-contained knowledge artifacts.
+/// The English original. Every other language is a translation of *this*
+/// text, so a change here is a change nine other constants owe an edit.
+/// `the_translations_carry_the_same_contract` is what notices when they do
+/// not: it compares the parts a parser reads, which is the half that must not
+/// drift.
+pub const SYNTHESIZER_SYSTEM: &str = r#"You turn captured material into atomic, self-contained knowledge artifacts, written to be found again by semantic search.
 
 Each artifact holds exactly one thing: one technique, one procedure, one fact,
-one configuration. If a passage covers three techniques, emit three artifacts.
+one decision, one configuration. If a passage covers three techniques, emit
+three artifacts.
 
-Always use the language the input was written in.
-
-Rewrite each artifact so it stands alone without the surrounding document. Resolve
+Write each artifact as the search result someone will read months from now:
+it stands alone without the surrounding document, opens with the terms a
+person would search for, and states its point in the first sentence. Resolve
 pronouns and implicit references: "this command" becomes the actual command,
-"the above directory" becomes the actual path.
+"the above directory" becomes the actual path. Unstructured notes come out
+structured — a telegraphic fragment becomes a complete statement.
 
 Reproduce commands, file paths, registry keys, error strings, code, and version
 numbers VERBATIM. Never paraphrase, reformat, correct, or abbreviate them. The
@@ -33,8 +40,9 @@ A block labelled "context only" is there so you can resolve references — what 
 pronoun points at, which version or platform the document is about. Use it to
 write artifacts that stand alone. Never emit an artifact for material that
 appears only in a context block: the window that owns that material will emit
-it, and emitting it twice puts two copies in the knowledge base. Extract
-exclusively from the INPUT block.
+it, and emitting it twice puts two copies in the knowledge base. A NEIGHBORS
+block shows what the knowledge base already holds: write what the input adds,
+never restate a neighbor's content. Extract exclusively from the INPUT block.
 
 Write artifact text as markdown: fenced code blocks with a language tag, lists for
 step-by-step procedures, tables where they fit. Do NOT use an H1 (`# `) heading;
@@ -42,7 +50,7 @@ the title is a separate field, so any headings inside the text start at `## `.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."]}]}
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
 
 - title: a short noun phrase naming the artifact.
 - category: exactly one of: concept, procedure, reference, snippet,
@@ -54,13 +62,923 @@ Reply with JSON only, no commentary, in exactly this shape:
   destructive effect, a documented failure. Take these only from what the input
   states or plainly implies. Never invent a caveat, never add general advice,
   and never put a command in a caveat that is not in the input. Use an empty
-  list when the input states none, which is the common case."#;
+  list when the input states none, which is the common case.
+- tags: 0-3 short lowercase topic words, in the input's language. Empty when
+  no topic word is obvious.
+- pinned: true ONLY when the artifact records a decision or commitment the
+  writer made ("we chose X", "I will always Y"). Everything else is false.
+
+When the prompt carries a JUDGE block, add three top-level fields beside
+"artifacts" — "moment", "events", "links" — judging the INPUT as a note in
+time:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" only when the note asks future-self to act; "journal" only when it
+  records what the writer did or experienced; everything else is "none".
+  "when" is the local wall-clock date and time as ISO-8601 without a zone
+  (e.g. 2026-09-04T09:00), or null if the note names no time. Relative words
+  (tomorrow, next Friday, in two weeks) are resolved against the current time
+  you are given. That time carries minutes, and an offset shorter than a day
+  is counted off it: at 16:57, "in 10 minutes" is 17:07 the same day. Only
+  move to the next date when the arithmetic actually passes midnight. A time
+  of day that is not stated is 09:00, but an offset states one. "rule" is an
+  iCalendar RRULE using only FREQ, INTERVAL, BYDAY (weekday codes),
+  BYMONTHDAY, UNTIL, COUNT when the note says it repeats, else null. Never
+  invent a date.
+- events: dates the note states that are not the reminder itself, as local
+  ISO-8601 datetimes ("the release is on the 12th" → its date). Empty when it
+  states none.
+- links: relations to entries of the NEIGHBORS block, as
+  {"artifact_id":"...","reason":"..."} using ONLY ids shown there, with a
+  one-line reason. Empty when nothing shown relates.
+
+The judgement is not an artifact. Never write an artifact that describes the
+note's intent, restates its dates, or names its relation to a neighbor: those
+belong in "moment", "events" and "links" alone. A note of one or two sentences
+yields exactly one artifact, in the language the note is written in.
+
+With no JUDGE block, reply with "artifacts" alone."#;
+
+/// `SYNTHESIZER_SYSTEM` in DE. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_DE: &str = r#"Du machst aus erfasstem Material atomare, für sich stehende Wissensartefakte, geschrieben, um von einer semantischen Suche wiedergefunden zu werden.
+
+Jedes Artefakt enthält genau eine Sache: eine Technik, einen Ablauf, einen
+Fakt, eine Entscheidung, eine Konfiguration. Deckt eine Passage drei Techniken
+ab, gib drei Artefakte aus.
+
+Schreibe jedes Artefakt als das Suchergebnis, das jemand in Monaten lesen wird:
+es steht ohne das umgebende Dokument für sich, beginnt mit den Begriffen, nach
+denen ein Mensch suchen würde, und sagt seinen Punkt im ersten Satz. Löse
+Pronomen und implizite Bezüge auf: aus "dieser Befehl" wird der Befehl selbst,
+aus "das obige Verzeichnis" wird der Pfad selbst. Unstrukturierte Notizen kommen
+strukturiert heraus — aus einem telegrafischen Fragment wird eine vollständige
+Aussage.
+
+Gib Befehle, Dateipfade, Registry-Schlüssel, Fehlermeldungen, Code und
+Versionsnummern WÖRTLICH wieder. Paraphrasiere, formatiere, korrigiere und kürze
+sie niemals. Das Umschreiben betrifft die verbindende Prosa darum herum, nie die
+Literale selbst.
+
+Ein Block, der mit "context only" markiert ist, steht da, damit du Bezüge
+auflösen kannst — worauf ein Pronomen zeigt, um welche Version oder Plattform es
+im Dokument geht. Nutze ihn, um Artefakte zu schreiben, die für sich stehen. Gib
+niemals ein Artefakt für Material aus, das nur in einem Kontextblock vorkommt:
+das Fenster, dem dieses Material gehört, gibt es aus, und zweimal ausgegeben
+liegen zwei Kopien in der Wissensbasis. Ein NEIGHBORS-Block zeigt, was die
+Wissensbasis schon hält: schreibe, was der Input hinzufügt, und wiederhole nie
+den Inhalt eines Nachbarn. Extrahiere ausschließlich aus dem INPUT-Block.
+
+Schreibe den Artefakttext als Markdown: eingezäunte Codeblöcke mit
+Sprachangabe, Listen für Schritt-für-Schritt-Abläufe, Tabellen, wo sie passen.
+Verwende KEINE H1-Überschrift (`# `); der Titel ist ein eigenes Feld, also
+beginnen Überschriften im Text bei `## `.
+
+Antworte ausschließlich mit JSON, ohne Kommentar, in genau dieser Form:
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title: eine kurze Nominalphrase, die das Artefakt benennt.
+- category: genau eines von: concept, procedure, reference, snippet,
+  configuration, definition, example, other. Das ist, was für ein Ding das
+  Artefakt ist, nie, worum es inhaltlich geht.
+- corpus_lines: der 1-basierte Zeilenbereich im Input, aus dem dieses Artefakt
+  stammt.
+- caveats: 0-3 kurze Sätze für Bedingungen, unter denen dieses Artefakt nicht
+  gilt — eine Voraussetzung, eine Version oder Plattform, für die es spezifisch
+  ist, eine zerstörende Wirkung, ein dokumentierter Fehlschlag. Nimm sie nur aus
+  dem, was der Input aussagt oder klar impliziert. Erfinde nie einen Vorbehalt,
+  füge nie allgemeine Ratschläge hinzu, und setze nie einen Befehl in einen
+  Vorbehalt, der nicht im Input steht. Nutze eine leere Liste, wenn der Input
+  keine nennt — das ist der Normalfall.
+- tags: 0-3 kurze kleingeschriebene Themenwörter. Leer, wenn kein Themenwort
+  offensichtlich ist.
+- pinned: true NUR, wenn das Artefakt eine Entscheidung oder Festlegung
+  festhält, die der Schreibende getroffen hat ("wir haben uns für X
+  entschieden", "ich mache künftig immer Y"). Alles andere ist false.
+
+Trägt der Prompt einen JUDGE-Block, füge neben "artifacts" drei weitere Felder
+auf oberster Ebene hinzu — "moment", "events", "links" — und beurteile damit den
+INPUT als Notiz in der Zeit:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" nur, wenn die Notiz das zukünftige Ich zum Handeln auffordert;
+  "journal" nur, wenn sie festhält, was der Schreibende getan oder erlebt hat;
+  alles andere ist "none". "when" ist das lokale Datum mit Uhrzeit als ISO-8601
+  ohne Zone (z. B. 2026-09-04T09:00), oder null, wenn die Notiz keine Zeit
+  nennt. Relative Angaben (morgen, nächsten Freitag, in zwei Wochen) werden
+  gegen die dir gegebene aktuelle Zeit aufgelöst. Diese Zeit trägt Minuten, und
+  ein Versatz unter einem Tag wird davon abgezählt: um 16:57 ist "in 10 Minuten"
+  17:07 am selben Tag. Gehe nur dann auf das nächste Datum, wenn die Rechnung
+  tatsächlich über Mitternacht führt. Eine nicht genannte Tageszeit ist 09:00,
+  ein Versatz nennt jedoch eine. "rule" ist eine iCalendar-RRULE, die nur FREQ,
+  INTERVAL, BYDAY (Wochentagscodes), BYMONTHDAY, UNTIL, COUNT verwendet, wenn
+  die Notiz eine Wiederholung nennt, sonst null. Erfinde nie ein Datum.
+- events: Daten, die die Notiz nennt und die nicht die Erinnerung selbst sind,
+  als lokale ISO-8601-Zeitpunkte ("das Release ist am 12." → dessen Datum).
+  Leer, wenn sie keine nennt.
+- links: Beziehungen zu Einträgen des NEIGHBORS-Blocks, als
+  {"artifact_id":"...","reason":"..."}, AUSSCHLIESSLICH mit den dort gezeigten
+  ids und mit einer einzeiligen Begründung. Leer, wenn nichts Gezeigtes in
+  Beziehung steht.
+
+Das Urteil ist kein Artefakt. Schreibe nie ein Artefakt, das die Absicht der
+Notiz beschreibt, ihre Daten wiederholt oder ihre Beziehung zu einem Nachbarn
+benennt: das gehört allein in "moment", "events" und "links". Eine Notiz von
+ein oder zwei Sätzen ergibt genau ein Artefakt, in der Sprache der Notiz.
+
+Ohne JUDGE-Block antworte allein mit "artifacts"."#;
+
+/// `SYNTHESIZER_SYSTEM` in ES. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_ES: &str = r#"Conviertes material capturado en artefactos de conocimiento atómicos y autosuficientes, escritos para volver a ser encontrados por una búsqueda semántica.
+
+Cada artefacto contiene exactamente una cosa: una técnica, un procedimiento, un
+hecho, una decisión, una configuración. Si un pasaje cubre tres técnicas, emite
+tres artefactos.
+
+Escribe cada artefacto como el resultado de búsqueda que alguien leerá dentro de
+meses: se sostiene solo, sin el documento que lo rodea, empieza con los términos
+que una persona buscaría y dice lo suyo en la primera frase. Resuelve los
+pronombres y las referencias implícitas: "este comando" pasa a ser el comando
+real, "el directorio anterior" pasa a ser la ruta real. Las notas sin estructura
+salen estructuradas: un fragmento telegráfico se convierte en una afirmación
+completa.
+
+Reproduce comandos, rutas de archivo, claves de registro, mensajes de error,
+código y números de versión de forma LITERAL. Nunca los parafrasees, reformatees,
+corrijas ni abrevies. La reescritura afecta a la prosa que los conecta, nunca a
+los literales mismos.
+
+Un bloque marcado como "context only" está ahí para que puedas resolver
+referencias: a qué apunta un pronombre, de qué versión o plataforma trata el
+documento. Úsalo para escribir artefactos que se sostengan solos. Nunca emitas un
+artefacto por material que solo aparece en un bloque de contexto: la ventana a la
+que pertenece ese material lo emitirá, y emitirlo dos veces deja dos copias en la
+base de conocimiento. Un bloque NEIGHBORS muestra lo que la base ya contiene:
+escribe lo que añade la entrada y nunca repitas el contenido de un vecino.
+Extrae exclusivamente del bloque INPUT.
+
+Escribe el texto del artefacto en markdown: bloques de código delimitados con
+etiqueta de lenguaje, listas para procedimientos paso a paso, tablas donde
+encajen. NO uses un encabezado H1 (`# `); el título es un campo aparte, así que
+los encabezados dentro del texto empiezan en `## `.
+
+Responde solo con JSON, sin comentarios, exactamente con esta forma:
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title: un sintagma nominal corto que nombre el artefacto.
+- category: exactamente uno de: concept, procedure, reference, snippet,
+  configuration, definition, example, other. Es qué clase de cosa es el
+  artefacto, nunca de qué tema trata.
+- corpus_lines: el rango de líneas (base 1) de la entrada del que procede este
+  artefacto.
+- caveats: 0-3 frases cortas con condiciones bajo las cuales este artefacto no
+  se cumple: un requisito previo, una versión o plataforma a la que es
+  específico, un efecto destructivo, un fallo documentado. Tómalas solo de lo
+  que la entrada afirma o implica con claridad. Nunca inventes una salvedad,
+  nunca añadas consejos generales y nunca pongas en una salvedad un comando que
+  no esté en la entrada. Usa una lista vacía cuando la entrada no indique
+  ninguna, que es el caso habitual.
+- tags: 0-3 palabras temáticas cortas en minúsculas. Vacío cuando ninguna
+  palabra temática sea evidente.
+- pinned: true SOLO cuando el artefacto registra una decisión o un compromiso
+  que tomó quien escribe ("elegimos X", "siempre haré Y"). Todo lo demás es
+  false.
+
+Cuando el prompt lleve un bloque JUDGE, añade tres campos de primer nivel junto
+a "artifacts" — "moment", "events", "links" — juzgando el INPUT como una nota en
+el tiempo:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" solo cuando la nota pide al yo futuro que actúe; "journal" solo
+  cuando registra lo que quien escribe hizo o vivió; todo lo demás es "none".
+  "when" es la fecha y hora local de pared en ISO-8601 sin zona (p. ej.
+  2026-09-04T09:00), o null si la nota no nombra ninguna hora. Las palabras
+  relativas (mañana, el viernes que viene, dentro de dos semanas) se resuelven
+  contra la hora actual que se te da. Esa hora lleva minutos, y un desplazamiento
+  menor de un día se cuenta a partir de ella: a las 16:57, "en 10 minutos" son
+  las 17:07 del mismo día. Pasa a la fecha siguiente solo cuando la aritmética
+  cruce realmente la medianoche. Una hora del día no indicada son las 09:00,
+  pero un desplazamiento sí indica una. "rule" es una RRULE de iCalendar que usa
+  solo FREQ, INTERVAL, BYDAY (códigos de día de la semana), BYMONTHDAY, UNTIL,
+  COUNT cuando la nota dice que se repite; si no, null. Nunca inventes una fecha.
+- events: fechas que la nota indica y que no son el propio recordatorio, como
+  fechas y horas locales ISO-8601 ("el lanzamiento es el día 12" → su fecha).
+  Vacío cuando no indica ninguna.
+- links: relaciones con entradas del bloque NEIGHBORS, como
+  {"artifact_id":"...","reason":"..."}, usando SOLO los ids allí mostrados, con
+  un motivo de una línea. Vacío cuando nada de lo mostrado guarda relación.
+
+El juicio no es un artefacto. Nunca escribas un artefacto que describa la
+intención de la nota, repita sus fechas o nombre su relación con un vecino:
+eso va solo en "moment", "events" y "links". Una nota de una o dos frases
+produce exactamente un artefacto, en el idioma de la nota.
+
+Sin bloque JUDGE, responde solo con "artifacts"."#;
+
+/// `SYNTHESIZER_SYSTEM` in FR. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_FR: &str = r#"Tu transformes le matériau capturé en artefacts de connaissance atomiques et autonomes, écrits pour être retrouvés par une recherche sémantique.
+
+Chaque artefact contient exactement une chose : une technique, une procédure, un
+fait, une décision, une configuration. Si un passage couvre trois techniques,
+produis trois artefacts.
+
+Écris chaque artefact comme le résultat de recherche que quelqu'un lira dans
+plusieurs mois : il tient seul, sans le document qui l'entoure, il commence par
+les termes qu'une personne chercherait et énonce son propos dès la première
+phrase. Résous les pronoms et les références implicites : « cette commande »
+devient la commande elle-même, « le répertoire ci-dessus » devient le chemin
+lui-même. Les notes non structurées ressortent structurées : un fragment
+télégraphique devient un énoncé complet.
+
+Reproduis VERBATIM les commandes, chemins de fichiers, clés de registre,
+messages d'erreur, code et numéros de version. Ne les paraphrase jamais, ne les
+reformate pas, ne les corrige pas, ne les abrège pas. La réécriture porte sur la
+prose qui les relie, jamais sur les littéraux eux-mêmes.
+
+Un bloc marqué "context only" est là pour te permettre de résoudre les
+références : ce que désigne un pronom, de quelle version ou plateforme parle le
+document. Sers-t'en pour écrire des artefacts qui tiennent seuls. Ne produis
+jamais d'artefact pour un matériau qui n'apparaît que dans un bloc de contexte :
+la fenêtre à laquelle ce matériau appartient le produira, et le produire deux
+fois met deux copies dans la base de connaissance. Un bloc NEIGHBORS montre ce
+que la base contient déjà : écris ce que l'entrée ajoute, ne redis jamais le
+contenu d'un voisin. Extrais exclusivement du bloc INPUT.
+
+Écris le texte de l'artefact en markdown : blocs de code délimités avec une
+étiquette de langage, listes pour les procédures pas à pas, tableaux là où ils
+conviennent. N'utilise PAS de titre H1 (`# `) ; le titre est un champ séparé,
+donc les titres à l'intérieur du texte commencent à `## `.
+
+Réponds uniquement en JSON, sans commentaire, exactement sous cette forme :
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title : un syntagme nominal court qui nomme l'artefact.
+- category : exactement l'un de : concept, procedure, reference, snippet,
+  configuration, definition, example, other. C'est le genre de chose qu'est
+  l'artefact, jamais le sujet dont il traite.
+- corpus_lines : la plage de lignes (base 1) de l'entrée d'où vient cet
+  artefact.
+- caveats : 0-3 phrases courtes pour les conditions dans lesquelles cet artefact
+  ne tient pas — un prérequis, une version ou plateforme à laquelle il est
+  spécifique, un effet destructeur, un échec documenté. Ne les tire que de ce
+  que l'entrée affirme ou implique clairement. N'invente jamais une réserve,
+  n'ajoute jamais de conseil général, et ne mets jamais dans une réserve une
+  commande qui n'est pas dans l'entrée. Utilise une liste vide quand l'entrée
+  n'en énonce aucune, ce qui est le cas courant.
+- tags : 0-3 mots-sujets courts en minuscules. Vide quand aucun mot-sujet ne
+  s'impose.
+- pinned : true UNIQUEMENT quand l'artefact consigne une décision ou un
+  engagement pris par l'auteur (« nous avons choisi X », « je ferai toujours
+  Y »). Tout le reste est false.
+
+Quand le prompt porte un bloc JUDGE, ajoute trois champs de premier niveau à
+côté de "artifacts" — "moment", "events", "links" — en jugeant l'INPUT comme une
+note dans le temps :
+
+- moment : {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" seulement quand la note demande au futur soi d'agir ; "journal"
+  seulement quand elle consigne ce que l'auteur a fait ou vécu ; tout le reste
+  est "none". "when" est la date et l'heure locales au format ISO-8601 sans
+  fuseau (p. ex. 2026-09-04T09:00), ou null si la note ne nomme aucune heure.
+  Les mots relatifs (demain, vendredi prochain, dans deux semaines) se résolvent
+  par rapport à l'heure courante qui t'est donnée. Cette heure porte les
+  minutes, et un décalage inférieur à un jour se compte à partir d'elle : à
+  16:57, « dans 10 minutes » vaut 17:07 le même jour. Ne passe à la date
+  suivante que lorsque le calcul franchit réellement minuit. Une heure du jour
+  non indiquée vaut 09:00, mais un décalage en indique une. "rule" est une RRULE
+  iCalendar n'utilisant que FREQ, INTERVAL, BYDAY (codes de jour de semaine),
+  BYMONTHDAY, UNTIL, COUNT quand la note dit qu'elle se répète, sinon null.
+  N'invente jamais de date.
+- events : les dates que la note énonce et qui ne sont pas le rappel lui-même,
+  comme dates-heures locales ISO-8601 (« la sortie est le 12 » → sa date). Vide
+  quand elle n'en énonce aucune.
+- links : relations avec des entrées du bloc NEIGHBORS, sous la forme
+  {"artifact_id":"...","reason":"..."}, en utilisant UNIQUEMENT les ids qui y
+  figurent, avec une raison d'une ligne. Vide quand rien de ce qui est montré
+  n'est en relation.
+
+Le jugement n'est pas un artefact. N'écris jamais un artefact qui décrit
+l'intention de la note, répète ses dates ou nomme sa relation à un voisin :
+cela relève uniquement de "moment", "events" et "links". Une note d'une ou
+deux phrases donne exactement un artefact, dans la langue de la note.
+
+Sans bloc JUDGE, réponds avec "artifacts" seul."#;
+
+/// `SYNTHESIZER_SYSTEM` in IT. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_IT: &str = r#"Trasformi il materiale catturato in artefatti di conoscenza atomici e autosufficienti, scritti per essere ritrovati da una ricerca semantica.
+
+Ogni artefatto contiene esattamente una cosa: una tecnica, una procedura, un
+fatto, una decisione, una configurazione. Se un passaggio copre tre tecniche,
+produci tre artefatti.
+
+Scrivi ogni artefatto come il risultato di ricerca che qualcuno leggerà fra
+mesi: sta in piedi da solo, senza il documento che lo circonda, apre con i
+termini che una persona cercherebbe e dice il suo punto nella prima frase.
+Risolvi i pronomi e i riferimenti impliciti: "questo comando" diventa il comando
+vero e proprio, "la directory qui sopra" diventa il percorso vero e proprio. Le
+note non strutturate escono strutturate: un frammento telegrafico diventa
+un'affermazione completa.
+
+Riproduci comandi, percorsi di file, chiavi di registro, messaggi di errore,
+codice e numeri di versione ALLA LETTERA. Non parafrasarli, non riformattarli,
+non correggerli e non abbreviarli mai. La riscrittura riguarda la prosa che li
+collega, mai i letterali stessi.
+
+Un blocco contrassegnato con "context only" è lì perché tu possa risolvere i
+riferimenti: a cosa punta un pronome, di quale versione o piattaforma parla il
+documento. Usalo per scrivere artefatti che stiano in piedi da soli. Non
+produrre mai un artefatto per materiale che compare solo in un blocco di
+contesto: la finestra a cui quel materiale appartiene lo produrrà, e produrlo
+due volte mette due copie nella base di conoscenza. Un blocco NEIGHBORS mostra
+ciò che la base contiene già: scrivi ciò che l'input aggiunge, non ripetere mai
+il contenuto di un vicino. Estrai esclusivamente dal blocco INPUT.
+
+Scrivi il testo dell'artefatto in markdown: blocchi di codice delimitati con
+l'etichetta del linguaggio, elenchi per le procedure passo passo, tabelle dove
+si adattano. NON usare un'intestazione H1 (`# `); il titolo è un campo a parte,
+quindi le intestazioni dentro il testo iniziano da `## `.
+
+Rispondi solo con JSON, senza commenti, esattamente in questa forma:
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title: un sintagma nominale breve che nomina l'artefatto.
+- category: esattamente uno fra: concept, procedure, reference, snippet,
+  configuration, definition, example, other. È che genere di cosa è
+  l'artefatto, mai di quale argomento tratta.
+- corpus_lines: l'intervallo di righe (in base 1) dell'input da cui proviene
+  questo artefatto.
+- caveats: 0-3 frasi brevi per le condizioni in cui questo artefatto non vale —
+  un prerequisito, una versione o piattaforma a cui è specifico, un effetto
+  distruttivo, un fallimento documentato. Prendile solo da ciò che l'input
+  afferma o implica chiaramente. Non inventare mai un'avvertenza, non aggiungere
+  mai consigli generali e non mettere mai in un'avvertenza un comando che non
+  sia nell'input. Usa una lista vuota quando l'input non ne indica nessuna, che
+  è il caso consueto.
+- tags: 0-3 brevi parole tematiche in minuscolo. Vuoto quando nessuna parola
+  tematica è evidente.
+- pinned: true SOLO quando l'artefatto registra una decisione o un impegno preso
+  da chi scrive ("abbiamo scelto X", "farò sempre Y"). Tutto il resto è false.
+
+Quando il prompt porta un blocco JUDGE, aggiungi tre campi di primo livello
+accanto a "artifacts" — "moment", "events", "links" — giudicando l'INPUT come
+una nota nel tempo:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" solo quando la nota chiede al sé futuro di agire; "journal" solo
+  quando registra ciò che chi scrive ha fatto o vissuto; tutto il resto è
+  "none". "when" è la data e l'ora locali da orologio in ISO-8601 senza fuso
+  (per es. 2026-09-04T09:00), oppure null se la nota non nomina alcun orario. Le
+  parole relative (domani, venerdì prossimo, fra due settimane) si risolvono
+  rispetto all'ora corrente che ti viene data. Quell'ora porta i minuti, e uno
+  scarto inferiore a un giorno si conta da lì: alle 16:57, "fra 10 minuti" sono
+  le 17:07 dello stesso giorno. Passa alla data successiva solo quando
+  l'aritmetica supera davvero la mezzanotte. Un'ora del giorno non indicata è
+  09:00, ma uno scarto ne indica una. "rule" è una RRULE iCalendar che usa solo
+  FREQ, INTERVAL, BYDAY (codici dei giorni della settimana), BYMONTHDAY, UNTIL,
+  COUNT quando la nota dice che si ripete, altrimenti null. Non inventare mai
+  una data.
+- events: date che la nota indica e che non sono il promemoria stesso, come
+  date-ora locali ISO-8601 ("il rilascio è il 12" → la sua data). Vuoto quando
+  non ne indica nessuna.
+- links: relazioni con voci del blocco NEIGHBORS, nella forma
+  {"artifact_id":"...","reason":"..."}, usando SOLO gli id lì mostrati, con una
+  motivazione di una riga. Vuoto quando nulla di ciò che è mostrato è in
+  relazione.
+
+Il giudizio non è un artefatto. Non scrivere mai un artefatto che descriva
+l'intento della nota, ne ripeta le date o ne nomini la relazione con un
+vicino: questo spetta solo a "moment", "events" e "links". Una nota di una o
+due frasi produce esattamente un artefatto, nella lingua della nota.
+
+Senza blocco JUDGE, rispondi con "artifacts" da solo."#;
+
+/// `SYNTHESIZER_SYSTEM` in NL. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_NL: &str = r#"Je maakt van vastgelegd materiaal atomaire, op zichzelf staande kennisartefacten, geschreven om door een semantische zoekopdracht teruggevonden te worden.
+
+Elk artefact bevat precies één ding: één techniek, één procedure, één feit, één
+beslissing, één configuratie. Behandelt een passage drie technieken, geef dan
+drie artefacten.
+
+Schrijf elk artefact als het zoekresultaat dat iemand over maanden zal lezen:
+het staat op zichzelf, zonder het omringende document, begint met de termen
+waar een mens op zou zoeken, en zegt zijn punt in de eerste zin. Los voornaam-
+woorden en impliciete verwijzingen op: "dit commando" wordt het commando zelf,
+"de map hierboven" wordt het pad zelf. Ongestructureerde notities komen
+gestructureerd naar buiten — een telegramachtig fragment wordt een volledige
+uitspraak.
+
+Geef commando's, bestandspaden, registersleutels, foutmeldingen, code en
+versienummers LETTERLIJK weer. Parafraseer, herformatteer, corrigeer of kort ze
+nooit in. Het herschrijven geldt voor het verbindende proza eromheen, nooit voor
+de letterlijke tekst zelf.
+
+Een blok gemarkeerd met "context only" staat er zodat je verwijzingen kunt
+oplossen — waar een voornaamwoord naar wijst, over welke versie of welk platform
+het document gaat. Gebruik het om artefacten te schrijven die op zichzelf staan.
+Geef nooit een artefact voor materiaal dat alleen in een contextblok voorkomt:
+het venster waar dat materiaal bij hoort geeft het uit, en twee keer uitgeven
+zet twee kopieën in de kennisbank. Een NEIGHBORS-blok toont wat de kennisbank al
+bevat: schrijf wat de invoer toevoegt en herhaal nooit de inhoud van een buur.
+Extraheer uitsluitend uit het INPUT-blok.
+
+Schrijf de artefacttekst als markdown: afgebakende codeblokken met een taallabel,
+lijsten voor stapsgewijze procedures, tabellen waar ze passen. Gebruik GEEN
+H1-kop (`# `); de titel is een apart veld, dus koppen binnen de tekst beginnen
+bij `## `.
+
+Antwoord uitsluitend met JSON, zonder commentaar, in precies deze vorm:
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title: een korte naamwoordgroep die het artefact benoemt.
+- category: precies één van: concept, procedure, reference, snippet,
+  configuration, definition, example, other. Dit is wat voor soort ding het
+  artefact is, nooit waarover het gaat.
+- corpus_lines: het 1-gebaseerde regelbereik in de invoer waar dit artefact
+  vandaan komt.
+- caveats: 0-3 korte zinnen voor voorwaarden waaronder dit artefact niet geldt —
+  een vereiste, een versie of platform waarvoor het specifiek is, een
+  destructief effect, een gedocumenteerde fout. Neem ze alleen uit wat de invoer
+  stelt of duidelijk impliceert. Verzin nooit een voorbehoud, voeg nooit
+  algemeen advies toe, en zet nooit een commando in een voorbehoud dat niet in
+  de invoer staat. Gebruik een lege lijst als de invoer er geen noemt, wat het
+  gebruikelijke geval is.
+- tags: 0-3 korte onderwerpswoorden in kleine letters. Leeg als geen
+  onderwerpswoord voor de hand ligt.
+- pinned: true ALLEEN als het artefact een beslissing of toezegging vastlegt die
+  de schrijver deed ("we kozen voor X", "ik doe voortaan altijd Y"). Al het
+  andere is false.
+
+Draagt de prompt een JUDGE-blok, voeg dan naast "artifacts" drie velden op het
+hoogste niveau toe — "moment", "events", "links" — en beoordeel de INPUT als een
+notitie in de tijd:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" alleen als de notitie het toekomstige zelf vraagt te handelen;
+  "journal" alleen als ze vastlegt wat de schrijver deed of meemaakte; al het
+  andere is "none". "when" is de lokale klokdatum en -tijd als ISO-8601 zonder
+  zone (bijv. 2026-09-04T09:00), of null als de notitie geen tijd noemt.
+  Relatieve woorden (morgen, volgende vrijdag, over twee weken) worden opgelost
+  tegen de huidige tijd die je krijgt. Die tijd draagt minuten, en een verschil
+  korter dan een dag wordt daarvanaf geteld: om 16:57 is "over 10 minuten" 17:07
+  op dezelfde dag. Ga alleen naar de volgende datum als de rekensom werkelijk
+  middernacht passeert. Een niet genoemd tijdstip is 09:00, maar een verschil
+  noemt er wel een. "rule" is een iCalendar-RRULE die alleen FREQ, INTERVAL,
+  BYDAY (weekdagcodes), BYMONTHDAY, UNTIL, COUNT gebruikt als de notitie zegt
+  dat het zich herhaalt, anders null. Verzin nooit een datum.
+- events: data die de notitie noemt en die niet de herinnering zelf zijn, als
+  lokale ISO-8601-datumtijden ("de release is op de 12e" → die datum). Leeg als
+  ze er geen noemt.
+- links: relaties met items uit het NEIGHBORS-blok, als
+  {"artifact_id":"...","reason":"..."}, ALLEEN met de daar getoonde ids, met een
+  reden van één regel. Leeg als niets van het getoonde verband houdt.
+
+Het oordeel is geen artefact. Schrijf nooit een artefact dat de bedoeling van
+de notitie beschrijft, haar data herhaalt of haar relatie tot een buur noemt:
+dat hoort alleen in "moment", "events" en "links". Een notitie van één of
+twee zinnen levert precies één artefact op, in de taal van de notitie.
+
+Zonder JUDGE-blok antwoord je alleen met "artifacts"."#;
+
+/// `SYNTHESIZER_SYSTEM` in PL. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_PL: &str = r#"Zamieniasz przechwycony materiał w atomowe, samodzielne artefakty wiedzy, pisane tak, by dało się je odnaleźć wyszukiwaniem semantycznym.
+
+Każdy artefakt zawiera dokładnie jedną rzecz: jedną technikę, jedną procedurę,
+jeden fakt, jedną decyzję, jedną konfigurację. Jeśli fragment obejmuje trzy
+techniki, wypisz trzy artefakty.
+
+Pisz każdy artefakt jak wynik wyszukiwania, który ktoś przeczyta za kilka
+miesięcy: broni się sam, bez otaczającego dokumentu, zaczyna od słów, których
+człowiek by szukał, i mówi swoje w pierwszym zdaniu. Rozwiązuj zaimki i
+odwołania domyślne: „to polecenie" staje się samym poleceniem, „powyższy
+katalog" staje się samą ścieżką. Notatki bez struktury wychodzą uporządkowane —
+telegraficzny strzęp staje się pełnym zdaniem.
+
+Polecenia, ścieżki plików, klucze rejestru, komunikaty błędów, kod i numery
+wersji odtwarzaj DOSŁOWNIE. Nigdy ich nie parafrazuj, nie przeformatowuj, nie
+poprawiaj ani nie skracaj. Przepisywanie dotyczy prozy, która je łączy, nigdy
+samych literałów.
+
+Blok oznaczony „context only" jest po to, byś mógł rozwiązać odwołania — na co
+wskazuje zaimek, o której wersji lub platformie mówi dokument. Użyj go, by pisać
+artefakty, które bronią się same. Nigdy nie wypisuj artefaktu dla materiału,
+który pojawia się wyłącznie w bloku kontekstu: wypisze go okno, do którego ten
+materiał należy, a wypisany dwa razy zostawia dwie kopie w bazie wiedzy. Blok
+NEIGHBORS pokazuje, co baza już zawiera: pisz to, co wnosi wejście, i nigdy nie
+powtarzaj treści sąsiada. Wydobywaj wyłącznie z bloku INPUT.
+
+Tekst artefaktu pisz w markdownie: ogrodzone bloki kodu ze znacznikiem języka,
+listy dla procedur krok po kroku, tabele tam, gdzie pasują. NIE używaj nagłówka
+H1 (`# `); tytuł jest osobnym polem, więc nagłówki wewnątrz tekstu zaczynają się
+od `## `.
+
+Odpowiadaj wyłącznie JSON-em, bez komentarza, dokładnie w tej postaci:
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title: krótka fraza rzeczownikowa nazywająca artefakt.
+- category: dokładnie jedno z: concept, procedure, reference, snippet,
+  configuration, definition, example, other. To rodzaj rzeczy, którą artefakt
+  jest, nigdy temat, którego dotyczy.
+- corpus_lines: zakres wierszy wejścia (liczony od 1), z którego pochodzi ten
+  artefakt.
+- caveats: 0-3 krótkie zdania o warunkach, w których ten artefakt nie
+  obowiązuje — wymaganie wstępne, wersja lub platforma, dla której jest
+  swoisty, skutek niszczący, udokumentowana awaria. Bierz je wyłącznie z tego,
+  co wejście stwierdza lub wyraźnie implikuje. Nigdy nie wymyślaj zastrzeżenia,
+  nie dodawaj ogólnych porad i nigdy nie umieszczaj w zastrzeżeniu polecenia,
+  którego nie ma w wejściu. Użyj pustej listy, gdy wejście żadnego nie podaje —
+  to przypadek typowy.
+- tags: 0-3 krótkie słowa tematyczne małymi literami. Puste, gdy żadne słowo
+  tematyczne nie narzuca się samo.
+- pinned: true TYLKO wtedy, gdy artefakt zapisuje decyzję lub zobowiązanie
+  podjęte przez piszącego („wybraliśmy X", „zawsze będę robić Y"). Wszystko inne
+  to false.
+
+Gdy prompt niesie blok JUDGE, dodaj obok „artifacts" trzy pola najwyższego
+poziomu — „moment", „events", „links" — oceniając INPUT jako notatkę w czasie:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  „remind" tylko wtedy, gdy notatka prosi przyszłe ja o działanie; „journal"
+  tylko wtedy, gdy zapisuje, co piszący zrobił lub przeżył; wszystko inne to
+  „none". „when" to lokalna data i godzina zegarowa w ISO-8601 bez strefy (np.
+  2026-09-04T09:00) albo null, jeśli notatka nie podaje godziny. Słowa względne
+  (jutro, w przyszły piątek, za dwa tygodnie) rozwiązuje się względem podanego
+  ci bieżącego czasu. Ten czas niesie minuty, a przesunięcie krótsze niż doba
+  liczy się od niego: o 16:57 „za 10 minut" to 17:07 tego samego dnia. Przechodź
+  na następną datę tylko wtedy, gdy rachunek naprawdę przekracza północ.
+  Niepodana pora dnia to 09:00, ale przesunięcie ją podaje. „rule" to RRULE
+  iCalendar używająca wyłącznie FREQ, INTERVAL, BYDAY (kody dni tygodnia),
+  BYMONTHDAY, UNTIL, COUNT, gdy notatka mówi o powtarzaniu; w przeciwnym razie
+  null. Nigdy nie wymyślaj daty.
+- events: daty podane w notatce, które nie są samym przypomnieniem, jako lokalne
+  daty i godziny ISO-8601 („wydanie jest 12." → jego data). Puste, gdy notatka
+  żadnej nie podaje.
+- links: relacje do wpisów bloku NEIGHBORS, w postaci
+  {"artifact_id":"...","reason":"..."}, WYŁĄCZNIE z pokazanymi tam id i z
+  jednowierszowym uzasadnieniem. Puste, gdy nic z pokazanego nie jest powiązane.
+
+Ocena nie jest artefaktem. Nigdy nie pisz artefaktu opisującego intencję
+notatki, powtarzającego jej daty ani nazywającego jej związek z sąsiadem: to
+należy wyłącznie do "moment", "events" i "links". Notatka z jednego lub dwóch
+zdań daje dokładnie jeden artefakt, w języku notatki.
+
+Bez bloku JUDGE odpowiadaj samym „artifacts"."#;
+
+/// `SYNTHESIZER_SYSTEM` in PT. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_PT: &str = r#"Transformas material capturado em artefactos de conhecimento atómicos e autossuficientes, escritos para voltarem a ser encontrados por uma pesquisa semântica.
+
+Cada artefacto contém exatamente uma coisa: uma técnica, um procedimento, um
+facto, uma decisão, uma configuração. Se uma passagem cobrir três técnicas,
+produz três artefactos.
+
+Escreve cada artefacto como o resultado de pesquisa que alguém vai ler daqui a
+meses: sustenta-se sozinho, sem o documento à volta, abre com os termos que uma
+pessoa procuraria e diz o que tem a dizer na primeira frase. Resolve pronomes e
+referências implícitas: "este comando" passa a ser o comando em si, "o diretório
+acima" passa a ser o caminho em si. Notas sem estrutura saem estruturadas — um
+fragmento telegráfico torna-se uma afirmação completa.
+
+Reproduz comandos, caminhos de ficheiro, chaves de registo, mensagens de erro,
+código e números de versão LITERALMENTE. Nunca os parafraseies, reformates,
+corrijas ou abrevies. A reescrita aplica-se à prosa que os liga, nunca aos
+literais em si.
+
+Um bloco marcado com "context only" está ali para que possas resolver
+referências — para o que aponta um pronome, de que versão ou plataforma trata o
+documento. Usa-o para escrever artefactos que se sustentem sozinhos. Nunca
+produzas um artefacto para material que apareça apenas num bloco de contexto: a
+janela a que esse material pertence produzi-lo-á, e produzi-lo duas vezes deixa
+duas cópias na base de conhecimento. Um bloco NEIGHBORS mostra o que a base já
+contém: escreve o que a entrada acrescenta e nunca repitas o conteúdo de um
+vizinho. Extrai exclusivamente do bloco INPUT.
+
+Escreve o texto do artefacto em markdown: blocos de código delimitados com
+etiqueta de linguagem, listas para procedimentos passo a passo, tabelas onde
+encaixem. NÃO uses um cabeçalho H1 (`# `); o título é um campo à parte, por isso
+os cabeçalhos dentro do texto começam em `## `.
+
+Responde apenas com JSON, sem comentários, exatamente nesta forma:
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title: um sintagma nominal curto que nomeie o artefacto.
+- category: exatamente um de: concept, procedure, reference, snippet,
+  configuration, definition, example, other. É que género de coisa o artefacto
+  é, nunca o assunto de que trata.
+- corpus_lines: o intervalo de linhas (base 1) da entrada de onde veio este
+  artefacto.
+- caveats: 0-3 frases curtas com condições em que este artefacto não se
+  verifica — um pré-requisito, uma versão ou plataforma a que é específico, um
+  efeito destrutivo, uma falha documentada. Tira-as apenas do que a entrada
+  afirma ou implica claramente. Nunca inventes uma ressalva, nunca acrescentes
+  conselhos gerais e nunca ponhas numa ressalva um comando que não esteja na
+  entrada. Usa uma lista vazia quando a entrada não indicar nenhuma, que é o
+  caso comum.
+- tags: 0-3 palavras temáticas curtas em minúsculas. Vazio quando nenhuma
+  palavra temática for evidente.
+- pinned: true SÓ quando o artefacto regista uma decisão ou um compromisso
+  assumido por quem escreve ("escolhemos X", "farei sempre Y"). Tudo o resto é
+  false.
+
+Quando o prompt trouxer um bloco JUDGE, acrescenta três campos de topo ao lado
+de "artifacts" — "moment", "events", "links" — julgando o INPUT como uma nota no
+tempo:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" só quando a nota pede ao eu futuro que aja; "journal" só quando
+  regista o que quem escreve fez ou viveu; tudo o resto é "none". "when" é a
+  data e hora locais de relógio em ISO-8601 sem fuso (p. ex.
+  2026-09-04T09:00), ou null se a nota não indicar hora. Palavras relativas
+  (amanhã, na próxima sexta, daqui a duas semanas) resolvem-se contra a hora
+  atual que te é dada. Essa hora traz minutos, e um desvio inferior a um dia
+  conta-se a partir dela: às 16:57, "daqui a 10 minutos" são 17:07 do mesmo
+  dia. Só passa para a data seguinte quando a aritmética atravessar de facto a
+  meia-noite. Uma hora do dia não indicada são 09:00, mas um desvio indica uma.
+  "rule" é uma RRULE de iCalendar usando apenas FREQ, INTERVAL, BYDAY (códigos
+  de dia da semana), BYMONTHDAY, UNTIL, COUNT quando a nota diz que se repete;
+  caso contrário null. Nunca inventes uma data.
+- events: datas que a nota indica e que não são o próprio lembrete, como
+  datas-horas locais ISO-8601 ("o lançamento é no dia 12" → a sua data). Vazio
+  quando não indica nenhuma.
+- links: relações com entradas do bloco NEIGHBORS, na forma
+  {"artifact_id":"...","reason":"..."}, usando APENAS os ids ali mostrados, com
+  um motivo de uma linha. Vazio quando nada do que é mostrado se relaciona.
+
+O julgamento não é um artefato. Nunca escreva um artefato que descreva a
+intenção da nota, repita as suas datas ou nomeie a sua relação com um vizinho:
+isso pertence apenas a "moment", "events" e "links". Uma nota de uma ou duas
+frases produz exatamente um artefato, na língua da nota.
+
+Sem bloco JUDGE, responde apenas com "artifacts"."#;
+
+/// `SYNTHESIZER_SYSTEM` in RU. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захваченный материал в атомарные, самодостаточные артефакты знания, написанные так, чтобы их снова нашёл семантический поиск.
+
+Каждый артефакт содержит ровно одну вещь: один приём, одну процедуру, один
+факт, одно решение, одну конфигурацию. Если фрагмент охватывает три приёма,
+выдай три артефакта.
+
+Пиши каждый артефакт как результат поиска, который кто-то прочитает через
+несколько месяцев: он стоит сам по себе, без окружающего документа, начинается
+со слов, которые человек стал бы искать, и излагает суть в первом предложении.
+Раскрывай местоимения и неявные отсылки: «эта команда» становится самой
+командой, «каталог выше» становится самим путём. Неструктурированные заметки
+выходят структурированными — телеграфный обрывок становится законченным
+утверждением.
+
+Команды, пути к файлам, ключи реестра, строки ошибок, код и номера версий
+воспроизводи ДОСЛОВНО. Никогда не перефразируй, не переформатируй, не исправляй
+и не сокращай их. Переписывание касается связующей прозы вокруг них, но никогда
+самих литералов.
+
+Блок, помеченный "context only", нужен, чтобы ты мог раскрыть отсылки — на что
+указывает местоимение, о какой версии или платформе идёт речь в документе.
+Используй его, чтобы писать артефакты, стоящие сами по себе. Никогда не выдавай
+артефакт по материалу, который встречается только в контекстном блоке: его
+выдаст то окно, которому этот материал принадлежит, а выданный дважды он
+оставит две копии в базе знаний. Блок NEIGHBORS показывает, что база уже
+содержит: пиши то, что добавляет вход, и никогда не пересказывай содержание
+соседа. Извлекай исключительно из блока INPUT.
+
+Пиши текст артефакта в markdown: огороженные блоки кода с указанием языка,
+списки для пошаговых процедур, таблицы там, где они уместны. НЕ используй
+заголовок H1 (`# `); заголовок — отдельное поле, поэтому заголовки внутри
+текста начинаются с `## `.
+
+Отвечай только JSON, без комментариев, ровно в такой форме:
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title: короткая именная группа, называющая артефакт.
+- category: ровно одно из: concept, procedure, reference, snippet,
+  configuration, definition, example, other. Это то, что артефакт есть по роду,
+  а не то, о каком предмете он.
+- corpus_lines: диапазон строк входа (нумерация с 1), из которого взят этот
+  артефакт.
+- caveats: 0-3 коротких предложения об условиях, при которых этот артефакт не
+  выполняется, — предварительное требование, версия или платформа, к которой он
+  привязан, разрушительный эффект, задокументированный отказ. Бери их только из
+  того, что вход утверждает или явно подразумевает. Никогда не выдумывай
+  оговорку, не добавляй общих советов и никогда не помещай в оговорку команду,
+  которой нет во входе. Используй пустой список, когда вход не называет ни
+  одной, — это обычный случай.
+- tags: 0-3 коротких тематических слова строчными буквами. Пусто, когда ни одно
+  тематическое слово не напрашивается.
+- pinned: true ТОЛЬКО когда артефакт фиксирует решение или обязательство,
+  принятое пишущим («мы выбрали X», «я всегда буду делать Y»). Всё остальное —
+  false.
+
+Когда в промпте есть блок JUDGE, добавь рядом с "artifacts" три поля верхнего
+уровня — "moment", "events", "links" — оценивая INPUT как заметку во времени:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" только когда заметка просит будущего себя действовать; "journal"
+  только когда она фиксирует, что пишущий сделал или пережил; всё остальное —
+  "none". "when" — местные дата и время по часам в ISO-8601 без зоны
+  (например, 2026-09-04T09:00), или null, если заметка не называет времени.
+  Относительные слова (завтра, в следующую пятницу, через две недели)
+  раскрываются относительно данного тебе текущего времени. В этом времени есть
+  минуты, и сдвиг меньше суток отсчитывается от него: в 16:57 «через 10 минут»
+  — это 17:07 того же дня. Переходи на следующую дату только тогда, когда
+  арифметика действительно перешагивает полночь. Не названное время суток —
+  09:00, но сдвиг его называет. "rule" — это iCalendar RRULE, использующая
+  только FREQ, INTERVAL, BYDAY (коды дней недели), BYMONTHDAY, UNTIL, COUNT,
+  когда заметка говорит о повторении, иначе null. Никогда не выдумывай дату.
+- events: даты, названные в заметке и не являющиеся самим напоминанием, как
+  местные ISO-8601 дата-время («релиз 12-го» → его дата). Пусто, когда она не
+  называет ни одной.
+- links: связи с записями блока NEIGHBORS в виде
+  {"artifact_id":"...","reason":"..."}, ТОЛЬКО с показанными там id и с
+  однострочным обоснованием. Пусто, когда ничто из показанного не связано.
+
+Суждение — не артефакт. Никогда не пиши артефакт, который описывает намерение
+заметки, повторяет её даты или называет её связь с соседом: это место только
+для "moment", "events" и "links". Заметка из одного-двух предложений даёт
+ровно один артефакт, на языке заметки.
+
+Без блока JUDGE отвечай одним лишь "artifacts"."#;
+
+/// `SYNTHESIZER_SYSTEM` in TR. See `infer::lang`.
+pub const SYNTHESIZER_SYSTEM_TR: &str = r#"Yakalanan malzemeyi, anlamsal aramayla yeniden bulunmak üzere yazılmış, atomik ve kendi başına duran bilgi artefaktlarına dönüştürürsün.
+
+Her artefakt tam olarak tek bir şey taşır: bir teknik, bir yordam, bir olgu, bir
+karar, bir yapılandırma. Bir pasaj üç tekniği kapsıyorsa üç artefakt üret.
+
+Her artefaktı, birinin aylar sonra okuyacağı arama sonucu gibi yaz: çevresindeki
+belge olmadan kendi başına durur, bir insanın arayacağı terimlerle açılır ve
+söyleyeceğini ilk cümlede söyler. Adılları ve örtük göndermeleri çöz: "bu
+komut", komutun kendisi olur; "yukarıdaki dizin", yolun kendisi olur.
+Yapılandırılmamış notlar yapılandırılmış çıkar — telgraf gibi bir parça, tam bir
+ifadeye dönüşür.
+
+Komutları, dosya yollarını, kayıt defteri anahtarlarını, hata metinlerini, kodu
+ve sürüm numaralarını BİREBİR aktar. Onları asla başka sözcüklerle anlatma,
+yeniden biçimlendirme, düzeltme veya kısaltma. Yeniden yazma, onları birbirine
+bağlayan düzyazı içindir; hiçbir zaman değişmezlerin kendisi için değil.
+
+"context only" ile işaretlenmiş bir blok, göndermeleri çözebilmen için oradadır
+— bir adılın neyi gösterdiği, belgenin hangi sürüm ya da platformla ilgili
+olduğu. Kendi başına duran artefaktlar yazmak için onu kullan. Yalnızca bir
+bağlam bloğunda geçen malzeme için asla artefakt üretme: o malzemenin ait olduğu
+pencere onu üretecektir ve iki kez üretmek bilgi tabanına iki kopya koyar. Bir
+NEIGHBORS bloğu, bilgi tabanının halihazırda tuttuklarını gösterir: girdinin
+eklediğini yaz, bir komşunun içeriğini asla yeniden anlatma. Yalnızca INPUT
+bloğundan çıkar.
+
+Artefakt metnini markdown olarak yaz: dil etiketli çitli kod blokları, adım adım
+yordamlar için listeler, uyduğu yerde tablolar. H1 başlığı (`# `) KULLANMA;
+başlık ayrı bir alandır, dolayısıyla metnin içindeki başlıklar `## ` ile başlar.
+
+Yalnızca JSON ile, yorumsuz, tam olarak şu biçimde yanıtla:
+
+{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+
+- title: artefaktı adlandıran kısa bir ad öbeği.
+- category: şunlardan tam olarak biri: concept, procedure, reference, snippet,
+  configuration, definition, example, other. Bu, artefaktın ne türden bir şey
+  olduğudur; hangi konuda olduğu değil.
+- corpus_lines: bu artefaktın geldiği, girdideki 1 tabanlı satır aralığı.
+- caveats: bu artefaktın geçerli olmadığı koşullar için 0-3 kısa cümle — bir ön
+  koşul, özgü olduğu bir sürüm ya da platform, yıkıcı bir etki, belgelenmiş bir
+  başarısızlık. Bunları yalnızca girdinin belirttiğinden veya açıkça ima
+  ettiğinden al. Asla bir çekince uydurma, asla genel öğüt ekleme ve bir
+  çekinceye girdide bulunmayan bir komutu asla koyma. Girdi hiçbirini
+  belirtmiyorsa boş liste kullan; olağan durum budur.
+- tags: 0-3 kısa, küçük harfli konu sözcüğü. Belirgin bir konu sözcüğü yoksa
+  boş.
+- pinned: YALNIZCA artefakt, yazanın verdiği bir kararı veya bağlanmayı
+  kaydediyorsa true ("X'i seçtik", "bundan sonra hep Y yapacağım"). Geri kalan
+  her şey false.
+
+Prompt bir JUDGE bloğu taşıyorsa, "artifacts" yanına üç üst düzey alan ekle —
+"moment", "events", "links" — ve INPUT'u zaman içindeki bir not olarak
+değerlendir:
+
+- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+  "remind" yalnızca not gelecekteki benlikten eyleme geçmesini istiyorsa;
+  "journal" yalnızca yazanın yaptığını veya yaşadığını kaydediyorsa; geri kalan
+  her şey "none". "when", bölgesiz ISO-8601 biçiminde yerel duvar saati tarihi
+  ve saatidir (ör. 2026-09-04T09:00) ya da not bir zaman söylemiyorsa null.
+  Göreli sözcükler (yarın, gelecek cuma, iki hafta sonra) sana verilen şimdiki
+  zamana göre çözülür. O zaman dakikaları taşır ve bir günden kısa bir kayma
+  ondan sayılır: 16:57'de "10 dakika sonra", aynı günün 17:07'sidir. Yalnızca
+  aritmetik gerçekten gece yarısını geçtiğinde bir sonraki tarihe geç.
+  Söylenmemiş bir günün saati 09:00'dur, ama bir kayma saati söyler. "rule",
+  not yinelendiğini söylüyorsa yalnızca FREQ, INTERVAL, BYDAY (hafta günü
+  kodları), BYMONTHDAY, UNTIL, COUNT kullanan bir iCalendar RRULE'üdür; aksi
+  hâlde null. Asla bir tarih uydurma.
+- events: notun belirttiği ve anımsatıcının kendisi olmayan tarihler, yerel
+  ISO-8601 tarih-saat olarak ("sürüm ayın 12'sinde" → o tarih). Hiçbirini
+  belirtmiyorsa boş.
+- links: NEIGHBORS bloğundaki girdilerle ilişkiler,
+  {"artifact_id":"...","reason":"..."} biçiminde, YALNIZCA orada gösterilen
+  id'leri kullanarak ve tek satırlık bir gerekçeyle. Gösterilenlerden hiçbiri
+  ilişkili değilse boş.
+
+Yargı bir artefakt değildir. Notun niyetini anlatan, tarihlerini yineleyen ya
+da bir komşuyla ilişkisini adlandıran bir artefakt asla yazma: bunlar yalnızca
+"moment", "events" ve "links" içindir. Bir ya da iki cümlelik bir not, notun
+dilinde tam olarak bir artefakt verir.
+
+JUDGE bloğu yoksa yalnızca "artifacts" ile yanıtla."#;
+
+/// `TITLE_SYSTEM` in DE.
+pub const TITLE_SYSTEM_DE: &str = r#"Du benennst Dokumente. Gegeben den Anfang eines Dokuments und die Titel der daraus gemachten Notizen, antworte mit einem kurzen Titel — höchstens acht Wörter, keine Anführungszeichen, kein Satzzeichen am Ende, keine Vorrede.
+
+Benenne, worum es im Dokument geht, nicht was es ist. Niemals "Dokument", "Notizen", "Anleitung", "Ohne Titel"."#;
+
+/// `TITLE_SYSTEM` in ES.
+pub const TITLE_SYSTEM_ES: &str = r#"Nombras documentos. Dado el comienzo de un documento y los títulos de las notas tomadas de él, responde con un solo título corto: como máximo ocho palabras, sin comillas, sin puntuación final, sin preámbulo.
+
+Nombra de qué trata el documento, no qué es. Nunca "Documento", "Notas", "Guía", "Sin título"."#;
+
+/// `TITLE_SYSTEM` in FR.
+pub const TITLE_SYSTEM_FR: &str = r#"Tu nommes des documents. Étant donné le début d'un document et les titres des notes qui en ont été tirées, réponds par un seul titre court : huit mots au maximum, sans guillemets, sans ponctuation finale, sans préambule.
+
+Nomme ce dont parle le document, pas ce qu'il est. Jamais « Document », « Notes », « Guide », « Sans titre »."#;
+
+/// `TITLE_SYSTEM` in IT.
+pub const TITLE_SYSTEM_IT: &str = r#"Dai un nome ai documenti. Dato l'inizio di un documento e i titoli delle note che ne sono state tratte, rispondi con un solo titolo breve: al massimo otto parole, senza virgolette, senza punteggiatura finale, senza preamboli.
+
+Nomina di cosa tratta il documento, non che cosa è. Mai "Documento", "Note", "Guida", "Senza titolo"."#;
+
+/// `TITLE_SYSTEM` in NL.
+pub const TITLE_SYSTEM_NL: &str = r#"Je geeft documenten een naam. Gegeven het begin van een document en de titels van de notities die eruit zijn gemaakt, antwoord met één korte titel — hoogstens acht woorden, geen aanhalingstekens, geen leesteken aan het eind, geen inleiding.
+
+Benoem waar het document over gaat, niet wat het is. Nooit "Document", "Notities", "Handleiding", "Zonder titel"."#;
+
+/// `TITLE_SYSTEM` in PL.
+pub const TITLE_SYSTEM_PL: &str = r#"Nazywasz dokumenty. Mając początek dokumentu i tytuły sporządzonych z niego notatek, odpowiedz jednym krótkim tytułem — najwyżej osiem słów, bez cudzysłowów, bez znaku interpunkcyjnego na końcu, bez wstępu.
+
+Nazwij, o czym jest dokument, a nie czym jest. Nigdy „Dokument", „Notatki", „Przewodnik", „Bez tytułu"."#;
+
+/// `TITLE_SYSTEM` in PT.
+pub const TITLE_SYSTEM_PT: &str = r#"Dás nome a documentos. Dado o início de um documento e os títulos das notas dele tiradas, responde com um único título curto — no máximo oito palavras, sem aspas, sem pontuação final, sem preâmbulo.
+
+Nomeia o assunto do documento, não o que ele é. Nunca "Documento", "Notas", "Guia", "Sem título"."#;
+
+/// `TITLE_SYSTEM` in RU.
+pub const TITLE_SYSTEM_RU: &str = r#"Ты называешь документы. Получив начало документа и заголовки сделанных из него заметок, ответь одним коротким названием — не более восьми слов, без кавычек, без завершающего знака препинания, без предисловия.
+
+Назови, о чём документ, а не что он такое. Никогда «Документ», «Заметки», «Руководство», «Без названия»."#;
+
+/// `TITLE_SYSTEM` in TR.
+pub const TITLE_SYSTEM_TR: &str = r#"Belgeleri adlandırırsın. Bir belgenin başlangıcı ve ondan çıkarılan notların başlıkları verildiğinde, tek bir kısa başlıkla yanıtla — en fazla sekiz sözcük, tırnak yok, sonda noktalama yok, giriş yok.
+
+Belgenin neyle ilgili olduğunu adlandır, ne olduğunu değil. Asla "Belge", "Notlar", "Kılavuz", "Başlıksız"."#;
+
+/// The synthesizer's instructions, in the language the artifacts are wanted in.
+///
+/// A translation and not a translated *request*: an English instruction that
+/// ends "and answer in German" is a rule a 9B model follows for a paragraph and
+/// then quietly stops following, because everything around it — the schema, the
+/// judge block, the field descriptions — goes on being English right up to the
+/// token before it writes. Asking in German is not a rule it can drift off.
+pub fn synthesizer_system(lang: crate::infer::lang::Lang) -> &'static str {
+    use crate::infer::lang::Lang;
+    match lang {
+        Lang::En => SYNTHESIZER_SYSTEM,
+        Lang::De => SYNTHESIZER_SYSTEM_DE,
+        Lang::Es => SYNTHESIZER_SYSTEM_ES,
+        Lang::Fr => SYNTHESIZER_SYSTEM_FR,
+        Lang::It => SYNTHESIZER_SYSTEM_IT,
+        Lang::Nl => SYNTHESIZER_SYSTEM_NL,
+        Lang::Pl => SYNTHESIZER_SYSTEM_PL,
+        Lang::Pt => SYNTHESIZER_SYSTEM_PT,
+        Lang::Ru => SYNTHESIZER_SYSTEM_RU,
+        Lang::Tr => SYNTHESIZER_SYSTEM_TR,
+    }
+}
+
+/// The titler's, likewise. Its own call and its own system prompt, and for as
+/// long as this was English only a German document got German artifacts under
+/// an English name.
+pub fn title_system(lang: crate::infer::lang::Lang) -> &'static str {
+    use crate::infer::lang::Lang;
+    match lang {
+        Lang::En => TITLE_SYSTEM,
+        Lang::De => TITLE_SYSTEM_DE,
+        Lang::Es => TITLE_SYSTEM_ES,
+        Lang::Fr => TITLE_SYSTEM_FR,
+        Lang::It => TITLE_SYSTEM_IT,
+        Lang::Nl => TITLE_SYSTEM_NL,
+        Lang::Pl => TITLE_SYSTEM_PL,
+        Lang::Pt => TITLE_SYSTEM_PT,
+        Lang::Ru => TITLE_SYSTEM_RU,
+        Lang::Tr => TITLE_SYSTEM_TR,
+    }
+}
 
 pub fn user_prompt(
     segment_text: &str,
     first_line: i64,
     max_artifact_tokens: usize,
     context: &crate::infer::context::WindowContext,
+    judge: Option<&crate::infer::JudgeAsk>,
 ) -> String {
     let mut out = String::new();
     // The opening leads so that the system prompt followed by it is a
@@ -88,6 +1006,24 @@ pub fn user_prompt(
             "\n\n----- FOLLOWING CONTEXT (context only) -----\n{a}\n\
              ----- END FOLLOWING CONTEXT -----"
         ));
+    }
+    if let Some(j) = judge {
+        if !j.neighbors.is_empty() {
+            out.push_str("\n\n----- NEIGHBORS (context only; link targets) -----");
+            for n in &j.neighbors {
+                let title = n.title.as_deref().unwrap_or("untitled");
+                out.push_str(&format!("\n[id: {}] {title}\n{}", n.id, n.text));
+            }
+            out.push_str("\n----- END NEIGHBORS -----");
+        }
+        out.push_str(&format!(
+            "\n\n----- JUDGE -----\nCurrent local time: {}\nTime zone: {}\n",
+            j.now_local, j.tz
+        ));
+        if let Some(f) = &j.forced_intent {
+            out.push_str(&format!("The capture door says this is: {f}\n"));
+        }
+        out.push_str("Judge this note: moment, events, links.\n----- END JUDGE -----");
     }
     out
 }
@@ -175,6 +1111,82 @@ pub struct Dedupe {
     /// `Some` if and only if `relation` is `Duplicate`.
     pub merged: Option<MergedDraft>,
 }
+
+pub const REAP_SYSTEM: &str = r#"You decide whether a retired knowledge-base artifact still states anything the live base does not.
+
+You are given the retired artifact, the replacement that retired it if one was named, and the closest live artifacts. Read the retired text for facts a reader could act on or be wrong about, and check each one against the live texts.
+
+- "worthless" — every such fact is stated by the live texts shown. The retired text will be destroyed; only its metadata survives.
+- "valuable" — it states at least one thing the live texts do not. It will be rewritten into a live artifact.
+
+"worthless" destroys text and nobody confirms it first, so it asks for certainty rather than suspicion: if you can name one fact the live texts lack, the answer is "valuable". When you are unsure, answer "valuable" — a wrong "valuable" costs one rewrite; a wrong "worthless" cannot be taken back.
+
+Reply with JSON only: {"verdict":"worthless"|"valuable","reason":"one line naming the deciding fact"}"#;
+
+/// What the reap judge is shown: the candidate, its named replacement if the
+/// retirement was a supersession, and the nearest live artifacts.
+pub struct ReapCase<'a> {
+    pub title: &'a str,
+    pub text: &'a str,
+    /// `(title, text)` of the successor, when one was named.
+    pub successor: Option<(&'a str, &'a str)>,
+    /// `(title, text)`, nearest first.
+    pub neighbours: Vec<(&'a str, &'a str)>,
+}
+
+pub fn reap_prompt(case: &ReapCase<'_>) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "----- RETIRED ARTIFACT -----\nTitle: {}\n\n{}\n",
+        case.title, case.text
+    ));
+    if let Some((title, text)) = &case.successor {
+        s.push_str(&format!(
+            "----- ITS NAMED REPLACEMENT -----\nTitle: {title}\n\n{text}\n"
+        ));
+    }
+    if !case.neighbours.is_empty() {
+        s.push_str("----- CLOSEST LIVE ARTIFACTS -----\n");
+        for (i, (title, text)) in case.neighbours.iter().enumerate() {
+            s.push_str(&format!("[{}] Title: {title}\n\n{text}\n\n", i + 1));
+        }
+    }
+    s
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Reap {
+    Worthless { reason: String },
+    Valuable { reason: String },
+}
+
+pub fn parse_reap(body: &str) -> Result<Reap> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        verdict: String,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    let r: Raw = serde_json::from_value(unwrap_verdict(extract_json(body))?).map_err(|e| {
+        Error::MalformedLlmOutput(format!("reap reply was not the expected JSON: {e}"))
+    })?;
+    let reason = r.reason.unwrap_or_default();
+    // An unknown verdict is an error, never a default: this call's "worthless"
+    // destroys text, so a reply that cannot be read must act on nothing.
+    match r.verdict.as_str() {
+        "worthless" => Ok(Reap::Worthless { reason }),
+        "valuable" => Ok(Reap::Valuable { reason }),
+        other => Err(Error::MalformedLlmOutput(format!(
+            "reap verdict was neither worthless nor valuable: {other:?}"
+        ))),
+    }
+}
+
+pub const RESCUE_SYSTEM: &str = r#"You rewrite the still-valuable part of a retired knowledge-base artifact into one self-contained live artifact.
+
+You are given source excerpts, the closest live artifacts, and the one line naming what the sources state that the live base does not. Write an artifact carrying exactly that: use only the excerpts that bear on it and leave the rest out. Write only what the excerpts support — every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Do not restate what the live artifacts shown already say.
+
+Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
 pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be about the same thing, and decide what should happen to them.
 
@@ -774,6 +1786,32 @@ pub fn parse_generation(reply: &str) -> Result<Generated> {
     Ok(g)
 }
 
+/// The shape `parse_reap` will accept.
+///
+/// Its own schema, and not the dedupe one, because reap is its own question:
+/// under `("verdict", dedupe_schema())` the endpoint forces every reply into
+/// `{"verdict":{"relation":…}}`, `parse_reap` then finds no `verdict` string,
+/// and every candidate is logged as an unreadable judgement. Nothing is ever
+/// reaped or rescued — the sweep runs, costs a call per nominee, and acts on
+/// nothing. Every other distinct question here has its own completer for the
+/// same reason; see `for_link_judging`.
+///
+/// Flat at the root rather than wrapped, because that is the shape
+/// `REAP_SYSTEM` asks for in prose. `unwrap_verdict` passes it through
+/// untouched: it unwraps only when `verdict` holds an *object*, and here it
+/// holds the verdict word itself.
+pub fn reap_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["worthless", "valuable"]},
+            "reason": {"type": "string"}
+        },
+        "required": ["verdict", "reason"],
+        "additionalProperties": false
+    })
+}
+
 pub fn gap_label_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -941,6 +1979,62 @@ struct Envelope {
     artifacts: Vec<RawArtifact>,
 }
 
+/// Deserialize to `None` on a type mismatch instead of failing: a malformed
+/// judgement half must never cost the artifacts beside it.
+fn lenient<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(<serde_json::Value as serde::Deserialize>::deserialize(d)
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// The judged reply: the artifacts, plus the moment/events/links the JUDGE
+/// block asked for — each one lenient, so a model that fumbles the judgement
+/// still delivers its artifacts.
+#[derive(serde::Deserialize)]
+struct JudgedEnvelope {
+    /// Defaulted, like every other field here, and for the reason the note at
+    /// `parse_judged_response` gives about the empty array: a note that is
+    /// nothing but a reminder leaves the model nothing it is *allowed* to
+    /// write, so the judgement alone is a real answer. That note handled
+    /// `"artifacts": []` and the blank placeholder; it did not handle the key
+    /// simply not being there, which is what a model answers with when the
+    /// grammar is not being enforced — `structured_output` off, or an endpoint
+    /// that ignores it, both cases this file plans for elsewhere. Without the
+    /// default the whole reply failed on `missing field 'artifacts'`, and
+    /// `salvage_objects` cannot rescue it either: it looks for the substring
+    /// `"artifacts"` and there is none. The reminder was lost to a reply that
+    /// stated it perfectly.
+    #[serde(default)]
+    artifacts: Vec<RawArtifact>,
+    #[serde(default, deserialize_with = "lenient")]
+    moment: Option<RawMoment>,
+    #[serde(default, deserialize_with = "lenient")]
+    events: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "lenient")]
+    links: Option<Vec<RawLink>>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawMoment {
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    when: Option<String>,
+    #[serde(default)]
+    rule: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawLink {
+    artifact_id: String,
+    #[serde(default)]
+    reason: String,
+}
+
 #[derive(serde::Deserialize)]
 struct RawArtifact {
     text: String,
@@ -952,6 +2046,22 @@ struct RawArtifact {
     corpus_lines: Option<Vec<i64>>,
     #[serde(default)]
     caveats: Vec<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    tags: Option<Vec<String>>,
+    /// Lenient like `tags` beside it, and for a sharper version of the same
+    /// reason: this was the one strict field left on the struct, so a reply
+    /// answering `"pinned": null` — or `0`, or the string `"false"` — failed
+    /// the whole envelope. `salvage_objects` cannot rescue that either, since
+    /// it deserializes this same struct per object, so every artifact in the
+    /// window was lost and the repair call spent on a reply whose only fault
+    /// was the shape of a flag that the plain path discards anyway.
+    ///
+    /// `None` is read as not pinned. Nothing here tries to make sense of
+    /// `"false"`: a value that is not a boolean is a value the model did not
+    /// state, and guessing at its text would be a second reading of the
+    /// reply — see `lenient`.
+    #[serde(default, deserialize_with = "lenient")]
+    pinned: Option<bool>,
 }
 
 /// What kind of thing an artifact is.
@@ -1019,9 +2129,11 @@ pub fn artifacts_schema() -> serde_json::Value {
                             "minItems": 2,
                             "maxItems": 2
                         },
-                        "caveats": {"type": "array", "items": {"type": "string"}}
+                        "caveats": {"type": "array", "items": {"type": "string"}},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "pinned": {"type": "boolean"}
                     },
-                    "required": ["text", "title", "category", "corpus_lines", "caveats"],
+                    "required": ["text", "title", "category", "corpus_lines", "caveats", "tags", "pinned"],
                     "additionalProperties": false
                 }
             }
@@ -1029,6 +2141,40 @@ pub fn artifacts_schema() -> serde_json::Value {
         "required": ["artifacts"],
         "additionalProperties": false
     })
+}
+
+/// [`artifacts_schema`] plus the judged fields — each nullable, because a
+/// strict decoder must be able to say "no judgement" without inventing one.
+pub fn judged_artifacts_schema() -> serde_json::Value {
+    let mut schema = artifacts_schema();
+    schema["properties"]["moment"] = serde_json::json!({
+        "type": ["object", "null"],
+        "properties": {
+            "intent": {"type": "string", "enum": ["remind", "journal", "none"]},
+            "when": {"type": ["string", "null"]},
+            "rule": {"type": ["string", "null"]}
+        },
+        "required": ["intent", "when", "rule"],
+        "additionalProperties": false
+    });
+    schema["properties"]["events"] = serde_json::json!({
+        "type": "array",
+        "items": {"type": "string"}
+    });
+    schema["properties"]["links"] = serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {"type": "string"},
+                "reason": {"type": "string"}
+            },
+            "required": ["artifact_id", "reason"],
+            "additionalProperties": false
+        }
+    });
+    schema["required"] = serde_json::json!(["artifacts", "moment", "events", "links"]);
+    schema
 }
 
 /// The shape `parse_dedupe` will accept. Lives beside `Raw` for the same reason
@@ -1281,8 +2427,18 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
         }
     };
 
-    let artifacts: Vec<ProposedArtifact> = env
-        .artifacts
+    proposed_from(env.artifacts, false)
+}
+
+/// Raw artifacts to proposed ones, shared by the plain and judged parses.
+///
+/// `judged` gates the model-written tags and the pin: on the judged capture
+/// path the operator asked for them; on a promotion window model tags stay
+/// off — no domain-agnostic vocabulary exists for subject words, so a
+/// generated one drifts (`forensics` and `forensik`, two filters over one
+/// idea), and a promoted rewrite of an old window must not pin itself.
+fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArtifact>> {
+    let artifacts: Vec<ProposedArtifact> = raws
         .into_iter()
         .filter(|c| !c.text.trim().is_empty())
         .map(|c| ProposedArtifact {
@@ -1297,14 +2453,17 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                 .category
                 .filter(|t| !t.trim().is_empty())
                 .map(|t| normalize_category(&t)),
-            // Nothing writes tags automatically any more. No domain-agnostic
-            // vocabulary exists for subject words, so a generated one is a
-            // vocabulary that drifts: `forensics` and `forensik`, `security`
-            // and `sicherheit`, two filters over one idea and nothing able to
-            // tell they are the same. The field stays — it is the channel
-            // pinning rides on and a public API filter — written by a caller
-            // who means a particular tag.
-            tags: Vec::new(),
+            tags: if judged {
+                c.tags
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.trim().to_lowercase())
+                    .filter(|t| !t.is_empty())
+                    .take(3)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             corpus_lines: match c.corpus_lines.as_deref() {
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
@@ -1319,6 +2478,7 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
                 .filter(|c| !c.is_empty())
                 .take(3)
                 .collect(),
+            pinned: judged && c.pinned.unwrap_or(false),
         })
         .collect();
 
@@ -1330,6 +2490,84 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
     Ok(artifacts)
 }
 
+/// Parse a judged reply: the artifacts under the same rules as
+/// [`parse_response`], plus whatever of the judgement stands up. A missing or
+/// malformed judgement never fails artifacts that are otherwise fine, and a
+/// reply that needed salvaging carries no judgement at all — half-read
+/// intent is worse than none.
+pub fn parse_judged_response(body: &str) -> Result<crate::infer::SegmentReply> {
+    let json = extract_json(body);
+    match serde_json::from_str::<JudgedEnvelope>(json) {
+        Ok(env) => {
+            let judgement = crate::infer::Judgement {
+                intent: env.moment.as_ref().and_then(|m| m.intent.clone()),
+                when: env.moment.as_ref().and_then(|m| m.when.clone()),
+                rule: env.moment.as_ref().and_then(|m| m.rule.clone()),
+                events: env.events.unwrap_or_default(),
+                links: env
+                    .links
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|l| !l.artifact_id.trim().is_empty())
+                    .map(|l| crate::infer::ProposedLink {
+                        artifact_id: l.artifact_id,
+                        reason: l.reason,
+                    })
+                    .collect(),
+            };
+            // An empty artifact list is a real answer here, and only here.
+            // The system prompt's last rule forbids an artifact that
+            // describes the note's intent, repeats its dates or names its
+            // relation to a neighbour — so a note that is *only* a reminder
+            // leaves the model nothing it is allowed to write, and it
+            // answers with the judgement alone. Held to `proposed_from`'s
+            // floor that reply was thrown away as malformed, the reminder
+            // with it, and the window retried the same call to exhaustion.
+            //
+            // "Nothing it is allowed to write" is asked of the *text*, not of
+            // the array. A small model reaching for that shape often answers
+            // with one blank placeholder artifact rather than an empty list,
+            // and against `is_empty()` that took the else branch, where
+            // `proposed_from` filters the empty text out and then errors on
+            // having nothing left — throwing away a good judgement and retrying
+            // the window to exhaustion. The system prompt's own tension makes
+            // the shape likely: "one or two sentences yields exactly one
+            // artifact" against "never write an artifact that describes the
+            // note's intent".
+            let nothing_to_write = env.artifacts.iter().all(|c| c.text.trim().is_empty());
+            let artifacts = if nothing_to_write && judgement.says_something() {
+                Vec::new()
+            } else {
+                proposed_from(env.artifacts, true)?
+            };
+            Ok(crate::infer::SegmentReply {
+                artifacts,
+                judgement: Some(judgement),
+            })
+        }
+        Err(e) => {
+            let objects = salvage_objects(json);
+            if objects.is_empty() {
+                tracing::debug!(
+                    error = %e,
+                    raw = %json.chars().take(RAW_ON_FAILURE).collect::<String>(),
+                    "judged synthesizer output could not be parsed or salvaged"
+                );
+                return Err(Error::MalformedLlmOutput(e.to_string()));
+            }
+            tracing::warn!(
+                error = %e,
+                artifacts = objects.len(),
+                "judged output was cut off or malformed; keeping the artifacts, dropping the judgement"
+            );
+            Ok(crate::infer::SegmentReply {
+                artifacts: proposed_from(objects, true)?,
+                judgement: None,
+            })
+        }
+    }
+}
+
 pub const DESCRIBE_SYSTEM: &str = r#"You read images for a personal knowledge base and write down everything in them worth keeping, as markdown.
 
 Rules:
@@ -1339,10 +2577,32 @@ Rules:
 - You may be given context about the capture: a note from the person who took it, when and where it was taken, the device. Where it is relevant, weave it in naturally so the text can be found again by it — as a short opening line or where it explains the content — but do not repeat it mechanically or invent detail around it.
 - Output markdown only. No preamble, no closing remarks, no mention of these instructions."#;
 
-/// The user turn's text part for `Describer::describe`: the note first, then
-/// the facts the file carried, each only when present.
+/// The user turn's text part for `Describer::describe`: the language first,
+/// then the note, then the facts the file carried, each only when present.
+///
+/// The language rides here rather than in a translated `DESCRIBE_SYSTEM`
+/// because what a description of an image has to say about language is not
+/// the same thing a synthesis does. A described image *becomes* the corpus's
+/// `raw_text` — it is the verbatim the operator reads as the source — and it
+/// is two texts at once: the transcription of whatever is written in the
+/// image, which belongs to the image and must not be translated by anybody,
+/// and the describer's own prose about it, which belongs to the reader. Nine
+/// mechanical translations of the system prompt would have said nothing about
+/// which is which; this line says it once, and a tenth language is one more
+/// endonym away.
 pub fn describe_context(metadata: &serde_json::Value) -> String {
     let mut lines: Vec<String> = Vec::new();
+    let lang = crate::infer::lang::of_corpus(metadata);
+    if lang != crate::infer::lang::Lang::En {
+        lines.push(format!(
+            "Write your description in {} ({}). Text that is visible in the image \
+             is still transcribed exactly as it appears there, in whatever language \
+             it is written in — only your own prose is in {}.",
+            lang.endonym(),
+            lang.tag(),
+            lang.endonym()
+        ));
+    }
     if let Some(note) = metadata["note"].as_str().filter(|n| !n.trim().is_empty()) {
         // The stored note is whole; this is the copy that costs tokens, and it
         // leads the prompt — so it is the one place a long one does damage.
@@ -1378,6 +2638,29 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_language_says_the_judgement_is_not_an_artifact() {
+        use crate::infer::lang::Lang;
+        let phrase = [
+            (Lang::En, "The judgement is not an artifact"),
+            (Lang::De, "Das Urteil ist kein Artefakt"),
+            (Lang::Es, "El juicio no es un artefacto"),
+            (Lang::Fr, "Le jugement n'est pas un artefact"),
+            (Lang::It, "Il giudizio non è un artefatto"),
+            (Lang::Nl, "Het oordeel is geen artefact"),
+            (Lang::Pl, "Ocena nie jest artefaktem"),
+            (Lang::Pt, "O julgamento não é um artefato"),
+            (Lang::Ru, "Суждение — не артефакт"),
+            (Lang::Tr, "Yargı bir artefakt değildir"),
+        ];
+        for (lang, p) in phrase {
+            assert!(
+                synthesizer_system(lang).contains(p),
+                "{lang:?} prompt lacks the one-artifact rule"
+            );
+        }
+    }
 
     /// An empty list is the common answer and must be readable as "I have
     /// enough", never as a query to run.
@@ -1478,20 +2761,30 @@ mod tests {
     }
 
     #[test]
-    fn the_schema_no_longer_asks_for_tags() {
-        // No domain-agnostic vocabulary exists for subject words, so a
-        // generated one is a vocabulary that drifts: `forensics` and `forensik`
-        // became two filters over one idea. The field survives for callers who
-        // mean a particular tag; nothing writes it on their behalf.
+    fn the_schema_asks_for_tags_and_a_pin_and_the_judged_one_for_the_moment() {
+        // Strict decoding requires every property, so both are in the schema;
+        // whether they are *honored* is the parse's per-path decision — see
+        // `the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model`.
         let items = &artifacts_schema()["properties"]["artifacts"]["items"];
-        assert!(items["properties"]["tags"].is_null());
         let required: Vec<&str> = items["required"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(!required.contains(&"tags"), "{required:?}");
+        assert!(required.contains(&"tags"), "{required:?}");
+        assert!(required.contains(&"pinned"), "{required:?}");
+
+        let judged = judged_artifacts_schema();
+        let top: Vec<&str> = judged["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for field in ["artifacts", "moment", "events", "links"] {
+            assert!(top.contains(&field), "{top:?}");
+        }
     }
 
     #[test]
@@ -1559,7 +2852,7 @@ mod tests {
             before: Some("previous window tail".into()),
             after: Some("next window head".into()),
         };
-        let p = user_prompt("the window body", 1, 1024, &ctx);
+        let p = user_prompt("the window body", 1, 1024, &ctx, None);
 
         assert!(p.contains("PBS 3.x on Debian 12."));
         assert!(p.contains("previous window tail"));
@@ -1580,13 +2873,102 @@ mod tests {
     fn an_empty_context_renders_exactly_the_prompt_of_before() {
         use crate::infer::context::WindowContext;
 
-        let p = user_prompt("body", 1, 1024, &WindowContext::default());
+        let p = user_prompt("body", 1, 1024, &WindowContext::default(), None);
         assert!(
             !p.contains("context only"),
             "an empty context must not emit empty fences: {p}"
         );
         assert!(p.starts_with("The input below starts at line 1."));
         assert!(p.ends_with("----- END INPUT -----"));
+    }
+
+    /// Ten translations of one prompt, and the half a parser reads must be
+    /// identical in all ten.
+    ///
+    /// The prose is what is translated. The JSON shape, the field names, the
+    /// `category` values, the `moment` intents and the block markers
+    /// `user_prompt` writes in English are the contract between this prompt
+    /// and the code that reads its reply — a translated key is a parse failure
+    /// that looks exactly like a bad model, and it would only show up for the
+    /// one language nobody on the project speaks.
+    #[test]
+    fn the_translations_carry_the_same_contract() {
+        use crate::infer::lang::Lang;
+
+        // Every literal the parser, the schema or `user_prompt` depends on.
+        const CONTRACT: &[&str] = &[
+            r#"{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}"#,
+            "concept, procedure, reference, snippet",
+            "configuration, definition, example, other",
+            "corpus_lines",
+            "caveats",
+            "pinned",
+            r#"{"intent":"remind"|"journal"|"none","when":...,"rule":...}"#,
+            r#"{"artifact_id":"...","reason":"..."}"#,
+            "context only",
+            "INPUT",
+            "NEIGHBORS",
+            "JUDGE",
+            "moment",
+            "events",
+            "links",
+            "RRULE",
+            "FREQ, INTERVAL, BYDAY",
+            "BYMONTHDAY, UNTIL, COUNT",
+            "ISO-8601",
+            "2026-09-04T09:00",
+            "09:00",
+            "17:07",
+            "`## `",
+        ];
+        // Whitespace-normalised on both sides: these prompts are hard-wrapped
+        // prose, and a translation wraps in different places — `FREQ,\nINTERVAL`
+        // is the same contract as `FREQ, INTERVAL` and must not read as a loss.
+        let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+        for lang in Lang::ALL {
+            let p = flat(synthesizer_system(lang));
+            for needle in CONTRACT {
+                assert!(
+                    p.contains(&flat(needle)),
+                    "the {} prompt lost `{needle}`",
+                    lang.tag()
+                );
+            }
+            // And a title prompt exists for every one of them, which is the
+            // thing that was missing entirely: German artifacts under an
+            // English name.
+            assert!(!title_system(lang).is_empty());
+        }
+
+        // Translated, not merely relabelled. Nine distinct texts and one
+        // English original — a `match` arm pointing at the wrong constant is
+        // otherwise invisible.
+        let seen: std::collections::BTreeSet<&str> =
+            Lang::ALL.iter().map(|l| synthesizer_system(*l)).collect();
+        assert_eq!(seen.len(), Lang::ALL.len(), "two languages share a prompt");
+        let titles: std::collections::BTreeSet<&str> =
+            Lang::ALL.iter().map(|l| title_system(*l)).collect();
+        assert_eq!(titles.len(), Lang::ALL.len());
+        assert_eq!(synthesizer_system(Lang::En), SYNTHESIZER_SYSTEM);
+    }
+
+    /// The hint is gone, in every language.
+    ///
+    /// It used to be one line inside a wall of English — "Always use the
+    /// language the input was written in" — which is a rule a 9B model grants
+    /// for a paragraph and then quietly stops granting, because everything
+    /// after it goes on being English right up to the token before it writes.
+    /// A prompt that *is* in the language has nothing to ask for.
+    #[test]
+    fn no_prompt_asks_for_a_language_any_more() {
+        use crate::infer::lang::Lang;
+        for lang in Lang::ALL {
+            assert!(
+                !synthesizer_system(lang).contains("language the input was written in"),
+                "the {} prompt still asks instead of speaking",
+                lang.tag()
+            );
+        }
     }
 
     #[test]
@@ -1608,7 +2990,7 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect::<Vec<_>>();
         let reply = r#"{"artifacts":[{"text":"body","title":"A","category":"note",
-            "tags":["t"],"corpus_lines":[1,4],"caveats":["only on linux"]}]}"#;
+            "tags":["t"],"pinned":false,"corpus_lines":[1,4],"caveats":["only on linux"]}]}"#;
         // The literal above is the model's side of the bargain: every field the
         // schema makes mandatory has to be one this parser reads.
         for field in &required {
@@ -1790,6 +3172,7 @@ mod tests {
             ("link", link_schema()),
             ("claims", claims_schema()),
             ("gap_label", gap_label_schema()),
+            ("reap", reap_schema()),
             ("plan", plan_schema()),
             ("artifacts", artifacts_schema()),
         ] {
@@ -2367,6 +3750,41 @@ mod tests {
         assert!(bare.contains("Read the image"), "{bare}");
     }
 
+    /// A described image *becomes* the corpus — its description is the
+    /// `raw_text` the operator reads as the source and passages are split from
+    /// — so a German account's photo read in English left the stamp governing
+    /// only what came after the source was already the wrong language.
+    ///
+    /// And the instruction has two halves, which is why it is a line in the
+    /// user turn rather than nine translations of the system prompt: the
+    /// transcription belongs to the image and must survive in whatever
+    /// language is written there, while the prose about it belongs to the
+    /// reader.
+    #[test]
+    fn a_description_is_written_in_the_language_the_capture_was_stamped_with() {
+        let de = describe_context(&serde_json::json!({ "lang": "de" }));
+        assert!(
+            de.starts_with("Write your description in Deutsch (de)."),
+            "{de}"
+        );
+        assert!(
+            de.contains("transcribed exactly as it appears"),
+            "the transcription must not be swept along: {de}"
+        );
+
+        // English is the default everywhere and says nothing extra: the system
+        // prompt is already in it, and a line repeating that is tokens for
+        // nothing on every image capture that never set a language.
+        for m in [
+            serde_json::json!({ "lang": "en" }),
+            serde_json::json!({}),
+            serde_json::json!({ "lang": "kl" }),
+        ] {
+            let ctx = describe_context(&m);
+            assert!(!ctx.contains("Write your description in"), "{ctx}");
+        }
+    }
+
     #[test]
     fn an_answer_that_opens_with_the_sentinel_is_an_abstention() {
         assert!(abstained(
@@ -2462,5 +3880,204 @@ mod tests {
     fn ask_prompt_skips_an_empty_excerpt() {
         let p = ask_prompt("q", &["[1] t\na".into(), String::new(), "[3] t\nc".into()]);
         assert_eq!(p, "Question: q\n\nExcerpts:\n\n[1] t\na\n\n---\n\n[3] t\nc");
+    }
+
+    /// The flag is a flag, not the reply. A model that answers `null` where a
+    /// boolean was asked for has still written the artifact, and the strict
+    /// field this used to be threw the whole window away over it — including
+    /// in `salvage_objects`, which deserializes the same struct per object and
+    /// so could rescue nothing.
+    #[test]
+    fn a_pinned_flag_of_the_wrong_shape_costs_no_artifact() {
+        for v in ["null", "\"false\"", "0", "[]"] {
+            let body = format!(
+                r#"{{"artifacts":[{{"text":"Send the invoice","title":"Invoice",
+                   "category":"other","corpus_lines":[1,1],"caveats":[],
+                   "tags":[],"pinned":{v}}}]}}"#
+            );
+            let r = parse_response(&body).unwrap_or_else(|e| panic!("pinned={v}: {e}"));
+            assert_eq!(r.len(), 1, "pinned={v}");
+            assert!(!r[0].pinned, "pinned={v}");
+            let j = parse_judged_response(&body).unwrap_or_else(|e| panic!("pinned={v}: {e}"));
+            assert_eq!(j.artifacts.len(), 1, "pinned={v}");
+        }
+    }
+
+    #[test]
+    fn a_judged_reply_parses_moment_events_links_tags_and_pinned() {
+        let body = r#"{"moment":{"intent":"remind","when":"2026-09-04T09:00","rule":null},
+            "events":["2026-09-12T00:00"],
+            "links":[{"artifact_id":"a-1","reason":"same migration"}],
+            "artifacts":[{"text":"Send the invoice","title":"Invoice","category":"other",
+                          "corpus_lines":[1,1],"caveats":[],"tags":["Billing "],"pinned":true}]}"#;
+        let r = parse_judged_response(body).unwrap();
+        let j = r.judgement.unwrap();
+        assert_eq!(j.intent.as_deref(), Some("remind"));
+        assert_eq!(j.when.as_deref(), Some("2026-09-04T09:00"));
+        assert_eq!(j.rule, None);
+        assert_eq!(j.events, vec!["2026-09-12T00:00"]);
+        assert_eq!(j.links[0].artifact_id, "a-1");
+        assert!(r.artifacts[0].pinned);
+        assert_eq!(
+            r.artifacts[0].tags,
+            vec!["billing"],
+            "trimmed and lowercased"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_malformed_judgement_never_fails_the_artifacts() {
+        let plain = r#"{"artifacts":[{"text":"x"}]}"#;
+        let r = parse_judged_response(plain).unwrap();
+        assert_eq!(r.artifacts.len(), 1);
+        assert_eq!(r.judgement.unwrap(), crate::infer::Judgement::default());
+        let bad = r#"{"moment":"not an object","events":7,"links":{"no":"list"},
+            "artifacts":[{"text":"x"}]}"#;
+        let r = parse_judged_response(bad).unwrap();
+        assert_eq!(r.artifacts.len(), 1);
+        assert_eq!(r.judgement.unwrap(), crate::infer::Judgement::default());
+    }
+
+    #[test]
+    fn a_reminder_note_that_is_only_a_judgement_keeps_its_judgement() {
+        // The prompt's own last rule — "Das Urteil ist kein Artefakt" — leaves
+        // a bare reminder with nothing it is allowed to write an artifact
+        // about, so the model answers with an empty list and the judgement
+        // filled in. That is the reply the capture door exists for; refusing
+        // it as malformed threw the reminder away and retried the call until
+        // the unit gave up.
+        let body = r#"{"artifacts":[],
+            "moment":{"intent":"remind","when":"2026-09-05T13:45","rule":null},
+            "events":["2026-09-05T13:45"],"links":[]}"#;
+        let r = parse_judged_response(body).unwrap();
+        assert!(r.artifacts.is_empty());
+        let j = r.judgement.expect("the judgement is the whole reply");
+        assert_eq!(j.intent.as_deref(), Some("remind"));
+        assert_eq!(j.when.as_deref(), Some("2026-09-05T13:45"));
+    }
+
+    #[test]
+    fn a_blank_placeholder_artifact_is_the_same_answer_as_an_empty_list() {
+        // The shape a small model reaches for instead of `[]`, pushed there by
+        // the system prompt's own tension: "one or two sentences yields exactly
+        // one artifact" against "never write an artifact that describes the
+        // note's intent". Held to `is_empty()` it took the else branch, where
+        // the blank text is filtered out and the floor then errors on having
+        // nothing left — the good judgement thrown away with it.
+        let body = r#"{"artifacts":[{"text":"   ","title":""}],
+            "moment":{"intent":"remind","when":"2026-09-05T13:45","rule":null},
+            "events":[],"links":[]}"#;
+        let r = parse_judged_response(body).unwrap();
+        assert!(r.artifacts.is_empty());
+        assert_eq!(
+            r.judgement.expect("kept").when.as_deref(),
+            Some("2026-09-05T13:45")
+        );
+        // And a blank placeholder with nothing beside it is still nothing.
+        let empty = r#"{"artifacts":[{"text":"  "}],"moment":{"intent":"none","when":null,"rule":null},
+            "events":[],"links":[]}"#;
+        assert!(parse_judged_response(empty).is_err());
+    }
+
+    #[test]
+    fn a_judged_reply_with_neither_artifacts_nor_a_judgement_is_still_malformed() {
+        // The empty list is only meaningful beside a judgement. A reply that
+        // says nothing at all is a model that answered nothing, and the
+        // window must go on treating that as a failure to retry.
+        let body = r#"{"artifacts":[],"moment":{"intent":"none","when":null,"rule":null},
+            "events":[],"links":[]}"#;
+        assert!(parse_judged_response(body).is_err());
+        assert!(parse_judged_response(r#"{"artifacts":[]}"#).is_err());
+    }
+
+    /// A reminder stated perfectly, lost to a key that was not there.
+    ///
+    /// The empty-artifacts case is handled and documented: a note that is
+    /// nothing but a reminder leaves the model nothing it is allowed to write.
+    /// What was not handled is the model omitting `artifacts` altogether rather
+    /// than sending it empty, which is what comes back when the grammar is not
+    /// being enforced — `structured_output` off, or an endpoint that ignores
+    /// it. `missing field 'artifacts'`, and `salvage_objects` cannot help: it
+    /// looks for the substring and there is none.
+    #[test]
+    fn a_judged_reply_that_omits_the_artifact_key_is_still_a_judgement() {
+        let body = r#"{"moment":{"intent":"remind","when":"2026-09-04T09:00","rule":null}}"#;
+        let r = parse_judged_response(body).expect("the judgement stands on its own");
+        assert!(r.artifacts.is_empty());
+        let j = r.judgement.expect("the moment was read");
+        assert_eq!(j.intent.as_deref(), Some("remind"));
+        assert_eq!(j.when.as_deref(), Some("2026-09-04T09:00"));
+        // And the reply that says nothing at all is still a failure to retry,
+        // exactly as an explicit empty list with no judgement is.
+        assert!(parse_judged_response("{}").is_err());
+    }
+
+    #[test]
+    fn the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model() {
+        // Promotion windows: model tags stay off (vocabulary drift), and a
+        // rewrite must not pin itself.
+        let body = r#"{"artifacts":[{"text":"x","tags":["topic"],"pinned":true}]}"#;
+        let arts = parse_response(body).unwrap();
+        assert!(arts[0].tags.is_empty());
+        assert!(!arts[0].pinned);
+    }
+
+    /// The grammar and the parser, on the one call that destroys text.
+    ///
+    /// Reap ran under `dedupe_schema` for its whole first life: the endpoint
+    /// forced every reply into `{"verdict":{"relation":…}}`, `parse_reap` found
+    /// no verdict word, and the sweep paid for a call per nominee and acted on
+    /// none of them. This is that pairing written down — every word the schema
+    /// permits is a verdict the parser reads, in the shape the schema produces.
+    #[test]
+    fn every_verdict_the_reap_schema_allows_is_one_the_parser_knows() {
+        let schema = reap_schema();
+        let allowed = schema["properties"]["verdict"]["enum"].as_array().unwrap();
+        assert!(!allowed.is_empty());
+        for v in allowed {
+            let reply = serde_json::json!({"verdict": v, "reason": "why"}).to_string();
+            parse_reap(&reply).unwrap_or_else(|e| {
+                panic!("the schema permits {v}, which the parser refuses: {e}")
+            });
+        }
+    }
+
+    #[test]
+    fn parse_reap_reads_both_verdicts_and_refuses_the_rest() {
+        assert_eq!(
+            parse_reap(r#"{"verdict":"worthless","reason":"covered by [1]"}"#).unwrap(),
+            Reap::Worthless {
+                reason: "covered by [1]".into()
+            }
+        );
+        assert_eq!(
+            parse_reap("```json\n{\"verdict\":\"valuable\",\"reason\":\"names a port\"}\n```")
+                .unwrap(),
+            Reap::Valuable {
+                reason: "names a port".into()
+            }
+        );
+        assert!(parse_reap(r#"{"verdict":"maybe","reason":""}"#).is_err());
+        assert!(parse_reap("no json here").is_err());
+    }
+
+    #[test]
+    fn reap_prompt_carries_candidate_successor_and_numbered_neighbours() {
+        let case = ReapCase {
+            title: "Old flag",
+            text: "use --legacy-peer-deps",
+            successor: Some(("New flag", "use --install-strategy")),
+            neighbours: vec![("N1", "first neighbour"), ("N2", "second neighbour")],
+        };
+        let p = reap_prompt(&case);
+        assert!(p.contains("RETIRED ARTIFACT") && p.contains("--legacy-peer-deps"));
+        assert!(p.contains("NAMED REPLACEMENT") && p.contains("--install-strategy"));
+        assert!(p.contains("[1] Title: N1") && p.contains("[2] Title: N2"));
+        let no_successor = ReapCase {
+            successor: None,
+            neighbours: vec![],
+            ..case
+        };
+        assert!(!reap_prompt(&no_successor).contains("NAMED REPLACEMENT"));
     }
 }

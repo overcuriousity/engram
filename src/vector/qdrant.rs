@@ -2032,6 +2032,30 @@ impl VectorStore for QdrantVectors {
         Ok(hits)
     }
 
+    async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
+        // The retrieve endpoint rather than `GET points/{id}`: it takes a
+        // named `with_vector`, so the `ctx` multivector stays on the server.
+        let points: Option<Vec<ScrolledPoint>> = self
+            .call_absent_point_as_none(
+                Method::POST,
+                &format!("/collections/{}/points", self.alias),
+                Some(json!({
+                    "ids": [point_uuid(artifact_id)],
+                    "with_payload": false,
+                    "with_vector": [DENSE],
+                })),
+            )
+            .await?;
+        Ok(points.and_then(|ps| {
+            let p = ps.into_iter().next()?;
+            let dense = dense_of(&p.vector)?.as_array()?;
+            dense
+                .iter()
+                .map(|x| x.as_f64().map(|f| f as f32))
+                .collect::<Option<Vec<f32>>>()
+        }))
+    }
+
     async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
         // One scroll page: Qdrant's scroll has no random start, and a slowly
         // changing first page is fine for a picture that refreshes every few
@@ -2578,6 +2602,32 @@ mod tests {
 
     /// A store pointed at a mock, for the arms that turn an HTTP status into a
     /// decision rather than a value.
+    #[tokio::test]
+    async fn dense_of_reads_one_point_by_id_and_none_when_it_is_absent() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let id = point_uuid("a1");
+        Mock::given(method("POST"))
+            .and(path("/collections/engram/points"))
+            .and(body_partial_json(json!({ "ids": [id] })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [ { "id": id, "vector": { DENSE: [0.1, 0.2, 0.3] } } ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/collections/engram/points"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": [] })))
+            .mount(&server)
+            .await;
+
+        let v = against(&server).await;
+        assert_eq!(v.dense_of("a1").await.unwrap(), Some(vec![0.1, 0.2, 0.3]));
+        assert_eq!(v.dense_of("nope").await.unwrap(), None);
+    }
+
     async fn against(server: &wiremock::MockServer) -> QdrantVectors {
         QdrantVectors::connect(&VectorConfig {
             url: server.uri(),

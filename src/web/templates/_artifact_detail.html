@@ -92,10 +92,19 @@
      three-up the lone trash button ended a thousand pixels from its siblings
      and read as stranded rather than as caution.
 
-     Every one of them carries its word. An icon alone is a guess: a check mark
-     could as easily mean "done" as "still true", and the tooltip that said
-     which only appears once you have already hovered the thing you were unsure
-     about. #}
+     Every one of them carries its word, and the word has to be the whole of
+     what the control does. "Verified" was not: directly under this row sits
+     *Was this what you were looking for?* with a Yes on it, and the two read
+     as one question asked twice. They are not. Yes answers *this search found
+     the right thing* and feeds the retrieval measure; this one answers *the
+     text is still accurate*, which resets the artifact's age and is what
+     search's recency term reads in place of `created_at`. Naming the subject
+     — the claim, not the hit — is what tells them apart without a sentence
+     explaining the difference.
+
+     "Hide" had the same shape of problem one step further on. What it hides
+     from, and that the artifact survives it, lived only in a `title`, and the
+     phone this base is mostly read on has no hover. #}
   <div class="actions pane-header">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify"
@@ -103,8 +112,9 @@
           hx-target="closest [data-artifact]" hx-swap="outerHTML">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
       <button class="btn-icon" type="submit"
-              title="Confirm still accurate" aria-label="Confirm still accurate">
-        {% include "_icon_check.html" %}<span>Verified</span>
+              title="Confirm this is still accurate — it resets the artifact's age, which search reads"
+              aria-label="Confirm this is still accurate; it resets the artifact's age, which search reads">
+        {% include "_icon_check.html" %}<span>Still accurate</span>
       </button>
     </form>
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate"
@@ -114,7 +124,7 @@
       <button class="btn-icon" type="submit"
               title="Hide from results — the artifact is kept, and this can be undone"
               aria-label="Hide from results: the artifact is kept, and this can be undone">
-        {% include "_icon_hide.html" %}<span>Hide</span>
+        {% include "_icon_hide.html" %}<span>Hide from results</span>
       </button>
     </form>
     {% endif %}
@@ -183,9 +193,22 @@
         {% endif %}
         {# The passage stopped mid-sentence, so the window it was cut from did.
            The source column beside this already shows the rest of the line;
-           this is the way to the artifact that carries it. #}
+           this is the way to the artifact that carries it.
+
+           Swapped in place, exactly as the Related list below swaps — and for
+           the same reason. Left as a bare `href` this was the one link on the
+           page that *navigated*: following it out of the workspace loaded the
+           standalone artifact page, and the results this passage was found in
+           went with it. The rest of the reading — the box, the rail, the run —
+           is what the pane is inside of, and continuing to the next passage is
+           the least of all the reasons to leave it. The `href` stays for a
+           browser running no script, where the standalone page is the right
+           and only answer. #}
         {% if let Some(next) = d.continues_at %}
-        <p class="continues"><a class="quiet-link" href="/ui/artifacts/{{ next }}">continues in the next passage →</a></p>
+        <p class="continues"><a class="quiet-link" href="/ui/artifacts/{{ next }}"
+             hx-get="/ui/artifacts/{{ next }}?via={{ d.id }}"
+             hx-target="closest [data-terms]" hx-swap="outerHTML"
+             hx-push-url="true">continues in the next passage →</a></p>
         {% endif %}
         {% if !d.caveats.is_empty() %}
         {# Emitted by the same synthesis call that wrote the artifact, from what
@@ -201,6 +224,9 @@
              model, so a chip row here would show whatever a caller set on this
              one artifact and nothing on the rest. #}
           {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
+          {% if let Some(due) = d.due_in %}
+          <span class="badge badge-due" title="A reminder you set on this is due">due {{ due }}</span>
+          {% endif %}
         </div>
         {# `view=detail`: the same PUT answers the corpus page with a card and
            this pane with a pane. Without it the save would swap this whole

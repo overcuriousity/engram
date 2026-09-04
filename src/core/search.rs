@@ -190,12 +190,27 @@ pub struct SearchResult {
     /// pass one off as the other.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_sitting: bool,
+    /// An open reminder on this artifact falls due inside `time.horizon_hours`.
+    /// A fact about the row whatever `time.lift` says; the lift is what may
+    /// move it, and then `primed` says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<i64>,
+    /// `due_at` in words — "in 2 h", "in 3 days", "1 h ago" — so every door
+    /// prints the same thing without each owning a clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_in: Option<String>,
     /// This hit sits past the cliff: the one step in this list's scores that
     /// accounts for more of the fall than the rest of the list together. See
     /// `cliff`. It still competed and still placed — nothing is reordered or
     /// dropped — but the page stops claiming it is an answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
+    /// The note this passage came from is a reminder that is done. It keeps
+    /// its place in the list and is moved to the tail rather than dropped:
+    /// search for its own words and it is still there. What it stops doing is
+    /// competing with the things that were written to be kept.
+    #[serde(default)]
+    pub retired: bool,
     /// Cosine similarity between the query and this hit, when the store could
     /// say. Comparable across queries where `score` is not, which is why the
     /// cliff is read from it whenever no reranker has calibrated the scores.
@@ -249,7 +264,10 @@ impl From<SearchHit> for SearchResult {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
+            retired: false,
             similarity: h.similarity,
             titled_by_corpus: false,
             via: None,
@@ -535,6 +553,41 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
     }
 }
 
+/// Retired notes to the tail, then the cliff, then the tail marked with it.
+///
+/// One function because the order is the whole of it. Marks, never reorders
+/// beyond the demotion, never drops.
+///
+/// `mark_past_cliff` guarantees that what it marks is a *suffix* of the list,
+/// and `ask` truncates at the first marked hit — so marking a row in the
+/// middle would silently cut the answer short. `sort_by_key` is stable, so
+/// every other row keeps the order the ranking produced.
+///
+/// The cliff is read over the live prefix and not the whole list. A retired
+/// row keeps its score, and a retired row with a *high* one — demoted here,
+/// not dropped — lands at the tail and makes the last position satisfy
+/// `score >= cut`: `mark_past_cliff` then finds its `from` at the end of the
+/// list and marks nothing at all. Scores `[0.90(retired), 0.88, 0.87, 0.30,
+/// 0.29]` gave a cut of 0.87 and left the 0.30 and 0.29 above the line — in
+/// `ask`, back in the answer — so one retired row switched the cliff off for
+/// everything. The retired tail is marked below whatever the cliff says, so
+/// reading the cliff over the rows the cliff is about costs nothing and is the
+/// only reading that means anything.
+fn sink_retired_and_mark_the_cliff(results: &mut [SearchResult], reranked: bool) {
+    results.sort_by_key(|r| r.retired);
+    let live = results
+        .iter()
+        .position(|r| r.retired)
+        .unwrap_or(results.len());
+    mark_past_cliff(&mut results[..live], reranked);
+    for r in results.iter_mut().filter(|r| r.retired) {
+        r.past_cliff = true;
+        if let Some(e) = r.explanation.as_mut() {
+            e.past_cliff = true;
+        }
+    }
+}
+
 /// Activation above the capture baseline, per artifact: what use has added,
 /// and nothing else. The arithmetic is `links::engagement_at`, which promotion
 /// and the insights page read the same quantity through.
@@ -588,6 +641,7 @@ fn prime(
     margin: f64,
     lift: usize,
     sitting: &std::collections::HashSet<String>,
+    due: &std::collections::HashSet<String>,
 ) -> Vec<SearchResult> {
     // Marked before anything can return. `in_sitting` is a fact about the row —
     // this sitting has been in it — and not a consequence of the reordering. A
@@ -601,7 +655,7 @@ fn prime(
         return results;
     }
     let max = activation.values().copied().fold(0.0f64, f64::max);
-    if max <= 0.0 && sitting.is_empty() {
+    if max <= 0.0 && sitting.is_empty() && due.is_empty() {
         return results;
     }
     let n = results.len();
@@ -619,9 +673,11 @@ fn prime(
                 true => activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max,
                 false => 0.0,
             };
-            match sitting.contains(&r.artifact_id) {
-                // The top of the same normalised scale: what this sitting has
-                // been in is as accessible as anything in the base gets.
+            // The top of the same normalised scale: what this sitting has
+            // been in is as accessible as anything in the base gets, and a
+            // reminder the operator set for this week is a fact about what
+            // they want now — the one budget, the one walk, for both.
+            match sitting.contains(&r.artifact_id) || due.contains(&r.artifact_id) {
                 true => act.max(1.0),
                 false => act,
             }
@@ -733,35 +789,15 @@ impl Core {
         // priming, and an install that never opted into `feedback` must see
         // no artifact's activation move, or the ranked order could start
         // changing under a feature it never turned on.
-        // Never `maybe_promote` here: exposure is not engagement. The only
-        // thing exposure can trigger is the opposite — an eager artifact shown
-        // and shown and never confirmed is re-read — and that ships disabled.
+        // Never `maybe_promote` here: exposure is not engagement.
         if counts_as_hit && self.associating() {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            let shown: Vec<(String, i64)> = if self.promote.resynthesize_after_unconfirmed > 0 {
-                results
-                    .iter()
-                    .map(|r| {
-                        (
-                            r.artifact_id.clone(),
-                            hit_counts.get(&r.artifact_id).copied().unwrap_or(0) + 1,
-                        )
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
             let core = self.clone();
             let (delta, half_life) = (self.activation.retrieved, self.activation.half_life_days);
             let at = now_secs();
             self.background.spawn(async move {
                 if let Err(e) = core.store.bump_activation(&ids, delta, half_life, at).await {
                     tracing::warn!(error = %e, "could not raise activation for a search");
-                }
-                if !shown.is_empty()
-                    && let Err(e) = crate::jobs::promote::maybe_resynthesize(&core, &shown).await
-                {
-                    tracing::warn!(error = %e, "could not check the re-synthesis threshold");
                 }
             });
         }
@@ -1049,7 +1085,10 @@ impl Core {
                 weak: false,
                 primed: false,
                 in_sitting: false,
+                due_at: None,
+                due_in: None,
                 past_cliff: false,
+                retired: false,
                 similarity: None,
                 titled_by_corpus: false,
                 // Set here, where `via` is known. Never ranked, so every other
@@ -1448,7 +1487,7 @@ impl Core {
             .map(|h| {
                 // Demonstrated, never assumed: a hit with no similarity to
                 // read is one the lexical half matched verbatim.
-                let weak = h.similarity.is_some_and(|s| s < self.weak_below);
+                let weak = h.similarity.is_some_and(|s| s < self.weak_below());
                 // Kept and refilled are different claims: a refilled hit is
                 // over its cap and present only because nothing else was on
                 // offer, which is the case the cap fails silently in.
@@ -1546,6 +1585,44 @@ impl Core {
         // and the excerpt lost is then the one that answered best — a silent
         // change to the answer, on a path where nobody can see what was cut.
         // `Judge` needs the pool it labels to be the pool the ranking produced.
+        // What is due on these rows, said on every door. Read regardless of
+        // `time.lift`: the badge is a fact, the lift is a choice.
+        let due_map = {
+            let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+            let now = now_secs();
+            self.store
+                .due_for(&ids, now, now + self.time.horizon_hours as i64 * 3_600)
+                .await
+                .unwrap_or_default()
+        };
+        for r in &mut results {
+            r.due_at = due_map.get(&r.artifact_id).copied();
+            r.due_in = r.due_at.map(crate::web::ui::ago_or_ahead);
+        }
+        // Retirement, read for the whole page in one query beside the due map.
+        {
+            let cids: Vec<String> = results.iter().map(|r| r.corpus_id.clone()).collect();
+            // Degraded, but never silently: an empty set here is
+            // indistinguishable from "nothing is retired", so a transient
+            // `SQLITE_BUSY` leaves the marks off the rail and
+            // `sink_retired_and_mark_the_cliff` demoting nothing. The page is
+            // still worth showing without them — the same trade the `due_for`
+            // read above makes — and the log is what says which it was.
+            let retired = match self.store.retired_among(&cids).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not read retirement for this page; nothing is marked or sunk");
+                    Default::default()
+                }
+            };
+            for r in &mut results {
+                r.retired = retired.contains(&r.corpus_id);
+            }
+        }
+        let due: std::collections::HashSet<String> = match self.time.lift {
+            true => due_map.keys().cloned().collect(),
+            false => Default::default(),
+        };
         if self.associating()
             && self.associate.prime_lift > 0
             && !matches!(door, Door::Ask | Door::Judge)
@@ -1579,9 +1656,22 @@ impl Core {
                 self.associate.prime_margin,
                 self.associate.prime_lift,
                 &sitting,
+                &due,
             );
             note_reorder(&mut results, &before, |e| &mut e.prime);
         }
+
+        // Before the capture below, not after the truncate: the recorded
+        // `rank` is the enumerate index of this very list, and sinking the
+        // retired hits afterwards meant the judge and the tuning pipeline were
+        // trained on an ordering no searcher ever saw. Scoped to the window
+        // the caller will actually be handed, so what the truncate keeps and
+        // what a person reads are unchanged — a retired hit outside `limit`
+        // was already going to be dropped, and the sink has nothing to say
+        // about it.
+
+        let visible = limit.min(results.len());
+        sink_retired_and_mark_the_cliff(&mut results[..visible], reranked);
 
         // Recorded here, where the list is still wider than the answer and the
         // ordering is final. Off the request path via `Background`, like
@@ -1673,10 +1763,6 @@ impl Core {
                     .is_some_and(|e| matches!(e.cap, crate::core::explain::CapEffect::Refilled))
             })
             .count();
-        // On the list the caller will see, in its final order: after priming,
-        // after the truncate, and before association appends hits that never
-        // competed for a place. Marks, never reorders or drops.
-        mark_past_cliff(&mut results, reranked);
         if query.mark {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
@@ -1869,6 +1955,146 @@ mod tests {
             "the fixture stopped configuring a reranker: {named:?}"
         );
         assert_eq!(named, started, "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_retired_note_sinks_below_the_cliff_and_says_why() {
+        let core = test_core().await;
+        // Three ordinary notes, so `cliff` has the three scores it needs, and
+        // the reminder in a corpus of its own so it can be retired alone.
+        seed(
+            &core,
+            &[
+                ("the invoice for august", "admin", &[]),
+                ("invoice terms and conditions", "admin", &[]),
+                ("invoice numbering scheme", "admin", &[]),
+            ],
+        )
+        .await;
+        let cid = seed_from(
+            &core,
+            "reminder",
+            &[("remind me friday to send the invoice", "admin", &[])],
+        )
+        .await;
+
+        let before = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        let pos = before
+            .iter()
+            .position(|r| r.corpus_id == cid)
+            .expect("it places while open");
+
+        core.store.retire_corpus(&cid, now_secs()).await.unwrap();
+        let after = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        let row = after
+            .iter()
+            .find(|r| r.corpus_id == cid)
+            .expect("still findable — nothing was deleted");
+        assert!(row.retired, "the row says what it is");
+        assert!(row.past_cliff, "and it is below the line");
+        assert_eq!(
+            after[after.len() - 1].corpus_id,
+            cid,
+            "demoted to the tail, so `ask` still truncates a tail"
+        );
+        assert!(after.iter().position(|r| r.corpus_id == cid).unwrap() >= pos);
+    }
+
+    /// The recorded `rank` is the enumerate index of the list the searcher saw,
+    /// so the retired sink has to happen before the capture. It used to run
+    /// after, and the judge and the tuning pipeline were then trained on an
+    /// ordering nobody was ever shown: a retired hit recorded at rank 1 and
+    /// read at the tail.
+    #[tokio::test]
+    async fn the_recorded_ranks_are_the_order_the_searcher_was_handed() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(
+            &core,
+            &[
+                ("the invoice for august", "admin", &[]),
+                ("invoice terms and conditions", "admin", &[]),
+                ("invoice numbering scheme", "admin", &[]),
+            ],
+        )
+        .await;
+        let cid = seed_from(
+            &core,
+            "reminder",
+            &[("remind me friday to send the invoice", "admin", &[])],
+        )
+        .await;
+        core.store.retire_corpus(&cid, now_secs()).await.unwrap();
+
+        // `Door::Ui` captures inline, so the row is there when the search
+        // returns rather than whenever a background task lands.
+        let got = core.search(&q("invoice"), Door::Ui).await.unwrap();
+        assert!(
+            got.iter().any(|r| r.retired),
+            "the fixture must actually put a retired hit in the list"
+        );
+        let recorded: Vec<String> =
+            sqlx::query_scalar("SELECT artifact_id FROM search_candidates ORDER BY event_id, rank")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        let shown: Vec<String> = got.iter().map(|r| r.artifact_id.clone()).collect();
+        assert_eq!(
+            recorded[..shown.len()],
+            shown[..],
+            "the ranking that was trained on is the ranking that was read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hit_says_it_is_due_inside_the_horizon_and_not_outside() {
+        let mut core = test_core().await;
+        seed(&core, &[("send the invoice to the client", "admin", &[])]).await;
+        let first = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        let aid = first[0].artifact_id.clone();
+        assert!(first[0].due_at.is_none());
+        let now = now_secs();
+        let far = core
+            .store
+            .insert_moment(&crate::store::moments::NewMoment {
+                artifact_id: aid.clone(),
+                kind: crate::store::moments::Kind::Due,
+                at: Some(now + 10 * 86_400),
+                tz: "UTC".into(),
+                rule: None,
+                source: crate::store::moments::Source::Set,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        let out = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        assert!(
+            out[0].due_at.is_none(),
+            "ten days out is beyond the horizon"
+        );
+        core.store.mark_done(&far, now).await.unwrap();
+        core.store
+            .insert_moment(&crate::store::moments::NewMoment {
+                artifact_id: aid.clone(),
+                kind: crate::store::moments::Kind::Due,
+                at: Some(now + 2 * 3_600),
+                tz: "UTC".into(),
+                rule: None,
+                source: crate::store::moments::Source::Set,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        core.time.lift = false;
+        let out = core.search(&q("invoice"), Door::Cli).await.unwrap();
+        assert_eq!(out[0].due_at, Some(now + 2 * 3_600));
+        assert_eq!(
+            out[0].due_in.as_deref(),
+            Some("in 2 h"),
+            "the badge is a fact whatever the lift says"
+        );
     }
 
     /// The stream is the same search, so it has to answer with the same hits.
@@ -3032,7 +3258,10 @@ mod tests {
                 weak: false,
                 primed: false,
                 in_sitting: false,
+                due_at: None,
+                due_in: None,
                 past_cliff: false,
+                retired: false,
                 similarity: None,
                 titled_by_corpus: false,
                 via: None,
@@ -3061,6 +3290,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
         assert!(out[1].primed, "the hit that moved must say so");
@@ -3070,7 +3300,14 @@ mod tests {
     #[test]
     fn the_most_active_hit_cannot_displace_an_exact_match() {
         let act = HashMap::from([("b".to_string(), 9.0)]);
-        let out = prime(ranked(&["a", "b", "c"]), &act, 0.5, 2, &Default::default());
+        let out = prime(
+            ranked(&["a", "b", "c"]),
+            &act,
+            0.5,
+            2,
+            &Default::default(),
+            &Default::default(),
+        );
         assert_eq!(order(&out), vec!["a", "b", "c"]);
         assert!(out.iter().all(|r| !r.primed));
     }
@@ -3084,10 +3321,45 @@ mod tests {
             0.5,
             2,
             &sitting,
+            &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
         assert!(out[1].primed);
         assert!(out[1].in_sitting, "the page cannot say why it moved");
+    }
+
+    #[test]
+    fn a_due_hit_is_lifted_like_a_sitting_hit_and_says_so() {
+        let due = std::collections::HashSet::from(["d".to_string()]);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &Default::default(),
+            &due,
+        );
+        assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
+        assert!(out[1].primed);
+        assert!(!out[1].in_sitting, "due is not the sitting");
+    }
+
+    #[test]
+    fn a_due_hit_never_displaces_an_exact_match() {
+        let due = std::collections::HashSet::from(["b".to_string()]);
+        let out = prime(
+            ranked(&["a", "b", "c"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &Default::default(),
+            &due,
+        );
+        assert_eq!(
+            order(&out),
+            vec!["a", "b", "c"],
+            "rank 0 never moves and b is already at 1"
+        );
     }
 
     #[test]
@@ -3096,7 +3368,14 @@ mod tests {
         // list of two is a list nothing can be lifted in — but a badge that
         // vanishes on short lists reads as the page forgetting, not as a rule.
         let sitting = std::collections::HashSet::from(["b".to_string()]);
-        let out = prime(ranked(&["a", "b"]), &HashMap::new(), 0.5, 2, &sitting);
+        let out = prime(
+            ranked(&["a", "b"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+            &Default::default(),
+        );
         assert_eq!(order(&out), vec!["a", "b"], "nothing can move on two rows");
         assert!(out[1].in_sitting);
         assert!(!out[0].in_sitting);
@@ -3110,7 +3389,14 @@ mod tests {
         // second lift would be the one nobody bounded. One walk, one `lift`.
         let act = HashMap::from([("e".to_string(), 9.0)]);
         let sitting = std::collections::HashSet::from(["e".to_string()]);
-        let out = prime(ranked(&["a", "b", "c", "d", "e"]), &act, 0.5, 2, &sitting);
+        let out = prime(
+            ranked(&["a", "b", "c", "d", "e"]),
+            &act,
+            0.5,
+            2,
+            &sitting,
+            &Default::default(),
+        );
         assert_eq!(
             order(&out),
             vec!["a", "b", "e", "c", "d"],
@@ -3122,7 +3408,14 @@ mod tests {
     fn the_sitting_cannot_displace_the_first_hit_either() {
         // Rank 0 never moves, whatever the reason for moving would have been.
         let sitting = std::collections::HashSet::from(["b".to_string(), "c".to_string()]);
-        let out = prime(ranked(&["a", "b", "c"]), &HashMap::new(), 0.5, 2, &sitting);
+        let out = prime(
+            ranked(&["a", "b", "c"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+            &Default::default(),
+        );
         assert_eq!(order(&out)[0], "a");
     }
 
@@ -3134,6 +3427,7 @@ mod tests {
             &act,
             0.5,
             0,
+            &Default::default(),
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "c", "d"]);
@@ -3149,6 +3443,7 @@ mod tests {
             &act,
             0.5,
             2,
+            &Default::default(),
             &Default::default(),
         );
         assert_eq!(
@@ -3190,6 +3485,7 @@ mod tests {
             ),
             0.5,
             2,
+            &Default::default(),
             &Default::default(),
         );
         assert!(
@@ -3246,6 +3542,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "e", "c", "d"]);
         let moved = order(&out).iter().position(|id| *id == "e").unwrap();
@@ -3263,6 +3560,7 @@ mod tests {
             &act,
             0.5,
             2,
+            &Default::default(),
             &Default::default(),
         );
         let moved = order(&out).iter().position(|id| *id == "g").unwrap();
@@ -4109,7 +4407,10 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: None,
@@ -4221,7 +4522,10 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
+            retired: false,
             similarity: None,
             titled_by_corpus: false,
             via: None,
@@ -4257,6 +4561,70 @@ mod tests {
         assert!(flat.iter().all(|r| !r.past_cliff));
     }
 
+    /// One retired row used to switch the cliff off for the whole list.
+    ///
+    /// A retired hit is demoted to the tail, not dropped, and it keeps its
+    /// score. With a high one it made the *last* position satisfy `score >=
+    /// cut`, so the mark started at the end of the list and the genuinely weak
+    /// rows above it lost the mark — in `ask`, they were no longer truncated
+    /// out of the answer. The cliff is read over the live prefix now, and the
+    /// retired tail is marked whatever the cliff said.
+    #[test]
+    fn a_retired_hit_at_the_tail_does_not_take_the_cliff_with_it() {
+        let dummy = |id: &str, score: f32, retired: bool| SearchResult {
+            artifact_id: id.into(),
+            corpus_id: "c".into(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            primed: false,
+            in_sitting: false,
+            due_at: None,
+            due_in: None,
+            past_cliff: false,
+            retired,
+            similarity: None,
+            titled_by_corpus: false,
+            via: None,
+            reason: None,
+            explanation: None,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+        };
+        // The retired row scores highest of all, and is first in the ranking.
+        let mut results = vec![
+            dummy("retired", 0.90, true),
+            dummy("a", 0.88, false),
+            dummy("b", 0.87, false),
+            dummy("c", 0.30, false),
+            dummy("d", 0.29, false),
+        ];
+        sink_retired_and_mark_the_cliff(&mut results, true);
+        assert_eq!(
+            results
+                .iter()
+                .map(|r| r.artifact_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d", "retired"],
+            "the retired row sinks to the tail"
+        );
+        assert_eq!(
+            results.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, true, true, true],
+            "the fall between 0.87 and 0.30 is still where the cliff is"
+        );
+        // And what is marked is still a suffix, which is what `ask` truncates on.
+        let first = results.iter().position(|r| r.past_cliff).unwrap();
+        assert!(results[first..].iter().all(|r| r.past_cliff));
+    }
+
     /// The default configuration has no reranker, and the scores are then
     /// RRF fusions: a harmonic curve whose first gap is always its largest.
     /// The list reproduced here is the `loop device` query from the report —
@@ -4279,7 +4647,10 @@ mod tests {
             weak: false,
             primed: false,
             in_sitting: false,
+            due_at: None,
+            due_in: None,
             past_cliff: false,
+            retired: false,
             similarity,
             titled_by_corpus: false,
             via: None,

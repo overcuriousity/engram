@@ -15,11 +15,22 @@ CREATE TABLE IF NOT EXISTS users (
   -- an email can change, and the mapping has to survive a later change to how
   -- the derivation works.
   slug         TEXT NOT NULL UNIQUE,
-  -- Whether this user may reach /ui/judge, which is also the only route in the
-  -- tree that writes config.toml. Granted out of band with
+  -- Whether this user may apply tuning recommendations on /ui/insights — the
+  -- only route in the tree that writes config.toml. Granted out of band with
   -- `engram --grant-judge`; there is no role model behind it and no page that
   -- sets it.
   can_judge    INTEGER NOT NULL DEFAULT 0,
+  -- Where a due reminder is pushed, namespaced JSON: {"gotify": {"url",
+  -- "token"}, "unifiedpush": {"endpoint"}}. '{}' means nowhere, and the
+  -- Remind unit is never armed for this user.
+  notify       TEXT NOT NULL DEFAULT '{}',
+  -- Which of the ten languages this account's captures are read in. '' means
+  -- automatic: the browser's Accept-Language decides, per capture, which is
+  -- what an account that has never opened Settings gets. The resolved value is
+  -- stamped onto each corpus at capture — see `Capture::with_lang` — because a
+  -- background job holds a cached `Core` that knows no subject and could not
+  -- read this column when it matters.
+  lang         TEXT NOT NULL DEFAULT '',
   created_at   INTEGER NOT NULL
 );
 

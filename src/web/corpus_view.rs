@@ -214,6 +214,7 @@ mod tests {
         CorpusSpan {
             start_line: a,
             end_line: b,
+            source: crate::store::artifacts::SpanSource::Located,
         }
     }
 
@@ -323,6 +324,7 @@ mod tests {
             Some(&CorpusSpan {
                 start_line: 2,
                 end_line: 2,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             0,
         );
@@ -337,6 +339,7 @@ mod tests {
             Some(&CorpusSpan {
                 start_line: 1,
                 end_line: 3,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             0,
         );
@@ -351,6 +354,7 @@ mod tests {
             Some(&CorpusSpan {
                 start_line: 3,
                 end_line: 4,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             1,
         );
@@ -449,6 +453,7 @@ mod tests {
             Some(&CorpusSpan {
                 start_line: 5,
                 end_line: 9,
+                source: crate::store::artifacts::SpanSource::Located,
             }),
             2,
         );
@@ -490,7 +495,8 @@ mod tests {
                 &src,
                 Some(&CorpusSpan {
                     start_line: 2,
-                    end_line: 3
+                    end_line: 3,
+                    source: crate::store::artifacts::SpanSource::Located,
                 }),
                 0
             )
@@ -530,7 +536,8 @@ mod tests {
                 &src,
                 Some(&CorpusSpan {
                     start_line: 2,
-                    end_line: 2
+                    end_line: 2,
+                    source: crate::store::artifacts::SpanSource::Located,
                 }),
                 0
             )

@@ -47,8 +47,8 @@ struct Args {
     /// List the users this instance knows, with their slug and judge grant.
     #[arg(long)]
     list_users: bool,
-    /// Let SUBJECT reach /ui/judge, which is also the only route that writes
-    /// config.toml.
+    /// Let SUBJECT apply tuning recommendations on /ui/insights — the only
+    /// route that writes config.toml.
     #[arg(long, value_name = "SUBJECT")]
     grant_judge: Option<String>,
     /// Take that grant back.
@@ -129,13 +129,8 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
 /// mean. Reclaiming stuck work and expiring sessions moved to the repair tick,
 /// which now owns the control database's own housekeeping.
 async fn startup_checks(cfg: &Config) -> Result<()> {
-    if let Some(s) = &cfg.infer.synthesize {
-        engram::infer::openai::probe("chunk", &s.base_url, s.api_key.as_deref()).await;
-    } else {
-        tracing::info!(
-            "synthesize not configured; capture embeds verbatim and nothing is synthesized"
-        );
-    }
+    let s = &cfg.infer.synthesize;
+    engram::infer::openai::probe("chunk", &s.base_url, s.api_key.as_deref()).await;
     engram::infer::openai::probe(
         "embed",
         &cfg.infer.embed.base_url,
@@ -157,10 +152,19 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
         tracing::info!("rerank not configured; search returns vector order");
     }
     if let Some(v) = &cfg.infer.vision {
-        let (base_url, api_key) = v.resolve(cfg.infer.synthesize.as_ref());
+        let (base_url, api_key) = v.resolve(Some(&cfg.infer.synthesize));
         engram::infer::openai::probe("vision", &base_url, api_key.as_deref()).await;
     } else {
         tracing::info!("vision not configured; the image door is closed");
+    }
+    // Named but not probed. Every other role here answers `models`; the small
+    // speech servers this is aimed at — whisper.cpp's `server`, and the
+    // faster-whisper wrappers — serve only the transcription route, so a probe
+    // would print "transcribe unreachable" at every startup of an installation
+    // whose microphone works. The first press is the check.
+    match &cfg.infer.transcribe {
+        Some(t) => tracing::info!(model = %t.model, "speech to text configured"),
+        None => tracing::info!("speech to text not configured; the search box has no microphone"),
     }
     Ok(())
 }
@@ -240,7 +244,10 @@ async fn run_account_command(
         // No restart, and no wait for a cache to turn over: the judge gate
         // reads this column on every request rather than the copy of the row
         // the registry is holding. See `web::tenant::CanJudge`.
-        println!("{subject} may now judge, and write config.toml through /ui/judge");
+        println!(
+            "{subject} may now apply tuning recommendations, and write config.toml \
+             through /ui/insights"
+        );
         return Ok(true);
     }
     if let Some(subject) = &args.revoke_judge {
@@ -399,8 +406,8 @@ async fn main() -> anyhow::Result<()> {
         );
         if pairs == 0 {
             println!(
-                "no judged searches yet — set learn.enabled, use the base, \
-                 then judge what it recorded at /ui/judge"
+                "no judged searches yet — set learn.enabled, use the base, then \
+                 answer 'Was this what you were looking for?' under the results"
             );
         }
         return Ok(());

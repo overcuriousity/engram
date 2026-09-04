@@ -5,15 +5,235 @@ use super::SynthesisBudget;
 /// rather than producing single-word chunks.
 pub const MIN_SEGMENT_TOKENS: usize = 256;
 
-/// Token counts for budgets. A character estimate, deliberately pessimistic:
-/// 3.5 characters per token undercounts nothing for English prose and code,
-/// so budgets stay conservative.
-pub struct TokenCounter;
+/// Token counts for budgets. A real tokenizer where one is loadable —
+/// bundled, from a configured path, or from a once-downloaded URL — and the
+/// pessimistic chars/3.5 estimate where none is. `Default` is the estimator
+/// alone, which is what every test runs on so size-sensitive assertions keep
+/// their arithmetic.
+#[derive(Default)]
+pub struct TokenCounter {
+    tok: Option<std::sync::Arc<tokenizers::Tokenizer>>,
+}
+
+/// Parsed tokenizers, by what was asked for. The bundled `tokenizer.json` is
+/// 11 MB and `Tokenizer::from_bytes` parses all of it; `Core::from_config_with`
+/// called `load` unconditionally and `Tenants::open` builds a fresh `Core` on
+/// every registry cache miss, so a 32-slot registry could hold 32 unshared
+/// copies and re-parse 11 MB of JSON — synchronously, inside an `async fn`, on
+/// a request path — every time a tenant was reopened. Keyed by the spec and the
+/// cache directory together, because a URL spec's download lands beside the
+/// store and two tenants need not share one.
+type Loaded = std::collections::HashMap<String, Option<std::sync::Arc<tokenizers::Tokenizer>>>;
+static LOADED: std::sync::OnceLock<std::sync::Mutex<Loaded>> = std::sync::OnceLock::new();
+
+/// The tokenizer of the model family the example config serves (Qwen, shared
+/// across the family). An accuracy default, not a requirement: `infer.tokenizer`
+/// points at any HF-format tokenizer.json, and every failure below falls back
+/// to the estimate rather than refusing startup.
+const BUNDLED: &[u8] = include_bytes!("../../assets/tokenizer.json");
 
 impl TokenCounter {
     pub fn count(&self, text: &str) -> usize {
-        estimate(text)
+        match &self.tok {
+            Some(t) => t
+                .encode_fast(text, false)
+                .map(|e| e.len())
+                .unwrap_or_else(|_| estimate(text)),
+            None => estimate(text),
+        }
     }
+
+    /// The longest leading (or trailing) run of whole characters that fits in
+    /// `limit` tokens, or `None` where not one character does.
+    ///
+    /// For the callers that have a token budget and no line to cut on: a
+    /// context block from a paste with no line breaks in it, and a neighbour's
+    /// text trimmed to its share. Both used to convert the budget with a
+    /// hardcoded chars-per-token ratio — 3.5, the estimator's — while this
+    /// counter is a real BPE tokenizer, so on Chinese or Russian they ran two
+    /// to four times over the reservation that had been subtracted for them
+    /// and the model's own limit truncated the answer instead.
+    ///
+    /// Binary search, so it costs about `log2` counts rather than one. The
+    /// upper bound is 8 characters per token, generous for every script the
+    /// tokenizer has a vocabulary for: it keeps each of those counts short on a
+    /// megabyte paste, and being an *upper* bound it can only leave the cut
+    /// slightly short, never over.
+    pub fn cut(&self, text: &str, limit: usize, from_start: bool) -> Option<String> {
+        if limit == 0 || text.is_empty() {
+            return None;
+        }
+        if self.count(text) <= limit {
+            return Some(text.to_string());
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let take = |n: usize| -> String {
+            if from_start {
+                chars[..n].iter().collect()
+            } else {
+                chars[chars.len() - n..].iter().collect()
+            }
+        };
+        let (mut lo, mut hi) = (0usize, chars.len().min(limit.saturating_mul(8)));
+        while lo < hi {
+            // Rounded up, so `mid` is always past `lo` and the loop cannot
+            // stall on a two-wide range.
+            let mid = hi - (hi - lo) / 2;
+            if self.count(&take(mid)) <= limit {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        (lo > 0).then(|| take(lo))
+    }
+
+    /// Where a URL's one-time download lands: keyed by a hash of the URL so a
+    /// changed link re-fetches, beside the store so it survives restarts.
+    pub fn cache_path(cache_dir: &std::path::Path, url: &str) -> std::path::PathBuf {
+        use sha2::{Digest, Sha256};
+        let h = hex::encode(&Sha256::digest(url.as_bytes())[..8]);
+        cache_dir.join(format!("tokenizer-{h}.json"))
+    }
+
+    /// Never an error: a tokenizer is an accuracy upgrade, not a reason to
+    /// refuse startup. Each fallback logs what it fell back from.
+    ///
+    /// A URL is fetched on its own OS thread — `reqwest::blocking` builds a
+    /// private runtime there, so this is safe whether or not the caller sits
+    /// inside tokio — written to the cache, and read from the cache on every
+    /// later boot. No cache and no network: the estimator, until next boot.
+    pub fn load(spec: Option<&str>, cache_dir: &std::path::Path) -> TokenCounter {
+        let key = format!("{}\u{0}{}", cache_dir.display(), spec.unwrap_or(""));
+        let loaded = LOADED.get_or_init(Default::default);
+        // Poisoning is not a reason to re-parse 11 MB: nothing here is an
+        // invariant another thread can leave half-written.
+        if let Some(hit) = loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return TokenCounter { tok: hit };
+        }
+        let tok = Self::parse(spec, cache_dir);
+        loaded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, tok.clone());
+        TokenCounter { tok }
+    }
+
+    /// Fill the memo off the async runtime's worker threads.
+    ///
+    /// `load` is memoized, so this costs nothing after the first call — but the
+    /// first call parses 11 MB of JSON (and may fetch a file over the network),
+    /// and `from_config_with` is sync and called from `Tenants::open`, which is
+    /// an `async fn` on a request path. The parse therefore sat on a tokio
+    /// worker, blocking every other task that thread was carrying, for as long
+    /// as it took. Warmed here instead, on a thread that is allowed to block,
+    /// so the `load` inside the core build is a hashmap lookup.
+    ///
+    /// Nothing is returned and nothing can fail: a warm that did not finish
+    /// leaves `load` to do exactly what it did before.
+    pub async fn warm(spec: Option<&str>, cache_dir: &std::path::Path) {
+        let spec = spec.map(String::from);
+        let dir = cache_dir.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || {
+            Self::load(spec.as_deref(), &dir);
+        })
+        .await;
+    }
+
+    fn parse(
+        spec: Option<&str>,
+        cache_dir: &std::path::Path,
+    ) -> Option<std::sync::Arc<tokenizers::Tokenizer>> {
+        let from_bytes = |b: &[u8], what: &str| {
+            tokenizers::Tokenizer::from_bytes(b)
+                .map_err(
+                    |e| tracing::warn!(error = %e, what, "tokenizer did not parse; falling back"),
+                )
+                .ok()
+                .map(|mut t| {
+                    // A counter counts. `infer.tokenizer` takes any HF file,
+                    // and the BERT-family ones — `bge-m3`, which the example
+                    // config names as the embedder — carry `truncation` with
+                    // `max_length: 512` in the file. Honoured, every count
+                    // saturates there: a book is one window, `ceiling_for_prompt`
+                    // returns the whole output budget, and every synthesis call
+                    // is a 400 nothing retries — with the guards that would
+                    // catch it blind, because they share the undercount.
+                    t.with_truncation(None).ok();
+                    t.with_padding(None);
+                    std::sync::Arc::new(t)
+                })
+        };
+        match spec {
+            Some(s) if s.starts_with("http://") || s.starts_with("https://") => {
+                let cache = Self::cache_path(cache_dir, s);
+                std::fs::read(&cache)
+                    .ok()
+                    .and_then(|b| from_bytes(&b, "cached"))
+                    .or_else(|| {
+                        fetch_blocking(s).and_then(|b| {
+                            // Parsed before it is cached, and cached only if it
+                            // parsed. The other order wrote whatever came back
+                            // — a captive portal's sign-in page answers 200
+                            // with HTML — and every later boot then read that
+                            // file, failed to parse it, and fell silently back
+                            // to the bundled default for the life of the
+                            // install. A cached file that no longer parses is
+                            // re-fetched by the same reasoning.
+                            let t = from_bytes(&b, "downloaded")?;
+                            let _ = std::fs::create_dir_all(cache_dir);
+                            if let Err(e) = std::fs::write(&cache, &b) {
+                                tracing::warn!(error = %e, "could not cache the tokenizer; it will re-download next boot");
+                            }
+                            Some(t)
+                        })
+                    })
+                    .or_else(|| from_bytes(BUNDLED, "bundled"))
+            }
+            Some(p) => std::fs::read(p)
+                .map_err(|e| tracing::warn!(error = %e, path = p, "tokenizer path unreadable; using the bundled default"))
+                .ok()
+                .and_then(|b| from_bytes(&b, "configured"))
+                .or_else(|| from_bytes(BUNDLED, "bundled")),
+            None => from_bytes(BUNDLED, "bundled"),
+        }
+    }
+}
+
+/// One GET on its own thread, so the private runtime `reqwest::blocking`
+/// spins up cannot collide with a tokio runtime the caller may be on.
+///
+/// Timed out, because the calling thread `join`s this one: `reqwest::blocking`
+/// has no default timeout, so a host that completes the TCP handshake and then
+/// never answers held `Core::from_config_with` — and, on the registry, a tenant
+/// open on a request path — for as long as the peer cared to keep the socket
+/// open. A tokenizer is an accuracy upgrade; it does not get to hang a boot.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn fetch_blocking(url: &str) -> Option<Vec<u8>> {
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        reqwest::blocking::Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .and_then(|c| c.get(&url).send())
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.bytes())
+            .map(|b| b.to_vec())
+    })
+    .join()
+    .ok()
+    .and_then(|r| {
+        r.map_err(|e| tracing::warn!(error = %e, "tokenizer download failed; estimator in use until next boot"))
+            .ok()
+    })
 }
 
 /// `chars * 2 / 7` is `chars / 3.5` in integer arithmetic.
@@ -152,6 +372,100 @@ mod tests {
     use super::*;
     use crate::infer::SynthesisBudget;
 
+    /// The defect `cut` replaced: 3.5 characters per token is the estimator's
+    /// ratio, and against a real tokenizer on a non-Latin script it let a
+    /// context block run several times over the reservation subtracted for it.
+    #[test]
+    fn cutting_holds_a_token_budget_on_a_script_the_ratio_does_not_describe() {
+        let real = TokenCounter::load(None, std::path::Path::new("/nonexistent-cache"));
+        let cn = "今天下午三点在办公室开会讨论季度预算和明年的招聘计划。".repeat(40);
+        for counter in [&real, &TokenCounter::default()] {
+            for from_start in [true, false] {
+                let got = counter.cut(&cn, 40, from_start).expect("something fits");
+                assert!(counter.count(&got) <= 40, "over the budget it was given");
+                assert!(!got.is_empty());
+                if from_start {
+                    assert!(cn.starts_with(&got));
+                } else {
+                    assert!(cn.ends_with(&got));
+                }
+            }
+        }
+        // The old arithmetic: 40 tokens read as 140 characters, which on this
+        // text is well over 40 tokens. The point of the change.
+        let naive: String = cn.chars().take(40 * 7 / 2).collect();
+        assert!(real.count(&naive) > 40);
+
+        assert_eq!(real.cut("short", 1_000, true).as_deref(), Some("short"));
+        assert_eq!(real.cut("anything", 0, true), None);
+        assert_eq!(real.cut("", 10, true), None);
+    }
+
+    #[test]
+    fn the_bundled_tokenizer_counts_and_differs_from_the_estimator() {
+        let real = TokenCounter::load(None, std::path::Path::new("/nonexistent-cache"));
+        let est = TokenCounter::default();
+        let text = "Der Bericht muss bis Freitag um 16:00 abgegeben werden.";
+        assert!(real.count(text) > 0);
+        // The estimator is chars*2/7; a real BPE count differs on this input.
+        assert_ne!(real.count(text), est.count(text));
+    }
+
+    #[test]
+    fn a_bad_path_falls_back_to_the_bundled_tokenizer_not_a_failure() {
+        let c = TokenCounter::load(Some("/no/such/file.json"), std::path::Path::new("/tmp"));
+        let bundled = TokenCounter::load(None, std::path::Path::new("/tmp"));
+        assert_eq!(c.count("hello world"), bundled.count("hello world"));
+    }
+
+    #[test]
+    fn a_tokenizer_file_carrying_truncation_still_counts_the_whole_text() {
+        // `infer.tokenizer` takes any HF file, and the BERT-family ones carry
+        // a `truncation` block. Honoured, every count saturated at its
+        // `max_length`: a book counted as one window and every synthesis call
+        // went out over the endpoint's real limit.
+        let dir = std::env::temp_dir().join(format!("tok-trunc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tokenizer.json");
+        let truncating = String::from_utf8(BUNDLED.to_vec()).unwrap().replacen(
+            "\"truncation\": null",
+            "\"truncation\": {\"direction\": \"Right\", \"max_length\": 8, \
+                 \"strategy\": \"LongestFirst\", \"stride\": 0}",
+            1,
+        );
+        std::fs::write(&file, &truncating).unwrap();
+        let c = TokenCounter::load(Some(file.to_str().unwrap()), &dir);
+        let long = "eine Zeile, die sich wiederholt. ".repeat(200);
+        assert!(
+            c.count(&long) > 8,
+            "the count saturated at the file's max_length"
+        );
+        assert_eq!(
+            c.count(&long),
+            TokenCounter::load(None, &dir).count(&long),
+            "and it is the count the same tokenizer gives without the block"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cached_url_download_is_read_from_the_cache_file() {
+        // Seed the cache the way a first boot's download would, then "load"
+        // the URL with no network: the cache hit is the behavior under test.
+        let dir = std::env::temp_dir().join(format!("tok-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = "https://example.invalid/tokenizer.json";
+        let cache = TokenCounter::cache_path(&dir, url);
+        std::fs::write(&cache, BUNDLED).unwrap();
+        let c = TokenCounter::load(Some(url), &dir);
+        assert_ne!(
+            c.count("hello world"),
+            TokenCounter::default().count("hello world"),
+            "the cached real tokenizer must be in use"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn budget(ctx: usize, max_out: usize, ratio: f32) -> SynthesisBudget {
         SynthesisBudget {
             context_tokens: ctx,
@@ -241,15 +555,16 @@ mod tests {
         b.context = ContextBudget {
             opening: 200,
             overlap: 150,
+            neighbors: 0,
         };
         let with = segment_tokens(b, 1000);
 
-        // 200 + 2*150 + 40 fences = 540 prompt tokens. The window loses that
+        // 200 + 2*150 + 160 fences = 660 prompt tokens. The window loses that
         // divided by (1 + output_ratio), because every input token it gives up
-        // frees output budget too: 540 / 2.4 = 225.
+        // frees output budget too: 660 / 2.4 = 275.
         assert_eq!(without, 13236);
-        assert_eq!(with, 13011);
-        assert_eq!(without - with, 225);
+        assert_eq!(with, 12961);
+        assert_eq!(without - with, 275);
     }
 
     #[test]
@@ -286,7 +601,7 @@ mod tests {
 
     #[test]
     fn estimate_counter_is_conservative() {
-        let c = TokenCounter;
+        let c = TokenCounter::default();
         // 35 characters / 3.5 = 10 tokens.
         assert_eq!(c.count(&"a".repeat(35)), 10);
         assert_eq!(c.count(""), 0);
@@ -296,13 +611,13 @@ mod tests {
     fn estimate_counts_characters_not_bytes() {
         // Multi-byte text must not be counted as if every byte were a char,
         // or every German or Japanese source would be split far too small.
-        let c = TokenCounter;
+        let c = TokenCounter::default();
         assert_eq!(c.count(&"ä".repeat(35)), 10);
     }
 
     #[test]
     fn pack_stops_at_the_budget() {
-        let c = TokenCounter;
+        let c = TokenCounter::default();
         let items: Vec<String> = (0..5).map(|_| "x".repeat(35)).collect(); // 10 tokens each
         assert_eq!(pack_by_budget(&items, &c, 25), 2);
         assert_eq!(pack_by_budget(&items, &c, 1000), 5);

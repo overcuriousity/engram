@@ -1,6 +1,8 @@
 <div class="card" id="artifact-{{ c.id }}">
   <div class="card-head">
-    <span class="card-title">{{ c.title }}</span>
+    {# A passage card has no title: its first line is its body, and printed as
+       both the card said everything twice. See `artifact_view`. #}
+    {% if !c.title.is_empty() %}<span class="card-title">{{ c.title }}</span>{% endif %}
     <span class="card-meta"><span class="badge {{ c.embed_badge }}">{{ c.embed_state }}</span></span>
   </div>
   <div class="md">{{ c.html|safe }}</div>

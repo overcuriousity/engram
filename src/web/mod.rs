@@ -2,9 +2,10 @@ pub mod api;
 pub mod assets;
 pub mod auth_routes;
 pub mod corpus_view;
+pub mod day;
+pub mod due;
 pub mod extension;
 pub mod insights;
-pub mod judge;
 pub mod lineage_view;
 pub mod markdown;
 pub mod pair;
@@ -83,6 +84,51 @@ async fn redirect_unauthenticated_browsers(req: Request, next: Next) -> Response
     res
 }
 
+/// Say what an HTML response depends on, and that it is nobody's to keep.
+///
+/// Half the UI's routes answer one URL with two different bodies, chosen by a
+/// request header: `/ui/artifacts/{id}` returns the standalone page to a
+/// browser and the bare fragment to htmx, and several others do the same. The
+/// rail's links carry `hx-push-url="true"`, so that URL is in the address bar
+/// having only ever been fetched as a fragment — and nothing said so. A
+/// history navigation is precisely where a browser may reuse a stored response
+/// without revalidating, so pressing Back rendered the fragment as a whole
+/// document: no `<head>`, no stylesheet, the page in Times New Roman with the
+/// icons at their intrinsic size. `Vary` is what tells a cache that the header
+/// is part of the key.
+///
+/// `no-store` beside it, because the negotiation is not the only reason. Every
+/// one of these pages is one person's own base rendered into HTML, and without
+/// this it sits in the disk cache under their profile after they sign out.
+/// `private` says the same thing to anything in between.
+///
+/// `text/html` only, and never over a `Cache-Control` a handler set for itself:
+/// the assets router serves the stylesheet and the tokenizer under a year-long
+/// `max-age`, and that is the whole reason those files are cheap.
+async fn declare_html_uncacheable(req: Request, next: Next) -> Response {
+    use axum::http::header;
+    let mut res = next.run(req).await;
+    let html = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"));
+    if !html {
+        return res;
+    }
+    let h = res.headers_mut();
+    if !h.contains_key(header::CACHE_CONTROL) {
+        h.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("private, no-store"),
+        );
+    }
+    // Appended rather than set: a handler that already varies on something of
+    // its own keeps it.
+    h.append(header::VARY, header::HeaderValue::from_static("HX-Request"));
+    res
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -96,8 +142,9 @@ pub fn router(state: AppState) -> Router {
             state.config.capture.image_max_bytes,
             state.config.capture.pdf_max_bytes,
         ))
-        .merge(judge::judge_router())
         .merge(insights::routes())
+        .merge(due::routes())
+        .merge(day::routes())
         .merge(crate::mcp::mcp_router(state.clone()))
         .nest(
             "/api/v1",
@@ -108,6 +155,7 @@ pub fn router(state: AppState) -> Router {
         )
         .fallback(ui::not_found)
         .layer(axum::middleware::from_fn(redirect_unauthenticated_browsers))
+        .layer(axum::middleware::from_fn(declare_html_uncacheable))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
@@ -118,6 +166,72 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    /// The one URL that answers with two different documents, and what has to
+    /// be said about it. Without `Vary` a browser is entitled to reuse the
+    /// fragment htmx fetched — and history navigation is exactly where it does
+    /// — so pressing Back after following a link out of the workspace rendered
+    /// the bare partial as a whole page: no `<head>`, no stylesheet, the app in
+    /// Times New Roman.
+    #[tokio::test]
+    async fn a_page_that_answers_two_ways_says_what_it_answers_to() {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha bravo charlie", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let id = core.store.artifacts_for_corpus(&out.id).await.unwrap()[0]
+            .id
+            .clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let ask = |hx: bool| {
+            let mut r = axum::http::Request::builder()
+                .uri(format!("/ui/artifacts/{id}"))
+                .header("cookie", &cookie);
+            if hx {
+                r = r.header("hx-request", "true");
+            }
+            app.clone().oneshot(r.body(Body::empty()).unwrap())
+        };
+
+        for hx in [false, true] {
+            let res = ask(hx).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{res:?}");
+            let h = res.headers();
+            assert!(
+                h.get_all("vary")
+                    .iter()
+                    .any(|v| v.to_str().unwrap_or("").eq_ignore_ascii_case("HX-Request")),
+                "hx={hx}: the header the body depends on has to be in the cache key: {h:?}"
+            );
+            // And nobody's to keep either way: this is one person's own base
+            // rendered into HTML, and it outlived their session in the disk
+            // cache.
+            assert_eq!(h["cache-control"], "private, no-store", "hx={hx}");
+        }
+
+        // The stylesheet is not a page and keeps the year-long `max-age` that
+        // is the whole reason it is cheap.
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/assets/app.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            res.headers()["cache-control"]
+                .to_str()
+                .unwrap()
+                .contains("max-age"),
+            "{:?}",
+            res.headers()
+        );
+    }
 
     #[tokio::test]
     async fn the_bare_domain_is_a_door_into_the_ui_and_not_a_404() {
@@ -276,8 +390,8 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_path_is_behind_a_session_like_every_other_page() {
         // The fallback took no `Identity`, so the one path nobody had routed
-        // was the one path that rendered the whole nav — `judge_pending`, a
-        // live count out of the base, included — to a visitor with no session.
+        // was the one path that rendered the whole nav to a visitor with no
+        // session.
         let core = crate::core::test_support::test_core().await;
         let app = crate::web::test_support::router(core, None).await;
         let res = app

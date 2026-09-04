@@ -1,8 +1,25 @@
-{# One line on the ordinary path. The queue that used to repeat this fragment
-   lives on Insights now, so nothing else on the workspace says the paste
-   landed — and a box that empties itself with no acknowledgment is
-   indistinguishable from data loss. The idle rail's "Last captured" carries
-   the same link a moment later; this is the receipt for the press itself. #}
+{# Nothing, on the ordinary path.
+
+   This used to answer every press with a receipt line, a sentence explaining
+   what "segmenting 3/7" counts towards, and `_queue.html` polling itself
+   beside them. All three landed in `#capture-result`, which is a child of
+   `.region-bar` — and on a phone that bar is fixed to the bottom of the
+   viewport with no height bound. The bar grew by three blocks it had no room
+   for, and because it is anchored at its bottom the overflow left through the
+   *top* of the screen, taking the textarea with it. A fixed element does not
+   scroll, so the box was simply gone until a reload.
+
+   The fix is not to make the bar cope. It is that a press has no business
+   putting a page's worth of blocks into the one element the operator types
+   into. Capture clears the box, enqueues the reading and updates the line that
+   says what was last kept — `_idle_foot.html`, swapped out of band by the same
+   `submit` that refreshes the rail. That line names the capture and links to
+   it, which is the acknowledgment; a second one directly above the box was
+   never carrying anything the first did not. The queue is on Insights, where
+   it is read by somebody who came to look at it.
+
+   What is left here is the two things that are not receipts: a state the
+   operator has to know about, and an action only reachable here. #}
 {% if duplicate || near_dupe_of.is_some() %}
 <div class="card">
   <div class="card-head">
@@ -25,24 +42,11 @@
   {% endif %}
   <a href="/ui/corpora/{{ id }}">View source</a>
 </div>
-{% else %}
-<p class="muted" role="status">Captured —
-  <a href="/ui/corpora/{{ id }}">view source</a>.</p>
-{# The work the press started, reported by the fragment that already knows how.
-   The gap between a paste landing and that paste being searchable is a
-   background job, and it was invisible from here: this receipt, then silence,
-   then a search that finds nothing and reads as data loss. `_queue.html`
-   carries its own polling trigger and drops it the moment nothing is moving,
-   so an idle receipt costs one request and then none — the same contract it
-   already honours on Insights, which is why it is included rather than
-   reimplemented. #}
-{# And what the row under it means. The queue speaks in statuses — a badge
-   reading "segmenting 3/7" is exact and is the first thing a new reader meets,
-   with nothing anywhere saying what it is counting towards. Said here rather
-   than in the fragment because the fragment also serves Insights, where the
-   sentence would be a line of explanation nobody needed twice; and said in the
-   page rather than in a `title`, because the camera path is the phone's and a
-   phone has no hover. #}
-<p class="muted hint">Reading it now — searchable once it settles.</p>
-<div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
 {% endif %}
+{# There used to be a third branch here: "Kept as today's entry", with its undo,
+   for a note the stage filed as a journal entry. It could not fire and never
+   had. Filing as an entry is a *judgement*, made by the window job minutes
+   after this response was written — `judgement::apply` calls `set_entry` — so
+   the origin this template was asked about was still `web` every single time.
+   The undo is offered where the entry actually appears, on the day page, which
+   is also where somebody who wants to take it back is looking. #}

@@ -107,7 +107,7 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     use crate::store::jobs::Stage;
     let mut out = Vec::new();
     // Duplicate hygiene, and the judging that needs a model to do it with.
-    if core.consolidate.enabled && core.synthesizes() {
+    if core.consolidate.enabled {
         out.push((Stage::Consolidate, CONSOLIDATE_TARGET));
         // Zero units per tick is the off switch for the calls, not for the
         // sweep that finds the pairs.
@@ -134,6 +134,12 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     // an operator switches off by switching off duplicate hygiene.
     if core.recommends() {
         out.push((Stage::Context, CONSOLIDATE_TARGET));
+    }
+    // Revisiting the retired. Behind its own switch and the judge's
+    // existence: the rules alone may nominate but never tombstone, so a base
+    // with no judge model gets no sweep rather than a rules-only one.
+    if core.reap.enabled && core.judge.is_some() {
+        out.push((Stage::Reap, CONSOLIDATE_TARGET));
     }
     if core.associating() {
         out.push((Stage::Associate, ASSOCIATE_TARGET));
@@ -172,6 +178,7 @@ pub fn periodic_period(
         Stage::Retention => core.feedback.sweep_hours.max(1).saturating_mul(3600),
         Stage::Context => crate::jobs::context::INTERVAL_HOURS.saturating_mul(3600),
         Stage::Associate => core.associate.interval_mins.max(1).saturating_mul(60),
+        Stage::Reap => core.reap.interval_mins.max(1).saturating_mul(60),
         // Shorter than the idle window, so a run of searches is grouped soon
         // after it goes quiet.
         Stage::Pursuit => (core.pursuit.idle_secs / 2).max(60),
@@ -192,6 +199,8 @@ pub fn periodic_period(
 /// where the repair pass's first tick fires immediately, and a restart picking
 /// the work straight up is the behaviour the tickers had.
 pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
+    use crate::jobs::remind::REMIND_TARGET;
+    use crate::store::jobs::Stage;
     for (stage, target) in periodic_units(core) {
         match core.store.live_job(stage, target).await {
             Ok(true) => {}
@@ -208,6 +217,36 @@ pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
                 tracing::warn!(stage = stage.as_str(), error = %e, "could not look for a sweep")
             }
         }
+    }
+    // And the one unit that is *not* periodic. `Stage::Remind` sleeps until the
+    // earliest owed moment and every write that can move that minimum re-arms
+    // it, so it is not in `periodic_units` and the loop above cannot reach it —
+    // which left the whole reminder ladder resting on those writes never
+    // failing. One `SQLITE_BUSY` in the re-arm after a `Remind` run disarmed it
+    // until some unrelated write happened to arm it again, and with two
+    // reminders pending the second pushed at no rung at all in between.
+    //
+    // Only where the unit is actually missing, which is the same question the
+    // loop above asks of every periodic one. `rearm_remind` goes through
+    // `arm_at`, and `arm_at` resets `attempts` and `empty_runs` — rightly, for
+    // the writes it exists for, which carry new information about when the
+    // next moment is due. This call carries none: it is a net under a unit
+    // that fell out of the table, and running it unconditionally handed a
+    // failing Remind unit a clean slate every hour, so a channel that has been
+    // refusing pushes all night was retried on the repair pass's cadence
+    // instead of on its own backoff.
+    //
+    // A stale row is not a case this has to answer for. A unit armed at the
+    // wrong second wakes, finds nothing owed, and re-arms or disarms itself;
+    // every write that moves the earliest owed instant re-arms it directly.
+    match core.store.live_job(Stage::Remind, REMIND_TARGET).await {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Err(e) = core.store.rearm_remind().await {
+                tracing::warn!(error = %e, "could not re-arm the reminder unit");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not look for the reminder unit"),
     }
 }
 
@@ -468,14 +507,28 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
     // dedupe arming every fifteen minutes, consolidation every day — keep
     // writing a row apiece into a table nothing was left to trim. The same
     // mistake this whole pass exists to record, one table further in.
+    // The line every "is this near that" reads is measured here, before the
+    // passes that read it: the base's own vectors say where unrelated stops,
+    // and a constant does not know which embedder it was configured for.
+    match core.calibrate().await {
+        Ok(line) => tracing::debug!(line, "measured where unrelated stops"),
+        Err(e) => tracing::warn!(error = %e, "could not measure the weak line; the floors stand"),
+    }
     // A coverage row outlives what it covers. `gap_id` names one of three
     // tables, so it is deliberately not a foreign key and nothing cascades onto
     // it — while retention deletes searches and questions on a promise, and a
     // purge takes every one of them. The rows left behind were kept for the
     // life of the base and read back as nothing at all, `gaps_covered_by_each`
     // skipping each one because the join found no text to show.
-    match core.store.trim_gap_coverage().await {
-        Ok(n) if n > 0 => tracing::info!(dropped = n, "dropped coverage of gaps that are gone"),
+    match core
+        .store
+        .trim_gap_coverage(crate::jobs::gaps::cover_line(core))
+        .await
+    {
+        Ok(n) if n > 0 => tracing::info!(
+            dropped = n,
+            "dropped coverage of gaps that are gone or under the line"
+        ),
         Err(e) => tracing::warn!(error = %e, "could not drop coverage of gaps that are gone"),
         _ => {}
     }
@@ -621,6 +674,36 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
+    async fn the_reap_sweep_is_armed_only_when_enabled_and_a_judge_exists() {
+        use crate::store::jobs::Stage;
+        let core = crate::core::test_support::test_core().await;
+        assert!(
+            periodic_units(&core).iter().any(|(s, _)| *s == Stage::Reap),
+            "on by default when a judge is configured"
+        );
+        assert_eq!(
+            periodic_period(&core, Stage::Reap),
+            Some(Duration::from_secs(1440 * 60))
+        );
+
+        let mut off = crate::core::test_support::test_core().await;
+        off.reap.enabled = false;
+        assert!(
+            !periodic_units(&off).iter().any(|(s, _)| *s == Stage::Reap),
+            "the switch arms nothing"
+        );
+
+        let mut judgeless = crate::core::test_support::test_core().await;
+        judgeless.judge = None;
+        assert!(
+            !periodic_units(&judgeless)
+                .iter()
+                .any(|(s, _)| *s == Stage::Reap),
+            "no judge, no sweep — the rules alone may never tombstone"
+        );
+    }
+
+    #[tokio::test]
     async fn the_context_sweep_is_armed_only_when_the_offer_is_on() {
         use crate::store::jobs::Stage;
         let mut core = crate::core::test_support::test_core().await;
@@ -712,13 +795,11 @@ mod tests {
                         start_line: 1,
                         end_line: 10,
                         text: "first window",
-                        carry_lines: 0,
                     },
                     crate::store::segments::NewSegment {
                         start_line: 11,
                         end_line: 20,
                         text: "second window",
-                        carry_lines: 0,
                     },
                 ],
             )

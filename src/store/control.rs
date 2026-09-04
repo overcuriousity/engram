@@ -102,7 +102,17 @@ impl Control {
     /// old rows mean is not something a boot path may guess about.
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("control_schema.sql");
-        const ADDITIVE: [(&str, &str, &str); 2] = [
+        const ADDITIVE: [(&str, &str, &str); 4] = [
+            (
+                "users",
+                "lang",
+                "ALTER TABLE users ADD COLUMN lang TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "users",
+                "notify",
+                "ALTER TABLE users ADD COLUMN notify TEXT NOT NULL DEFAULT '{}'",
+            ),
             (
                 "jobs",
                 "class",
@@ -280,6 +290,55 @@ impl Control {
             .iter()
             .map(User::from_row)
             .collect())
+    }
+
+    /// Where this user's due reminders go. `{}` when nothing is configured.
+    /// The language this account's captures are read in, or `None` for
+    /// automatic — which is the default and means the browser decides.
+    pub async fn lang(&self, subject: &str) -> Result<Option<crate::infer::lang::Lang>> {
+        let raw: Option<String> = sqlx::query_scalar("SELECT lang FROM users WHERE subject = ?")
+            .bind(subject)
+            .fetch_optional(&self.pool)
+            .await?
+            .flatten();
+        // A stored tag this build does not know reads as automatic rather than
+        // as English: the operator chose *something*, and falling back to the
+        // browser is closer to that choice than overriding it.
+        Ok(raw.as_deref().and_then(crate::infer::lang::Lang::parse))
+    }
+
+    /// Set it, or clear it back to automatic with `None`.
+    pub async fn set_lang(
+        &self,
+        subject: &str,
+        lang: Option<crate::infer::lang::Lang>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE users SET lang = ? WHERE subject = ?")
+            .bind(lang.map(|l| l.tag()).unwrap_or(""))
+            .bind(subject)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn notify(&self, subject: &str) -> Result<serde_json::Value> {
+        let raw: Option<String> = sqlx::query_scalar("SELECT notify FROM users WHERE subject = ?")
+            .bind(subject)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(raw
+            .and_then(|r| serde_json::from_str(&r).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({})))
+    }
+
+    pub async fn set_notify(&self, subject: &str, notify: &serde_json::Value) -> Result<()> {
+        sqlx::query("UPDATE users SET notify = ? WHERE subject = ?")
+            .bind(notify.to_string())
+            .bind(subject)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// `false` when there is no such subject, so the grant CLI can say so
@@ -643,6 +702,38 @@ mod tests {
     /// longer does has to go, or the `INSERT` in `provision` that stopped naming
     /// it fails against a leftover `NOT NULL` with no default — which presents
     /// as a 500 at the door for the next person to sign in after an upgrade.
+    #[tokio::test]
+    async fn notify_is_empty_until_set_and_survives_a_reread() {
+        let c = Control::memory().await.unwrap();
+        c.provision("u", None).await.unwrap();
+        assert_eq!(c.notify("u").await.unwrap(), serde_json::json!({}));
+        c.set_notify(
+            "u",
+            &serde_json::json!({"gotify": {"url": "https://g/message", "token": "t"}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.notify("u").await.unwrap()["gotify"]["token"], "t");
+    }
+
+    #[tokio::test]
+    async fn a_users_table_without_notify_gains_the_column() {
+        let pool = empty_pool().await;
+        sqlx::raw_sql(
+            "CREATE TABLE users (
+               subject TEXT PRIMARY KEY, email TEXT, slug TEXT NOT NULL UNIQUE,
+               can_judge INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let control = Control { pool };
+        control.migrate().await.unwrap();
+        control.provision("u", None).await.unwrap();
+        assert_eq!(control.notify("u").await.unwrap(), serde_json::json!({}));
+    }
+
     #[tokio::test]
     async fn a_control_database_still_holding_last_seen_at_loses_it() {
         let pool = empty_pool().await;

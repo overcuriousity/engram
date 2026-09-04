@@ -1,0 +1,40 @@
+{{ echo|safe }}
+{# The last line of the idle column, and the only place the base says what it
+   holds. It used to be the rail's own idle state — a block of counts above a
+   list of the last five captures, standing beside a middle column rendering
+   those same five rows in a different shape. One list is now one line.
+
+   Not `.rail-item` cards and not a list: these are not answers to anything.
+   The title opens its source, the stamp opens the day.
+
+   `hx-swap-oob` on both pieces, and inert on first paint: htmx reads
+   out-of-band attributes only on a swapped response, so the same fragment
+   renders in place inside `#idle` when the page is built and swaps itself
+   into that same place when the box is emptied again. One account of the idle
+   state, however it is reached. #}
+{# The rail's label, emptied. While the box is empty the rail is not on screen
+   at all, so "This memory" over a hidden column is a heading for nothing —
+   and left standing it is the heading the *next* act's results arrive under.
+   Cleared here, so whichever fragment fills the rail is the one that names
+   it. #}
+<div class="rail-act" hx-swap-oob="innerHTML:#rail-head"></div>
+<p id="idle-foot" class="idle-foot muted" hx-swap-oob="true">
+{%- if !held %}
+  {# Nothing. No counts to print and no last capture to name, and the sentence
+     that used to stand here was the third copy of one thought: the placeholder
+     inside the box, the hint under it, and this. The hint keeps it, being the
+     one of the three that is next to the box and read in both states. The
+     branch stays because the paragraph is the out-of-band swap target, and it
+     renders empty — `.idle-foot:empty` takes the margin with it. #}
+{%- else %}
+  <span class="mono">{{ artifacts }}</span> artifact{% if artifacts != 1 %}s{% endif %}
+  from <span class="mono">{{ corpora }}</span> source{% if corpora != 1 %}s{% endif %}
+  {%- if let Some(r) = recent.first() %} &middot; last kept
+  <a href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>
+  {#- `data-day-at` is the capture's instant: app.js rebuilds the whole href
+      from it in the viewer's zone, because the date baked into the path here
+      is UTC and the day page reads its window locally. #}
+  <a href="/ui/day/{{ r.day }}" data-day-link data-day-at="{{ r.at }}">{{ r.when }}</a>
+  {%- endif %}
+{%- endif %}
+</p>

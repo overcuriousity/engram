@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS corpora (
   -- column cannot be both without losing the channel.
   source_url      TEXT,
   restored_at     INTEGER,
+  -- Set when the last reminder read out of this note was completed. The note
+  -- stays: it is still searchable, still on its day page, still the corpus its
+  -- artifacts belong to. What it stops being is a *recent capture* and a
+  -- competitor in the ranked half of a result list. NULL is the ordinary
+  -- state, and `undone` writes NULL back.
+  retired_at      INTEGER,
   -- What a door knew about the capture beyond the text: a note, file facts,
   -- EXIF. Namespaced JSON, '{}' when nothing was recorded.
   metadata        TEXT NOT NULL DEFAULT '{}'
@@ -122,7 +128,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
   -- — one crossing.
   activated_at     INTEGER NOT NULL DEFAULT 0,
   -- For a synthesized artifact: the questions it was written for, JSON list.
-  cues             TEXT    NOT NULL DEFAULT '[]'
+  cues             TEXT    NOT NULL DEFAULT '[]',
+  -- When this artifact left `active` (deprecate or supersede), cleared on the
+  -- way back. The reap sweep's age rule reads this; NULL on a retired row
+  -- means "never stamped" and the sweep stamps it fresh before judging.
+  retired_at       INTEGER,
+  -- When the reap sweep wiped this row's text into `graveyard`. A stub row —
+  -- links intact, text gone — never a candidate again.
+  reaped_at        INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);
@@ -626,6 +639,76 @@ CREATE TABLE IF NOT EXISTS pursuits (
   embed_model  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pursuits_state ON pursuits(state, opened_at);
+
+-- ── Moments ──────────────────────────────────────────────────────────────────
+-- A time attached to an artifact. `due` is a reminder; `event` is a date the
+-- note refers to. The note is the reminder text — there is none apart from it.
+-- A wrong date is corrected on the row itself — see `moved_from`, which keeps
+-- the misreading — so that a recurrence still has exactly one row per firing.
+CREATE TABLE IF NOT EXISTS moments (
+  id            TEXT PRIMARY KEY,
+  artifact_id   TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- 'due' | 'event'
+  kind          TEXT NOT NULL,
+  -- Unix seconds. NULL for a reminder the base heard and could not date:
+  -- kept, and shown asking for its date, rather than dropped.
+  at            INTEGER,
+  until         INTEGER,
+  -- IANA zone the moment was read in. Recurrence and the day page need the
+  -- wall-clock, and a Unix integer alone cannot give it back across DST.
+  tz            TEXT NOT NULL,
+  -- RRULE subset (FREQ, INTERVAL, BYDAY, BYMONTHDAY, UNTIL, COUNT), or NULL.
+  rule          TEXT,
+  -- 'set' | 'cue' | 'classified' | 'extracted' | 'armed'. `armed` is the next
+  -- occurrence a completed recurrence put on the band: nobody set it and no
+  -- reading of the prose would make it again, so the moments stage must not
+  -- delete it the way it deletes what it read.
+  source        TEXT NOT NULL,
+  -- The text the date was read from, verbatim, so a misread is visible.
+  span          TEXT,
+  done_at       INTEGER,
+  snoozed_until INTEGER,
+  -- Set once the push went out, so a restart never sends it twice.
+  notified_at   INTEGER,
+  -- The instant this row was first read at, kept when somebody moves the row
+  -- to the date they meant. Two jobs: it is the misreading, still visible, and
+  -- it is what stops the moments stage re-inserting a fresh row at the date the
+  -- operator explicitly corrected away from on the next re-read. NULL where the
+  -- row had no instant to move off — a reminder nobody could date.
+  moved_from    INTEGER,
+  -- When somebody moved it. The fourth mark that says a row has a history, and
+  -- separate from `moved_from` because dating an undated reminder is a move
+  -- with no old instant to record and must still leave a mark.
+  moved_at      INTEGER,
+  -- The recurrence this row is one occurrence of: the id of the first moment
+  -- of the series, copied onto every successor an `armed` completion inserts.
+  -- A bounded `COUNT=n` is bounded by its occurrences, and its occurrences are
+  -- the rows carrying this id -- not the rows that happen to sit on one
+  -- artifact today, because `carry_moments` moves the open row across a
+  -- supersession and leaves the done ones behind. NULL for a one-shot.
+  series_id     TEXT,
+  -- The corpus the artifact belonged to when this row was written. Completing
+  -- a reminder retires the note it was read out of, and after a carry the
+  -- row's current artifact can belong to a different note entirely -- which
+  -- sank a note nobody had set a reminder on. Stamped once, never re-derived.
+  origin_corpus_id TEXT,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_moments_open     ON moments(kind, done_at, at);
+CREATE INDEX IF NOT EXISTS idx_moments_artifact ON moments(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_moments_series   ON moments(series_id);
+
+-- Where a reaped artifact's text goes. Never read by search, FTS, or the
+-- embedder; permanent by design — its purpose is that no reap verdict is
+-- ever wrong invisibly. `meta_json` snapshots what the stub no longer says:
+-- provenance, tags, span, and the judge's one-line reason.
+CREATE TABLE IF NOT EXISTS graveyard (
+  id         TEXT PRIMARY KEY,
+  title      TEXT,
+  text       TEXT NOT NULL,
+  meta_json  TEXT NOT NULL,
+  reaped_at  INTEGER NOT NULL
+);
 
 -- Cursors that have no row to live on. Three keys so far:
 -- `associate.events_after`, `associate.judged_after`, `pursuit.events_after`.
