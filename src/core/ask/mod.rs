@@ -888,7 +888,23 @@ impl Core {
             .iter()
             .filter_map(|(c, _, _)| c.corpus_id.clone())
             .collect();
-        let retired = self.store.retired_among(&cids).await.unwrap_or_default();
+        // Not defaulted to empty. An empty set does not read as "the store
+        // could not say"; it reads as "nothing is retired", and that is what
+        // `retired_only` then reports over every citation the model was shown
+        // — a confident answer with the "this came entirely from retired
+        // notes" caveat withheld, which is the same wrong answer hard-coding
+        // `false` used to give, arriving by a different road.
+        //
+        // Best-effort still, the way everything in here is: a neighbour whose
+        // retirement cannot be read is a neighbour this pass does not add, and
+        // the answer keeps every hit that was already retrievable.
+        let retired = match self.store.retired_among(&cids).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read retirement for the reached neighbours; reaching no further");
+                return;
+            }
+        };
         let merged = retrieve::append_neighbours(ranked, ids, retrieve::NEIGHBOUR_MAX);
 
         for id in merged.into_iter().skip(ranked_len) {

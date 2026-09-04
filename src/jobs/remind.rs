@@ -302,11 +302,22 @@ pub async fn run(core: &Core) -> Result<()> {
         }
     }
     if let Some(e) = failed {
-        // Still not returned. A job that fails here is a job that retries, and
-        // its retry says the same thing to the same people about the same
-        // rows. The rows stay owed and the next wake will say it again, which
-        // is the same duplicate arriving later and with a record of why.
+        // Returned after all, and the whole point is *when* the duplicate
+        // arrives. Swallowing it here meant `run_claimed` took the `Ok` road:
+        // `rearm_remind` at the instant `next_notify_at` reports, which for
+        // rows still owed is the instant that just passed — so the unit was
+        // immediately claimable again and the same push went out every couple
+        // of seconds for as long as the write lock was held. "The next wake
+        // will say it again" was the intent; a tight loop was the behaviour.
+        //
+        // The error puts it on the backoff instead: four more attempts at 4,
+        // 8, 16 and 32 seconds, each a duplicate with a record of why, and
+        // then the exhausted arm in `jobs::run_claimed` closes the job without
+        // re-arming. The rows stay owed and `arm_missing_periodic` is what
+        // brings the unit back — one repair interval later, which is the same
+        // trade that branch's own lost-arming case already makes.
         tracing::error!(error = %e, n = ids.len(), "a push went out that could not be recorded");
+        return Err(e);
     }
     // The re-arm is NOT here. `arm_at` only moves a row in `pending`, `done`
     // or `failed`, and while this runs the row is `running` — so an arming

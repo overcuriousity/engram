@@ -5,12 +5,18 @@
    capture, or by hand. The band replaces itself in place, so what the column
    shows on its way back is what is due now and not what was due a minute ago.
 
-   And it polls itself, but only while something is coming: the trigger is on
-   the fragment rather than on the page, so the swap that reports the last
-   pending thing landing is also the swap that stops the polling. What the
-   delay is worked out from is in `due::refresh_in`. Same contract as
-   `_queue.html`, and the reason an idle page in a background tab costs
-   nothing.
+   And it polls itself, at a rate it sets each time it lands: the trigger is on
+   the fragment rather than on the page, so the swap that reports a capture
+   settling is also the swap that drops the two-second poll back to the five
+   minutes an idle band costs. It does not stop — `due::refresh_in` never
+   answers `None`, and the doc comment there says why at length: rows arrive
+   from the CLI, the extension and other windows, and a band that stopped
+   watching for them went stale in silence. Five minutes is the floor, which is
+   what a background tab costs.
+
+   `head` draws the "Due" heading, for the page that wants one. Inside the
+   swapped element and never around it: a heading in the page outside this div
+   is a heading over whatever the band next becomes, including nothing.
 
    `just` is the row the viewer acted on, shown struck through with its undo
    for this render only — its own undo: what undoes a snooze is not what
@@ -22,7 +28,8 @@
 <div id="due" class="due{% if !rows.is_empty() || just.is_some() %} due-filled{% endif %}"
      hx-post="/ui/due" hx-swap="outerHTML"
      hx-trigger="refresh{% if let Some(s) = refresh_in %}, every {{ s }}s{% endif %}"
-     hx-vals='{"tz": "{{ tz }}", "since": "{{ since }}", "all": "{% if all %}1{% else %}0{% endif %}"}'>
+     hx-vals='{"tz": "{{ tz }}", "since": "{{ since }}", "all": "{% if all %}1{% else %}0{% endif %}", "head": "{% if head %}1{% else %}0{% endif %}"}'>
+{% if head && (!rows.is_empty() || just.is_some() || !events.is_empty()) %}<h2>Due</h2>{% endif %}
 {% if let Some(j) = just %}
   <p class="due-row due-done muted"><span class="due-title">{{ j.verb }}</span>
     <button class="btn btn-ghost btn-sm" hx-post="{{ j.undo }}" hx-target="#due" hx-swap="outerHTML">undo</button></p>

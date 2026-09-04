@@ -96,14 +96,15 @@
    is exactly where a reminder set for a date now past deserves to be seen,
    not only in the column beside the capture box.
 
-   Gated on `has_due`, read with the fragment's own window: a heading over a
-   band that loads in empty is a claim that something is being measured when
-   nothing is. #}
-{% if has_due %}
-<h2>Due</h2>
+   The heading comes back with the band and not from here — `head: "1"` asks
+   for it — because the band swaps itself out on every action and on its own
+   poll. Gated from this side, on a `has_due` read taken once at page render,
+   it outlived its own rows: press done on the only open reminder and the
+   fragment came back empty under a heading still claiming something was due.
+   Nothing is drawn until the band lands, which is the honest state for a
+   region whose contents are not known yet. #}
 <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
-     hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
-{% endif %}
+     hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "", head: "1"}' hx-swap="outerHTML"></div>
 
 {% include "_gaps.html" %}
 

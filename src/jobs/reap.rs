@@ -85,6 +85,26 @@ pub async fn run(core: &Core) -> Result<Report> {
             // A reply that failed or cannot be read acts on nothing; the row
             // is simply a candidate again next interval. The sweep's cadence
             // is the retry — no bookkeeping.
+            //
+            // Unless the endpoint answered and said no, which is not a wait.
+            // `reap_candidates` orders `retired_at ASC` and the sweep judges
+            // `max_judged_per_run` rows a run, so a row the model will never
+            // accept — text it rejects outright with a 400 — is the oldest
+            // retirement in the base for ever: a slot and a model call every
+            // sweep, and the candidates behind it never reached. That is the
+            // starvation `step_aside` exists for, arriving through the one
+            // branch that did not use it.
+            //
+            // `InferenceRejected` and not every non-retryable error, because
+            // the other one reachable here is "no reap model configured" — a
+            // role that has not arrived, the same wait `Describe`'s exhausted
+            // arm guards for. Standing every candidate in the base down on
+            // that would push every `retired_at` forward on every sweep and
+            // leave nothing reapable once a model finally was configured.
+            Err(e @ crate::error::Error::InferenceRejected { .. }) => {
+                tracing::warn!(artifact_id = %c.id, error = %e, "the judge will not rule on this candidate; standing it down");
+                step_aside(core, &c.id).await;
+            }
             Err(e) => {
                 tracing::warn!(artifact_id = %c.id, error = %e, "reap judgement failed; candidate waits")
             }
@@ -106,9 +126,13 @@ pub async fn run(core: &Core) -> Result<Report> {
 /// A fresh `retired_at` is the whole of the bookkeeping: nothing is lost, the
 /// row stays retired, and it comes back for another attempt an age later —
 /// which for a failure that was merely transient is a delay, and for one that
-/// is not is the difference between a stuck sweep and a working one. Only the
-/// *action* failures restamp; a judge call that failed says nothing about the
-/// row and the sweep's own cadence is its retry.
+/// is not is the difference between a stuck sweep and a working one.
+///
+/// The action failures restamp, and so does a judge call the endpoint refused:
+/// a 400 on this row's text is a verdict about this row and repeating it every
+/// sweep buys nothing. A judge call that merely *failed* — a timeout, an
+/// endpoint down, no model configured at all — says nothing about the row, and
+/// the sweep's own cadence is its retry.
 async fn step_aside(core: &Core, id: &str) {
     if let Err(e) = core.store.restamp_retired(id).await {
         tracing::warn!(artifact_id = %id, error = %e, "could not restamp a candidate the sweep could not act on");
@@ -795,6 +819,73 @@ mod tests {
             "still here"
         );
         assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+    }
+
+    /// A candidate the judge will never rule on must not hold the queue.
+    /// `reap_candidates` is ordered `retired_at ASC` and the sweep judges
+    /// `max_judged_per_run` rows a run, so the oldest retirement in the base
+    /// is judged first every time — and if that call is refused rather than
+    /// merely failed, it is refused again on the next sweep, and the row
+    /// behind it is never reached.
+    #[tokio::test]
+    async fn a_candidate_the_judge_refuses_stands_down_and_lets_the_queue_move() {
+        let mut core = test_core().await;
+        core.reaper = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::rejecting("HTTP 400: input too long"),
+        ));
+        let ids = seed(&core, &["the one it will not read"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        let before = core
+            .store
+            .get_artifact(&ids[0])
+            .await
+            .unwrap()
+            .retired_at
+            .unwrap();
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped), (0, 0));
+        let after = core
+            .store
+            .get_artifact(&ids[0])
+            .await
+            .unwrap()
+            .retired_at
+            .unwrap();
+        assert!(
+            after > before,
+            "a refusal is a verdict about this row: it goes to the back, {before} → {after}"
+        );
+    }
+
+    /// And a call that merely failed is not that. No model configured is a
+    /// role that has not arrived, and standing every candidate in the base
+    /// down on it would push every `retired_at` forward on every sweep — with
+    /// nothing reapable left once a model finally was configured.
+    #[tokio::test]
+    async fn a_sweep_with_no_judge_leaves_every_candidate_where_it_was() {
+        let mut core = test_core().await;
+        core.reaper = None;
+        let ids = seed(&core, &["waiting for a judge"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        let before = core
+            .store
+            .get_artifact(&ids[0])
+            .await
+            .unwrap()
+            .retired_at
+            .unwrap();
+
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .retired_at
+                .unwrap(),
+            before
+        );
     }
 
     #[tokio::test]

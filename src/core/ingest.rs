@@ -1751,11 +1751,19 @@ impl Core {
             // re-promote the whole document and produce no judgement and no
             // moment at all; nothing is armed and the caller is told so.
             let windows = self.store.segments_for_corpus(cid).await?.len();
-            if windows > 1 {
+            // `!= 1` and not `> 1`. Zero is the same answer as many and for a
+            // nearer reason: there is no window to hand back, so arming one
+            // for a `segment_idx` the artifact still carries would queue a
+            // unit against a segment that does not exist — and returning
+            // `true` would have the page report a reminder armed that nothing
+            // will ever judge. The sibling `ask_the_judged_read_for_a_reminder`
+            // has always spelled the empty case out; this one guarded only the
+            // long-capture half of it.
+            if windows != 1 {
                 tracing::info!(
                     corpus_id = cid,
                     windows,
-                    "a reminder is read in one pass; this capture is read window by window"
+                    "a reminder is read in one pass; this capture has no single window to re-read"
                 );
                 return Ok(false);
             }

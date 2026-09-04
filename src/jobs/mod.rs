@@ -206,6 +206,16 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 // again whether it is worth asking about. Everything else
                 // stays queued at the backoff ceiling, because everything else
                 // carries knowledge that would otherwise be lost.
+                // A push that went out and could not be written down. The
+                // retries have each re-delivered it; going on would re-deliver
+                // it for ever, and the rows are still owed either way. Closed
+                // *without* re-arming — `rearm_remind` lives on the `Ok` road
+                // above — so the unit comes back through `arm_missing_periodic`
+                // rather than through the past instant that made this a loop.
+                (Stage::Remind, _) if exhausted => {
+                    tracing::warn!(error = %e, "could not record a push after every retry; standing the unit down until the repair pass");
+                    core.store.complete_job(job.id).await?;
+                }
                 (Stage::Dedupe | Stage::Title, _) if exhausted => {
                     tracing::warn!(error = %e, stage = job.stage.as_str(), "giving up on this unit for now");
                     core.store.complete_job(job.id).await?;

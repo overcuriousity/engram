@@ -468,11 +468,42 @@ async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
 /// The base's nearest artifacts to this capture, shown to the judged call so
 /// it can resolve references and name relations. Best-effort throughout: any
 /// failure is "no neighbors", never a failed window.
+/// How many neighbours the reserved budget buys, and what each one gets.
+/// `None` where it buys none.
+///
+/// Five shares, and a floor under each: a neighbour cut to a dozen tokens is a
+/// title and half a sentence, which tells the model nothing and costs the same
+/// fence overhead as a useful one.
+///
+/// The floor is what the *count* gives way to, not the budget. `max(64)` alone
+/// overran the reservation on every budget under 320 — five slices of 64 out
+/// of, say, 200 tokens, which is the share reserved for neighbours spent one
+/// and a half times over, against a ceiling the whole point of which is that
+/// the prompt fits. Fewer neighbours, each still worth reading, is the trade a
+/// narrow budget actually offers — and all the way down to none of them, which
+/// is why the count is capped and never raised. Clamping it up to one slot was
+/// the same overrun at the bottom of the range: a 32-token reservation buying
+/// a 64-token neighbour.
+///
+/// The property, at every budget: `per * slots <= budget`.
+fn neighbour_shares(budget: usize) -> Option<(usize, usize)> {
+    let per = (budget / 5).max(64);
+    match budget / per {
+        0 => None,
+        slots => Some((per, slots.min(5))),
+    }
+}
+
 async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::infer::Neighbor> {
     let budget = core.synthesizer.budget().context.neighbors;
     if budget == 0 {
         return Vec::new();
     }
+    // Worked out before the lookup, so a budget that can afford nothing costs
+    // no vector search and no stray embedding either.
+    let Some((per, slots)) = neighbour_shares(budget) else {
+        return Vec::new();
+    };
     let Ok(rows) = core.store.artifacts_for_segment(corpus_id, idx).await else {
         return Vec::new();
     };
@@ -498,18 +529,6 @@ async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::
             .await
             .unwrap_or_default();
     }
-    // Five shares of the reserved budget, and a floor under each: a neighbour
-    // cut to a dozen tokens is a title and half a sentence, which tells the
-    // model nothing and costs the same fence overhead as a useful one.
-    //
-    // The floor is what the *count* gives way to, not the budget. `max(64)`
-    // alone overran the reservation on every budget under 320 — five slices of
-    // 64 out of, say, 200 tokens, which is the share reserved for neighbours
-    // spent one and a half times over, against a ceiling the whole point of
-    // which is that the prompt fits. Fewer neighbours, each still worth
-    // reading, is the trade a narrow budget actually offers.
-    let per = (budget / 5).max(64);
-    let slots = (budget / per.max(1)).clamp(1, 5);
     let mut out = Vec::new();
     for h in hits {
         if h.payload.corpus_id == corpus_id {
@@ -865,6 +884,29 @@ pub(crate) fn proposed_to_new(
 
 #[cfg(test)]
 mod tests {
+
+    /// The reservation is a ceiling, and the count is what gives way to the
+    /// floor under each share. `clamp(1, 5)` raised the count instead, so a
+    /// budget under the floor bought one neighbour worth twice what was
+    /// reserved for all of them.
+    #[test]
+    fn the_neighbour_shares_never_add_up_to_more_than_was_reserved() {
+        for budget in 0..2_000usize {
+            if let Some((per, slots)) = super::neighbour_shares(budget) {
+                assert!(
+                    per * slots <= budget,
+                    "budget {budget}: {slots} × {per} is over the reservation"
+                );
+                assert!((1..=5).contains(&slots), "budget {budget}: {slots} slots");
+                assert!(per >= 64, "budget {budget}: {per} is not worth reading");
+            }
+        }
+        assert_eq!(super::neighbour_shares(0), None);
+        assert_eq!(super::neighbour_shares(32), None, "no share worth a fence");
+        assert_eq!(super::neighbour_shares(64), Some((64, 1)));
+        assert_eq!(super::neighbour_shares(200), Some((64, 3)));
+        assert_eq!(super::neighbour_shares(1_024), Some((204, 5)));
+    }
 
     #[tokio::test]
     async fn a_windows_attempts_are_read_from_this_tenants_row_only() {

@@ -1602,7 +1602,19 @@ impl Core {
         // Retirement, read for the whole page in one query beside the due map.
         {
             let cids: Vec<String> = results.iter().map(|r| r.corpus_id.clone()).collect();
-            let retired = self.store.retired_among(&cids).await.unwrap_or_default();
+            // Degraded, but never silently: an empty set here is
+            // indistinguishable from "nothing is retired", so a transient
+            // `SQLITE_BUSY` leaves the marks off the rail and
+            // `sink_retired_and_mark_the_cliff` demoting nothing. The page is
+            // still worth showing without them — the same trade the `due_for`
+            // read above makes — and the log is what says which it was.
+            let retired = match self.store.retired_among(&cids).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not read retirement for this page; nothing is marked or sunk");
+                    Default::default()
+                }
+            };
             for r in &mut results {
                 r.retired = retired.contains(&r.corpus_id);
             }

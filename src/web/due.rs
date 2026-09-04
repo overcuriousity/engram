@@ -48,6 +48,13 @@ struct TzForm {
     /// here would snap shut under the reader every five minutes.
     #[serde(default)]
     all: String,
+    /// Whether this band draws its own "Due" heading. Insights wants one and
+    /// the workspace column does not, and it rides on the fragment for the
+    /// same reason `all` does: the band swaps itself on every action and on
+    /// its own poll, so a heading rendered once by the page around it outlives
+    /// the rows it was a heading for. See `_due.html`.
+    #[serde(default)]
+    head: String,
 }
 
 pub(crate) struct DueView {
@@ -120,6 +127,13 @@ pub(crate) struct DueTemplate {
     /// Whether the fold is open. Echoed into the fragment's `hx-vals` so the
     /// next poll comes back the same shape the viewer left it in.
     pub all: bool,
+    /// Whether to draw the "Due" heading above the rows. Echoed the same way,
+    /// and drawn *inside* the swapped element: a heading in the page around
+    /// the band, gated on a `has_due` read taken once at page render, survived
+    /// the swap that emptied the band under it — press done on the last open
+    /// reminder and the heading stood over nothing, which is exactly the state
+    /// the gate was written to prevent.
+    pub head: bool,
     /// Seconds until this fragment should ask again. `Option` for the
     /// template's sake; `refresh_in` always answers, and the floor is the cap.
     ///
@@ -263,6 +277,7 @@ async fn render(
     just: Option<Just>,
     since: i64,
     all: bool,
+    head: bool,
 ) -> Result<Response> {
     let tz = zone(Some(tz_name));
     // The zone as the zone table spells it, never as the form spelled it. It
@@ -352,13 +367,14 @@ async fn render(
         since: now,
         hidden,
         all,
+        head,
         refresh_in,
     })
     .into_response())
 }
 
 async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
-    render(&tenant, &f.tz, None, f.since, f.all == "1").await
+    render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
 async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
@@ -370,12 +386,12 @@ async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> 
         .complete_moment(&id)
         .await?
         .then(|| Just::moment(&id, "Done", "undone"));
-    render(&tenant, &f.tz, just, f.since, f.all == "1").await
+    render(&tenant, &f.tz, just, f.since, f.all == "1", f.head == "1").await
 }
 
 async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
     tenant.core.uncomplete_moment(&id).await?;
-    render(&tenant, &f.tz, None, f.since, f.all == "1").await
+    render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
 /// `hour` = now + 1h; `tomorrow` = 09:00 tomorrow; `monday` = 09:00 next
@@ -422,7 +438,7 @@ async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -
         tenant.core.store.rearm_remind().await?;
         just = Some(Just::moment(&id, "Snoozed", "unsnooze"));
     }
-    render(&tenant, &f.tz, just, f.since, f.all == "1").await
+    render(&tenant, &f.tz, just, f.since, f.all == "1", f.head == "1").await
 }
 
 async fn unsnooze(
@@ -432,7 +448,7 @@ async fn unsnooze(
 ) -> Result<Response> {
     tenant.core.store.unsnooze(&id).await?;
     tenant.core.store.rearm_remind().await?;
-    render(&tenant, &f.tz, None, f.since, f.all == "1").await
+    render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
 /// Move a reminder to a date the operator typed.
@@ -455,7 +471,7 @@ async fn set_date(
         tenant.core.store.move_moment(&id, at, tz.name()).await?;
         tenant.core.store.rearm_remind().await?;
     }
-    render(&tenant, &f.tz, None, f.since, f.all == "1").await
+    render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
 /// "This is not a reminder", and its undo.
@@ -474,7 +490,7 @@ async fn not_a_reminder(
     Form(f): Form<TzForm>,
 ) -> Result<Response> {
     let Some(m) = tenant.core.store.moment(&id).await? else {
-        return render(&tenant, &f.tz, None, f.since, f.all == "1").await;
+        return render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await;
     };
     // The banner is drawn on what happened, not on what was asked for: a
     // `set` row is the one source this never removes, and announcing "Not a
@@ -488,7 +504,7 @@ async fn not_a_reminder(
             verb: "Not a reminder",
             undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id),
         });
-    render(&tenant, &f.tz, just, f.since, f.all == "1").await
+    render(&tenant, &f.tz, just, f.since, f.all == "1", f.head == "1").await
 }
 
 async fn is_a_reminder(
@@ -497,7 +513,7 @@ async fn is_a_reminder(
     Form(f): Form<TzForm>,
 ) -> Result<Response> {
     tenant.core.set_reminder(&id, true).await?;
-    render(&tenant, &f.tz, None, f.since, f.all == "1").await
+    render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
 #[cfg(test)]
@@ -567,6 +583,81 @@ mod tests {
             !html.contains("due-filled"),
             "a card is drawn around something or not at all"
         );
+    }
+
+    /// The heading rides in the fragment, so the swap that empties the band
+    /// takes it with it. Rendered by the page around it — gated on a `has_due`
+    /// read taken once, which is what Insights used to do — pressing done on
+    /// the only open reminder left "Due" standing over nothing.
+    #[tokio::test]
+    async fn the_heading_leaves_with_the_last_row_it_was_a_heading_for() {
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.clone()
+                .oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&head=1"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("<h2>Due</h2>"), "{html}");
+        assert!(
+            html.contains(r#""head": "1""#),
+            "and the next poll asks for it again: {html}"
+        );
+
+        let after = body_of(
+            app.clone()
+                .oneshot(form(
+                    &format!("/ui/moments/{id}/done"),
+                    &cookie,
+                    "tz=Europe/Berlin&head=1",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            after.contains("undone"),
+            "the undo is the one thing this render still carries: {after}"
+        );
+        assert!(
+            after.contains("<h2>Due</h2>"),
+            "an undo is still something, and a heading over it is honest: {after}"
+        );
+
+        // The poll that follows once the undo has been let go. This is the
+        // render the heading used to outlive.
+        let empty = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&head=1"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!empty.contains("due-filled"), "{empty}");
+        assert!(
+            !empty.contains("<h2>Due</h2>"),
+            "nothing is due, so nothing says so: {empty}"
+        );
+    }
+
+    /// And the column beside the capture box asks for no heading, so it gets
+    /// none: one fragment, two pages, and only one of them has a section to
+    /// name.
+    #[tokio::test]
+    async fn the_workspace_column_draws_no_heading() {
+        let core = test_core().await;
+        artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("due-filled"), "{html}");
+        assert!(!html.contains("<h2>Due</h2>"), "{html}");
     }
 
     #[tokio::test]

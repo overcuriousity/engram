@@ -1577,6 +1577,12 @@
       var had = box.value.replace(/\s+$/, '');
       box.value = had ? had + ' ' + text : text;
       box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
+      // And the synthetic `input`, for the same reason `exampleChips` fires
+      // one: the form's own search trigger and the idle column's hide both
+      // listen for it and for nothing else, and there is no Search button in
+      // the verb row. Without this a dictated query sat in the box unanswered
+      // until one more character was typed by hand.
+      box.dispatchEvent(new Event('input', { bubbles: true }));
       // The caret at the end of what was just said, so the next thing typed
       // continues it. Focus, because the press was on a button and the box is
       // where the operator is now working.
@@ -2760,6 +2766,14 @@
   // for ever. It is held for as long as a person plausibly reaches for it and
   // then let go, after which one poll clears it and the next press starts the
   // clock again.
+  //
+  // The clock is stamped where the undo arrives — in the swap handler below,
+  // off the response about to land — and not lazily from in here. Read from
+  // the DOM on the way past, it was only ever written while a band swap was
+  // being considered, so a press whose clearing swap landed while polling was
+  // at five minutes left the stamp behind: the next press, minutes later,
+  // inherited an expired clock and had its undo swapped away by the first poll
+  // after it. For a deleted moment that undo is the only way back.
   var UNDO_GRACE = 30000;
   var undoSince = 0;
 
@@ -2768,12 +2782,7 @@
     if (!band) return false;
     if (band.querySelector('details[open]')) return true;
     if (document.activeElement && band.contains(document.activeElement)) return true;
-    if (band.querySelector('.due-done button')) {
-      if (!undoSince) undoSince = Date.now();
-      if (Date.now() - undoSince < UNDO_GRACE) return true;
-    } else {
-      undoSince = 0;
-    }
+    if (undoSince && Date.now() - undoSince < UNDO_GRACE) return true;
     // A date typed but not yet submitted. Nothing else on the band holds text.
     return Array.prototype.some.call(band.querySelectorAll('input'), function (i) {
       return i.value !== '';
@@ -2788,8 +2797,16 @@
       var cfg = e.detail && e.detail.requestConfig;
       // The poll and the `refresh` event both name the band as their source;
       // a button names itself.
-      if (cfg && cfg.elt && cfg.elt !== e.target) return;
-      if (dueBusy()) e.detail.shouldSwap = false;
+      var own = !(cfg && cfg.elt && cfg.elt !== e.target);
+      if (own && dueBusy()) {
+        e.detail.shouldSwap = false;
+        return;
+      }
+      // This response is landing, so it is what the band is about to be: an
+      // undo in it is a new undo and starts the clock, and one without clears
+      // it. Read off the response rather than the DOM because the two presses
+      // in a row case has no swap in between to notice the change.
+      undoSince = (e.detail.serverResponse || '').indexOf('due-done') >= 0 ? Date.now() : 0;
     });
     // A second is the resolution of the last minute of a countdown, and the
     // work is a handful of rows: cheaper than the poll it replaces.

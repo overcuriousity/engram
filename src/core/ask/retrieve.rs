@@ -55,8 +55,18 @@ pub(super) const NEIGHBOUR_MAX: usize = 6;
 /// Takes the raw `Option` from `search::cliff` rather than `above_cliff`'s
 /// count, because the two cases that count conflates — no cliff at all, and a
 /// cliff at the very end of the list — want opposite treatment here.
+///
+/// `Some(0)` is read the way [`above_cliff`] reads it: not a cut. It is the
+/// all-retired list, which is "nothing to conclude from" and not "nothing is
+/// reliable" — and taking it literally gave zero anchors, so `reach_sideways`
+/// returned at once and the answer got no neighbours in precisely the case
+/// `retired_only` exists for: a note whose completed reminder retired it.
 pub(super) fn anchor_count(cliff_at: Option<usize>, hits: usize) -> usize {
-    cliff_at.unwrap_or(hits).min(NEIGHBOUR_ANCHORS).min(hits)
+    cliff_at
+        .filter(|n| *n > 0)
+        .unwrap_or(hits)
+        .min(NEIGHBOUR_ANCHORS)
+        .min(hits)
 }
 
 /// Ranked hits first, then neighbours, deduped, capped.
@@ -174,8 +184,15 @@ impl Part {
     ///
     /// Takes the round's `cliff_at` rather than a bare flag so the caller
     /// cannot get the question backwards: it is the same `Option` the round
-    /// already reported on the wire, and `Some` is exactly "this ranking said
-    /// where it stopped meaning anything".
+    /// already reported on the wire, and `Some(n > 0)` is exactly "this
+    /// ranking said where it stopped meaning anything".
+    ///
+    /// `Some(0)` is not that, and [`above_cliff`] already says so: it is the
+    /// all-retired list, handed back whole because there is nothing to
+    /// conclude from. Reading it as a cut here made `merge` treat such a round
+    /// as fully vouched-for and interleave its entire retired tail ahead of
+    /// another round's fourth-and-later live hits — the one thing
+    /// [`UNCUT_PREFIX`] exists to prevent.
     pub fn of(
         mut hits: Vec<crate::core::search::SearchResult>,
         ranked: usize,
@@ -185,7 +202,7 @@ impl Part {
         Part {
             ranked: hits,
             reached,
-            cut: cliff_at.is_some(),
+            cut: cliff_at.is_some_and(|n| n > 0),
         }
     }
 }
@@ -715,6 +732,35 @@ mod tests {
             anchor_count(None, 2),
             2,
             "never more anchors than there are hits"
+        );
+    }
+
+    /// `Some(0)` is the all-retired list, which `above_cliff` hands back whole
+    /// because there is nothing to conclude from it. Reading it as a cut here
+    /// gave no anchors at all, so the one case `retired_only` exists for — a
+    /// note whose completed reminder retired it — was answered with no
+    /// neighbour context, while the `None` arm, the same "nothing to conclude
+    /// from", got three.
+    #[test]
+    fn a_cliff_at_the_first_hit_anchors_like_no_cliff_at_all() {
+        assert_eq!(anchor_count(Some(0), 10), 3);
+        assert_eq!(anchor_count(Some(0), 2), 2);
+    }
+
+    /// And the same `Some(0)`, one seam over: a round whose whole list is
+    /// retired was not cut, so it interleaves its leading `UNCUT_PREFIX` and
+    /// no more. Treating it as cut put its fourth-and-later hits ahead of
+    /// another round's second-best.
+    #[test]
+    fn a_round_cut_at_its_first_hit_interleaves_like_an_uncut_one() {
+        let all_retired = Part::of(hits_of(&["a0", "a1", "a2", "a3"], &[]), 4, Some(0));
+        let other = Part::of(hits_of(&["b0", "b1", "b2", "b3"], &[]), 4, Some(4));
+        let merged = merge(vec![all_retired, other]);
+        let ids: Vec<&str> = merged.hits.iter().map(|h| h.artifact_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["a0", "b0", "a1", "b1", "a2", "b2", "b3", "a3"],
+            "the uncut round's tail follows every hit a ranking vouched for"
         );
     }
 }

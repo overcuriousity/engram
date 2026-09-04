@@ -638,6 +638,10 @@ pub struct ScriptedCompleter {
     /// Overridable so a test can make the window the binding constraint without
     /// writing a megabyte of artifact text to get there.
     context_tokens: std::sync::atomic::AtomicUsize,
+    /// The endpoint's "no" rather than its "not now": every call is refused
+    /// with `InferenceRejected`, which is what a 400 on the request itself
+    /// looks like from the caller's side and is never worth repeating.
+    rejects: Option<String>,
 }
 
 impl ScriptedCompleter {
@@ -647,7 +651,17 @@ impl ScriptedCompleter {
             calls: std::sync::atomic::AtomicUsize::new(0),
             prompts: std::sync::Mutex::new(Vec::new()),
             context_tokens: std::sync::atomic::AtomicUsize::new(4096),
+            rejects: None,
         }
+    }
+
+    /// Refuses every call the way an endpoint refuses a request it will never
+    /// accept. Distinct from an exhausted script, which is the endpoint that
+    /// did not answer.
+    pub fn rejecting(msg: &str) -> Self {
+        let mut s = Self::new(Vec::new());
+        s.rejects = Some(msg.to_string());
+        s
     }
     pub fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
@@ -666,6 +680,12 @@ impl Completer for ScriptedCompleter {
     async fn complete(&self, _system: &str, user: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.prompts.lock().unwrap().push(user.to_string());
+        if let Some(detail) = &self.rejects {
+            return Err(crate::error::Error::InferenceRejected {
+                role: "ask",
+                detail: detail.clone(),
+            });
+        }
         self.replies
             .lock()
             .unwrap()

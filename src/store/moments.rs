@@ -251,6 +251,22 @@ impl Store {
     /// instant. `carry_moments` will move the row onto another artifact, and
     /// after that the join through `artifact_id` answers a different note than
     /// the one whose prose was read as the reminder.
+    ///
+    /// A merged artifact has no `corpus_id` — that is the whole point of one —
+    /// so the column is filled from its lineage instead, and only where the
+    /// lineage names one note. A reminder *born* on a merge otherwise recorded
+    /// nothing: `corpus_of_moment` answered NULL, so completing it never
+    /// retired the note and it stayed in `recent_captures`, and
+    /// `has_open_reminder_for_corpus` answered `false` for the sources, so
+    /// `REAPABLE`'s reminder guard did not hold their retired artifacts back.
+    /// `COALESCE(m.origin_corpus_id, live.corpus_id)` fixed that for a moment
+    /// *carried* onto a merge and could not fix it here, because there was
+    /// nothing in the column to coalesce to.
+    ///
+    /// One root corpus or none. Where a merge spans several notes there is no
+    /// single note the reminder was read out of, and naming one of them would
+    /// be the same dishonesty the NULL `corpus_id` exists to avoid — so the
+    /// column stays NULL and the row behaves as it does today.
     pub async fn insert_moment(&self, m: &NewMoment) -> Result<String> {
         let id = new_id();
         let series: Option<String> = match (&m.series_id, &m.rule) {
@@ -258,12 +274,35 @@ impl Store {
             (None, Some(_)) => Some(id.clone()),
             (None, None) => None,
         };
-        let corpus: Option<String> =
-            sqlx::query_scalar("SELECT corpus_id FROM artifacts WHERE id = ?")
+        let corpus: Option<String> = match sqlx::query_scalar::<_, Option<String>>(
+            "SELECT corpus_id FROM artifacts WHERE id = ?",
+        )
+        .bind(&m.artifact_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten()
+        {
+            Some(c) => Some(c),
+            // The merge's roots, and only where they agree. `DISTINCT` over
+            // the roots' notes with a `LIMIT 2` is the whole of the question:
+            // one row is the note, two is "several", and the second is never
+            // read.
+            None => {
+                let roots: Vec<String> = sqlx::query_scalar(
+                    "SELECT DISTINCT a.corpus_id FROM artifact_sources s
+                       JOIN artifacts a ON a.id = s.root_id
+                      WHERE s.child_id = ? AND a.corpus_id IS NOT NULL
+                      LIMIT 2",
+                )
                 .bind(&m.artifact_id)
-                .fetch_optional(&self.pool)
-                .await?
-                .flatten();
+                .fetch_all(&self.pool)
+                .await?;
+                match roots.len() {
+                    1 => roots.into_iter().next(),
+                    _ => None,
+                }
+            }
+        };
         sqlx::query(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, rule, source, span,
                                   series_id, origin_corpus_id, created_at)
@@ -1098,6 +1137,101 @@ mod tests {
             .await
             .unwrap();
         (s, made[0].id.clone())
+    }
+
+    /// A reminder set on a merged artifact used to record no note at all:
+    /// `artifacts.corpus_id` is NULL for a merge, so `corpus_of_moment`
+    /// answered NULL, completing the reminder retired nothing, and
+    /// `has_open_reminder_for_corpus` answered `false` for the notes behind it
+    /// — which is `REAPABLE`'s guard letting go of text a live reminder was
+    /// read out of. The lineage is where the note is, when the lineage names
+    /// one.
+    #[tokio::test]
+    async fn a_reminder_born_on_a_merge_of_one_note_still_names_that_note() {
+        let s = Store::memory().await.unwrap();
+        let c = s.insert_corpus("the note", "ui", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&c.id, &[na(0, "first half"), na(1, "second half")])
+            .await
+            .unwrap();
+        let merged = s
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "both halves".into(),
+                    title: Some("merged".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[made[0].id.clone(), made[1].id.clone()],
+            )
+            .await
+            .unwrap()
+            .id;
+        assert!(s.get_artifact(&merged).await.unwrap().corpus_id.is_none());
+
+        let id = s.insert_moment(&due_on(&merged)).await.unwrap();
+        assert_eq!(
+            s.corpus_of_moment(&id).await.unwrap().as_deref(),
+            Some(c.id.as_str()),
+            "one note behind the merge is the note the reminder is about"
+        );
+        assert!(s.has_open_reminder_for_corpus(&c.id).await.unwrap());
+    }
+
+    /// And where the merge spans two notes there is no one note it was read
+    /// out of. Naming either would be the dishonesty the NULL `corpus_id`
+    /// exists to avoid, so the column stays empty.
+    #[tokio::test]
+    async fn a_reminder_born_on_a_merge_of_two_notes_names_neither() {
+        let s = Store::memory().await.unwrap();
+        let a = s.insert_corpus("one note", "ui", None).await.unwrap();
+        let b = s.insert_corpus("another note", "ui", None).await.unwrap();
+        let one = s.insert_artifacts(&a.id, &[na(0, "one")]).await.unwrap();
+        let two = s.insert_artifacts(&b.id, &[na(0, "two")]).await.unwrap();
+        let merged = s
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "both notes".into(),
+                    title: Some("merged".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &[one[0].id.clone(), two[0].id.clone()],
+            )
+            .await
+            .unwrap()
+            .id;
+
+        let id = s.insert_moment(&due_on(&merged)).await.unwrap();
+        assert_eq!(s.corpus_of_moment(&id).await.unwrap(), None);
+    }
+
+    fn na(ordinal: i64, text: &str) -> NewArtifact {
+        NewArtifact {
+            ordinal,
+            text: text.into(),
+            corpus_span: None,
+            title: Some(text.into()),
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        }
+    }
+
+    fn due_on(artifact_id: &str) -> NewMoment {
+        NewMoment {
+            artifact_id: artifact_id.to_string(),
+            kind: Kind::Due,
+            at: Some(crate::store::now() + 3_600),
+            tz: "UTC".into(),
+            rule: None,
+            source: Source::Set,
+            span: None,
+            series_id: None,
+        }
     }
 
     /// A second note with one artifact, so a carry can cross corpora the way a

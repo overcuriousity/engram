@@ -560,7 +560,7 @@ pub(crate) fn fate_echo(
             kind: "will be synthesized",
             detail: "captured verbatim, then rewritten into structured artifacts".into(),
         }
-    } else {
+    } else if q.len() <= EXACT_SPLIT_BYTES {
         // The splitter's own answer, not arithmetic beside it. A
         // `MarkdownSplitter` will not cut inside a paragraph unless it has to,
         // so ten paragraphs of six tenths of a budget each are ten windows and
@@ -572,8 +572,33 @@ pub(crate) fn fate_echo(
             kind: "large paste",
             detail: format!("stored verbatim in {windows} windows; synthesis comes with use"),
         }
+    } else {
+        // Past the bound, the arithmetic — and the line says it is a floor
+        // rather than pretending to a count it did not make.
+        //
+        // This branch is reached from `search_results`, which the box asks on
+        // every keystroke behind a 120 ms debounce, and a full `MarkdownSplitter`
+        // pass over a 40 KB article is not something the hottest route in the
+        // app should do per keystroke. Under the bound the exact answer is
+        // cheap and is what gets shown; over it, the difference between "9
+        // windows" and "at least 6" is not what a person pasting a book is
+        // reading the line for.
+        let windows = tokens.div_ceil(budget);
+        IntentEchoTemplate {
+            kind: "large paste",
+            detail: format!(
+                "stored verbatim in at least {windows} windows; synthesis comes with use"
+            ),
+        }
     }
 }
+
+/// How much text the fate echo will run the splitter over.
+///
+/// See the `else` arm of [`fate_echo`]: above this the window count is
+/// estimated instead, because the exact answer costs a whole `MarkdownSplitter`
+/// pass on a route the capture box asks on every keystroke.
+const EXACT_SPLIT_BYTES: usize = 20_000;
 
 #[derive(Template)]
 #[template(path = "_results.html")]
@@ -5094,10 +5119,18 @@ mod tests {
         let lang = crate::infer::lang::Lang::En;
         let budget = crate::jobs::synthesize::segment_budget(&core, lang).max(1);
         let para = "filler words ".repeat(budget * 6 / 10);
-        let text = std::iter::repeat_n(para.trim(), 10)
+        // Three, not ten: the property holds from three paragraphs up — three
+        // windows against the arithmetic's two — and ten put the fixture over
+        // `EXACT_SPLIT_BYTES`, where the echo estimates on purpose.
+        let text = std::iter::repeat_n(para.trim(), 3)
             .collect::<Vec<_>>()
             .join("\n\n");
         let echo = fate_echo(&core, &text, lang);
+        assert!(
+            text.len() <= EXACT_SPLIT_BYTES,
+            "the fixture has to stay under the bound the exact split is done below: {}",
+            text.len()
+        );
         assert_eq!(echo.kind, "large paste");
         let windows = crate::infer::split::split_into_segments(&text, &core.counter, budget).len();
         assert!(
@@ -5108,6 +5141,31 @@ mod tests {
         assert!(
             windows > core.counter.count(&text).div_ceil(budget),
             "the fixture must be one the old arithmetic under-reported"
+        );
+    }
+
+    /// And the bound the exact answer stops at. `search_results` asks this on
+    /// every debounced keystroke, so a whole `MarkdownSplitter` pass over a
+    /// pasted article is work the hottest route in the app must not repeat per
+    /// character. Over the bound the line says "at least", which is what the
+    /// arithmetic actually knows.
+    #[tokio::test]
+    async fn a_paste_too_big_to_split_twice_a_second_is_estimated_and_says_so() {
+        let core = crate::core::test_support::test_core().await;
+        let lang = crate::infer::lang::Lang::En;
+        let budget = crate::jobs::synthesize::segment_budget(&core, lang).max(1);
+        let para = "filler words ".repeat(budget * 6 / 10);
+        let text = std::iter::repeat_n(para.trim(), 40)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(text.len() > EXACT_SPLIT_BYTES);
+        let echo = fate_echo(&core, &text, lang);
+        assert_eq!(echo.kind, "large paste");
+        let floor = core.counter.count(&text).div_ceil(budget);
+        assert!(
+            echo.detail.contains(&format!("at least {floor} windows")),
+            "an estimate is offered as one: {}",
+            echo.detail
         );
     }
 

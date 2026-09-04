@@ -234,12 +234,6 @@ struct InsightsTemplate {
     /// no table, because a heading over no rows is a claim that something is
     /// being measured when nothing is.
     offer_rates: Vec<crate::store::pursuits::OfferRate>,
-    /// Whether the `/ui/due` band, loaded separately, has anything to show —
-    /// read with the same window it renders with, so the heading never sits
-    /// over a band that comes back empty. A heading over no rows is a claim
-    /// that something is being measured when nothing is, the same reasoning
-    /// `offer_rates` follows above.
-    has_due: bool,
 }
 
 /// One generated artifact on Ops.
@@ -610,11 +604,6 @@ async fn page(tenant: Tenant) -> Result<Response> {
                 .unwrap_or_default(),
             false => Vec::new(),
         },
-        has_due: {
-            let now = tenant.core.clock.now();
-            let horizon = now + tenant.core.time.horizon_hours as i64 * 3_600;
-            !tenant.core.store.open_due(now, horizon).await?.is_empty()
-        },
     })
     .into_response())
 }
@@ -886,23 +875,14 @@ mod tests {
         );
     }
 
-    /// A heading over a band that loads in empty is a claim that something
-    /// is being measured when nothing is — the same reasoning `offer_rates`
-    /// already follows on this page.
+    /// A heading over a band that loads in empty is a claim that something is
+    /// being measured when nothing is — the same reasoning `offer_rates`
+    /// already follows on this page. It is the band that draws it, because the
+    /// band is what swaps: gated from this side, on a read taken once at page
+    /// render, the heading outlived the rows it was a heading for. See
+    /// `_due.html` and `due::render`.
     #[tokio::test]
-    async fn a_base_with_nothing_due_carries_no_due_heading() {
-        let core = crate::core::test_support::test_core().await;
-        core.ingest("just a note, nothing to remind about", "web", None)
-            .await
-            .unwrap();
-        let html = insights(core).await;
-        assert!(!html.contains("<h2>Due</h2>"), "{html}");
-    }
-
-    /// The reported gap: a reminder existed and nothing on the page that
-    /// measures the base ever said so.
-    #[tokio::test]
-    async fn a_reminder_inside_the_horizon_gets_its_own_heading_and_band() {
+    async fn the_due_heading_is_the_bands_to_draw_and_not_this_pages() {
         let core = crate::core::test_support::test_core().await;
         core.ingest_capture(
             crate::core::ingest::Capture::new("Remind me tomorrow to send the invoice", "ui")
@@ -912,10 +892,17 @@ mod tests {
         .unwrap();
         crate::jobs::test_support::drain(&core).await;
         let html = insights(core).await;
-        assert!(html.contains("<h2>Due</h2>"), "{html}");
+        assert!(
+            !html.contains("<h2>Due</h2>"),
+            "nothing is claimed before the band lands: {html}"
+        );
         assert!(
             html.contains(r#"id="due""#),
             "the same band the workspace column shows: {html}"
+        );
+        assert!(
+            html.contains(r#"head: "1""#),
+            "and it is asked for with its heading: {html}"
         );
     }
 
