@@ -1492,14 +1492,15 @@ dependencies = [
 
 [[package]]
 name = "docling"
-version = "1.14.2"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43c691a22b00526603c6dc7a95279e0fc801ea81b06a9fb0c4c26974c8f32789"
+checksum = "4c8273255bc5e38b73d0179fcee608d634bde73e5361d5204ee9e1d13d02a832"
 dependencies = [
  "calamine",
  "csv",
  "docling-core",
  "docling-pdf",
+ "flate2",
  "image",
  "mail-parser",
  "pulldown-cmark",
@@ -1517,21 +1518,32 @@ dependencies = [
 
 [[package]]
 name = "docling-core"
-version = "1.15.0"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cba5471ecb0cfe435bd1a951879eb5432d84cbdf4b22570adf04d59056952cd3"
+checksum = "f428e5a8d58f3f29992f36e1c45739203cf594603feeca24bb51de265052e6b2"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
 ]
 
 [[package]]
-name = "docling-pdf"
-version = "1.15.0"
+name = "docling-onnx"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90b77b9068a50df92814b758ce02ed1a1218a7af5b0cda03db9235b5e27bb042"
+checksum = "dc2cb60f01247afa1485a0be14044bb1f545fa5df1ef93fbcf0d7dc0fd4fae3f"
 dependencies = [
  "docling-core",
+ "ort",
+]
+
+[[package]]
+name = "docling-pdf"
+version = "1.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5883ce60d3559ee15dee6a744aba45a3078d5d1442f3bb033a593b1a08b2f3ba"
+dependencies = [
+ "docling-core",
+ "docling-onnx",
  "fast_image_resize",
  "flate2",
  "image",
@@ -6467,9 +6479,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.24.1"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
