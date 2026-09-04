@@ -1991,10 +1991,12 @@ pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> st
     let weight = (f64::from(p.recency_weight) * 1000.0).round() / 1000.0;
     doc["vector"]["recency_weight"] = toml_edit::value(weight);
     doc["vector"]["per_source_cap"] = toml_edit::value(p.per_source_cap.map_or(0, |n| n as i64));
+    doc["vector"]["candidate_multiplier"] = toml_edit::value(p.candidate_multiplier as i64);
+    doc["vector"]["recency_half_life_days"] = toml_edit::value(i64::from(p.recency_half_life_days));
     write_beside_and_rename(path, &doc.to_string())
 }
 
-/// Whichever of the two swept keys the environment is currently setting.
+/// Whichever of the four swept keys the environment is currently setting.
 ///
 /// `load` layers `ENGRAM__*` *after* the file, so an operator who set one of
 /// these where the server starts gets that value back on the next boot whatever
@@ -2013,7 +2015,10 @@ pub fn ranking_keys_in_env() -> Vec<String> {
         .filter(|k| {
             matches!(
                 k.to_ascii_uppercase().as_str(),
-                "ENGRAM__VECTOR__RECENCY_WEIGHT" | "ENGRAM__VECTOR__PER_SOURCE_CAP"
+                "ENGRAM__VECTOR__RECENCY_WEIGHT"
+                    | "ENGRAM__VECTOR__PER_SOURCE_CAP"
+                    | "ENGRAM__VECTOR__CANDIDATE_MULTIPLIER"
+                    | "ENGRAM__VECTOR__RECENCY_HALF_LIFE_DAYS"
             )
         })
         .collect()
@@ -3039,6 +3044,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 5\n"));
         assert_eq!(Config::load(Some(&p)).unwrap().feedback.candidates, 5);
+    }
+
+    #[test]
+    fn applying_writes_all_four_knobs_and_eats_no_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n# a comment the apply path must not eat\n"),
+        );
+        write_ranking(
+            &p,
+            &crate::core::ranking::RankingParams {
+                recency_weight: 0.1,
+                per_source_cap: None,
+                candidate_multiplier: 5,
+                recency_half_life_days: 90,
+            },
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("candidate_multiplier = 5"), "{out}");
+        assert!(out.contains("recency_half_life_days = 90"), "{out}");
+        assert!(
+            out.contains("# a comment the apply path must not eat"),
+            "{out}"
+        );
+        let back = Config::load(Some(&p)).unwrap();
+        assert_eq!(back.vector.candidate_multiplier, 5);
+        assert_eq!(back.vector.recency_half_life_days, 90);
+    }
+
+    #[test]
+    fn the_environment_check_knows_all_four_keys() {
+        temp_env::with_var("ENGRAM__VECTOR__CANDIDATE_MULTIPLIER", Some("4"), || {
+            assert!(
+                ranking_keys_in_env()
+                    .iter()
+                    .any(|k| k.eq_ignore_ascii_case("ENGRAM__VECTOR__CANDIDATE_MULTIPLIER"))
+            );
+        });
     }
 
     #[test]

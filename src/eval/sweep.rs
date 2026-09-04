@@ -628,6 +628,7 @@ mod tests {
                 params: GenerationParams {
                     recency_weight: 0.05,
                     per_source_cap: Some(3),
+                    ..Default::default()
                 },
                 embed_recipe: "recipe-a".into(),
                 chat_model: "qwen".into(),
@@ -723,6 +724,7 @@ mod tests {
                 params: GenerationParams {
                     recency_weight: 0.05,
                     per_source_cap: Some(3),
+                    ..Default::default()
                 },
                 embed_recipe: "recipe-a".into(),
                 chat_model: "a-different-model".into(),
@@ -1035,6 +1037,7 @@ mod tests {
         let tried = vec![GenerationParams {
             recency_weight: 0.1,
             per_source_cap: Some(3),
+            ..Default::default()
         }];
         let out = candidates(current, &tried, 8);
         assert!(

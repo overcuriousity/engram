@@ -659,12 +659,16 @@ fn cap_str(c: Option<usize>) -> String {
 /// read as one.
 fn describe(run: &crate::store::eval_runs::EvalRun) -> String {
     format!(
-        "recency {:.2} → {:.2}, cap {} → {} · replayed over {} pairs: \
-         MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}",
+        "recency {:.2} → {:.2}, cap {} → {}, pool ×{} → ×{}, half-life {}d → {}d · \
+         replayed over {} pairs: MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}",
         run.base_params.recency_weight,
         run.best_params.recency_weight,
         cap_str(run.base_params.per_source_cap),
         cap_str(run.best_params.per_source_cap),
+        run.base_params.candidate_multiplier,
+        run.best_params.candidate_multiplier,
+        run.base_params.recency_half_life_days,
+        run.best_params.recency_half_life_days,
         run.pairs_used,
         run.base_mrr,
         run.best_mrr,
@@ -745,9 +749,11 @@ struct EvolveView {
 
 fn params_str(p: &crate::store::generations::GenerationParams) -> String {
     format!(
-        "recency {:.2}, cap {}",
+        "recency {:.2}, cap {}, pool ×{}, half-life {}d",
         p.recency_weight,
-        cap_str(p.per_source_cap)
+        cap_str(p.per_source_cap),
+        p.candidate_multiplier,
+        p.recency_half_life_days
     )
 }
 
@@ -1233,11 +1239,13 @@ mod tests {
         let base = crate::store::eval_runs::RunParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let best = if recommended {
             crate::store::eval_runs::RunParams {
                 recency_weight: 0.1,
                 per_source_cap: None,
+                ..Default::default()
             }
         } else {
             base
@@ -1285,12 +1293,14 @@ mod tests {
                 base: crate::store::eval_runs::RunParams {
                     recency_weight: 0.05,
                     per_source_cap: Some(3),
+                    ..Default::default()
                 },
                 base_recall: 0.70,
                 base_mrr: 0.50,
                 best: crate::store::eval_runs::RunParams {
                     recency_weight: 0.1,
                     per_source_cap: None,
+                    ..Default::default()
                 },
                 best_recall: 0.80,
                 best_mrr: 0.60,

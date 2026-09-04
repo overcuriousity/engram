@@ -17,6 +17,18 @@ use sqlx::Row;
 pub struct RunParams {
     pub recency_weight: f32,
     pub per_source_cap: Option<usize>,
+    /// Absent in rows written before the retrieval knobs existed, which ran
+    /// under the shipped value.
+    #[serde(default = "crate::config::default_candidate_multiplier")]
+    pub candidate_multiplier: usize,
+    #[serde(default = "crate::config::default_recency_half_life_days")]
+    pub recency_half_life_days: u32,
+}
+
+impl Default for RunParams {
+    fn default() -> Self {
+        crate::core::ranking::RankingParams::default().into()
+    }
 }
 
 impl From<crate::core::ranking::RankingParams> for RunParams {
@@ -24,6 +36,8 @@ impl From<crate::core::ranking::RankingParams> for RunParams {
         Self {
             recency_weight: p.recency_weight,
             per_source_cap: p.per_source_cap,
+            candidate_multiplier: p.candidate_multiplier,
+            recency_half_life_days: p.recency_half_life_days,
         }
     }
 }
@@ -33,8 +47,8 @@ impl From<RunParams> for crate::core::ranking::RankingParams {
         Self {
             recency_weight: p.recency_weight,
             per_source_cap: p.per_source_cap,
-            // Filled in by the next task, which widens the stored shape too.
-            ..Default::default()
+            candidate_multiplier: p.candidate_multiplier,
+            recency_half_life_days: p.recency_half_life_days,
         }
     }
 }
@@ -204,15 +218,24 @@ fn hydrate(row: sqlx::sqlite::SqliteRow) -> Result<EvalRun> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_run_written_before_the_retrieval_knobs_still_reads() {
+        let p: RunParams = parse(r#"{"recency_weight":0.05,"per_source_cap":3}"#).unwrap();
+        assert_eq!(p.candidate_multiplier, 3);
+        assert_eq!(p.recency_half_life_days, 180);
+    }
+
     fn sample(recommended: bool) -> NewEvalRun {
         let base = RunParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let best = if recommended {
             RunParams {
                 recency_weight: 0.1,
                 per_source_cap: None,
+                ..Default::default()
             }
         } else {
             base

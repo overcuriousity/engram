@@ -441,6 +441,7 @@ mod tests {
                 params: GenerationParams {
                     recency_weight: 0.05,
                     per_source_cap: Some(3),
+                    ..Default::default()
                 },
                 embed_recipe: "recipe-a".into(),
                 chat_model: "qwen".into(),

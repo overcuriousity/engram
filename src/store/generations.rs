@@ -12,13 +12,25 @@ use sqlx::Row;
 /// does, and a deferred transaction takes its snapshot before the upgrade.
 const IMMEDIATE: &str = "BEGIN IMMEDIATE";
 
-/// The knobs a generation holds. These are the two the runtime sweep already
-/// moves; the set is meant to widen, and nothing else has to change when it
-/// does, because it is stored as JSON.
+/// The knobs a generation holds: the four the idle pass may move. Stored as
+/// JSON so the set can widen without a migration — the two retrieval knobs
+/// arrived after the first rows were written, and those rows still read.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GenerationParams {
     pub recency_weight: f32,
     pub per_source_cap: Option<usize>,
+    /// Absent in rows written before the retrieval knobs existed, which ran
+    /// under the shipped value. The default says so rather than a migration.
+    #[serde(default = "crate::config::default_candidate_multiplier")]
+    pub candidate_multiplier: usize,
+    #[serde(default = "crate::config::default_recency_half_life_days")]
+    pub recency_half_life_days: u32,
+}
+
+impl Default for GenerationParams {
+    fn default() -> Self {
+        crate::core::ranking::RankingParams::default().into()
+    }
 }
 
 impl From<crate::core::ranking::RankingParams> for GenerationParams {
@@ -26,6 +38,8 @@ impl From<crate::core::ranking::RankingParams> for GenerationParams {
         Self {
             recency_weight: p.recency_weight,
             per_source_cap: p.per_source_cap,
+            candidate_multiplier: p.candidate_multiplier,
+            recency_half_life_days: p.recency_half_life_days,
         }
     }
 }
@@ -35,8 +49,8 @@ impl From<GenerationParams> for crate::core::ranking::RankingParams {
         Self {
             recency_weight: p.recency_weight,
             per_source_cap: p.per_source_cap,
-            // Filled in by the next task, which widens the stored shape too.
-            ..Default::default()
+            candidate_multiplier: p.candidate_multiplier,
+            recency_half_life_days: p.recency_half_life_days,
         }
     }
 }
@@ -370,6 +384,7 @@ mod tests {
             params: GenerationParams {
                 recency_weight: 0.05,
                 per_source_cap: Some(3),
+                ..Default::default()
             },
             embed_recipe: "embeddinggemma:768:asym".into(),
             chat_model: "qwen".into(),
@@ -405,6 +420,7 @@ mod tests {
         let params = GenerationParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let g = ensure_generation(&store, params, "recipe-a", "qwen")
             .await
@@ -419,6 +435,7 @@ mod tests {
         let params = GenerationParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let first = ensure_generation(&store, params, "recipe-a", "qwen")
             .await
@@ -441,6 +458,7 @@ mod tests {
         let params = GenerationParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let first = ensure_generation(&store, params, "recipe-a", "qwen")
             .await
@@ -539,6 +557,7 @@ mod tests {
         GenerationParams {
             recency_weight,
             per_source_cap,
+            ..Default::default()
         }
     }
 
@@ -657,6 +676,28 @@ mod tests {
             same.id, g.id,
             "restating what is already live mints nothing"
         );
+    }
+
+    #[test]
+    fn a_generation_written_before_the_retrieval_knobs_still_reads() {
+        // Stage 1 and 2 rows. A migration here would be a recreated database,
+        // which is the price this schema charges and not one a knob may cost.
+        let p: GenerationParams =
+            from_json(r#"{"recency_weight":0.05,"per_source_cap":3}"#).unwrap();
+        assert_eq!(p.candidate_multiplier, 3);
+        assert_eq!(p.recency_half_life_days, 180);
+    }
+
+    #[test]
+    fn the_two_shapes_of_the_parameters_round_trip() {
+        let r = crate::core::ranking::RankingParams {
+            recency_weight: 0.1,
+            per_source_cap: None,
+            candidate_multiplier: 5,
+            recency_half_life_days: 90,
+        };
+        let back: crate::core::ranking::RankingParams = GenerationParams::from(r).into();
+        assert_eq!(back, r);
     }
 
     #[tokio::test]
