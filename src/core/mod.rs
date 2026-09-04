@@ -887,8 +887,7 @@ mod tests {
         let working = Working::default();
         // What the registry does on two cache misses for one subject — and
         // what `open_for_pass` does beside whichever core is serving.
-        let serving =
-            Core::from_config_with(&cfg, vectors.clone(), store.clone(), working.clone());
+        let serving = Core::from_config_with(&cfg, vectors.clone(), store.clone(), working.clone());
         let passing = Core::from_config_with(&cfg, vectors, store, working);
         assert_eq!(serving.measured_line(), 0.0);
         passing

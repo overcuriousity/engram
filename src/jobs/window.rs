@@ -919,7 +919,10 @@ mod tests {
     #[test]
     fn a_neighbour_below_the_line_is_not_put_in_front_of_the_model() {
         assert!(super::worth_showing(Some(0.71), 0.6));
-        assert!(super::worth_showing(Some(0.6), 0.6), "the line is inclusive");
+        assert!(
+            super::worth_showing(Some(0.6), 0.6),
+            "the line is inclusive"
+        );
         assert!(!super::worth_showing(Some(0.59), 0.6));
         // No opinion is not a low score: an exact lexical match reaches here
         // with nothing set, and it is the opposite of weak.
