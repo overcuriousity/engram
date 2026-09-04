@@ -944,15 +944,22 @@ pub struct VectorConfig {
     /// file stays the one place the running configuration can be read.
     #[serde(default = "default_per_source_cap")]
     pub per_source_cap: usize,
+    /// How many times the answer size a search fetches when the cap or the
+    /// reranker will narrow it. See `RankingParams::candidate_multiplier`.
+    #[serde(default = "default_candidate_multiplier")]
+    pub candidate_multiplier: usize,
 }
-fn default_recency_weight() -> f32 {
+pub(crate) fn default_recency_weight() -> f32 {
     0.05
 }
-fn default_per_source_cap() -> usize {
+pub(crate) fn default_per_source_cap() -> usize {
     crate::core::search::MAX_PER_CORPUS
 }
-fn default_recency_half_life_days() -> u32 {
+pub(crate) fn default_recency_half_life_days() -> u32 {
     180
+}
+pub(crate) fn default_candidate_multiplier() -> usize {
+    crate::core::search::CANDIDATE_MULTIPLIER
 }
 fn default_pinned_boost() -> f32 {
     0.15
@@ -2286,7 +2293,19 @@ impl Config {
                  using the default"
             );
         }
-        let ceiling = crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER;
+        if self.vector.candidate_multiplier == 0 {
+            let d = default_candidate_multiplier();
+            self.vector.candidate_multiplier = d;
+            tracing::warn!(
+                using = d,
+                "vector.candidate_multiplier = 0 would fetch nothing to cap; using the default"
+            );
+        }
+        // The widest ordinary search is the top rung of the ladder the pass may
+        // climb to, not the shipped multiplier: a pass that adopted the top
+        // rung would otherwise fetch wider than the ceiling promised.
+        let ceiling = crate::core::search::MAX_LIMIT
+            * crate::core::ranking::MULTIPLIERS[crate::core::ranking::MULTIPLIERS.len() - 1];
         if self.feedback.candidates > ceiling {
             tracing::warn!(
                 configured = self.feedback.candidates,
@@ -2658,6 +2677,7 @@ impl Config {
                 pinned_boost: 0.15,
                 weak_below: 0.35,
                 per_source_cap: 3,
+                candidate_multiplier: 3,
             },
             infer: InferConfig {
                 tokenizer: None,
@@ -2982,7 +3002,8 @@ mod tests {
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(
             cfg.feedback.candidates,
-            crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER
+            crate::core::search::MAX_LIMIT
+                * crate::core::ranking::MULTIPLIERS[crate::core::ranking::MULTIPLIERS.len() - 1]
         );
     }
 
@@ -3036,6 +3057,7 @@ mod tests {
         let params = crate::core::ranking::RankingParams {
             recency_weight: 0.1,
             per_source_cap: None,
+            ..Default::default()
         };
         write_ranking(&p, &params).unwrap();
 
@@ -3064,6 +3086,7 @@ mod tests {
         let params = crate::core::ranking::RankingParams {
             recency_weight: 0.1,
             per_source_cap: Some(2),
+            ..Default::default()
         };
         write_ranking(&p, &params).unwrap();
 
@@ -3091,6 +3114,7 @@ mod tests {
         let params = crate::core::ranking::RankingParams {
             recency_weight: 0.1,
             per_source_cap: Some(2),
+            ..Default::default()
         };
         assert!(write_ranking(&dir.path().join("absent.toml"), &params).is_err());
     }
@@ -3106,6 +3130,7 @@ mod tests {
             &crate::core::ranking::RankingParams {
                 recency_weight: 0.05,
                 per_source_cap: Some(3),
+                ..Default::default()
             },
         )
         .unwrap();

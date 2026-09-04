@@ -216,12 +216,12 @@ pub struct Core {
     /// the registry hands back on reopen. See `Working::line` for why that
     /// matters and `core::gaps::unrelated_line` for what is measured.
     pub line: Arc<std::sync::atomic::AtomicU32>,
-    /// The recency decay's half-life and the pinned tag's boost — the two
-    /// terms the vector store folds into one score and never reports back.
-    /// Held here so the explanation reconstructs them from the same
-    /// configuration the store was built from, rather than from a second
-    /// reading that could drift. See `core::explain::scoring_terms`.
-    pub recency_half_life_days: u32,
+    /// The pinned tag's boost — a term the vector store folds into one score
+    /// and never reports back. Held here so the explanation reconstructs it
+    /// from the same configuration the store was built from, rather than from
+    /// a second reading that could drift. The recency terms used to sit beside
+    /// it; they travel in `ranking` now, because the idle pass moves them. See
+    /// `core::explain::scoring_terms`.
     pub pinned_boost: f32,
     /// The one switch over everything learned from what happens here. Read on
     /// the search path and by every sweep downstream of it, so it lives here
@@ -499,7 +499,6 @@ impl Core {
             // `Working::line`. A core built for one pass and dropped after it
             // still hands its measurement to whichever core is serving.
             line: working.line,
-            recency_half_life_days: cfg.vector.recency_half_life_days.max(1),
             pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
             feedback: cfg.feedback.clone(),
@@ -729,6 +728,7 @@ pub mod test_support {
                 crate::core::ranking::RankingParams {
                     recency_weight: 0.0,
                     per_source_cap: Some(crate::core::search::MAX_PER_CORPUS),
+                    ..Default::default()
                 },
             )),
             tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -738,7 +738,6 @@ pub mod test_support {
             // about the labelling set it themselves.
             weak_floor: 0.0,
             line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            recency_half_life_days: 180,
             pinned_boost: 0.15,
             // Off in tests, whatever ships: the tests that need a log switch
             // it on and the rest assert nothing is recorded.

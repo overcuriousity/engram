@@ -1199,8 +1199,11 @@ impl Core {
         cap: Option<usize>,
         origin: impl Into<Origin>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
-        let weight = self.ranking.read().expect("ranking lock").recency_weight;
-        self.search_inner(query, cap, weight, origin.into(), true, None)
+        let params = crate::core::ranking::RankingParams {
+            per_source_cap: cap,
+            ..*self.ranking.read().expect("ranking lock")
+        };
+        self.search_inner(query, params, origin.into(), true, None)
             .await
     }
 
@@ -1221,15 +1224,8 @@ impl Core {
         params: crate::core::ranking::RankingParams,
         origin: impl Into<Origin>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
-        self.search_inner(
-            query,
-            params.per_source_cap,
-            params.recency_weight,
-            origin.into(),
-            false,
-            None,
-        )
-        .await
+        self.search_inner(query, params, origin.into(), false, None)
+            .await
     }
 
     /// `search_with`, reporting each stage as it starts.
@@ -1248,11 +1244,14 @@ impl Core {
         origin: Origin,
     ) -> impl tokio_stream::Stream<Item = Result<SearchEvent>> + 'static {
         let core = self.clone();
-        let weight = self.ranking.read().expect("ranking lock").recency_weight;
+        let params = crate::core::ranking::RankingParams {
+            per_source_cap: cap,
+            ..*self.ranking.read().expect("ranking lock")
+        };
         async_stream::try_stream! {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let task = tokio::spawn(async move {
-                core.search_inner(&query, cap, weight, origin, true, Some(tx)).await
+                core.search_inner(&query, params, origin, true, Some(tx)).await
             });
             // The sender lives inside the search and is dropped when it
             // returns, so this ends exactly once every stage it reported has
@@ -1272,13 +1271,14 @@ impl Core {
     async fn search_inner(
         &self,
         query: &SearchQuery,
-        cap: Option<usize>,
-        recency_weight: f32,
+        params: crate::core::ranking::RankingParams,
         origin: Origin,
         waited_on: bool,
         stages: Option<tokio::sync::mpsc::UnboundedSender<SearchEvent>>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let door = origin.door;
+        let cap = params.per_source_cap;
+        let recency_weight = params.recency_weight;
         // A client that hung up must not fail a search that is already running:
         // the send is the report, not the work.
         let say = |ev: SearchEvent| {
@@ -1392,7 +1392,7 @@ impl Core {
         // Over-fetch whenever something downstream narrows the list: both the
         // per-source cap and the reranker can only discard what they are given.
         let candidates = if cap.is_some() || reranking {
-            limit * CANDIDATE_MULTIPLIER
+            limit * params.candidate_multiplier
         } else {
             limit
         };
@@ -1418,7 +1418,16 @@ impl Core {
         say(SearchEvent::Stage(SearchStage::Retrieve));
         let hits = self
             .vectors
-            .search_weighted(&vector, &sparse, candidates, &filter, recency_weight)
+            .search_weighted(
+                &vector,
+                &sparse,
+                candidates,
+                &filter,
+                crate::vector::Recency {
+                    weight: recency_weight,
+                    half_life_days: params.recency_half_life_days,
+                },
+            )
             .await?;
 
         // Where retrieval put each hit, read before anything below reorders
@@ -1483,10 +1492,11 @@ impl Core {
 
         // Read once, and from the same configuration the vector store was
         // built from: a second reading of these could drift from the formula
-        // that actually scored this search. `recency_weight` comes off the
-        // parameter rather than the lock, because `search_with_ranking`
-        // overrides it and the sweep must be explained with the weight it ran.
-        let half_life_secs = self.recency_half_life_days as u64 * 86_400;
+        // that actually scored this search. The recency terms come off the
+        // parameters rather than the lock, because `search_with_ranking`
+        // overrides them and a replay must be explained with the settings it
+        // ran under.
+        let half_life_secs = params.recency_half_life_days as u64 * 86_400;
         let pinned_boost = self.pinned_boost;
         // Asked of the store, not of the configuration: the default
         // `search_weighted` drops the weight and delegates to a plain
@@ -2229,6 +2239,31 @@ mod tests {
             explain: false,
             include_deprecated: false,
             include_superseded: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pool_is_as_deep_as_the_multiplier_says() {
+        let core = test_core().await;
+        seed(&core, &[("mounting an image", "procedure", &[])]).await;
+        let mut query = q("mount");
+        query.limit = 4;
+        let base = *core.ranking.read().unwrap();
+        for multiplier in [1usize, 2, 5] {
+            let params = crate::core::ranking::RankingParams {
+                candidate_multiplier: multiplier,
+                per_source_cap: Some(2),
+                ..base
+            };
+            let (_, outcome) = core
+                .search_with_ranking(&query, params, Door::Judge)
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome.explanation.candidates_fetched,
+                4 * multiplier,
+                "multiplier {multiplier}"
+            );
         }
     }
 

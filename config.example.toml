@@ -101,10 +101,15 @@ recency_half_life_days = 180
 # decay curve.
 pinned_boost = 0.15
 # Chunks one document may contribute to a result list, so a long document
-# cannot fill it. 0 lets one document supply every result. This and
-# recency_weight above are the two knobs the tuning sweep measures, and
-# applying its recommendation rewrites them here — see [feedback.tune].
+# cannot fill it. 0 lets one document supply every result. This, recency_weight,
+# recency_half_life_days and candidate_multiplier are the four knobs the tuning
+# sweep and the idle pass may move; applying a recommendation rewrites them here
+# — see [feedback.tune] and [evolve].
 per_source_cap = 3
+# How many times the answer size a search fetches when the cap or the reranker
+# will narrow the list. Wider gives the cap more to choose from and costs a
+# bigger vector read; at 1 a capped search has nothing to refill from.
+candidate_multiplier = 3
 
 # ── Inference roles ─────────────────────────────────────────────────────────
 # Three independent roles. They may all point at one server, or at three

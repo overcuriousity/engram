@@ -755,7 +755,16 @@ mod tests {
             .await
             .unwrap();
         let weighted = v
-            .search_weighted(&[1.0, 0.0, 0.0], &Default::default(), 10, &wide(), 0.9)
+            .search_weighted(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                10,
+                &wide(),
+                crate::vector::Recency {
+                    weight: 0.9,
+                    half_life_days: 180,
+                },
+            )
             .await
             .unwrap();
         assert_eq!(

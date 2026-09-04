@@ -33,6 +33,8 @@ impl From<RunParams> for crate::core::ranking::RankingParams {
         Self {
             recency_weight: p.recency_weight,
             per_source_cap: p.per_source_cap,
+            // Filled in by the next task, which widens the stored shape too.
+            ..Default::default()
         }
     }
 }

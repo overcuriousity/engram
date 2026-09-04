@@ -212,6 +212,15 @@ pub struct LifecycleRow {
     pub last_verified_at: i64,
 }
 
+/// The two terms of the recency stage, chosen per call. Together because they
+/// are meaningless apart: a weight with no half-life is a number with no curve
+/// under it, and a store that applies one applies both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Recency {
+    pub weight: f32,
+    pub half_life_days: u32,
+}
+
 #[async_trait]
 pub trait VectorStore: Send + Sync {
     async fn ensure_collection(&self, dim: usize) -> Result<()>;
@@ -269,22 +278,23 @@ pub trait VectorStore: Send + Sync {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>>;
-    /// `search`, with the recency weight chosen per call rather than fixed
+    /// `search`, with the recency terms chosen per call rather than fixed
     /// when the store was connected.
     ///
-    /// The default ignores it and delegates: only a store that applies recency
-    /// at all has anything to vary, and the tuning sweep is the one caller that
-    /// needs to — it ranks the same pairs under several weights in one pass, so
-    /// the knob cannot live in the connection.
+    /// The default ignores them and delegates: only a store that applies
+    /// recency at all has anything to vary, and the tuning sweep and the idle
+    /// pass are the callers that need to — they rank the same pairs under
+    /// several settings in one pass, so the knobs cannot live in the
+    /// connection.
     async fn search_weighted(
         &self,
         vector: &[f32],
         sparse: &sparse::SparseVector,
         limit: usize,
         filter: &SearchFilter,
-        recency_weight: f32,
+        recency: Recency,
     ) -> Result<Vec<SearchHit>> {
-        let _ = recency_weight;
+        let _ = recency;
         self.search(vector, sparse, limit, filter).await
     }
     /// Whether this store actually runs the recency-decay and pinned-boost

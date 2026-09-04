@@ -529,12 +529,12 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
             engram::core::ranking::RankingParams {
                 recency_weight: 0.0,
                 per_source_cap: Some(engram::core::search::MAX_PER_CORPUS),
+                ..Default::default()
             },
         )),
         tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         weak_floor: 0.0,
         line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        recency_half_life_days: 180,
         pinned_boost: 0.15,
         learn: engram::config::LearnConfig {
             enabled: false,

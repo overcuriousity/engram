@@ -12,8 +12,8 @@
 
 use super::sparse::SparseVector;
 use super::{
-    FacetCount, Facets, LifecycleRow, SearchFilter, SearchHit, Touch, VectorPayload, VectorPoint,
-    VectorStore,
+    FacetCount, Facets, LifecycleRow, Recency, SearchFilter, SearchHit, Touch, VectorPayload,
+    VectorPoint, VectorStore,
 };
 use crate::config::VectorConfig;
 use crate::error::{Error, Result};
@@ -1591,8 +1591,17 @@ impl VectorStore for QdrantVectors {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>> {
-        self.search_weighted(vector, sparse, limit, filter, self.recency_weight)
-            .await
+        self.search_weighted(
+            vector,
+            sparse,
+            limit,
+            filter,
+            Recency {
+                weight: self.recency_weight,
+                half_life_days: self.recency_half_life_days,
+            },
+        )
+        .await
     }
 
     /// This is the store `scoring_formula` was written for.
@@ -1606,7 +1615,7 @@ impl VectorStore for QdrantVectors {
         sparse: &SparseVector,
         limit: usize,
         filter: &SearchFilter,
-        recency_weight: f32,
+        recency: Recency,
     ) -> Result<Vec<SearchHit>> {
         let f = build_filter(filter);
 
@@ -1650,7 +1659,7 @@ impl VectorStore for QdrantVectors {
         // Recency and pinning are applied as a final scoring stage over
         // whatever retrieval returned, so they reorder results without
         // changing which ones were retrieved.
-        if recency_weight > 0.0 || self.pinned_boost > 0.0 {
+        if recency.weight > 0.0 || self.pinned_boost > 0.0 {
             let mut prefetch = std::mem::replace(&mut body, Value::Null);
             // The payload is fetched once, by the outer stage. Asking the
             // prefetch for it too would carry every candidate's full text
@@ -1662,8 +1671,8 @@ impl VectorStore for QdrantVectors {
                 "prefetch": [prefetch],
                 "query": scoring_formula(
                     now_secs(),
-                    self.recency_half_life_days as u64 * SECONDS_PER_DAY,
-                    recency_weight,
+                    recency.half_life_days as u64 * SECONDS_PER_DAY,
+                    recency.weight,
                     self.pinned_boost,
                 ),
                 "limit": limit,
@@ -2189,6 +2198,7 @@ mod tests {
             pinned_boost: 0.15,
             weak_below: 0.35,
             per_source_cap: 3,
+            candidate_multiplier: 3,
         })
         .await
         .unwrap();
@@ -2638,9 +2648,51 @@ mod tests {
             pinned_boost: 0.15,
             weak_below: 0.35,
             per_source_cap: 3,
+            candidate_multiplier: 3,
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_half_life_a_search_is_handed_is_the_one_the_formula_decays_over() {
+        // The half-life used to be fixed when the store connected. The idle
+        // pass ranks the same pairs under several, so it travels with the call
+        // — and this is the request Qdrant actually sees, not our belief about
+        // it.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let decays_over_thirty_days = |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+            body["searches"][0]["query"]["formula"]["sum"][1]["mult"][1]["exp_decay"]["scale"]
+                == json!(30 * SECONDS_PER_DAY)
+        };
+        Mock::given(method("POST"))
+            .and(path("/collections/engram/points/query/batch"))
+            .and(decays_over_thirty_days)
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [ { "points": [] }, { "points": [] } ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        against(&server)
+            .await
+            .search_weighted(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                10,
+                &SearchFilter::default(),
+                Recency {
+                    weight: 0.1,
+                    half_life_days: 30,
+                },
+            )
+            .await
+            .expect("the request carried the half-life it was handed");
     }
 
     #[tokio::test]

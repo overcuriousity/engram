@@ -41,6 +41,7 @@ pub fn grid(current: RankingParams) -> Vec<RankingParams> {
             out.push(RankingParams {
                 recency_weight,
                 per_source_cap,
+                ..current
             });
         }
     }
@@ -1007,6 +1008,7 @@ mod tests {
         let current = RankingParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         assert_eq!(
             candidates(current, &[], 8)[0],
@@ -1017,6 +1019,7 @@ mod tests {
         let odd = RankingParams {
             recency_weight: 0.07,
             per_source_cap: Some(4),
+            ..Default::default()
         };
         assert!(candidates(odd, &[], 8).contains(&odd));
     }
@@ -1027,6 +1030,7 @@ mod tests {
         let current = RankingParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let tried = vec![GenerationParams {
             recency_weight: 0.1,
@@ -1050,6 +1054,7 @@ mod tests {
         let current = RankingParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let out = candidates(current, &[], 4);
         assert!(out.len() <= 4);
@@ -1077,6 +1082,7 @@ mod tests {
         let current = RankingParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let all = candidates(current, &[], 12);
         for c in &all {
@@ -1094,6 +1100,7 @@ mod tests {
         let shipped = RankingParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         assert!(grid(shipped).contains(&shipped));
         assert_eq!(grid(shipped).len(), RECENCY.len() * CAPS.len());
@@ -1102,6 +1109,7 @@ mod tests {
         let odd = RankingParams {
             recency_weight: 0.07,
             per_source_cap: Some(4),
+            ..Default::default()
         };
         assert!(grid(odd).contains(&odd));
         assert_eq!(grid(odd).len(), RECENCY.len() * CAPS.len() + 1);

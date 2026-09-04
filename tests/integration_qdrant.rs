@@ -24,6 +24,7 @@ fn cfg(collection: &str) -> VectorConfig {
         pinned_boost: 0.15,
         weak_below: 0.35,
         per_source_cap: 3,
+        candidate_multiplier: 3,
     }
 }
 
@@ -2124,7 +2125,10 @@ async fn the_reconstructed_recency_term_matches_what_qdrant_scored() {
             &Default::default(),
             10,
             &SearchFilter::default(),
-            0.05,
+            engram::vector::Recency {
+                weight: 0.05,
+                half_life_days: 180,
+            },
         )
         .await
         .unwrap();
