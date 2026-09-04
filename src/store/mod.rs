@@ -8,6 +8,7 @@ pub mod corpora;
 pub mod eval_runs;
 pub mod feedback;
 pub mod gaps;
+pub mod generations;
 pub mod insights;
 pub mod jobs;
 pub mod lineage;

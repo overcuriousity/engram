@@ -17,7 +17,7 @@
 - **Every test must run with no infrastructure.** No Qdrant, no model endpoint. `Store::memory()` and the deterministic fakes are what the suite uses; anything needing a service is `#[ignore]`d and does not count as a test here.
 - **Schema changes are declarative.** `src/store/schema.sql` is one statement of what the schema *is*, applied by `Store::migrate()` on every connect, every object `IF NOT EXISTS`. Adding a *column* to an existing table means recreating the database — so **this stage adds only new tables and touches no existing one.**
 - **Nothing is deleted.** An observation that stops being usable is stamped `excluded_at`; no row is ever removed by this code.
-- **No behaviour change.** Nothing in this stage may alter what a search or an ask returns, or how long either takes. The one place observations reach the existing tuning loop is task 10, behind a config key that ships `false`.
+- **No behaviour change in what is returned.** Nothing in this stage may alter what a search or an ask returns, or the order it returns it in. Two paths gain one INSERT each — opening a result (task 6) and recording an ask (tasks 5 and 7) — and both must be inside the statement's existing transaction, so a stamped open can never lack its observation. The one place observations reach the existing tuning loop is task 10, behind a config key that ships `false`.
 - **Every new config key goes into `config.example.toml`** with the reasoning behind its default, in the voice of the keys around it.
 - **Test names are sentences.** `an_unused_citation_leaves_no_observation`, not `test_observation_2`. Match the file you are editing.
 - Commit after every task. Commit subjects are lowercase sentences in the repo's style: `feat(evolve): ...`, `test(evolve): ...`.
@@ -999,88 +999,29 @@ git commit -m "feat(evolve): a search that was given up on says so, quietly"
 
 ---
 
-### Task 9: An observation whose artifact moved
+### Task 9 — dropped, because it already exists
 
-**Files:**
-- Modify: `src/store/observations.rs`
-- Test: `src/store/observations.rs`
+The original task 9 was "follow `superseded_by`, exclude what is gone". Both
+rules are already implemented on the path observations will flow down:
+`pairs_to_replay` in `src/eval/sweep.rs` calls `get_artifact` and treats
+`NotFound` as skipped rather than as a miss — "a deleted artifact is
+housekeeping, not a ranking result" — and calls `crate::eval::satisfied_by`,
+which is the supersede rule.
 
-**Interfaces:**
-- Produces:
-  - `Store::resolve_observation_targets(&self) -> Result<(usize, usize)>` — returns `(followed, excluded)`. Follows `artifacts.superseded_by` to its end, and stamps `excluded_at` where the artifact is gone entirely.
+Writing a second implementation of both would be machinery for a rule the tree
+already enforces. Stage 2 scores observations directly rather than through
+pairs and will need the rule at that point; it reuses `satisfied_by` then.
 
-The existing rule, applied unchanged: an observation is satisfied by whatever **superseded** the artifact it names, or every merge would report a retrieval regression that is really a bookkeeping change. An observation naming something gone is excluded, never scored as a miss — a miss is a claim about ordering and this is not one.
-
-- [ ] **Step 1: Write the failing tests**
-
-```rust
-#[tokio::test]
-async fn an_observation_follows_the_artifact_that_superseded_its_own() {
-    let (store, gen) = base().await;
-    insert_artifact(&store, "art-1", Some("art-2")).await;
-    insert_artifact(&store, "art-2", None).await;
-    store.record_observation(&obs(&gen, Some("art-1"), Some(1), Source::Cited)).await.unwrap();
-
-    let (followed, excluded) = store.resolve_observation_targets().await.unwrap();
-    assert_eq!((followed, excluded), (1, 0));
-    let back = store.observations_for_generation(&gen, 10).await.unwrap();
-    assert_eq!(back[0].artifact_id.as_deref(), Some("art-2"));
-}
-
-#[tokio::test]
-async fn an_observation_naming_an_artifact_that_is_gone_is_excluded_not_missed() {
-    let (store, gen) = base().await;
-    store.record_observation(&obs(&gen, Some("art-gone"), Some(1), Source::Cited)).await.unwrap();
-
-    let (_, excluded) = store.resolve_observation_targets().await.unwrap();
-    assert_eq!(excluded, 1);
-    assert!(
-        store.observations_for_generation(&gen, 10).await.unwrap().is_empty(),
-        "an excluded observation must not be read back as evidence"
-    );
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
-        .fetch_one(&store.pool).await.unwrap();
-    assert_eq!(n, 1, "and it must not be deleted either");
-}
-
-#[tokio::test]
-async fn an_observation_naming_no_artifact_is_left_alone() {
-    let (store, gen) = base().await;
-    store.record_observation(&obs(&gen, None, None, Source::Unsupported)).await.unwrap();
-    let (followed, excluded) = store.resolve_observation_targets().await.unwrap();
-    assert_eq!((followed, excluded), (0, 0));
-    assert_eq!(store.observations_for_generation(&gen, 10).await.unwrap().len(), 1);
-}
-```
-
-- [ ] **Step 2: Run to verify they fail**
-
-Run: `cargo test --lib store::observations`
-Expected: FAIL — `resolve_observation_targets` does not exist.
-
-- [ ] **Step 3: Implement**
-
-Follow `superseded_by` transitively, bounded, so a chain of merges resolves to its live end. Anything whose id is in no `artifacts` row gets `excluded_at = now()`. Call it from the same retention ticker `jobs::observe` runs on, after it.
-
-- [ ] **Step 4: Run to verify they pass**
-
-Run: `cargo test --lib store::observations`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/store/observations.rs src/jobs/mod.rs
-git commit -m "feat(evolve): an observation outlives a merge and does not outlive a deletion"
-```
-
----
+The `excluded_at` column stays in the schema. It costs nothing, stage 2 uses
+it, and a column added later is a recreated database.
 
 ### Task 10: The sweep may draw on observations, and ships not doing so
 
+(Kept as task 10 so the commit trail matches the plan; task 9 above is a note, not work.)
+
 **Files:**
 - Modify: `src/eval/sweep.rs`
-- Modify: `src/config.rs`, `config.example.toml`
+- Modify: `src/config.rs`, `config.example.toml`, `src/core/mod.rs` (the `Core` field and `test_support`)
 - Test: `src/eval/sweep.rs`
 
 **Interfaces:**
@@ -1094,8 +1035,8 @@ Only **positive** observations may enter. A weak negative is not enough to move 
 - [ ] **Step 1: Put the config on `Core` and give the tests a way to vary it**
 
 Add `pub evolve: crate::config::EvolveConfig` to `Core` (`src/core/mod.rs`),
-populated where the other config sections are. Beside the existing
-`test_core()` in `src/core/test_support.rs`, add:
+populated where the other config sections are. Beside the existing `test_core()` in the
+`pub mod test_support` block of `src/core/mod.rs` (line ~612), add:
 
 ```rust
 /// `test_core()` with one section overridden. Stage 1 needs it because
@@ -1164,7 +1105,7 @@ async fn the_sweep_ignores_observations_by_default() {
     let (core, gen) = sweep_base(false).await;
     seed_used(&core, &gen, 40).await;
     assert!(
-        sweep_pairs(&core).await.unwrap().is_empty(),
+        pairs_to_replay(&core).await.unwrap().0.is_empty(),
         "a shipped default must not change what is recommended"
     );
 }
@@ -1173,7 +1114,7 @@ async fn the_sweep_ignores_observations_by_default() {
 async fn with_the_key_on_a_used_excerpt_is_a_pair_the_sweep_can_score() {
     let (core, gen) = sweep_base(true).await;
     seed_used(&core, &gen, 40).await;
-    assert_eq!(sweep_pairs(&core).await.unwrap().len(), 40);
+    assert_eq!(pairs_to_replay(&core).await.unwrap().0.len(), 40);
 }
 
 #[tokio::test]
@@ -1184,7 +1125,7 @@ async fn a_weak_negative_is_never_a_pair() {
         .await
         .unwrap();
     assert!(
-        sweep_pairs(&core).await.unwrap().is_empty(),
+        pairs_to_replay(&core).await.unwrap().0.is_empty(),
         "weaker evidence may stop a change and may never cause one"
     );
 }
@@ -1196,7 +1137,7 @@ async fn observations_from_a_superseded_generation_are_not_evidence_about_this_o
     // gathered under the old models must stop counting.
     let (core, first) = sweep_base(true).await;
     seed_used(&core, &first, 40).await;
-    assert_eq!(sweep_pairs(&core).await.unwrap().len(), 40, "live, so far");
+    assert_eq!(pairs_to_replay(&core).await.unwrap().0.len(), 40, "live, so far");
 
     core.store
         .record_generation(&NewGeneration {
@@ -1209,16 +1150,16 @@ async fn observations_from_a_superseded_generation_are_not_evidence_about_this_o
         .unwrap();
 
     assert!(
-        sweep_pairs(&core).await.unwrap().is_empty(),
+        pairs_to_replay(&core).await.unwrap().0.is_empty(),
         "a model change ends the era its evidence belonged to"
     );
 }
 ```
 
-`sweep_pairs(&core)` is the pair-gathering step of the sweep, which this task
-extracts into its own function so it can be asserted on without running a
-vector search. If `sweep.rs` already gathers pairs inline, pulling that out is
-the first edit of step 3.
+`pairs_to_replay(core)` already exists in this file and is exactly the
+pair-gathering step — no extraction is needed. It returns `(Vec<Pair>, i64)`,
+where a `Pair` is `(query, satisfies)`. The tests call it directly and read
+`.0.len()`; `sweep_pairs` in the snippets above is that call.
 
 - [ ] **Step 3: Run to verify they fail**
 

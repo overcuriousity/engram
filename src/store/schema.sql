@@ -716,3 +716,32 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- One named, immutable bundle of everything that decides what is retrieved and
+-- in what order, together with the identity of the models that computed under
+-- it. Exactly one row is `live`.
+--
+-- `params` is JSON rather than a column per knob because the set it holds is
+-- meant to widen, and a column per knob would make every widening a recreated
+-- database — which is the price this schema's doctrine charges for an altered
+-- column, and not one a tuning knob should cost.
+--
+-- The models are named because they are inside the measurement. Change the ask
+-- model and every citation-derived number shifts underneath the evidence; a
+-- generation that does not say who computed under it is a row of numbers
+-- nothing can be compared to.
+CREATE TABLE IF NOT EXISTS generations (
+  id            TEXT PRIMARY KEY,
+  created_at    INTEGER NOT NULL,
+  params        TEXT NOT NULL,
+  embed_recipe  TEXT NOT NULL,
+  chat_model    TEXT NOT NULL,
+  -- NULL for the generation a base starts with.
+  parent_id     TEXT,
+  -- Filled when a generation is proposed by a run rather than by a boot.
+  run_id        TEXT,
+  predicted     REAL,
+  -- `live` | `superseded`.
+  state         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_generations_live ON generations(state, created_at DESC);
