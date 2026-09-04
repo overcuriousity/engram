@@ -5,8 +5,8 @@
 //! pairs score under other settings, right now, against the base as it stands.
 //! Baseline and candidates run in one pass over one index, so nothing needs
 //! freezing and nothing needs re-embedding — the query cache means each
-//! distinct query is embedded once and every candidate re-ranks the same
-//! vectors.
+//! distinct query is embedded once, and every candidate is one vector read
+//! over it, whether it reorders what came back or changes how much comes back.
 //!
 //! It reads the live index and only reads it. `Door::Judge` and `mark: false`
 //! are the same discipline the judge page's assign search follows, for the same

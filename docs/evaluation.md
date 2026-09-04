@@ -83,7 +83,17 @@ a different embedding or chat model was configured belongs to another era and
 stops counting. It ships off, because widening what the sweep reads changes
 what it recommends.
 
-The cargo harness is untouched by that key. It scores the pairs a person
+With `evolve.autonomous` on, the same positive observations feed an idle pass
+that adopts settings rather than recommending them. It walks four knobs —
+recency weight, per-source cap, candidate pool depth, recency half-life — one
+knob at a time, replays only stored query vectors through the live index with
+the reranker off, and stops when anybody comes back. Nothing here touches the
+cargo harness: `tests/eval.rs` still freezes its corpus and ranks under the
+parameters it constructs itself, so its numbers stay comparable across every
+generation a base moves through. The harness is how a move the base made is
+checked against something that did not move.
+
+The cargo harness is untouched by either key. It scores the pairs a person
 judged, over a frozen corpus, which is what makes its numbers the ones
 comparable across months.
 
