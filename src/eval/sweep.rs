@@ -50,6 +50,83 @@ pub fn grid(current: RankingParams) -> Vec<RankingParams> {
     out
 }
 
+/// A bounded set of candidates, drawn a step at a time from the running
+/// configuration rather than enumerated.
+///
+/// The grid is twenty candidates today and every axis added multiplies it;
+/// this is what the idle pass walks instead. The running configuration comes
+/// first — it is the baseline — then its nearest neighbour on each axis, then
+/// the next step out on each, until `budget` is spent. A parameter set already
+/// tried and taken back is never offered.
+///
+/// Deliberately not a learned sampler. Neighbours-first is the whole
+/// heuristic: a knob that helps usually helps a little, and the pass runs every
+/// quiet period, so a long walk is reached in small steps that each get their
+/// own watch. Every candidate moves exactly one knob off the baseline, which
+/// is what keeps a result about caps from arriving wearing a recency change.
+pub fn candidates(
+    current: RankingParams,
+    tried: &[crate::store::generations::GenerationParams],
+    budget: usize,
+) -> Vec<RankingParams> {
+    let recency = outward(
+        &RECENCY,
+        |v| *v < current.recency_weight,
+        |v| *v == current.recency_weight,
+    );
+    let cap_key = |c: Option<usize>| c.unwrap_or(usize::MAX);
+    let caps = outward(
+        &CAPS,
+        |v| cap_key(*v) < cap_key(current.per_source_cap),
+        |v| *v == current.per_source_cap,
+    );
+
+    let mut out = vec![current];
+    for i in 0..recency.len().max(caps.len()) {
+        if let Some(per_source_cap) = caps.get(i) {
+            out.push(RankingParams {
+                per_source_cap: *per_source_cap,
+                ..current
+            });
+        }
+        if let Some(recency_weight) = recency.get(i) {
+            out.push(RankingParams {
+                recency_weight: *recency_weight,
+                ..current
+            });
+        }
+    }
+    out.retain(|c| {
+        *c == current
+            || !tried
+                .iter()
+                .any(|t| *t == crate::store::generations::GenerationParams::from(*c))
+    });
+    out.truncate(budget.max(1));
+    out
+}
+
+/// The rungs of one ladder in order of distance from the current one, nearest
+/// first and alternating sides, with the current rung left out.
+fn outward<T: Copy>(
+    ladder: &[T],
+    below: impl Fn(&T) -> bool,
+    current: impl Fn(&T) -> bool,
+) -> Vec<T> {
+    let lower: Vec<T> = ladder.iter().filter(|v| below(v)).rev().copied().collect();
+    let upper: Vec<T> = ladder
+        .iter()
+        .filter(|v| !below(v) && !current(v))
+        .copied()
+        .collect();
+    let mut out = Vec::with_capacity(lower.len() + upper.len());
+    for i in 0..lower.len().max(upper.len()) {
+        out.extend(lower.get(i));
+        out.extend(upper.get(i));
+    }
+    out
+}
+
 /// Whether `cand` placed a pair better than `base` did. A miss loses to any
 /// rank; two misses are equal.
 fn better(cand: Option<usize>, base: Option<usize>) -> bool {
@@ -808,6 +885,93 @@ mod tests {
         assert!(
             !recommend(&base, &[Some(0), Some(0), None, Some(3)]),
             "two climbed and one fell out of the head: MRR must not pay for it"
+        );
+    }
+
+    #[test]
+    fn the_running_configuration_is_always_among_the_candidates() {
+        let current = RankingParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        assert_eq!(
+            candidates(current, &[], 8)[0],
+            current,
+            "and it comes first"
+        );
+        // A hand-set value off every ladder is still the baseline.
+        let odd = RankingParams {
+            recency_weight: 0.07,
+            per_source_cap: Some(4),
+        };
+        assert!(candidates(odd, &[], 8).contains(&odd));
+    }
+
+    #[test]
+    fn a_reverted_candidate_is_never_offered() {
+        use crate::store::generations::GenerationParams;
+        let current = RankingParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        let tried = vec![GenerationParams {
+            recency_weight: 0.1,
+            per_source_cap: Some(3),
+        }];
+        let out = candidates(current, &tried, 8);
+        assert!(
+            !out.iter()
+                .any(|c| c.recency_weight == 0.1 && c.per_source_cap == Some(3)),
+            "{out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|c| c.recency_weight == 0.15 && c.per_source_cap == Some(3)),
+            "the step past the one that failed is still reachable: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_budget_is_respected_and_neighbours_come_first() {
+        let current = RankingParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        let out = candidates(current, &[], 4);
+        assert!(out.len() <= 4);
+        assert!(
+            out.iter()
+                .any(|c| c.per_source_cap == Some(2) || c.per_source_cap == Some(5)),
+            "a neighbour on the cap axis must be reachable inside a small budget: {out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|c| c.recency_weight == 0.0 || c.recency_weight == 0.1),
+            "and so must one on the recency axis: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|c| c.per_source_cap.is_none()),
+            "the far end of the ladder waits its turn: {out:?}"
+        );
+    }
+
+    #[test]
+    fn every_candidate_moves_at_most_one_knob() {
+        // `moved` is what keeps a result about caps from arriving wearing a
+        // recency change; the chooser must not hand it a candidate that already
+        // moved both.
+        let current = RankingParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        let all = candidates(current, &[], 12);
+        for c in &all {
+            assert!(moved(*c, current) <= 1, "{c:?}");
+        }
+        assert_eq!(
+            all.len(),
+            1 + (RECENCY.len() - 1) + (CAPS.len() - 1),
+            "every rung on both ladders, once, and nothing off them"
         );
     }
 
