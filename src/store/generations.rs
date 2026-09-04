@@ -21,6 +21,15 @@ pub struct GenerationParams {
     pub per_source_cap: Option<usize>,
 }
 
+impl From<crate::core::ranking::RankingParams> for GenerationParams {
+    fn from(p: crate::core::ranking::RankingParams) -> Self {
+        Self {
+            recency_weight: p.recency_weight,
+            per_source_cap: p.per_source_cap,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewGeneration {
     pub params: GenerationParams,
@@ -90,6 +99,48 @@ impl Store {
     }
 }
 
+/// The live generation for the running configuration, minting one where the
+/// base has none or where the models have changed under it.
+///
+/// A model change mints a generation rather than editing the live one: a
+/// generation is immutable, and the point of the row is that observations
+/// collected under it name something that still says what it said.
+pub async fn ensure_generation(
+    store: &Store,
+    params: GenerationParams,
+    embed_recipe: &str,
+    chat_model: &str,
+) -> Result<Generation> {
+    let live = store.live_generation().await?;
+    if let Some(live) = &live
+        && live.embed_recipe == embed_recipe
+        && live.chat_model == chat_model
+    {
+        return Ok(live.clone());
+    }
+    let parent_id = live.map(|g| g.id);
+    if parent_id.is_some() {
+        tracing::info!(
+            embed_recipe,
+            chat_model,
+            "models changed; observations recorded before this belong to another era"
+        );
+    }
+    let id = store
+        .record_generation(&NewGeneration {
+            params,
+            embed_recipe: embed_recipe.to_string(),
+            chat_model: chat_model.to_string(),
+            parent_id,
+        })
+        .await?;
+    store
+        .live_generation()
+        .await?
+        .filter(|g| g.id == id)
+        .ok_or_else(|| Error::Store("generations: the new generation was not made live".into()))
+}
+
 // `Error` has no `From<serde_json::Error>`, so both directions map explicitly.
 // This is the shape `eval_runs.rs` already uses; copied rather than replaced by
 // a blanket conversion, which would swallow the context in every other store
@@ -138,6 +189,61 @@ mod tests {
         assert_eq!(live.id, second_id);
         assert_eq!(live.parent_id.as_deref(), Some(first.as_str()));
         assert_eq!(live.params.recency_weight, 0.1);
+    }
+
+    #[tokio::test]
+    async fn a_base_with_no_generation_gets_one_from_the_running_config() {
+        let store = Store::memory().await.unwrap();
+        let params = GenerationParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        let g = ensure_generation(&store, params, "recipe-a", "qwen")
+            .await
+            .unwrap();
+        assert_eq!(g.params, params);
+        assert!(g.parent_id.is_none(), "the first generation has no parent");
+    }
+
+    #[tokio::test]
+    async fn a_second_boot_under_the_same_models_reuses_the_generation() {
+        let store = Store::memory().await.unwrap();
+        let params = GenerationParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        let first = ensure_generation(&store, params, "recipe-a", "qwen")
+            .await
+            .unwrap();
+        let again = ensure_generation(&store, params, "recipe-a", "qwen")
+            .await
+            .unwrap();
+        assert_eq!(
+            first.id, again.id,
+            "an unchanged boot must not mint a generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_changed_chat_model_starts_a_new_era() {
+        // Every citation-derived number shifts when the generator changes.
+        // Carrying on under the same generation would compare two things that
+        // were never measured the same way.
+        let store = Store::memory().await.unwrap();
+        let params = GenerationParams {
+            recency_weight: 0.05,
+            per_source_cap: Some(3),
+        };
+        let first = ensure_generation(&store, params, "recipe-a", "qwen")
+            .await
+            .unwrap();
+        let second = ensure_generation(&store, params, "recipe-a", "llama")
+            .await
+            .unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(second.parent_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(second.params, params, "a model change moves no knob");
     }
 
     #[tokio::test]

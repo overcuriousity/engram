@@ -304,10 +304,14 @@ become autonomous until a restore path exists that a person can actually take.
 ## When the ground moves
 
 **The models change.** A generation names its embedding recipe and its chat
-model. The embedding side is already caught at boot — engram refuses to start
-when stored vectors do not match the configured recipe. The chat model is not
-caught by anything today; that is a small new check at boot against the live
-generation. When either has changed, prior observations are **marked as another
+model. The embedding side is *half* caught at boot, and the halves differ: a
+`dim` that does not match the collection refuses to start, while a changed
+model or template is only a warning — `tenants::embed_recipe_check` says it
+once and carries on, deliberately, because "a base that will not open is worse
+than one that says what is wrong with it". So the recipe change engram already
+notices does not stop anything, and the chat model is noticed by nothing at
+all. Naming both in the generation is what turns either into an era boundary,
+and it is the generation that enforces it rather than a refusal to boot. When either has changed, prior observations are **marked as another
 era, not deleted** — nothing is deleted here — and are no longer eligible for
 adoption. A new line starts from the live generation's parameters, and Ops says
 so rather than the counting silently continuing.

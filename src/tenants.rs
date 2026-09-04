@@ -398,6 +398,9 @@ impl Tenants {
             if let Err(e) = embed_recipe_check(&core, &cfg).await {
                 tracing::warn!(error = %e, "could not check the embedding recipe");
             }
+            if let Err(e) = generation_check(&core, &cfg).await {
+                tracing::warn!(error = %e, "could not name this base's generation");
+            }
             if !reconcile {
                 return;
             }
@@ -685,6 +688,36 @@ mod tests {
         assert_eq!(a.core.store.list_corpora(10, 0).await.unwrap().len(), 1);
         assert!(b.core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
+}
+
+/// Name the settings this tenant is retrieving under, so that what use leaves
+/// behind has something to be evidence *about*.
+///
+/// Beside `embed_recipe_check` and for the same reason: per tenant, answered
+/// from the config and the base together, and asked once when a base opens
+/// rather than on every request.
+///
+/// Both models are pinned, as one string. The ask model writes the citations
+/// and the synthesize model writes the artifacts they cite, so either changing
+/// shifts what the evidence means — and a composite says that without a second
+/// column to keep in step.
+pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
+    let params = crate::store::generations::GenerationParams::from(
+        *core.ranking.read().expect("ranking lock"),
+    );
+    let chat_model = format!(
+        "ask={};synth={}",
+        cfg.infer.ask.as_ref().map_or("none", |a| a.model.as_str()),
+        cfg.infer.synthesize.model,
+    );
+    crate::store::generations::ensure_generation(
+        &core.store,
+        params,
+        &cfg.infer.embed.fingerprint(),
+        &chat_model,
+    )
+    .await?;
+    Ok(())
 }
 
 /// Say it out loud when the embedding recipe changed under a base that already
