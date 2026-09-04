@@ -931,9 +931,9 @@ feed_sweep = false
 # again until the models change.
 #
 # This file is never written by that loop. It holds your starting point; the
-# database holds what is live, and `--print-config` prints both. Turning this
-# off returns the base to the file at the next start, and every move it made is
-# in the tuning history on /ui/insights.
+# database holds what is live, and /ui/insights says which generation that is.
+# Turning this off returns the base to the file at the next start, and every
+# move it made is in the history there.
 #
 # One knob per adoption, and nothing proposed while the last one is watched.
 # Slower, and it keeps the history readable and every revert exact.

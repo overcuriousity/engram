@@ -526,7 +526,7 @@ pub struct EvolveConfig {
     /// moves only after the harness has been run. On, the idle pass adopts a
     /// candidate that clears the sweep's gate as a new generation, watches
     /// what it earns while serving, and reverts it when it does not hold. The
-    /// file is never written; `--print-config` says which generation is live.
+    /// file is never written; the insights page says which generation is live.
     pub autonomous: bool,
     /// How long a base has to have been quiet before the idle pass runs.
     ///
