@@ -18,6 +18,7 @@ pub mod relate;
 pub mod remind;
 pub mod retention;
 pub mod synthesize;
+pub mod tune;
 pub mod window;
 
 use crate::core::Core;

@@ -710,13 +710,18 @@ pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
         cfg.infer.ask.as_ref().map_or("none", |a| a.model.as_str()),
         cfg.infer.synthesize.model,
     );
-    crate::store::generations::ensure_generation(
+    let live = crate::store::generations::boot_generation(
         &core.store,
         params,
         &cfg.infer.embed.fingerprint(),
         &chat_model,
+        cfg.evolve.autonomous,
     )
     .await?;
+    // Serve under it. Shared by every clone of this core, so the requests
+    // already being answered move with it — the same swap the apply button
+    // makes, arrived at from the other side.
+    *core.ranking.write().expect("ranking lock") = live.params.into();
     Ok(())
 }
 

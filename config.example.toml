@@ -917,6 +917,35 @@ give_up_window_secs = 300
 # about.
 feed_sweep = false
 
+# Let a quiet base move its own ranking parameters — the recency weight and the
+# per-source cap — on what use left behind, and take a move back on the same
+# evidence, with nobody pressing anything.
+#
+# Off, for the reason `feed_sweep` is off: a default that changes ranking moves
+# only after the harness has been run. On, an idle pass replays the positive
+# observations under every neighbouring setting, and a candidate that clears the
+# same gate the sweep uses — two net better, no aggregate loss — becomes the
+# live generation. The base then watches what that generation earns while it is
+# actually serving, compared with what its predecessor earned, and puts the
+# predecessor back when it does not hold. A candidate taken back is not offered
+# again until the models change.
+#
+# This file is never written by that loop. It holds your starting point; the
+# database holds what is live, and `--print-config` prints both. Turning this
+# off returns the base to the file at the next start, and every move it made is
+# in the tuning history on /ui/insights.
+#
+# One knob per adoption, and nothing proposed while the last one is watched.
+# Slower, and it keeps the history readable and every revert exact.
+autonomous = false
+
+# How long the base has to have been quiet — no search, no question — before
+# the idle pass runs. Its searches embed nothing (each observation keeps the
+# vector it was searched with) and take the background lane, so a person who
+# comes back gets ahead of it; this is what keeps it from starting under
+# somebody at all. Half an hour is a sitting having ended, not a pause in one.
+idle_secs = 1800
+
 [capture]
 # The upload, paste-a-link and extension doors.
 #

@@ -519,6 +519,21 @@ pub struct EvolveConfig {
     /// it recommends, a recommendation changes ranking, and a default that
     /// changes ranking moves only after the harness has been run.
     pub feed_sweep: bool,
+    /// Let a quiet base move its own ranking parameters on what use left
+    /// behind, and take the move back on the same evidence.
+    ///
+    /// Off, for the reason `feed_sweep` is: a default that changes ranking
+    /// moves only after the harness has been run. On, the idle pass adopts a
+    /// candidate that clears the sweep's gate as a new generation, watches
+    /// what it earns while serving, and reverts it when it does not hold. The
+    /// file is never written; `--print-config` says which generation is live.
+    pub autonomous: bool,
+    /// How long a base has to have been quiet before the idle pass runs.
+    ///
+    /// Quiet means no search and no question. The pass takes its searches on
+    /// the background lane, so a person returning gets ahead of it either way;
+    /// the window is what keeps it from starting under somebody at all.
+    pub idle_secs: i64,
 }
 
 impl Default for EvolveConfig {
@@ -526,6 +541,8 @@ impl Default for EvolveConfig {
         Self {
             give_up_window_secs: 300,
             feed_sweep: false,
+            autonomous: false,
+            idle_secs: 1800,
         }
     }
 }

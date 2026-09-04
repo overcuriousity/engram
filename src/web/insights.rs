@@ -778,6 +778,25 @@ async fn tune_apply(
         .await;
     }
     *tenant.core.ranking.write().expect("ranking lock") = params;
+    // Every ranking change is a named generation, or the observations written
+    // after it are evidence about settings that are not running. Logged and
+    // carried past on failure: the file and the parameters are already
+    // changed, and the journal missing a row is the smaller wrong.
+    match tenant.core.store.live_generation().await {
+        Ok(Some(live)) => {
+            if let Err(e) = crate::store::generations::restate_generation(
+                &tenant.core.store,
+                &live,
+                params.into(),
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "applied settings were not journaled as a generation");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "could not read the live generation"),
+    }
     // The stamp is what closes the recommendation, so its answer is the one
     // thing here that must not be dropped. `false` is the second press of the
     // same button arriving while the first was still in flight: same run, same
@@ -1254,6 +1273,39 @@ mod tests {
                 .is_some()
         );
         assert!(core.store.open_recommendation().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn applying_journals_the_change_as_a_generation() {
+        // Every ranking change is a named generation, or the observations
+        // written after it are evidence about settings that are not running.
+        let (app, cookie, core, run, _) = tune_app(true).await;
+        let params = *core.ranking.read().unwrap();
+        let before = core
+            .store
+            .record_generation(&crate::store::generations::NewGeneration {
+                params: params.into(),
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
+
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        assert_ne!(live.id, before);
+        assert_eq!(live.parent_id.as_deref(), Some(before.as_str()));
+        assert_eq!(
+            crate::core::ranking::RankingParams::from(live.params),
+            *core.ranking.read().unwrap(),
+            "the generation says what is running"
+        );
+        assert!(
+            live.predicted.is_none(),
+            "a hand-applied change is not watched"
+        );
     }
 
     #[tokio::test]

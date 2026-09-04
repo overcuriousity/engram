@@ -26,6 +26,10 @@ pub struct Report {
     pub interactions: u64,
     /// Searches given up on, written down as weak negatives.
     pub gave_up: usize,
+    /// Generations adopted by the idle pass. Zero or one.
+    pub adopted: usize,
+    /// Generations the idle pass took back. Zero or one.
+    pub reverted: usize,
 }
 
 /// What the base holds, as opposed to what this pass did to it.
@@ -70,6 +74,21 @@ pub async fn run(core: &Core) -> Result<Report> {
         Ok(n) => report.gave_up = n,
         Err(e) => {
             tracing::warn!(error = %e, "could not record what was given up on");
+            failure.get_or_insert(e);
+        }
+    }
+
+    // After the give-ups are written and before anything is expired: the pass
+    // reads the observations, and the give-ups just recorded are part of what
+    // the generation under watch is judged on. Its own quiet check is inside;
+    // this unit is only the ticker it hangs off, the way the give-up chain is.
+    match crate::jobs::tune::run_if_quiet(core).await {
+        Ok(p) => {
+            report.adopted = usize::from(p.adopted.is_some());
+            report.reverted = usize::from(p.reverted.is_some());
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "the idle pass failed; the live generation is unchanged");
             failure.get_or_insert(e);
         }
     }

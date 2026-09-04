@@ -1175,6 +1175,19 @@ impl Core {
         self.query_cache.lock().ok().and_then(|c| c.get(&key))
     }
 
+    /// The other direction: hand the cache a vector a query was searched with
+    /// before, so the next search of `q` embeds nothing. What lets a replay of
+    /// stored observations spend no inference — the vector is stored beside
+    /// each one for exactly this.
+    pub fn remember_query_vector(&self, q: &str, vector: Vec<f32>) {
+        let key = q.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Ok(mut c) = self.query_cache.lock()
+            && c.get(&key).is_none()
+        {
+            c.put(key, vector);
+        }
+    }
+
     /// `search`, with the per-source cap chosen by the caller and what the
     /// search cost. `cap` of `None` lets a single source supply every result:
     /// `ask` wants that, since a question is often answered by one document.

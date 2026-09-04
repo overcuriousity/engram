@@ -30,6 +30,15 @@ impl From<crate::core::ranking::RankingParams> for GenerationParams {
     }
 }
 
+impl From<GenerationParams> for crate::core::ranking::RankingParams {
+    fn from(p: GenerationParams) -> Self {
+        Self {
+            recency_weight: p.recency_weight,
+            per_source_cap: p.per_source_cap,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewGeneration {
     pub params: GenerationParams,
@@ -223,7 +232,10 @@ impl Store {
 ///
 /// A model change mints a generation rather than editing the live one: a
 /// generation is immutable, and the point of the row is that observations
-/// collected under it name something that still says what it said.
+/// collected under it name something that still says what it said. The new
+/// era starts from the live generation's parameters, not the file's — a model
+/// change moves no knob — and `params` is only what a base with no generation
+/// at all starts from.
 pub async fn ensure_generation(
     store: &Store,
     params: GenerationParams,
@@ -237,6 +249,7 @@ pub async fn ensure_generation(
     {
         return Ok(live.clone());
     }
+    let params = live.as_ref().map_or(params, |g| g.params);
     let parent_id = live.map(|g| g.id);
     if parent_id.is_some() {
         tracing::info!(
@@ -258,6 +271,80 @@ pub async fn ensure_generation(
         .await?
         .filter(|g| g.id == id)
         .ok_or_else(|| Error::Store("generations: the new generation was not made live".into()))
+}
+
+/// What `meta` remembers the file said the last time this base opened. How a
+/// boot tells an edited file from an unchanged one.
+const FILE_PARAMS_SEEN: &str = "evolve.file_params";
+
+/// The generation a base serves under from this boot on.
+///
+/// The file holds the operator's starting point and the database holds what
+/// is live, and at boot the two can disagree — the idle pass moved a knob
+/// while the file kept saying what it said. Who wins is decided by what
+/// changed:
+///
+/// - the file was edited since the last boot, or autonomy is off: the file
+///   wins, and a generation is minted from it so the journal shows the hand
+///   that moved the knob. Turning the loop off is therefore the way back to
+///   the file, exactly.
+/// - otherwise the live generation wins, because nothing about the operator's
+///   intent changed and the loop's move is the newer fact.
+///
+/// The caller serves under whatever comes back. Without this a restart would
+/// quietly return the ranking to the file while every observation kept being
+/// written under a generation that no longer described it.
+pub async fn boot_generation(
+    store: &Store,
+    file: GenerationParams,
+    embed_recipe: &str,
+    chat_model: &str,
+    autonomous: bool,
+) -> Result<Generation> {
+    let seen: Option<GenerationParams> = match store.meta_get(FILE_PARAMS_SEEN).await? {
+        Some(s) => Some(from_json(&s)?),
+        None => None,
+    };
+    let mut live = ensure_generation(store, file, embed_recipe, chat_model).await?;
+    let file_wins = !autonomous || seen != Some(file);
+    if live.params != file && file_wins {
+        tracing::info!(
+            recency_weight = file.recency_weight,
+            per_source_cap = ?file.per_source_cap,
+            "config.toml sets the ranking; the live generation is superseded by it"
+        );
+        live = restate_generation(store, &live, file).await?;
+    }
+    store.meta_set(FILE_PARAMS_SEEN, &json(&file)?).await?;
+    Ok(live)
+}
+
+/// Journal parameters a person set — by editing the file or pressing Apply —
+/// as a generation of the same era, child of the one that was live.
+///
+/// Every ranking change is a named generation, or the numbers gathered after
+/// it have nothing to be about. `run_id` and `predicted` stay empty: nothing
+/// proposed this and nothing is watching it.
+pub async fn restate_generation(
+    store: &Store,
+    live: &Generation,
+    params: GenerationParams,
+) -> Result<Generation> {
+    if live.params == params {
+        return Ok(live.clone());
+    }
+    let id = store
+        .record_generation(&NewGeneration {
+            params,
+            embed_recipe: live.embed_recipe.clone(),
+            chat_model: live.chat_model.clone(),
+            parent_id: Some(live.id.clone()),
+        })
+        .await?;
+    store
+        .generation(&id)
+        .await?
+        .ok_or_else(|| Error::Store("generations: the restated generation was not written".into()))
 }
 
 // `Error` has no `From<serde_json::Error>`, so both directions map explicitly.
@@ -444,6 +531,130 @@ mod tests {
         assert_eq!(live.id, id);
         assert_eq!(live.predicted, Some(0.04));
         assert_eq!(live.run_id.as_deref(), Some("run-1"));
+    }
+
+    fn p(recency_weight: f32, per_source_cap: Option<usize>) -> GenerationParams {
+        GenerationParams {
+            recency_weight,
+            per_source_cap,
+        }
+    }
+
+    /// A base the loop has moved: the file says 0.05/3, the live generation
+    /// was adopted at 0.25/3.
+    async fn moved_by_the_loop(autonomous: bool) -> (Store, String) {
+        let store = Store::memory().await.unwrap();
+        let file = p(0.05, Some(3));
+        let first = boot_generation(&store, file, "recipe-a", "qwen", autonomous)
+            .await
+            .unwrap();
+        let mut adopted = sample();
+        adopted.parent_id = Some(first.id);
+        adopted.params = p(0.25, Some(3));
+        adopted.embed_recipe = "recipe-a".into();
+        let id = store
+            .adopt_generation(&adopted, "run-1", 0.04)
+            .await
+            .unwrap();
+        (store, id)
+    }
+
+    #[tokio::test]
+    async fn a_generation_the_loop_adopted_survives_a_restart() {
+        // Without this a restart quietly returned the ranking to the file while
+        // every observation kept being written under a generation that no
+        // longer described it.
+        let (store, adopted) = moved_by_the_loop(true).await;
+        let g = boot_generation(&store, p(0.05, Some(3)), "recipe-a", "qwen", true)
+            .await
+            .unwrap();
+        assert_eq!(g.id, adopted);
+        assert_eq!(
+            g.params,
+            p(0.25, Some(3)),
+            "the base serves what it adopted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edited_file_wins_over_what_the_loop_adopted() {
+        let (store, adopted) = moved_by_the_loop(true).await;
+        let g = boot_generation(&store, p(0.0, Some(3)), "recipe-a", "qwen", true)
+            .await
+            .unwrap();
+        assert_ne!(g.id, adopted);
+        assert_eq!(g.params, p(0.0, Some(3)), "a key written in the file wins");
+        assert_eq!(
+            g.parent_id.as_deref(),
+            Some(adopted.as_str()),
+            "and the journal shows the hand that moved it"
+        );
+        assert!(
+            g.predicted.is_none(),
+            "nothing is watching a change a person made"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_autonomy_off_returns_the_base_to_the_file() {
+        let (store, adopted) = moved_by_the_loop(true).await;
+        let g = boot_generation(&store, p(0.05, Some(3)), "recipe-a", "qwen", false)
+            .await
+            .unwrap();
+        assert_ne!(g.id, adopted);
+        assert_eq!(
+            g.params,
+            p(0.05, Some(3)),
+            "off leaves today's behaviour exactly"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_boot_mints_nothing() {
+        let (store, adopted) = moved_by_the_loop(true).await;
+        boot_generation(&store, p(0.05, Some(3)), "recipe-a", "qwen", true)
+            .await
+            .unwrap();
+        boot_generation(&store, p(0.05, Some(3)), "recipe-a", "qwen", true)
+            .await
+            .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generations")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "the first boot's and the adoption, nothing more");
+        assert_eq!(store.live_generation().await.unwrap().unwrap().id, adopted);
+    }
+
+    #[tokio::test]
+    async fn a_new_era_starts_from_the_live_parameters_not_the_files() {
+        let (store, _) = moved_by_the_loop(true).await;
+        let g = boot_generation(&store, p(0.05, Some(3)), "recipe-b", "qwen", true)
+            .await
+            .unwrap();
+        assert_eq!(g.embed_recipe, "recipe-b");
+        assert_eq!(g.params, p(0.25, Some(3)), "a model change moves no knob");
+    }
+
+    #[tokio::test]
+    async fn a_hand_applied_change_is_a_generation_of_the_same_era() {
+        let store = Store::memory().await.unwrap();
+        let first = ensure_generation(&store, p(0.05, Some(3)), "recipe-a", "qwen")
+            .await
+            .unwrap();
+        let g = restate_generation(&store, &first, p(0.05, Some(5)))
+            .await
+            .unwrap();
+        assert_eq!(g.parent_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(g.embed_recipe, first.embed_recipe);
+        assert_eq!(store.live_generation().await.unwrap().unwrap().id, g.id);
+        let same = restate_generation(&store, &g, p(0.05, Some(5)))
+            .await
+            .unwrap();
+        assert_eq!(
+            same.id, g.id,
+            "restating what is already live mints nothing"
+        );
     }
 
     #[tokio::test]
