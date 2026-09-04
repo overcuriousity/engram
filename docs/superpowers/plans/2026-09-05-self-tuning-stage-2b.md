@@ -30,7 +30,7 @@ One consequence to state plainly: **the in-memory vector store ignores recency.*
 
 The spec held this stage back for a cost conversation. Here is the answer, and it is two rules rather than a number:
 
-1. **The nearest step on every axis, and no further in one pass.** `tune::BUDGET` becomes 9: the running configuration plus its nearest neighbour each way on each of four axes. A far rung is reached in later passes as the base walks, each step getting its own watch. Nine searches per pair, over at most `OBSERVATION_LIMIT` pairs, of vector reads only.
+1. **Every rung on every axis, one knob at a time, and no combinations.** `tune::BUDGET` becomes 16: the running configuration plus every other rung of each of four ladders. Sixteen searches per pair, over at most `OBSERVATION_LIMIT` pairs, of vector reads only. *Not* "the nearest step only", which this plan first said: a tie keeps the current value, so an improvement two rungs out behind a rung that ties would never be reached at all — the stage 2 fixture showed exactly that, with caps 5 and 3 tying an uncapped baseline and cap 2 the improvement.
 2. **The pass stops when somebody comes back.** Between pairs it asks whether a search or a question has been recorded since it started; if so it abandons the pass with nothing written — a pass is never partially adopted — and the next quiet period starts it over. Recomputing is the resumption: the pass is bounded by rule 1, so a restart costs what a pass costs, and no partial state has to be kept correct across a sitting.
 
 ## Global Constraints
@@ -548,7 +548,7 @@ git commit -m "feat(evolve): a generation carries the retrieval knobs, and rows 
 - Modify: `src/eval/sweep.rs` — `candidates`, `moved`, `grid`
 - Modify: `src/jobs/tune.rs` — `BUDGET`
 
-**Interfaces produced:** none new. `candidates(current, tried, budget)` keeps its signature and offers steps on four axes.
+**Interfaces produced:** none new. `candidates(current, tried, budget)` keeps its signature and offers steps on four axes. `BUDGET` becomes `pub(crate)` and 16 — see "What a quiet base may spend" for why not 9.
 
 `grid` — the verdict-paid sweep's 5 × 4 — stays two-axis. The human sweep is paced by verdicts and runs the reranker; widening it to a hundred candidates is not this plan's business. It fills the other two knobs from `current` so its candidates move nothing it does not measure.
 

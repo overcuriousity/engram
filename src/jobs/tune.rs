@@ -29,10 +29,14 @@ use crate::eval::lived::{holds_up, lived, settled};
 use crate::eval::sweep;
 use crate::store::generations::{Generation, GenerationParams, NewGeneration};
 
-/// How many candidates one pass ranks the pairs under. A bound on work rather
-/// than a setting: with two axes it covers every rung of both ladders, and a
-/// third axis will spend it on the nearest steps first.
-const BUDGET: usize = 8;
+/// How many candidates one pass ranks the pairs under: the running
+/// configuration and every rung on every axis, one knob moved at a time. A
+/// bound on work rather than a setting, and deliberately not "the nearest step
+/// only": a tie keeps the current value, so an improvement two rungs out
+/// behind a rung that ties would never be reached at all. Sixteen vector reads
+/// per pair, over a bounded number of pairs, and the pass stops when somebody
+/// comes back.
+pub(crate) const BUDGET: usize = 16;
 
 /// What one pass did. Flat counts, so `jobs::did_work` reads them.
 #[derive(Debug, Default, Clone, serde::Serialize)]

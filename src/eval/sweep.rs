@@ -54,22 +54,26 @@ pub fn grid(current: RankingParams) -> Vec<RankingParams> {
 /// A bounded set of candidates, drawn a step at a time from the running
 /// configuration rather than enumerated.
 ///
-/// The grid is twenty candidates today and every axis added multiplies it;
-/// this is what the idle pass walks instead. The running configuration comes
-/// first — it is the baseline — then its nearest neighbour on each axis, then
-/// the next step out on each, until `budget` is spent. A parameter set already
-/// tried and taken back is never offered.
+/// The grid is twenty candidates over two axes and every axis added multiplies
+/// it; this is what the idle pass walks instead, over all four knobs of
+/// `RankingParams`. The running configuration comes first — it is the baseline
+/// — then its nearest neighbour on each axis, then the next step out on each,
+/// until `budget` is spent. A parameter set already tried and taken back is
+/// never offered.
 ///
 /// Deliberately not a learned sampler. Neighbours-first is the whole
 /// heuristic: a knob that helps usually helps a little, and the pass runs every
 /// quiet period, so a long walk is reached in small steps that each get their
 /// own watch. Every candidate moves exactly one knob off the baseline, which
 /// is what keeps a result about caps from arriving wearing a recency change.
+/// A reorder knob and a retrieval knob cost the pass the same — one vector
+/// read per pair — so the axes are interleaved rather than ordered.
 pub fn candidates(
     current: RankingParams,
     tried: &[crate::store::generations::GenerationParams],
     budget: usize,
 ) -> Vec<RankingParams> {
+    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS};
     let recency = outward(
         &RECENCY,
         |v| *v < current.recency_weight,
@@ -81,9 +85,28 @@ pub fn candidates(
         |v| cap_key(*v) < cap_key(current.per_source_cap),
         |v| *v == current.per_source_cap,
     );
+    let multipliers = outward(
+        &MULTIPLIERS,
+        |v| *v < current.candidate_multiplier,
+        |v| *v == current.candidate_multiplier,
+    );
+    let half_lives = outward(
+        &HALF_LIVES,
+        |v| *v < current.recency_half_life_days,
+        |v| *v == current.recency_half_life_days,
+    );
 
     let mut out = vec![current];
-    for i in 0..recency.len().max(caps.len()) {
+    let longest = [
+        recency.len(),
+        caps.len(),
+        multipliers.len(),
+        half_lives.len(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    for i in 0..longest {
         if let Some(per_source_cap) = caps.get(i) {
             out.push(RankingParams {
                 per_source_cap: *per_source_cap,
@@ -93,6 +116,18 @@ pub fn candidates(
         if let Some(recency_weight) = recency.get(i) {
             out.push(RankingParams {
                 recency_weight: *recency_weight,
+                ..current
+            });
+        }
+        if let Some(candidate_multiplier) = multipliers.get(i) {
+            out.push(RankingParams {
+                candidate_multiplier: *candidate_multiplier,
+                ..current
+            });
+        }
+        if let Some(recency_half_life_days) = half_lives.get(i) {
+            out.push(RankingParams {
+                recency_half_life_days: *recency_half_life_days,
                 ..current
             });
         }
@@ -177,6 +212,8 @@ pub fn recommend(base: &[Option<usize>], cand: &[Option<usize>]) -> bool {
 fn moved(cand: RankingParams, current: RankingParams) -> usize {
     usize::from(cand.recency_weight != current.recency_weight)
         + usize::from(cand.per_source_cap != current.per_source_cap)
+        + usize::from(cand.candidate_multiplier != current.candidate_multiplier)
+        + usize::from(cand.recency_half_life_days != current.recency_half_life_days)
 }
 
 /// One pair to replay: a query, every id that satisfies it already resolved,
@@ -1039,7 +1076,7 @@ mod tests {
             per_source_cap: Some(3),
             ..Default::default()
         }];
-        let out = candidates(current, &tried, 8);
+        let out = candidates(current, &tried, 64);
         assert!(
             !out.iter()
                 .any(|c| c.recency_weight == 0.1 && c.per_source_cap == Some(3)),
@@ -1082,20 +1119,61 @@ mod tests {
         // `moved` is what keeps a result about caps from arriving wearing a
         // recency change; the chooser must not hand it a candidate that already
         // moved both.
-        let current = RankingParams {
-            recency_weight: 0.05,
-            per_source_cap: Some(3),
-            ..Default::default()
-        };
-        let all = candidates(current, &[], 12);
+        let current = RankingParams::default();
+        let all = candidates(current, &[], 64);
         for c in &all {
             assert!(moved(*c, current) <= 1, "{c:?}");
         }
         assert_eq!(
             all.len(),
-            1 + (RECENCY.len() - 1) + (CAPS.len() - 1),
-            "every rung on both ladders, once, and nothing off them"
+            1 + (RECENCY.len() - 1)
+                + (CAPS.len() - 1)
+                + (crate::core::ranking::MULTIPLIERS.len() - 1)
+                + (crate::core::ranking::HALF_LIVES.len() - 1),
+            "every rung on every ladder, once, and nothing off them"
         );
+    }
+
+    #[test]
+    fn the_pass_budget_covers_every_rung_on_every_axis() {
+        // A tie keeps the current value, so an improvement two rungs out
+        // behind a rung that ties would never be reached by a pass that only
+        // tried the nearest step. The budget has to reach the whole ladder.
+        let current = RankingParams::default();
+        let all = candidates(current, &[], usize::MAX);
+        assert_eq!(all.len(), crate::jobs::tune::BUDGET, "{all:?}");
+        for c in &all {
+            assert!(moved(*c, current) <= 1, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn a_reverted_pool_depth_is_not_offered_again() {
+        use crate::store::generations::GenerationParams;
+        let current = RankingParams::default();
+        let tried = vec![GenerationParams::from(RankingParams {
+            candidate_multiplier: 5,
+            ..current
+        })];
+        let out = candidates(current, &tried, 64);
+        assert!(!out.iter().any(|c| c.candidate_multiplier == 5), "{out:?}");
+        assert!(
+            out.iter().any(|c| c.candidate_multiplier == 8),
+            "the rung past it is still there"
+        );
+    }
+
+    #[test]
+    fn the_verdict_paid_grid_moves_only_the_two_knobs_it_measures() {
+        let current = RankingParams {
+            candidate_multiplier: 5,
+            recency_half_life_days: 90,
+            ..RankingParams::default()
+        };
+        for c in grid(current) {
+            assert_eq!(c.candidate_multiplier, 5, "{c:?}");
+            assert_eq!(c.recency_half_life_days, 90, "{c:?}");
+        }
     }
 
     #[test]
