@@ -27,12 +27,24 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     };
     let now = crate::store::now();
 
-    // The engaged artifacts, whatever their provenance — a generated artifact
-    // the operator pivoted through contributes its own text, unresolved. In
-    // engagement order, the way the sweep stored them.
-    let rows = core.store.artifacts_by_ids(&p.sources).await?;
-    let mut sources: Vec<crate::store::artifacts::Chunk> = p
-        .sources
+    // The engaged artifacts resolved to what was captured, in engagement
+    // order. A synthesized artifact the operator pivoted through contributes
+    // its roots, never its own text: a synthesis is a consolidation of
+    // originals, and consolidating consolidations is how three generations
+    // drifted from web tracking to Petri nets while every literal checked
+    // out. `roots_of` answers a captured artifact with itself and a synthesis
+    // whose roots are all gone with nothing, which is the right amount.
+    let roots = core.store.roots_of(&p.sources).await?;
+    let mut ids: Vec<String> = Vec::new();
+    for id in &p.sources {
+        for r in roots.get(id).into_iter().flatten() {
+            if !ids.contains(r) {
+                ids.push(r.clone());
+            }
+        }
+    }
+    let rows = core.store.artifacts_by_ids(&ids).await?;
+    let mut sources: Vec<crate::store::artifacts::Chunk> = ids
         .iter()
         .filter_map(|id| rows.iter().find(|c| &c.id == id).cloned())
         .filter(|c| c.in_results())
@@ -215,7 +227,7 @@ async fn answered_since(
         // `None` is "no opinion" rather than a low value — a lexical hit the
         // dense half never returned — and closing a pursuit is a claim about
         // distance, the same rule `gaps::cover` reads the line by.
-        .filter(|h| h.similarity.is_some_and(|s| s >= core.weak_below))
+        .filter(|h| h.similarity.is_some_and(|s| s >= core.weak_below()))
         .map(|h| h.payload.artifact_id)
         .filter(|id| !p.sources.contains(id))
         .collect();
@@ -241,9 +253,7 @@ pub const PURSUIT_AFTER: &str = "pursuit.events_after";
 /// first sweep after `[learn]` is turned on, where there is no cursor
 /// and the window would otherwise open at the epoch. Recording is on by
 /// default, so that window holds every search the base has taken since it was
-/// installed — and the clustering below is quadratic in *memory* as well as
-/// time, so reading it is not a slow sweep, it is one `Vec` the size of the
-/// square of the log.
+/// installed, and every interaction with it.
 ///
 /// A day is chosen because a pursuit is a sitting, and the sweep after an
 /// idle stretch has already seen everything older than the last one.
@@ -256,7 +266,7 @@ pub struct Need {
     pub queries: Vec<String>,
     pub opened_at: i64,
     pub last_at: i64,
-    /// A synthesized artifact led one of the lists above `weak_below`.
+    /// A synthesized artifact led one of the lists above the weak line.
     pub answered: bool,
     /// A question was answered "not in the knowledge base".
     pub abstained: bool,
@@ -267,9 +277,6 @@ pub struct Need {
     pub dwell: Vec<(String, f64)>,
     pub pivots: usize,
     pub returns: usize,
-    /// Something opened or confirmed was a strong hit — at or above
-    /// `weak_below` — or a question cited it.
-    pub strong_engaged: bool,
     /// Searches with nothing opened that were followed by another search.
     pub refined: usize,
     /// The last search opened nothing and nothing followed it.
@@ -283,12 +290,15 @@ pub enum Decision {
     Generate,
 }
 
-/// The signals that say the need went unmet, whatever else happened: no strong
-/// hit was engaged, the question was rephrased and rephrased, the last search
-/// was walked away from, the model declined to answer.
+/// The signals that say the need went unmet, whatever else happened: nothing
+/// the base offered was engaged, the question was rephrased and rephrased,
+/// the last search was walked away from, the model declined to answer.
 ///
+/// Everything in `engagement` was reached from a hit at or above the weak
+/// line — the sweep attaches nothing else — so "engaged" and "engaged
+/// something strong" are one condition.
 pub fn unsatisfied(n: &Need) -> bool {
-    !n.strong_engaged || n.refined >= 2 || n.abandoned || n.abstained
+    n.engagement.is_empty() || n.refined >= 2 || n.abandoned || n.abstained
 }
 
 /// The analysis pass, in the spec's order. Pure: every input is in `Need`.
@@ -404,52 +414,74 @@ pub async fn run(core: &Core) -> Result<usize> {
         .collect();
     evs.sort_by_key(|e| e.at);
 
-    // An interaction belongs to the latest event before it, in the same scope,
-    // within the idle window. Never to an answered search: the base answered,
-    // and what was opened afterwards is not a need.
+    // An interaction belongs to the latest event before it — in the same
+    // scope, within the idle window — that *reached* its artifact: showed it
+    // at or above the weak line, confirmed it, cited it, or showed whatever
+    // it was pivoted from. Never to an answered search: the base answered,
+    // and what was opened afterwards is not a need. And never by the clock
+    // alone: the opens after a search that found nothing are the operator
+    // reading something else, and billing them to that search is what turned
+    // nine minutes of Nmap notes into an artifact about page changes.
+    let weak = core.weak_below();
+    let mut reach: Vec<std::collections::HashSet<String>> = evs
+        .iter()
+        .map(|e| {
+            let mut r: std::collections::HashSet<String> = e
+                .shown
+                .iter()
+                .filter(|(_, sim)| sim.is_none_or(|s| s >= weak))
+                .map(|(id, _)| id.clone())
+                .collect();
+            r.extend(e.confirmed.iter().cloned());
+            r.extend(e.cited.iter().cloned());
+            r
+        })
+        .collect();
     let mut attached: Vec<Vec<usize>> = vec![Vec::new(); evs.len()];
     for (k, i) in interactions.iter().enumerate() {
         let owner = evs
             .iter()
             .enumerate()
             .filter(|(_, e)| e.at <= i.at && i.at - e.at <= idle && e.scope == i.scope)
+            .filter(|(idx, _)| {
+                reach[*idx].contains(&i.artifact_id)
+                    || i.via.as_ref().is_some_and(|v| reach[*idx].contains(v))
+            })
             .max_by_key(|(_, e)| e.at)
             .map(|(idx, _)| idx);
         if let Some(idx) = owner {
+            // A pivot lands somewhere the search never showed; opening it
+            // afterwards is still this pursuit.
+            reach[idx].insert(i.artifact_id.clone());
             attached[idx].push(k);
         }
     }
 
-    let vecs: Vec<Vec<f32>> = evs.iter().map(|e| e.vec.clone()).collect();
-    let line = crate::core::gaps::link_threshold(&vecs);
-    let refs: Vec<&[f32]> = vecs.iter().map(Vec::as_slice).collect();
-    let clusters = crate::core::gaps::cluster(&refs, line);
-
-    // `cluster` groups on the words alone, and the words do not say when. Two
-    // sittings a week apart on one subject come back as one group, and every
-    // count taken over it is then taken across the gap: `opened_at`/`last_at`
-    // span the week, and `refined`/`abandoned` are read from events that were
-    // never consecutive. Splitting on the same idle gap that decides when the
-    // sweep runs is what makes each piece a pursuit — something that ended —
-    // rather than a topic.
-    let clusters: Vec<Vec<usize>> = clusters
-        .into_iter()
-        .flat_map(|mut members| {
-            members.sort_by_key(|&m| evs[m].at);
-            let mut sittings: Vec<Vec<usize>> = Vec::new();
-            for m in members {
-                match sittings.last_mut() {
-                    Some(run) if evs[m].at - evs[*run.last().unwrap()].at <= idle => run.push(m),
-                    _ => sittings.push(vec![m]),
-                }
-            }
-            sittings
-        })
-        .collect();
+    // Grouped by the lead: an event joins the pursuit whose first query it is
+    // nearest, if that is at or above the line and the pursuit is still
+    // within the idle gap; otherwise it opens one. Anchoring on the lead
+    // rather than linking transitively is what keeps "datenfluss" from
+    // pulling "Petrinetze" in over a bridge the two endpoints never cross —
+    // and the idle gap is what makes each group a sitting, something that
+    // ended, rather than a topic.
+    let line = core.link_at();
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    for m in 0..evs.len() {
+        let best = clusters
+            .iter_mut()
+            .filter(|c| evs[m].at - evs[*c.last().unwrap()].at <= idle)
+            .map(|c| (crate::core::gaps::cosine(&evs[c[0]].vec, &evs[m].vec), c))
+            .filter(|(sim, _)| *sim >= line)
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        match best {
+            Some((_, c)) => c.push(m),
+            None => clusters.push(vec![m]),
+        }
+    }
 
     let mut written = 0;
     for members in clusters {
-        let need = need_of(core, &evs, &members, &attached, &interactions);
+        let need = need_of(&evs, &members, &attached, &interactions);
         // Sources in the order they go to the model: engagement first, dwell
         // breaking ties. Dwell moves an artifact up the list and nothing else.
         let mut ranked: Vec<(String, f64)> = need
@@ -525,7 +557,6 @@ pub async fn run(core: &Core) -> Result<usize> {
 
 /// Score one cluster.
 fn need_of(
-    core: &Core,
     evs: &[Ev],
     members: &[usize],
     attached: &[Vec<usize>],
@@ -562,13 +593,11 @@ fn need_of(
             // exists and the engagement that says it was pursued.
             for id in &e.cited {
                 bump(id, 1.0);
-                n.strong_engaged = true;
             }
             continue;
         }
         if let Some(id) = &e.confirmed {
             bump(id, 3.0);
-            n.strong_engaged = true;
         }
         let mine: Vec<&crate::store::pursuits::Interaction> = attached[m]
             .iter()
@@ -612,12 +641,6 @@ fn need_of(
                     n.returns += 1;
                 }
                 touched.push(i.artifact_id.clone());
-                let strong = e
-                    .shown
-                    .iter()
-                    .find(|(id, _)| id == &i.artifact_id)
-                    .is_some_and(|(_, sim)| sim.is_none_or(|s| s >= core.weak_below));
-                n.strong_engaged |= strong;
             }
         }
         let followed = pos + 1 < members.len();
@@ -754,6 +777,57 @@ mod tests {
         }
     }
 
+    /// A generation reads originals. A pursuit whose engaged source is itself
+    /// a synthesis hands the model that synthesis's roots, so the lineage of
+    /// what gets written stays one step deep and the prompt never carries a
+    /// paraphrase as an excerpt.
+    #[tokio::test]
+    async fn a_synthesized_source_contributes_its_roots_not_its_text() {
+        let mut core = test_core().await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+        ]));
+        core.generator = Some(scripted.clone());
+        let ids = two_sources(&core).await;
+        let earlier = core
+            .store
+            .insert_synthesized_artifact(
+                &NewSynthesized {
+                    text: "an earlier write-up".into(),
+                    title: Some("Earlier".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                    cues: vec![],
+                },
+                &ids,
+            )
+            .await
+            .unwrap();
+        let pid = core
+            .store
+            .insert_pursuit(100, &["q".into()], std::slice::from_ref(&earlier.id), None)
+            .await
+            .unwrap();
+        generate(&core, &pid).await.unwrap();
+        let made = core.store.synthesized_artifacts(10).await.unwrap();
+        let g = made.iter().find(|g| g.id != earlier.id).expect("generated");
+        let roots = core
+            .store
+            .roots_of(std::slice::from_ref(&g.id))
+            .await
+            .unwrap();
+        let mut got = roots[&g.id].clone();
+        got.sort();
+        let mut want = ids.clone();
+        want.sort();
+        assert_eq!(got, want, "the roots, not the synthesis");
+        assert!(!got.contains(&earlier.id));
+        let prompt = scripted.prompts().remove(0);
+        assert!(!prompt.contains("an earlier write-up"), "{prompt}");
+        assert!(prompt.contains("S0") && prompt.contains("S1"), "{prompt}");
+    }
+
     #[tokio::test]
     async fn a_generation_that_abstains_writes_nothing_and_closes_unsatisfied() {
         let mut core = test_core().await;
@@ -814,7 +888,7 @@ mod tests {
             .unwrap();
         while crate::jobs::run_one(&core).await.unwrap() {}
         core.background.wait_idle().await;
-        core.weak_below = core
+        let at = core
             .vectors
             .search(
                 &v,
@@ -831,6 +905,7 @@ mod tests {
             .and_then(|h| h.similarity)
             .expect("the capture embedded nothing")
             - 0.01;
+        core.set_weak_below(at);
 
         generate(&core, &pid).await.unwrap();
 
@@ -875,7 +950,6 @@ mod tests {
         Need {
             queries: vec!["q".into()],
             engagement: engaged.iter().map(|(i, w)| (i.to_string(), *w)).collect(),
-            strong_engaged: true,
             ..Default::default()
         }
     }
@@ -902,13 +976,14 @@ mod tests {
         let mut n = need(&[("a", 3.0), ("b", 1.0), ("c", 1.0)]);
         n.returns = 1;
         assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
-        // Two weak opens totalling 2.0: unsatisfied but not worth a call.
+        // Two opens totalling 2.0 and then walked away from: unsatisfied but
+        // not worth a call.
         let mut n = need(&[("a", 1.0), ("b", 1.0)]);
-        n.strong_engaged = false;
+        n.abandoned = true;
         assert!(matches!(decide(&n, 2, 3.0), Decision::Unsatisfied(_)));
-        // Two weak opens totalling 3.0: generate.
+        // Two opens totalling 3.0, walked away from: generate.
         let mut n = need(&[("a", 1.5), ("b", 1.5)]);
-        n.strong_engaged = false;
+        n.abandoned = true;
         assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
         // An abstention with two cited sources: generate.
         let mut n = need(&[("a", 2.0), ("b", 1.0)]);
@@ -920,7 +995,6 @@ mod tests {
         assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
         // Nothing engaged and abandoned: unsatisfied.
         let mut n = need(&[]);
-        n.strong_engaged = false;
         n.abandoned = true;
         assert!(matches!(decide(&n, 2, 3.0), Decision::Unsatisfied(_)));
     }
@@ -1349,6 +1423,85 @@ mod tests {
         ids_before.sort_unstable();
         ids_after.sort_unstable();
         assert_eq!(ids_before, ids_after);
+    }
+
+    /// The clock is not attribution. A search that found nothing, followed by
+    /// nine minutes of reading something the search never showed, is a search
+    /// nobody followed — not a pursuit that engaged what was read.
+    #[tokio::test]
+    async fn an_open_the_search_never_showed_attaches_to_nothing() {
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        search_event(
+            &core,
+            "the css when the page changes",
+            vec![1.0, 0.0],
+            &[],
+            now - 100,
+        )
+        .await;
+        for (i, id) in ids.iter().enumerate() {
+            core.store
+                .record_interaction(id, "opened", None, Some("me"), now - 90 + i as i64)
+                .await
+                .unwrap();
+        }
+        assert_eq!(run(&core).await.unwrap(), 1);
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert_eq!(p.reason.as_deref(), Some("nothing engaged"), "{p:?}");
+        assert!(p.sources.is_empty(), "{p:?}");
+    }
+
+    /// A pivot lands where the search never showed, and is still the pursuit:
+    /// it was reached from something the search did show.
+    #[tokio::test]
+    async fn a_pivot_from_a_shown_hit_is_engagement_and_so_is_opening_where_it_landed() {
+        let core = pursuing_core().await;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        search_event(
+            &core,
+            "read the journal",
+            vec![1.0, 0.0],
+            &[&ids[0]],
+            now - 100,
+        )
+        .await;
+        core.store
+            .record_interaction(&ids[1], "pivoted", Some(&ids[0]), Some("me"), now - 95)
+            .await
+            .unwrap();
+        core.store
+            .record_interaction(&ids[1], "opened", None, Some("me"), now - 94)
+            .await
+            .unwrap();
+        assert_eq!(run(&core).await.unwrap(), 1);
+        let p = &core.store.recent_pursuits(10).await.unwrap()[0];
+        assert_eq!(p.sources, vec![ids[1].clone()], "{p:?}");
+    }
+
+    /// Grouping anchors on the lead. A joins B and B joins C, but A and C sit
+    /// apart: under single linkage that chained into one pursuit about
+    /// nothing in particular.
+    #[tokio::test]
+    async fn grouping_does_not_chain_through_a_bridge() {
+        let mut core = pursuing_core().await;
+        core.pursuit.idle_secs = 1_000;
+        let ids = two_sources(&core).await;
+        let now = crate::store::now();
+        let a = vec![1.0, 0.0];
+        let b = vec![0.7, 0.7]; // 0.71 to each end
+        let c = vec![0.0, 1.0]; // 0.0 to `a`
+        search_event(&core, "a", a, &[&ids[0]], now - 3_000).await;
+        search_event(&core, "b", b, &[&ids[0]], now - 2_900).await;
+        search_event(&core, "c", c, &[&ids[0]], now - 2_800).await;
+        assert_eq!(run(&core).await.unwrap(), 2);
+        let ps = core.store.recent_pursuits(10).await.unwrap();
+        let mut sizes: Vec<usize> = ps.iter().map(|p| p.queries.len()).collect();
+        sizes.sort();
+        assert_eq!(sizes, vec![1, 2], "{ps:?}");
     }
 
     #[tokio::test]

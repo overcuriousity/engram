@@ -276,7 +276,7 @@ async fn page(tenant: Tenant) -> Result<Response> {
         let (rows, loose) = tenant
             .core
             .store
-            .gap_rows(tenant.core.embedder.model(), tenant.core.weak_below)
+            .gap_rows(tenant.core.embedder.model(), tenant.core.weak_below())
             .await?;
         (
             rows.into_iter()
@@ -552,7 +552,7 @@ async fn page(tenant: Tenant) -> Result<Response> {
                 let f = tenant
                     .core
                     .store
-                    .feedback_stats(tenant.core.weak_below)
+                    .feedback_stats(tenant.core.weak_below())
                     .await?;
                 Some(Retrieval {
                     recall_at_10: format!("{:.2}", f.recall_at_10),

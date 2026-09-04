@@ -1307,12 +1307,12 @@ mod tests {
         // A base where nothing matches closely. Cosine tops out at 1, so every
         // candidate is under this — which is the situation the kind exists for,
         // stated as a threshold rather than hoped for from a fake embedder.
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         core.ask(&req("chunk"), Door::Ui.by("me")).await.unwrap();
 
         let gaps = core
             .store
-            .open_gap_refs(core.embedder.model(), core.weak_below)
+            .open_gap_refs(core.embedder.model(), core.weak_below())
             .await
             .unwrap();
         let subjects: Vec<&str> = gaps
@@ -1331,12 +1331,12 @@ mod tests {
     async fn the_api_door_names_no_subjects() {
         let (mut core, _) = core_with_planner(Some(r#"{"need": ["mounting an E01"]}"#)).await;
         core.learn.enabled = true;
-        core.weak_below = 1.0;
+        core.set_weak_below(1.0);
         core.ask(&req("chunk"), Door::Api).await.unwrap();
 
         let gaps = core
             .store
-            .open_gap_refs(core.embedder.model(), core.weak_below)
+            .open_gap_refs(core.embedder.model(), core.weak_below())
             .await
             .unwrap();
         assert!(

@@ -531,7 +531,8 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
             },
         )),
         tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        weak_below: 0.0,
+        weak_floor: 0.0,
+        line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         recency_half_life_days: 180,
         pinned_boost: 0.15,
         learn: engram::config::LearnConfig {

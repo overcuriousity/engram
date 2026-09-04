@@ -1487,7 +1487,7 @@ impl Core {
             .map(|h| {
                 // Demonstrated, never assumed: a hit with no similarity to
                 // read is one the lexical half matched verbatim.
-                let weak = h.similarity.is_some_and(|s| s < self.weak_below);
+                let weak = h.similarity.is_some_and(|s| s < self.weak_below());
                 // Kept and refilled are different claims: a refilled hit is
                 // over its cap and present only because nothing else was on
                 // offer, which is the case the cap fails silently in.

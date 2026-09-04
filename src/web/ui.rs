@@ -2612,7 +2612,7 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Resp
                 tenant
                     .core
                     .store
-                    .feedback_stats(tenant.core.weak_below)
+                    .feedback_stats(tenant.core.weak_below())
                     .await?,
             ),
             false => None,
@@ -10373,7 +10373,7 @@ mod tests {
         // The fake embedder's vectors are not a semantic space, so the shipped
         // threshold would call everything weak. A line above what the
         // candidate below scores and below nothing else.
-        c.weak_below = 0.5;
+        c.set_weak_below(0.5);
         let core = c.clone();
         let (app, cookie) = app_with_cookie(c).await;
         // Judged a gap.

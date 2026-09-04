@@ -185,9 +185,14 @@ pub struct Core {
     /// Thresholds and budgets for duplicate hygiene. Read on the capture path
     /// and by the sweep, so it lives here rather than being passed down.
     pub consolidate: crate::config::ConsolidateConfig,
-    /// Cosine similarity below which a result is reported as only loosely
-    /// related. See `VectorConfig::weak_below`.
-    pub weak_below: f32,
+    /// The floor under the weak line. See `VectorConfig::weak_below` and
+    /// `Core::weak_below`.
+    pub weak_floor: f32,
+    /// Where "unrelated" stops under this base's embedder, as `f32` bits;
+    /// zero until `calibrate` has measured it. Shared by every clone of
+    /// `Core`, so one measurement serves every request. See
+    /// `core::gaps::unrelated_line`.
+    pub line: Arc<std::sync::atomic::AtomicU32>,
     /// The recency decay's half-life and the pinned tag's boost — the two
     /// terms the vector store folds into one score and never reports back.
     /// Held here so the explanation reconstructs them from the same
@@ -264,6 +269,68 @@ pub struct Core {
 }
 
 impl Core {
+    /// The measured line, or zero while unmeasured.
+    fn measured_line(&self) -> f32 {
+        f32::from_bits(self.line.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Cosine similarity below which a result is unrelated to what was asked:
+    /// the measured line when there is one, the configured floor otherwise.
+    ///
+    /// Read by the search path to label weak hits, by the gap store to decide
+    /// what is a gap, by `gaps::cover` to decide what answers one, and by the
+    /// pursuit sweep to decide what was engaged. All one line, because they
+    /// are all the one question — is this near that — asked of one embedder.
+    pub fn weak_below(&self) -> f32 {
+        crate::core::gaps::line_above(self.weak_floor, self.measured_line())
+    }
+
+    /// Cosine similarity at or above which two queries are about one thing.
+    /// The same measurement as `weak_below`, over a higher floor: a match has
+    /// to reach further than "not unrelated".
+    pub fn link_at(&self) -> f32 {
+        crate::core::gaps::line_above(crate::core::gaps::GAP_LINK_AT, self.measured_line())
+    }
+
+    /// Pin the weak line, for tests that assert on the labelling: the floor is
+    /// set and the measurement dropped, so `weak_below` returns exactly this.
+    pub fn set_weak_below(&mut self, at: f32) {
+        self.weak_floor = at;
+        self.line = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    }
+
+    /// Measure where "unrelated" stops from what this base holds — every
+    /// recorded query against the others and against a sample of stored
+    /// artifacts — and remember it, in memory for the readers above and in
+    /// the meta table for the next boot. Runs on the repair pass, so the line
+    /// follows the base as it grows and the embedder if it changes; a base
+    /// with too little recorded keeps the floors.
+    pub async fn calibrate(&self) -> crate::error::Result<f32> {
+        const KEY: &str = "calibration.line";
+        let queries = self.store.calibration_vecs(self.embedder.model()).await?;
+        let artifacts: Vec<Vec<f32>> = self
+            .vectors
+            .sample(crate::store::gaps::CALIBRATION_SAMPLE as usize)
+            .await?
+            .into_iter()
+            .map(|(_, v)| v)
+            .filter(|v| queries.first().is_none_or(|q| q.len() == v.len()))
+            .collect();
+        let line = match crate::core::gaps::unrelated_line(&queries, &artifacts) {
+            Some(l) => l,
+            None => self
+                .store
+                .meta_get(KEY)
+                .await?
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.0),
+        };
+        self.store.meta_set(KEY, &line.to_string()).await?;
+        self.line
+            .store(line.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        Ok(line)
+    }
+
     /// Build the running core from configuration. Lives here rather than in
     /// `main`, so the evaluation harness drives exactly the `Core` the binary
     /// does — a benchmark against a differently wired core measures the wrong
@@ -361,7 +428,8 @@ impl Core {
                 crate::core::ranking::RankingParams::from_vector(&cfg.vector),
             )),
             tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            weak_below: cfg.vector.weak_below,
+            weak_floor: cfg.vector.weak_below,
+            line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             recency_half_life_days: cfg.vector.recency_half_life_days.max(1),
             pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
@@ -598,7 +666,8 @@ pub mod test_support {
             // realistic threshold would mark arbitrary results weak and every
             // search test would be asserting against noise. Tests that care
             // about the labelling set it themselves.
-            weak_below: 0.0,
+            weak_floor: 0.0,
+            line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             recency_half_life_days: 180,
             pinned_boost: 0.15,
             // Off in tests, whatever ships: the tests that need a log switch
@@ -649,6 +718,68 @@ pub mod test_support {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    /// Deterministic stand-in for an embedder that puts everything close
+    /// together, the way bge-m3 does.
+    fn crowded(n: usize) -> Vec<Vec<f32>> {
+        let mut state = 0x2545_f491u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        (0..n)
+            .map(|_| {
+                (0..test_support::TEST_DIM)
+                    .map(|d| next() * 0.3 + if d == 0 { 1.0 } else { 0.0 })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The weak line is measured, not configured: with enough recorded
+    /// queries the base says where unrelated stops, every clone of `Core`
+    /// reads the one measurement, and the next boot finds it in meta. With
+    /// too few, the configured floor stands.
+    #[tokio::test]
+    async fn the_weak_line_is_measured_from_the_base_and_shared() {
+        let mut core = test_support::test_core().await;
+        core.weak_floor = 0.35;
+        let reader = core.clone();
+        assert_eq!(core.calibrate().await.unwrap(), 0.0);
+        assert_eq!(reader.weak_below(), 0.35);
+        assert_eq!(reader.link_at(), crate::core::gaps::GAP_LINK_AT);
+
+        for (i, v) in crowded(40).into_iter().enumerate() {
+            core.store
+                .record_search(
+                    crate::store::feedback::NewEvent {
+                        fold_onto: None,
+                        query: format!("q{i}"),
+                        door: crate::store::feedback::Door::Ui,
+                        scope: None,
+                        filters: "{}".into(),
+                        query_vec: v,
+                        embed_model: core.embedder.model().into(),
+                        candidates: vec![],
+                        answered: false,
+                    },
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+        let line = core.calibrate().await.unwrap();
+        assert!(line > 0.35, "{line}");
+        assert_eq!(
+            reader.weak_below(),
+            line.min(crate::core::gaps::LINE_CEILING)
+        );
+        assert!(reader.link_at() >= reader.weak_below());
+        assert_eq!(
+            core.store.meta_get("calibration.line").await.unwrap(),
+            Some(line.to_string())
+        );
+    }
 
     /// The one wiring decision `from_config` makes that is not a straight
     /// field copy: rerank is optional, and an absent block must leave search

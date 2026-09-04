@@ -507,14 +507,28 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
     // dedupe arming every fifteen minutes, consolidation every day — keep
     // writing a row apiece into a table nothing was left to trim. The same
     // mistake this whole pass exists to record, one table further in.
+    // The line every "is this near that" reads is measured here, before the
+    // passes that read it: the base's own vectors say where unrelated stops,
+    // and a constant does not know which embedder it was configured for.
+    match core.calibrate().await {
+        Ok(line) => tracing::debug!(line, "measured where unrelated stops"),
+        Err(e) => tracing::warn!(error = %e, "could not measure the weak line; the floors stand"),
+    }
     // A coverage row outlives what it covers. `gap_id` names one of three
     // tables, so it is deliberately not a foreign key and nothing cascades onto
     // it — while retention deletes searches and questions on a promise, and a
     // purge takes every one of them. The rows left behind were kept for the
     // life of the base and read back as nothing at all, `gaps_covered_by_each`
     // skipping each one because the join found no text to show.
-    match core.store.trim_gap_coverage().await {
-        Ok(n) if n > 0 => tracing::info!(dropped = n, "dropped coverage of gaps that are gone"),
+    match core
+        .store
+        .trim_gap_coverage(crate::jobs::gaps::cover_line(core))
+        .await
+    {
+        Ok(n) if n > 0 => tracing::info!(
+            dropped = n,
+            "dropped coverage of gaps that are gone or under the line"
+        ),
         Err(e) => tracing::warn!(error = %e, "could not drop coverage of gaps that are gone"),
         _ => {}
     }

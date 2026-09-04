@@ -406,7 +406,7 @@ impl Default for PromoteConfig {
 /// or the answer was assembled by hand. Runs behind `[learn]`, which is the
 /// switch: the events it reads are the ones recording writes, and the sweep it
 /// rides on is the associative pass. The grouping line is not a key: it is
-/// measured, like the gap clusters', by `core::gaps::link_threshold`.
+/// measured, like the gap clusters', by `Core::calibrate`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct PursuitConfig {
@@ -870,10 +870,15 @@ pub struct VectorConfig {
     /// hit for a perfect match. The similarity is read separately — see
     /// `VectorStore::search` — and compared here.
     ///
-    /// Normalised embeddings put unrelated text around 0.0–0.2 and genuinely
-    /// related text well above 0.4, so the default sits between them. Raise it
-    /// to be told more often that nothing really matched; `0.0` turns the
-    /// labelling off.
+    /// A floor, not the line. Where unrelated text lands depends on the
+    /// embedder — around 0.0–0.2 for most, 0.45–0.6 under bge-m3, the default
+    /// — and a constant that is right for one is inside the noise band of
+    /// another, where it labels nothing weak, closes every gap on every
+    /// capture, and counts every open as a strong hit. So the line is
+    /// measured from the base's own recorded queries on the repair pass
+    /// (`Core::calibrate`) and never sits below this. Raise it to be told more
+    /// often that nothing really matched; `0.0` leaves the measurement alone
+    /// and turns the labelling off only until there is one.
     #[serde(default = "default_weak_below")]
     pub weak_below: f32,
     /// Chunks one document may contribute to a result list. `0` lets a single

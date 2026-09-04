@@ -1554,7 +1554,7 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
             gaps_open: tenant
                 .core
                 .store
-                .count_open_gaps(tenant.core.embedder.model(), tenant.core.weak_below)
+                .count_open_gaps(tenant.core.embedder.model(), tenant.core.weak_below())
                 .await?,
         }),
     };
