@@ -658,7 +658,34 @@ impl Store {
     /// above happened. That is what decides whether the bar under the artifact
     /// is drawn at all.
     pub async fn open_event(&self, event_id: &str, artifact_id: &str) -> Result<bool> {
-        Ok(sqlx::query(
+        let generation = self.live_generation().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        // Read before the stamp, because the stamp destroys the thing worth
+        // knowing: whether this event had been opened already. The UPDATE below
+        // is deliberately left exactly as it was — it has never carried an
+        // `opened_at IS NULL` guard, and adding one would change when the
+        // verdict bar is drawn. So the guard goes on the observation instead,
+        // which is new and answers to nothing.
+        //
+        // The join is also the membership check: no row here means this
+        // artifact was not in this event's pool, which is the same thing the
+        // EXISTS below refuses on.
+        let before = sqlx::query(
+            "SELECT e.opened_at AS opened_at, e.query AS query,
+                    e.query_vec AS query_vec, e.embed_model AS embed_model,
+                    c.rank AS rank
+               FROM search_events e
+               JOIN search_candidates c
+                 ON c.event_id = e.id AND c.artifact_id = ?
+              WHERE e.id = ?",
+        )
+        .bind(artifact_id)
+        .bind(event_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let stamped = sqlx::query(
             "UPDATE search_events SET opened_at = ?
               WHERE id = ? AND judged_at IS NULL
                 AND EXISTS (SELECT 1 FROM search_candidates
@@ -668,10 +695,37 @@ impl Store {
         .bind(event_id)
         .bind(event_id)
         .bind(artifact_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected()
-            == 1)
+            == 1;
+
+        // An open is a deliberate act on a list somebody read: the strongest
+        // thing a plain search can say, and the only one it says out loud.
+        if let (true, Some(g), Some(row)) = (stamped, &generation, &before)
+            && row.get::<Option<i64>, _>("opened_at").is_none()
+        {
+            crate::store::observations::insert(
+                &mut *tx,
+                &crate::store::observations::NewObservation {
+                    generation_id: g.id.clone(),
+                    query: row.get("query"),
+                    query_vec: blob_to_vec(&row.get::<Vec<u8>, _>("query_vec")),
+                    embed_model: row.get("embed_model"),
+                    artifact_id: Some(artifact_id.to_string()),
+                    // `search_candidates.rank` counts from zero; `observations.rank`
+                    // and `ask_citations.n` both count from one. Converted here
+                    // rather than left for whoever compares an opened result with
+                    // a cited excerpt and finds them a place apart.
+                    rank: Some(row.get::<i64, _>("rank") + 1),
+                    source: crate::store::observations::Source::Opened,
+                },
+            )
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(stamped)
     }
 
     /// "Not this one": the search stays a question for the deck, and the column
@@ -1059,6 +1113,115 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+
+    /// A store with one generation live, and a helper that lists artifacts in
+    /// the order given so a rank is a known quantity.
+    async fn observed_base() -> (Store, String) {
+        use crate::store::generations::{GenerationParams, NewGeneration};
+        let store = Store::memory().await.unwrap();
+        let generation = store
+            .record_generation(&NewGeneration {
+                params: GenerationParams {
+                    recency_weight: 0.05,
+                    per_source_cap: Some(3),
+                },
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        (store, generation)
+    }
+
+    fn event_with(artifacts: &[&str]) -> NewEvent {
+        NewEvent {
+            query: "loop device".into(),
+            door: Door::Ui,
+            scope: Some("me".into()),
+            filters: "{}".into(),
+            query_vec: vec![0.1, 0.2, 0.3],
+            embed_model: "fake".into(),
+            candidates: artifacts
+                .iter()
+                .enumerate()
+                .map(|(i, a)| NewCandidate {
+                    artifact_id: (*a).to_string(),
+                    score: 1.0 - i as f32 * 0.1,
+                    similarity: Some(0.9 - i as f32 * 0.1),
+                    shown: true,
+                })
+                .collect(),
+            answered: false,
+            fold_onto: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_opened_result_is_an_observation_at_the_rank_it_was_listed() {
+        use crate::store::observations::Source;
+        let (store, generation) = observed_base().await;
+        let event = store
+            .record_search(event_with(&["art-1", "art-2", "art-3"]), 5)
+            .await
+            .unwrap();
+
+        assert!(store.open_event(&event, "art-2").await.unwrap());
+
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].artifact_id.as_deref(), Some("art-2"));
+        assert_eq!(obs[0].rank, Some(2));
+        assert_eq!(obs[0].source, Source::Opened);
+        assert_eq!(obs[0].query, "loop device");
+    }
+
+    #[tokio::test]
+    async fn opening_an_artifact_the_search_never_listed_writes_nothing() {
+        // `open_event` already refuses this. The observation must not outlive
+        // the refusal, or a positive would be recorded against a list that
+        // never held the artifact it names.
+        let (store, generation) = observed_base().await;
+        let event = store
+            .record_search(event_with(&["art-1"]), 5)
+            .await
+            .unwrap();
+
+        assert!(!store.open_event(&event, "art-9").await.unwrap());
+        assert!(
+            store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_the_same_result_twice_leaves_one_observation() {
+        // The second open affects no row because `opened_at` is already set.
+        // Asserted rather than assumed: it is what stops a double click being
+        // double evidence.
+        let (store, generation) = observed_base().await;
+        let event = store
+            .record_search(event_with(&["art-1"]), 5)
+            .await
+            .unwrap();
+        store.open_event(&event, "art-1").await.unwrap();
+        store.open_event(&event, "art-1").await.unwrap();
+
+        assert_eq!(
+            store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn a_client_may_claim_the_cli_door_and_still_nothing_else() {
