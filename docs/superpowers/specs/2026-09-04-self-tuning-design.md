@@ -369,6 +369,12 @@ the reordering parameters first — where a candidate is scored by re-sorting a
 stored list and nothing is retrieved — and over the retrieval parameters once
 that loop has a track record in the journal.
 
+One stage, two plans. The retrieval parameters need the pass to genuinely
+re-search rather than re-sort a cached list, which turns its cost from a few
+vector reads into a query per candidate per observation. That is a different
+conversation about what a quiet base may spend, and it is held separately for
+that reason rather than because it is a different piece of work.
+
 **Stage 3 — earned autonomy for the corpus jobs.** Needs stage 2's agreement
 history to exist before it can mean anything, and needs a reap restore path
 before reap is in it at all.
