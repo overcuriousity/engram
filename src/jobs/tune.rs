@@ -20,8 +20,12 @@
 //! The pass spends no inference. Every observation keeps the vector its query
 //! was searched with, so the replay embeds nothing; the reranker is left out,
 //! so it calls nothing; and its searches take the background lane, behind
-//! whoever is actually waiting. `config.toml` is never written: the file is the
-//! operator's starting point and the database holds what is live.
+//! whoever is actually waiting. It stops the moment somebody comes back —
+//! between pairs, with nothing written — and the next quiet period starts it
+//! over. Recomputing is the resumption: the pass is bounded, so a restart
+//! costs what a pass costs, and no partial state has to be kept correct across
+//! a sitting. `config.toml` is never written: the file is the operator's
+//! starting point and the database holds what is live.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -65,16 +69,10 @@ pub async fn run_if_quiet(core: &Core) -> Result<Pass> {
 }
 
 async fn quiet(core: &Core) -> Result<bool> {
-    let since = crate::store::now() - core.evolve.idle_secs.max(0);
-    let recent: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM search_events WHERE created_at > ?)
-              + (SELECT COUNT(*) FROM ask_events WHERE created_at > ?)",
-    )
-    .bind(since)
-    .bind(since)
-    .fetch_one(&core.store.pool)
-    .await?;
-    Ok(recent == 0)
+    Ok(!core
+        .store
+        .activity_since(crate::store::now() - core.evolve.idle_secs.max(0))
+        .await?)
 }
 
 pub async fn pass(core: &Core) -> Result<Pass> {
@@ -180,6 +178,7 @@ async fn propose(
     live: &Generation,
     current: crate::core::ranking::RankingParams,
 ) -> Result<Pass> {
+    let started = crate::store::now();
     let (pairs, skipped) = sweep::observation_pairs(core, &live.id).await?;
     if pairs.is_empty() {
         return Ok(Pass::default());
@@ -189,7 +188,13 @@ async fn propose(
         .tried_candidates(&live.embed_recipe, &live.chat_model)
         .await?;
     let grid = sweep::candidates(current, &tried, BUDGET);
-    let scored = sweep::score(core, &pairs, grid, current, false).await?;
+    let Some(scored) = sweep::score(core, &pairs, grid, current, false, Some(started)).await?
+    else {
+        tracing::info!(
+            "somebody came back; the idle pass stopped and will start over next quiet period"
+        );
+        return Ok(Pass::default());
+    };
 
     // Same guard as the sweep, for the same reason: an apply landing while
     // this ran means the baseline it measured against is no longer running.
@@ -576,6 +581,80 @@ mod tests {
                 .len()
                 >= 36,
             "collection carries on"
+        );
+    }
+
+    /// A search stamped a moment *after* now: what a search landing mid-pass
+    /// looks like to a check that reads a timestamp.
+    async fn somebody_returns(core: &Core) -> String {
+        let id = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: "back at the keyboard".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
+            .bind(crate::store::now() + 5)
+            .bind(&id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn a_pass_stops_when_somebody_comes_back_and_adopts_nothing() {
+        // The check reads the same predicate whether the search landed before
+        // the first pair or between two of them, so a search stamped a moment
+        // after the pass starts stands in for one that lands mid-pass — the
+        // pass cannot see the difference, and neither can this test without a
+        // vector store that writes to the log on its own first read.
+        let (mut core, before) = seeded_with_observations().await;
+        core.evolve.autonomous = true;
+        somebody_returns(&core).await;
+
+        assert!(run(&core).await.unwrap().is_none());
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            before
+        );
+        assert!(
+            core.store.latest_eval_run().await.unwrap().is_none(),
+            "an abandoned pass writes nothing: it is never partially adopted"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_next_quiet_period_starts_the_pass_over() {
+        // Resumption is recomputation. The pass is bounded, so a restart costs
+        // a pass, and no partial state has to be kept correct across a sitting.
+        let (mut core, _) = seeded_with_observations().await;
+        core.evolve.autonomous = true;
+        let id = somebody_returns(&core).await;
+        assert!(run(&core).await.unwrap().is_none(), "interrupted");
+
+        // The sitting ends: the search is now in the past.
+        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 5_000)
+            .bind(&id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        assert!(
+            run(&core).await.unwrap().is_some(),
+            "and the pass finds what it would have"
         );
     }
 

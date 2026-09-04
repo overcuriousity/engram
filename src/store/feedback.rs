@@ -940,6 +940,20 @@ impl Store {
         .collect())
     }
 
+    /// Whether anybody has searched or asked since `since`. What tells an idle
+    /// pass that the quiet it started in has ended.
+    pub async fn activity_since(&self, since: i64) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM search_events WHERE created_at > ?)
+                  + (SELECT COUNT(*) FROM ask_events WHERE created_at > ?)",
+        )
+        .bind(since)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     /// Verdicts given since `since`. What the day's counter on the judge page
     /// reads, so it counts the work done rather than the pairs produced.
     pub async fn judged_since(&self, since: i64) -> Result<i64> {
@@ -1290,6 +1304,41 @@ mod tests {
         assert_eq!(store.newest_event_at().await.unwrap(), Some(9_500));
     }
     use super::*;
+
+    #[tokio::test]
+    async fn activity_is_a_search_or_a_question_after_the_moment_asked_about() {
+        let store = Store::memory().await.unwrap();
+        let before = crate::store::now() - 10;
+        assert!(
+            !store.activity_since(before).await.unwrap(),
+            "an empty base is quiet"
+        );
+        store
+            .record_search(
+                NewEvent {
+                    fold_onto: None,
+                    query: "loop device".into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(store.activity_since(before).await.unwrap());
+        assert!(
+            !store
+                .activity_since(crate::store::now() + 10)
+                .await
+                .unwrap(),
+            "nothing has happened in the future"
+        );
+    }
 
     fn ev(query: &str, door: Door) -> NewEvent {
         scoped(query, door, None)

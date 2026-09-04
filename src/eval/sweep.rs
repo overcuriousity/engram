@@ -284,14 +284,22 @@ async fn ranks_over_grid(
     pairs: &[Pair],
     grid: &[RankingParams],
     rerank: bool,
-) -> Result<Vec<Vec<Option<usize>>>> {
+    stop_after: Option<i64>,
+) -> Result<Option<Vec<Vec<Option<usize>>>>> {
     let mut ranks = vec![Vec::with_capacity(pairs.len()); grid.len()];
     for pair in pairs {
+        // Between pairs, not between candidates: a pair is a handful of vector
+        // reads, and whoever came back is behind at most that.
+        if let Some(since) = stop_after
+            && core.store.activity_since(since).await?
+        {
+            return Ok(None);
+        }
         for (row, params) in ranks.iter_mut().zip(grid) {
             row.push(rank_of(core, pair, *params, rerank).await?);
         }
     }
-    Ok(ranks)
+    Ok(Some(ranks))
 }
 
 /// The pairs a sweep can actually replay, and how many it had to leave out.
@@ -398,7 +406,11 @@ pub async fn run_sweep(core: &Core) -> Result<()> {
     let judged = core.store.feedback_stats(core.weak_below()).await?.judged;
     let current = *core.ranking.read().expect("ranking lock");
 
-    let scored = score(core, &pairs, grid(current), current, true).await?;
+    // Never stopped: the verdict-paid sweep runs on the background lane and
+    // answers to nobody's quiet period.
+    let Some(scored) = score(core, &pairs, grid(current), current, true, None).await? else {
+        return Ok(());
+    };
 
     // An apply can land in the minutes this takes: `Sweeping` keeps two sweeps
     // apart and nothing else, and `tune_apply` takes the write lock without
@@ -433,14 +445,21 @@ pub(crate) struct Scored {
 /// Rank `pairs` under every configuration in `grid` and pick the winner, if
 /// there is one. `grid` must carry `current`: it is the baseline everything
 /// else is measured against.
+///
+/// `stop_after` is the moment the pass began; a search or a question recorded
+/// after it ends the pass with nothing scored, and `None` comes back. `None`
+/// as the argument never stops.
 pub(crate) async fn score(
     core: &Core,
     pairs: &[Pair],
     grid: Vec<RankingParams>,
     current: RankingParams,
     rerank: bool,
-) -> Result<Scored> {
-    let ranks = ranks_over_grid(core, pairs, &grid, rerank).await?;
+    stop_after: Option<i64>,
+) -> Result<Option<Scored>> {
+    let Some(ranks) = ranks_over_grid(core, pairs, &grid, rerank, stop_after).await? else {
+        return Ok(None);
+    };
     let base_at = grid
         .iter()
         .position(|p| *p == current)
@@ -465,12 +484,12 @@ pub(crate) async fn score(
             best = Some(cand);
         }
     }
-    Ok(Scored {
+    Ok(Some(Scored {
         grid,
         ranks,
         base_at,
         best,
-    })
+    }))
 }
 
 impl Scored {
