@@ -74,6 +74,19 @@ moment simply stays unlabelled. Position bias remains: a person is likelier
 to confirm what came first, so recall@10 and MRR read off these verdicts lean
 slightly towards the ranker. Scores are withheld either way.
 
+Since `evolve.feed_sweep`, the **runtime sweep** — not the harness below — may
+also read what use left behind: an excerpt an answer actually drew on, and a
+result somebody opened. Both are the same claim a verdict makes, arrived at
+without anybody being asked, and there are far more of them. Only positive
+observations enter, and only under the live generation: evidence gathered while
+a different embedding or chat model was configured belongs to another era and
+stops counting. It ships off, because widening what the sweep reads changes
+what it recommends.
+
+The cargo harness is untouched by that key. It scores the pairs a person
+judged, over a frozen corpus, which is what makes its numbers the ones
+comparable across months.
+
 ```bash
 engram --export-eval ~/engram-eval
 ```

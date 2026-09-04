@@ -903,6 +903,20 @@ cooldown_secs = 0
 # 0 turns this one signal off and leaves the other three recording.
 give_up_window_secs = 300
 
+# Let the tuning sweep read positive observations as pairs, beside the ones you
+# judged by hand.
+#
+# This is the whole point of recording any of it, and it ships off — not as an
+# opinion about whether it works, but because widening the sweep's evidence
+# changes which settings it recommends, a recommendation changes ranking, and a
+# default that changes ranking moves only after the harness has been run. Turn
+# it on deliberately, and run `cargo test --test eval` on either side of it if
+# you want to know what it did.
+#
+# Positive observations only. A weak negative is never enough to bring a change
+# about.
+feed_sweep = false
+
 [capture]
 # The upload, paste-a-link and extension doors.
 #

@@ -511,12 +511,21 @@ pub struct EvolveConfig {
     ///
     /// Zero turns the give-up signal off and leaves the rest recording.
     pub give_up_window_secs: i64,
+    /// Let the tuning sweep read positive observations as pairs, beside the
+    /// ones a person judged.
+    ///
+    /// Off, and off is the shipped default rather than an opinion about
+    /// whether it works. Widening the sweep's evidence changes which settings
+    /// it recommends, a recommendation changes ranking, and a default that
+    /// changes ranking moves only after the harness has been run.
+    pub feed_sweep: bool,
 }
 
 impl Default for EvolveConfig {
     fn default() -> Self {
         Self {
             give_up_window_secs: 300,
+            feed_sweep: false,
         }
     }
 }

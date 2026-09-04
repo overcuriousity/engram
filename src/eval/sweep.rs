@@ -104,6 +104,12 @@ fn moved(cand: RankingParams, current: RankingParams) -> usize {
 /// One judged pair, with every id that satisfies it already resolved.
 type Pair = (String, Vec<String>);
 
+/// How many observations one sweep will draw on. A bound rather than a
+/// setting: a sweep re-ranks every pair under every grid candidate, so the
+/// work is pairs times grid, and a base that has been used for a year would
+/// otherwise make one pass unbounded.
+const OBSERVATION_LIMIT: usize = 500;
+
 /// Where one configuration put the answer to one pair. `None` past `LIMIT`.
 async fn rank_of(core: &Core, pair: &Pair, params: RankingParams) -> Result<Option<usize>> {
     let (query, satisfies) = pair;
@@ -171,6 +177,41 @@ async fn pairs_to_replay(core: &Core) -> Result<(Vec<Pair>, i64)> {
             Err(e) => return Err(e),
         }
     }
+
+    // Beside the judged pairs, not instead of them. An excerpt an answer drew
+    // on and a result somebody opened are the same claim a verdict makes —
+    // this query was answered by that artifact — arrived at without anybody
+    // being asked, and there are two orders of magnitude more of them.
+    //
+    // Positive observations only. A weak negative may take a setting back and
+    // may never bring one about, and this is the bringing-about path.
+    //
+    // Both rules the loop above enforces apply unchanged, because these go
+    // through the same `get_artifact` and the same `satisfied_by`: a merged
+    // artifact is satisfied by what superseded it, and a deleted one is
+    // skipped rather than scored as a miss.
+    if core.evolve.feed_sweep
+        && let Some(generation) = core.store.live_generation().await?
+    {
+        for o in core
+            .store
+            .observations_for_generation(&generation.id, OBSERVATION_LIMIT)
+            .await?
+        {
+            let (Some(artifact), true) = (o.artifact_id.as_deref(), o.strength > 0.0) else {
+                continue;
+            };
+            match core.store.get_artifact(artifact).await {
+                Ok(_) => {
+                    let satisfies = crate::eval::satisfied_by(core, artifact).await;
+                    pairs.push((o.query, satisfies));
+                }
+                Err(crate::error::Error::NotFound) => skipped += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     Ok((pairs, skipped))
 }
 
@@ -368,6 +409,115 @@ mod tests {
         core.ranking.write().unwrap().per_source_cap = None;
         let order = ranks_order(&core).await;
         (core, order)
+    }
+
+    async fn a_generation(core: &crate::core::Core) -> String {
+        use crate::store::generations::{GenerationParams, NewGeneration};
+        core.store
+            .record_generation(&NewGeneration {
+                params: GenerationParams {
+                    recency_weight: 0.05,
+                    per_source_cap: Some(3),
+                },
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn observe(
+        core: &crate::core::Core,
+        generation: &str,
+        artifact: &str,
+        source: crate::store::observations::Source,
+    ) {
+        core.store
+            .record_observation(&crate::store::observations::NewObservation {
+                generation_id: generation.to_string(),
+                query: QUERY.into(),
+                query_vec: vec![0.1, 0.2, 0.3],
+                embed_model: "fake".into(),
+                artifact_id: Some(artifact.to_string()),
+                rank: Some(1),
+                source,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_sweep_ignores_observations_by_default() {
+        use crate::store::observations::Source;
+        let (core, order) = seeded().await;
+        let generation = a_generation(&core).await;
+        observe(&core, &generation, &order[0], Source::Cited).await;
+
+        assert!(
+            pairs_to_replay(&core).await.unwrap().0.is_empty(),
+            "a shipped default must not change what is recommended"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_key_on_a_used_excerpt_is_a_pair_the_sweep_can_score() {
+        use crate::store::observations::Source;
+        let (mut core, order) = seeded().await;
+        core.evolve.feed_sweep = true;
+        let generation = a_generation(&core).await;
+        observe(&core, &generation, &order[0], Source::Cited).await;
+        observe(&core, &generation, &order[1], Source::Opened).await;
+
+        let (pairs, _) = pairs_to_replay(&core).await.unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(|(q, _)| q == QUERY));
+    }
+
+    #[tokio::test]
+    async fn a_weak_negative_is_never_a_pair() {
+        use crate::store::observations::Source;
+        let (mut core, order) = seeded().await;
+        core.evolve.feed_sweep = true;
+        let generation = a_generation(&core).await;
+        observe(&core, &generation, &order[0], Source::GaveUp).await;
+
+        assert!(
+            pairs_to_replay(&core).await.unwrap().0.is_empty(),
+            "weaker evidence may take a setting back and may never bring one about"
+        );
+    }
+
+    #[tokio::test]
+    async fn observations_from_a_superseded_generation_stop_counting() {
+        // Seed under the generation that is live, then mint another — which
+        // supersedes it. A model change ends the era its evidence belonged to.
+        use crate::store::generations::{GenerationParams, NewGeneration};
+        use crate::store::observations::Source;
+        let (mut core, order) = seeded().await;
+        core.evolve.feed_sweep = true;
+        let first = a_generation(&core).await;
+        observe(&core, &first, &order[0], Source::Cited).await;
+        assert_eq!(
+            pairs_to_replay(&core).await.unwrap().0.len(),
+            1,
+            "live so far"
+        );
+
+        core.store
+            .record_generation(&NewGeneration {
+                params: GenerationParams {
+                    recency_weight: 0.05,
+                    per_source_cap: Some(3),
+                },
+                embed_recipe: "recipe-a".into(),
+                chat_model: "a-different-model".into(),
+                parent_id: Some(first),
+            })
+            .await
+            .unwrap();
+
+        assert!(pairs_to_replay(&core).await.unwrap().0.is_empty());
     }
 
     async fn ranks_order(core: &crate::core::Core) -> Vec<String> {
