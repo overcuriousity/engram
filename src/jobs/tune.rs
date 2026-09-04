@@ -25,6 +25,7 @@
 
 use crate::core::Core;
 use crate::error::Result;
+use crate::eval::lived::{holds_up, lived, settled};
 use crate::eval::sweep;
 use crate::store::generations::{Generation, GenerationParams, NewGeneration};
 
@@ -100,7 +101,58 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         return Ok(Pass::default());
     }
 
+    // A live generation with a parent and a prediction is under watch, and
+    // the watch comes before any new proposal. One change at a time is what
+    // keeps the journal readable and the revert exact, and what stops a base
+    // walking three knobs away from anything it measured.
+    if let (Some(parent_id), Some(_)) = (&live.parent_id, live.predicted)
+        && let Some(parent) = core.store.generation(parent_id).await?
+    {
+        let new = lived(core, &live.id).await?;
+        let old = lived(core, &parent.id).await?;
+        if !holds_up(&new, &old) {
+            return revert(core, &live, &new, &old).await;
+        }
+        if !settled(&new, &old) {
+            tracing::debug!(generation = %live.id, ?new, ?old, "under watch; nothing proposed");
+            return Ok(Pass::default());
+        }
+    }
+
     propose(core, &live, current).await
+}
+
+/// Put the predecessor back, and remember the candidate that failed.
+///
+/// Compared against the predecessor's *lived* record, never its offline
+/// number: that was computed on replayed evidence and is not the same kind of
+/// quantity. The memory is the row itself — `reverted` is a state, and
+/// `tried_candidates` reads it — so the same candidate is not proposed again
+/// on the next quiet period. Without that the base oscillates.
+async fn revert(
+    core: &Core,
+    live: &Generation,
+    new: &crate::eval::lived::Lived,
+    old: &crate::eval::lived::Lived,
+) -> Result<Pass> {
+    let Some(back) = core.store.revert_generation(&live.id).await? else {
+        // Checked above; a parent that vanished between the two reads is a
+        // base with nowhere to go back to, which stays where it is.
+        return Ok(Pass::default());
+    };
+    *core.ranking.write().expect("ranking lock") = back.params.into();
+    tracing::info!(
+        reverted = %live.id,
+        live = %back.id,
+        predicted = live.predicted,
+        ?new,
+        ?old,
+        "a generation did not hold what it promised; its predecessor is live again"
+    );
+    Ok(Pass {
+        adopted: None,
+        reverted: Some(live.id.clone()),
+    })
 }
 
 /// Rank the positive observations under the neighbouring settings, and adopt
@@ -280,6 +332,125 @@ mod tests {
         );
         let run = core.store.latest_eval_run().await.unwrap().unwrap();
         assert!(!run.recommended, "the quiet pass is still journaled");
+    }
+
+    /// A base that has just adopted a generation, with the one it replaced.
+    pub(crate) async fn adopted_and_watching() -> (Core, String) {
+        let (mut core, parent) = seeded_with_observations().await;
+        core.evolve.autonomous = true;
+        run(&core).await.unwrap().expect("a candidate cleared");
+        (core, parent)
+    }
+
+    /// `n` searches given up on under the live generation: the weak negative,
+    /// which may take a setting back and may never bring one about.
+    pub(crate) async fn observe_badly_under_live(core: &Core, n: usize) {
+        let live = core.store.live_generation().await.unwrap().unwrap().id;
+        for i in 0..n {
+            core.store
+                .record_observation(&NewObservation {
+                    generation_id: live.clone(),
+                    query: format!("something that did not answer {i}"),
+                    query_vec: vec![0.1, 0.2, 0.3],
+                    embed_model: "fake".into(),
+                    artifact_id: None,
+                    rank: None,
+                    source: Source::GaveUp,
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn eval_runs(core: &Core) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM eval_runs")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_generation_under_watch_blocks_a_new_proposal() {
+        let (core, _) = adopted_and_watching().await;
+        let live_before = core.store.live_generation().await.unwrap().unwrap().id;
+        let runs = eval_runs(&core).await;
+        assert!(run(&core).await.unwrap().is_none(), "one change at a time");
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            live_before
+        );
+        assert_eq!(eval_runs(&core).await, runs, "nothing was even replayed");
+    }
+
+    #[tokio::test]
+    async fn a_generation_that_lost_ground_reverts_itself() {
+        let (core, parent) = adopted_and_watching().await;
+        // Weak negatives, and enough of them that one observation could not
+        // account for the gap between two positives out of two and sixteen
+        // give-ups out of sixteen.
+        observe_badly_under_live(&core, 16).await;
+        let adopted = core.store.live_generation().await.unwrap().unwrap();
+
+        assert!(run(&core).await.unwrap().is_none());
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        assert_eq!(live.id, parent, "the base put itself back");
+        assert_eq!(
+            GenerationParams::from(*core.ranking.read().unwrap()),
+            live.params,
+            "and serves under the predecessor again"
+        );
+        assert_eq!(
+            core.store
+                .generation(&adopted.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "reverted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reverted_generation_is_not_proposed_again_on_the_next_pass() {
+        let (core, _) = adopted_and_watching().await;
+        observe_badly_under_live(&core, 16).await;
+        let reverted = core.store.live_generation().await.unwrap().unwrap().params;
+        run(&core).await.unwrap();
+
+        let next = run(&core).await.unwrap();
+        if let Some(id) = next {
+            let g = core.store.live_generation().await.unwrap().unwrap();
+            assert_ne!(g.params, reverted, "{id} re-proposed what had just failed");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_ends_once_the_generation_has_earned_its_place() {
+        // A watch that never ended would be one adoption and then silence for
+        // the life of the base.
+        let (mut core, order) = seeded().await;
+        let generation = generation_for(&core).await;
+        observe(&core, &generation, &order[3], 4).await;
+        observe(&core, &generation, &order[4], 5).await;
+        core.evolve.autonomous = true;
+        run(&core).await.unwrap().expect("a candidate cleared");
+        let live = core.store.live_generation().await.unwrap().unwrap().id;
+        for artifact in &order[..3] {
+            observe(&core, &live, artifact, 1).await;
+        }
+        let runs = eval_runs(&core).await;
+
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            live,
+            "it held, so it stays"
+        );
+        assert_eq!(
+            eval_runs(&core).await,
+            runs + 1,
+            "and the pass went looking again"
+        );
     }
 
     #[tokio::test]
