@@ -15,6 +15,7 @@
 
 pub mod claims;
 pub mod export;
+pub mod lived;
 pub mod metrics;
 pub mod sweep;
 
