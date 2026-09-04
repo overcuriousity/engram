@@ -1288,6 +1288,7 @@ mod tests {
                 abstained,
                 dropped: 0,
                 truncated: false,
+                unsupported: 0,
                 citations: cited
                     .iter()
                     .map(|(a, used)| crate::store::asks::NewAskCitation {

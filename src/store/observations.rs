@@ -95,29 +95,42 @@ pub struct Observation {
     pub strength: f32,
 }
 
+/// Write one observation through whatever executor the caller has.
+///
+/// Generic over the executor rather than taking `&Store`, because the writes
+/// that matter happen inside a transaction somebody else opened: an ask
+/// records its citations and its observations together or neither, or an
+/// answer exists that the evidence has no record of.
+pub(crate) async fn insert<'e, E>(ex: E, o: &NewObservation) -> Result<String>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let id = new_id();
+    sqlx::query(
+        "INSERT INTO observations
+           (id, created_at, generation_id, query, query_vec, vec_dim,
+            embed_model, artifact_id, rank, source, strength)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(now())
+    .bind(&o.generation_id)
+    .bind(&o.query)
+    .bind(vec_to_blob(&o.query_vec))
+    .bind(o.query_vec.len() as i64)
+    .bind(&o.embed_model)
+    .bind(&o.artifact_id)
+    .bind(o.rank)
+    .bind(o.source.as_str())
+    .bind(o.source.strength())
+    .execute(ex)
+    .await?;
+    Ok(id)
+}
+
 impl Store {
     pub async fn record_observation(&self, o: &NewObservation) -> Result<String> {
-        let id = new_id();
-        sqlx::query(
-            "INSERT INTO observations
-               (id, created_at, generation_id, query, query_vec, vec_dim,
-                embed_model, artifact_id, rank, source, strength)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(now())
-        .bind(&o.generation_id)
-        .bind(&o.query)
-        .bind(vec_to_blob(&o.query_vec))
-        .bind(o.query_vec.len() as i64)
-        .bind(&o.embed_model)
-        .bind(&o.artifact_id)
-        .bind(o.rank)
-        .bind(o.source.as_str())
-        .bind(o.source.strength())
-        .execute(&self.pool)
-        .await?;
-        Ok(id)
+        insert(&self.pool, o).await
     }
 
     /// What was observed under one generation, newest first.

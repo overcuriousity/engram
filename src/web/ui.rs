@@ -10175,6 +10175,7 @@ mod tests {
                     abstained: true,
                     dropped: 0,
                     truncated: false,
+                    unsupported: 0,
                     citations: vec![],
                 })
                 .await

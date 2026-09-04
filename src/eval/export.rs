@@ -308,6 +308,7 @@ mod tests {
                 abstained: false,
                 dropped: 0,
                 truncated: false,
+                unsupported: 0,
                 citations: cited
                     .iter()
                     .map(|id| crate::store::asks::NewAskCitation {

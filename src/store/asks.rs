@@ -36,6 +36,13 @@ pub struct NewAsk {
     pub abstained: bool,
     pub dropped: usize,
     pub truncated: bool,
+    /// How many literals the answer carried that no excerpt it was shown
+    /// held — the count behind the badge, not the strings.
+    ///
+    /// A count because one observation is written per answer rather than per
+    /// literal: three unsupported literals are one retrieval that fell short,
+    /// not three.
+    pub unsupported: usize,
     /// In the order the model saw them; `n` is assigned 1-based from it.
     pub citations: Vec<NewAskCitation>,
 }
@@ -126,6 +133,10 @@ fn one_row(res: sqlx::sqlite::SqliteQueryResult) -> Result<()> {
 
 impl Store {
     pub async fn record_ask(&self, ask: NewAsk) -> Result<String> {
+        // Read before the transaction opens: this is a different table with a
+        // different lifetime, and holding the write lock across it would put a
+        // question's own record behind a row that never changes.
+        let generation = self.live_generation().await?;
         let mut tx = self.pool.begin().await?;
         let id = new_id();
         sqlx::query(
@@ -159,6 +170,56 @@ impl Store {
             .bind(c.score)
             .bind(c.used as i64)
             .execute(&mut *tx)
+            .await?;
+
+            // The densest positive signal there is, and until now it was
+            // computed, stored and read by nothing that tunes anything. An
+            // excerpt the answer actually drew on says the retrieval that put
+            // it there was right to.
+            //
+            // `abstained` is checked as well as `used`, though an abstention
+            // references nothing and so has no used citation: the guard is
+            // explicit because the rule is about the answer, not about the
+            // scan that happens to implement it.
+            if let Some(g) = &generation
+                && c.used
+                && !ask.abstained
+            {
+                crate::store::observations::insert(
+                    &mut *tx,
+                    &crate::store::observations::NewObservation {
+                        generation_id: g.id.clone(),
+                        query: ask.question.clone(),
+                        query_vec: ask.query_vec.clone(),
+                        embed_model: ask.embed_model.clone(),
+                        artifact_id: Some(c.artifact_id.clone()),
+                        rank: Some(i as i64 + 1),
+                        source: crate::store::observations::Source::Cited,
+                    },
+                )
+                .await?;
+            }
+        }
+
+        // An answer that asserts a command or a path none of its excerpts held
+        // is retrieval having failed to supply what the answer needed. It
+        // names no artifact, because the claim is about the set: nothing in the
+        // list was wrong to be there, the list was missing something.
+        if let Some(g) = &generation
+            && ask.unsupported > 0
+        {
+            crate::store::observations::insert(
+                &mut *tx,
+                &crate::store::observations::NewObservation {
+                    generation_id: g.id.clone(),
+                    query: ask.question.clone(),
+                    query_vec: ask.query_vec.clone(),
+                    embed_model: ask.embed_model.clone(),
+                    artifact_id: None,
+                    rank: None,
+                    source: crate::store::observations::Source::Unsupported,
+                },
+            )
             .await?;
         }
         tx.commit().await?;
@@ -359,6 +420,7 @@ mod tests {
             abstained: false,
             dropped: 0,
             truncated: false,
+            unsupported: 0,
             citations: (0..citations)
                 .map(|i| NewAskCitation {
                     artifact_id: format!("art-{i}"),
@@ -367,6 +429,119 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// A store with one generation live, so an observation has something to be
+    /// evidence about.
+    async fn base() -> (Store, String) {
+        use crate::store::generations::{GenerationParams, NewGeneration};
+        let store = Store::memory().await.unwrap();
+        let generation = store
+            .record_generation(&NewGeneration {
+                params: GenerationParams {
+                    recency_weight: 0.05,
+                    per_source_cap: Some(3),
+                },
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        (store, generation)
+    }
+
+    #[tokio::test]
+    async fn a_used_citation_becomes_an_observation_at_the_rank_it_was_shown() {
+        use crate::store::observations::Source;
+        let (store, generation) = base().await;
+        let mut a = ask("how did I mount it", 2);
+        a.citations[0].used = false;
+        store.record_ask(a).await.unwrap();
+
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1, "only the used citation is an observation");
+        assert_eq!(obs[0].artifact_id.as_deref(), Some("art-1"));
+        assert_eq!(obs[0].rank, Some(2), "the [n] it was shown as");
+        assert_eq!(obs[0].source, Source::Cited);
+    }
+
+    #[tokio::test]
+    async fn an_abstention_leaves_no_observation_however_much_it_was_shown() {
+        // Being packed into the prompt is not engagement. An abstention
+        // references nothing however many excerpts it was given.
+        let (store, generation) = base().await;
+        let mut a = ask("something the base has never held", 3);
+        a.abstained = true;
+        store.record_ask(a).await.unwrap();
+
+        assert!(
+            store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_asserting_what_no_excerpt_supports_is_a_negative_observation() {
+        use crate::store::observations::Source;
+        let (store, generation) = base().await;
+        let mut a = ask("which flag was it", 1);
+        a.unsupported = 2;
+        store.record_ask(a).await.unwrap();
+
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        let negative: Vec<_> = obs
+            .iter()
+            .filter(|o| o.source == Source::Unsupported)
+            .collect();
+        assert_eq!(
+            negative.len(),
+            1,
+            "one observation per answer, not one per literal"
+        );
+        assert_eq!(
+            negative[0].artifact_id, None,
+            "the claim is about the set, not about anything in it"
+        );
+        assert!(negative[0].strength < 0.0);
+    }
+
+    #[tokio::test]
+    async fn an_answer_whose_literals_were_all_supported_writes_no_negative() {
+        use crate::store::observations::Source;
+        let (store, generation) = base().await;
+        let mut a = ask("which flag was it", 1);
+        a.unsupported = 0;
+        store.record_ask(a).await.unwrap();
+
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert!(obs.iter().all(|o| o.source != Source::Unsupported));
+    }
+
+    #[tokio::test]
+    async fn an_ask_recorded_before_any_generation_exists_writes_no_observation() {
+        // Ordering safety: the boot path that names a generation runs in the
+        // background, and nothing may fail because it has not run yet.
+        let store = Store::memory().await.unwrap();
+        store.record_ask(ask("early", 2)).await.unwrap();
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[tokio::test]

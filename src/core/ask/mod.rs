@@ -998,6 +998,9 @@ impl Core {
             abstained: response.abstained,
             dropped: response.dropped,
             truncated: response.truncated,
+            // Already computed for the badge; read here as a local rather than
+            // recomputed, so the number recorded is the number shown.
+            unsupported: response.unsupported.len(),
             // What the answer referenced, not what it was shown. The sweep
             // reads these as engagement, and every excerpt that fit the window
             // would otherwise count as one — enough, on its own, to arm a
