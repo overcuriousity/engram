@@ -873,6 +873,36 @@ age_after_mins = 60
 # call a small capture arms.
 cooldown_secs = 0
 
+# ── What use leaves behind ───────────────────────────────────────────────────
+# Nothing here changes what a search or an ask returns. It decides only what is
+# written down about how one turned out.
+#
+# Four things are recorded, and three of them were already being computed and
+# thrown away: an excerpt an answer actually drew on, a result somebody opened,
+# and an answer carrying a command or path none of its excerpts held. The
+# fourth is below.
+#
+# What is deliberately *not* recorded is silence. A search nobody acted on may
+# have failed, or may have been answered off the rail without anything being
+# opened, and those are indistinguishable — so neither is written rather than
+# one being guessed at.
+[evolve]
+# A search nobody opened, followed by another search from the same person
+# inside this many seconds, is recorded as a weak negative: the first one did
+# not answer, and the second attempt is the evidence of it.
+#
+# Minutes, and far above `feedback.coalesce_secs` on purpose. That one is the
+# length of a typing burst; this one is a person reading a list, thinking, and
+# asking again. Too long and an unrelated question an hour later is scored as
+# the failure of a search that worked.
+#
+# Weak because the search rail shows snippets: a search read and walked away
+# from satisfied looks exactly like one given up on. A weak negative is never
+# enough to change a setting — only ever enough to take one back.
+#
+# 0 turns this one signal off and leaves the other three recording.
+give_up_window_secs = 300
+
 [capture]
 # The upload, paste-a-link and extension doors.
 #

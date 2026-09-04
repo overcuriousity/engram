@@ -24,6 +24,8 @@ pub struct Report {
     pub contexts: u64,
     /// Interactions dropped for being past the same window.
     pub interactions: u64,
+    /// Searches given up on, written down as weak negatives.
+    pub gave_up: usize,
 }
 
 /// What the base holds, as opposed to what this pass did to it.
@@ -57,6 +59,20 @@ pub async fn run(core: &Core) -> Result<Report> {
     // classifies the variant, and that decides whether the worker spends
     // another attempt.
     let mut failure: Option<crate::error::Error> = None;
+
+    // Before expiry, and that ordering is the point: expiring removes the very
+    // rows a give-up is read from, and a chain trimmed before it is read is a
+    // failure nobody ever hears about. It is a third pass in the same unit for
+    // the reason the other two are one — it reads the same log, on the same
+    // ticker, and a second ticker over one table is two things to reason about
+    // where there was one.
+    match crate::jobs::observe::run(core).await {
+        Ok(n) => report.gave_up = n,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not record what was given up on");
+            failure.get_or_insert(e);
+        }
+    }
 
     if core.feedback.retain_days > 0 {
         match core.store.expire_feedback(core.feedback.retain_days).await {

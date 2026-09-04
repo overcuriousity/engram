@@ -8,6 +8,7 @@ pub mod extract;
 pub mod gaps;
 pub mod judgement;
 pub mod merge;
+pub mod observe;
 pub mod passages;
 pub mod promote;
 pub mod pursuit;

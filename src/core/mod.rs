@@ -230,6 +230,10 @@ pub struct Core {
     /// How real searches are recorded for later judging. Read on the search
     /// path, so it lives here rather than being threaded down.
     pub feedback: crate::config::FeedbackConfig,
+    /// What is written down about how a retrieval turned out. Read by
+    /// `jobs::observe` and by the sweep's pair gathering; never on a path a
+    /// person waits on.
+    pub evolve: crate::config::EvolveConfig,
     /// Limits for the upload, link and extension capture paths. Read on the
     /// request path, so it lives here rather than being threaded down.
     pub capture: crate::config::CaptureConfig,
@@ -426,6 +430,7 @@ impl Core {
             std::path::Path::new(&cfg.store.dir),
         ));
         Core {
+            evolve: cfg.evolve.clone(),
             store,
             vectors,
             synthesizer: Arc::new(
@@ -684,6 +689,7 @@ pub mod test_support {
     async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {
+            evolve: crate::config::EvolveConfig::default(),
             store,
             vectors: Arc::new(MemoryVectors::new()),
             synthesizer,

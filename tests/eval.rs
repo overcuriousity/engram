@@ -494,6 +494,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
     // Built here rather than through `test_support`, which is `#[cfg(test)]` in
     // the library and so invisible to an integration test.
     let core = Core {
+        evolve: engram::config::EvolveConfig::default(),
         store: Store::memory().await.unwrap(),
         vectors: Arc::new(engram::vector::memory::MemoryVectors::new()),
         synthesizer: Arc::new(engram::infer::fake::FakeSynthesizer::default()),

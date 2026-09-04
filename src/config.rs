@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default)]
     pub pacing: PacingConfig,
     #[serde(default)]
+    pub evolve: EvolveConfig,
+    #[serde(default)]
     pub capture: CaptureConfig,
     #[serde(default)]
     pub associate: AssociateConfig,
@@ -489,6 +491,33 @@ impl Default for SittingConfig {
         // reason above it, and a derived `Default` would put that reason a
         // refactor away from the value it explains.
         Self { prime: false }
+    }
+}
+
+/// Recording what use leaves behind.
+///
+/// Nothing here changes what a search or an ask returns. It decides only what
+/// is written down about how one turned out, and — once — whether the tuning
+/// sweep is allowed to read it.
+#[derive(Debug, Deserialize, Clone)]
+pub struct EvolveConfig {
+    /// A search nobody opened, followed by another search from the same person
+    /// inside this many seconds, is a weak negative.
+    ///
+    /// Minutes, and deliberately far above `feedback.coalesce_secs`: that one
+    /// is the length of a typing burst, this one is a person reading a list,
+    /// thinking, and asking again. Too long and an unrelated question an hour
+    /// later is scored as the failure of a search that worked.
+    ///
+    /// Zero turns the give-up signal off and leaves the rest recording.
+    pub give_up_window_secs: i64,
+}
+
+impl Default for EvolveConfig {
+    fn default() -> Self {
+        Self {
+            give_up_window_secs: 300,
+        }
     }
 }
 
@@ -2588,6 +2617,7 @@ impl Config {
     #[doc(hidden)]
     pub fn test_default() -> Config {
         Config {
+            evolve: EvolveConfig::default(),
             server: ServerConfig {
                 bind: "127.0.0.1:8080".into(),
                 workers: 2,
