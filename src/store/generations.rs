@@ -46,6 +46,28 @@ pub struct Generation {
     pub embed_recipe: String,
     pub chat_model: String,
     pub parent_id: Option<String>,
+    /// The idle pass that proposed it. `None` for one minted at boot or by a
+    /// person pressing Apply.
+    pub run_id: Option<String>,
+    /// What the pass said it would gain, as an MRR delta over the replay. A
+    /// generation with a parent and a prediction is one the base is watching.
+    pub predicted: Option<f64>,
+    /// `live` | `superseded` | `reverted`.
+    pub state: String,
+}
+
+fn hydrate(r: sqlx::sqlite::SqliteRow) -> Result<Generation> {
+    Ok(Generation {
+        id: r.get("id"),
+        created_at: r.get("created_at"),
+        params: from_json(&r.get::<String, _>("params"))?,
+        embed_recipe: r.get("embed_recipe"),
+        chat_model: r.get("chat_model"),
+        parent_id: r.get("parent_id"),
+        run_id: r.get("run_id"),
+        predicted: r.get("predicted"),
+        state: r.get("state"),
+    })
 }
 
 impl Store {
@@ -54,6 +76,26 @@ impl Store {
     /// One transaction: a base with two live generations is a base whose
     /// searches cannot say which settings produced them.
     pub async fn record_generation(&self, g: &NewGeneration) -> Result<String> {
+        self.insert_live(g, None, None).await
+    }
+
+    /// Record a generation the idle pass chose, carrying the run that chose it
+    /// and what it promised, and make it live.
+    pub async fn adopt_generation(
+        &self,
+        g: &NewGeneration,
+        run_id: &str,
+        predicted: f64,
+    ) -> Result<String> {
+        self.insert_live(g, Some(run_id), Some(predicted)).await
+    }
+
+    async fn insert_live(
+        &self,
+        g: &NewGeneration,
+        run_id: Option<&str>,
+        predicted: Option<f64>,
+    ) -> Result<String> {
         let id = new_id();
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         sqlx::query("UPDATE generations SET state = 'superseded' WHERE state = 'live'")
@@ -63,7 +105,7 @@ impl Store {
             "INSERT INTO generations
                (id, created_at, params, embed_recipe, chat_model, parent_id,
                 run_id, predicted, state)
-             VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'live')",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live')",
         )
         .bind(&id)
         .bind(now())
@@ -71,31 +113,108 @@ impl Store {
         .bind(&g.embed_recipe)
         .bind(&g.chat_model)
         .bind(&g.parent_id)
+        .bind(run_id)
+        .bind(predicted)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(id)
     }
 
+    /// Take a generation back: it becomes `reverted` and its parent is live
+    /// again. Returns the parent, or `None` — and changes nothing — for a
+    /// generation with nowhere to go back to.
+    ///
+    /// Cheap and complete because a generation is a row. Nothing in the corpus
+    /// was touched by adopting it, so nothing has to be untouched here.
+    pub async fn revert_generation(&self, id: &str) -> Result<Option<Generation>> {
+        let mut tx = self.pool.begin_with(IMMEDIATE).await?;
+        let parent: Option<String> =
+            sqlx::query_scalar("SELECT parent_id FROM generations WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .flatten();
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        sqlx::query("UPDATE generations SET state = 'reverted' WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE generations SET state = 'live' WHERE id = ?")
+            .bind(&parent)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.generation(&parent).await
+    }
+
+    pub async fn generation(&self, id: &str) -> Result<Option<Generation>> {
+        sqlx::query(
+            "SELECT id, created_at, params, embed_recipe, chat_model, parent_id,
+                    run_id, predicted, state
+               FROM generations WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(hydrate)
+        .transpose()
+    }
+
     pub async fn live_generation(&self) -> Result<Option<Generation>> {
-        let row = sqlx::query(
-            "SELECT id, created_at, params, embed_recipe, chat_model, parent_id
+        sqlx::query(
+            "SELECT id, created_at, params, embed_recipe, chat_model, parent_id,
+                    run_id, predicted, state
                FROM generations WHERE state = 'live'
               ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .fetch_optional(&self.pool)
-        .await?;
-        row.map(|r| {
-            Ok(Generation {
-                id: r.get("id"),
-                created_at: r.get("created_at"),
-                params: from_json(&r.get::<String, _>("params"))?,
-                embed_recipe: r.get("embed_recipe"),
-                chat_model: r.get("chat_model"),
-                parent_id: r.get("parent_id"),
-            })
-        })
+        .await?
+        .map(hydrate)
         .transpose()
+    }
+
+    /// The parameter sets already tried and taken back under these models, so
+    /// the chooser does not offer them again. Without this the pass proposes
+    /// the same losing candidate every quiet period, adopts it, watches it
+    /// fail, and reverts — forever.
+    ///
+    /// Keyed on the models rather than on a date, because that is what makes
+    /// a candidate eligible again: evidence gathered under other models is not
+    /// evidence about these, and neither is a failure.
+    pub async fn tried_candidates(
+        &self,
+        embed_recipe: &str,
+        chat_model: &str,
+    ) -> Result<Vec<GenerationParams>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT params FROM generations
+              WHERE state = 'reverted' AND embed_recipe = ? AND chat_model = ?",
+        )
+        .bind(embed_recipe)
+        .bind(chat_model)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|p| from_json(p))
+        .collect()
+    }
+
+    /// Every generation, newest first. The journal a person reads.
+    pub async fn generation_history(&self, limit: usize) -> Result<Vec<Generation>> {
+        sqlx::query(
+            "SELECT id, created_at, params, embed_recipe, chat_model, parent_id,
+                    run_id, predicted, state
+               FROM generations ORDER BY created_at DESC, id DESC LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(hydrate)
+        .collect()
     }
 }
 
@@ -244,6 +363,87 @@ mod tests {
         assert_ne!(first.id, second.id);
         assert_eq!(second.parent_id.as_deref(), Some(first.id.as_str()));
         assert_eq!(second.params, params, "a model change moves no knob");
+    }
+
+    #[tokio::test]
+    async fn a_reverted_generation_hands_the_base_back_to_its_parent() {
+        let store = Store::memory().await.unwrap();
+        let first = store.record_generation(&sample()).await.unwrap();
+        let mut second = sample();
+        second.parent_id = Some(first.clone());
+        second.params.recency_weight = 0.25;
+        let second_id = store
+            .adopt_generation(&second, "run-1", 0.04)
+            .await
+            .unwrap();
+
+        let back = store
+            .revert_generation(&second_id)
+            .await
+            .unwrap()
+            .expect("a parent");
+        assert_eq!(back.id, first);
+        assert_eq!(back.state, "live");
+        assert_eq!(store.live_generation().await.unwrap().unwrap().id, first);
+        assert_eq!(
+            store.generation(&second_id).await.unwrap().unwrap().state,
+            "reverted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reverted_candidate_is_not_offered_again() {
+        // Without this the pass proposes the same losing candidate every quiet
+        // period, adopts it, watches it fail, and reverts — forever.
+        let store = Store::memory().await.unwrap();
+        let first = store.record_generation(&sample()).await.unwrap();
+        let mut second = sample();
+        second.parent_id = Some(first);
+        second.params.recency_weight = 0.25;
+        let id = store
+            .adopt_generation(&second, "run-1", 0.04)
+            .await
+            .unwrap();
+        store.revert_generation(&id).await.unwrap();
+
+        let tried = store
+            .tried_candidates(&second.embed_recipe, &second.chat_model)
+            .await
+            .unwrap();
+        assert!(tried.iter().any(|p| p.recency_weight == 0.25));
+        assert!(
+            store
+                .tried_candidates(&second.embed_recipe, "another-model")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a failure under other models is not a failure under these"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_generation_with_no_parent_cannot_be_reverted() {
+        let store = Store::memory().await.unwrap();
+        let id = store.record_generation(&sample()).await.unwrap();
+        assert!(store.revert_generation(&id).await.unwrap().is_none());
+        assert_eq!(
+            store.live_generation().await.unwrap().unwrap().id,
+            id,
+            "a base with nowhere to go back to stays where it is"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_a_generation_promised_is_kept_with_it() {
+        let store = Store::memory().await.unwrap();
+        let id = store
+            .adopt_generation(&sample(), "run-1", 0.04)
+            .await
+            .unwrap();
+        let live = store.live_generation().await.unwrap().unwrap();
+        assert_eq!(live.id, id);
+        assert_eq!(live.predicted, Some(0.04));
+        assert_eq!(live.run_id.as_deref(), Some("run-1"));
     }
 
     #[tokio::test]
