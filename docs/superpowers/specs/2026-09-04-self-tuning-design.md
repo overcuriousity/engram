@@ -52,6 +52,15 @@ operator could use what retrieval gave them*, which is one step removed from
 *the person got their answer*. Verdicts are the sparse, honest sample that
 checks the two have not come apart.
 
+**No gate in this design is a tuned constant.** Every threshold is a rule that
+reads the evidence in front of it: adopt when the margin exceeds what one
+observation could account for, watch until the prediction separates from noise,
+suspend when self-generated scores stop agreeing with human ones better than
+chance. The precedent is already in the tree — `sweep.rs`'s `recommend` gates an
+automatic feature today with two net better pairs and no aggregate loss, and no
+number calibrated against anybody's corpus. A system that tunes itself must not
+need a person to tune its gates, or the regress never bottoms out.
+
 Drift across many small steps is accepted. The corpus is untouched by any of
 this, so the worst case is a ranking that has wandered somewhere nobody chose —
 recoverable, because the operator's starting point is never overwritten.
@@ -221,9 +230,18 @@ quiet period. That pattern is established in the tree.
 ### Adoption
 
 1. **Positive observations only.** Weak negatives cannot promote a candidate.
-2. **A floor on evidence.** Below it, nothing moves. `docs/evaluation.md`
-   already sets the honest version of this for verdicts: under twenty, "the
-   arithmetic works and the result means nothing."
+2. **A gate, not a floor.** Nothing moves unless the candidate beats the live
+   generation by more than a single observation could account for, and loses on
+   neither aggregate. That is `sweep.rs`'s `recommend` generalized from pairs to
+   observations — two net better, no aggregate loss, ties keep the current
+   value — and its doc comment already says what it is for: *"the gate, and the
+   reason the whole feature is safe to run automatically."*
+
+   Deliberately not a tuned number. A floor of "twenty" would be a constant
+   someone picked on somebody's corpus, and the whole claim of this design is
+   that the system does not need a person to hand-tune it. A base with four
+   observations adopts nothing because four cannot clear the gate, not because
+   a number said so.
 3. **One parameter per adoption.** Move three and lose the ability to say which
    one did it. Slower, and it keeps the journal readable and the revert exact.
 4. **The prediction is recorded** — how much this generation should improve the
@@ -236,9 +254,12 @@ against the prediction, and against the **lived** record of its predecessor —
 never against the predecessor's offline number, which was computed on replayed
 evidence and is not the same kind of quantity.
 
-The watch window is measured **in observations, not in days**. A base in heavy
-use decides quickly; a quiet one waits. This self-paces and is more honest than
-any fixed period.
+The watch does not run for a fixed count any more than adoption clears a fixed
+floor. It ends when the live evidence can separate the prediction from noise —
+the same gate, pointed the other way: the adopted generation is kept when it
+holds its margin and taken back when the predecessor would clear the gate
+against it. A base in heavy use decides quickly; a quiet one waits, and neither
+is a number anybody chose.
 
 ### Revert
 
