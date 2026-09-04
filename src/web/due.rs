@@ -300,30 +300,31 @@ async fn render(
     let rows = open
         .into_iter()
         .take(if all { usize::MAX } else { BAND_ROWS })
-        .map(|r: DueRow| DueView {
-            id: r.moment.id.clone(),
-            artifact_id: r.moment.artifact_id.clone(),
-            title: r.title,
-            when: r
-                .moment
-                .at
-                .map(|a| due_words(a, now, tz))
-                .unwrap_or_else(|| "when?".into()),
-            full: r
-                .moment
-                .at
-                .map(|a| when_words(a, now, tz))
-                .unwrap_or_default(),
-            at: r.moment.at.unwrap_or(0),
-            heat: r
-                .moment
-                .at
-                .map_or_else(String::new, |a| format!("{:.3}", heat(a, now))),
-            overdue: r.moment.at.is_some_and(|a| a < now),
-            undated: r.moment.at.is_none(),
-            recurring: r.moment.rule.is_some(),
-            source: r.moment.source.as_str(),
-            fresh: r.moment.created_at > since,
+        .map(|r: DueRow| {
+            // The instant the row is due at *now*: an elapsed snooze is the
+            // row's time, which is what `open_due` selected and ordered on
+            // (`COALESCE(snoozed_until, at)`), what the ladder is keyed on
+            // (`remind::eff`) and what the artifact page shows. Drawing from
+            // `at` alone, the band said "6h overdue" at full heat about a row
+            // the push for the same second called "now", and wrote that same
+            // stale instant into `data-due-at` for the client to count from.
+            let eff = r.moment.snoozed_until.or(r.moment.at);
+            DueView {
+                id: r.moment.id.clone(),
+                artifact_id: r.moment.artifact_id.clone(),
+                title: r.title,
+                when: eff
+                    .map(|a| due_words(a, now, tz))
+                    .unwrap_or_else(|| "when?".into()),
+                full: eff.map(|a| when_words(a, now, tz)).unwrap_or_default(),
+                at: eff.unwrap_or(0),
+                heat: eff.map_or_else(String::new, |a| format!("{:.3}", heat(a, now))),
+                overdue: eff.is_some_and(|a| a < now),
+                undated: eff.is_none(),
+                recurring: r.moment.rule.is_some(),
+                source: r.moment.source.as_str(),
+                fresh: r.moment.created_at > since,
+            }
         })
         .collect::<Vec<_>>();
     let coming = now + tenant.core.time.coming_up_days as i64 * 86_400;
@@ -1729,5 +1730,43 @@ mod tests {
             "halfway up the ramp: {html}"
         );
         assert!(html.contains("in 3h 00m"), "and it counts down: {html}");
+    }
+
+    /// A snooze re-keys the row, and the band is one of its readers.
+    ///
+    /// `open_due` selects and orders on `COALESCE(snoozed_until, at)`, the
+    /// push ladder is keyed on `snoozed_until.or(at)`, and so is the artifact
+    /// page. The band drew from `at` alone: a reminder due at nine, snoozed to
+    /// three and rendered at five past three came back "6h overdue" at full
+    /// heat, counting up from nine, while the push for the same second said
+    /// "now".
+    #[tokio::test]
+    async fn an_elapsed_snooze_is_the_rows_time_on_the_band_too() {
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = crate::core::context::Clock::Fixed(now);
+        let at = now - 6 * 3_600;
+        let until = now - 300;
+        let id = artifact_with_due(&core, Some(at)).await;
+        assert!(core.store.snooze(&id, until).await.unwrap());
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            html.contains(&format!(r#"data-due-at="{until}""#)),
+            "the client counts from the snooze, not from the original: {html}"
+        );
+        assert!(
+            !html.contains(&format!(r#"data-due-at="{at}""#)),
+            "and never from the original: {html}"
+        );
+        assert!(
+            html.contains("5m overdue"),
+            "five minutes, not six hours: {html}"
+        );
     }
 }

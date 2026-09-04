@@ -89,7 +89,12 @@ pub async fn apply(
     // Recorded before anything is withdrawn, so a store error here costs
     // nothing: `?` used to abort `apply` with the previous reading already
     // deleted and no replacement written.
-    record_intent(core, corpus_id, &src, j.intent.as_deref()).await?;
+    // Returns the metadata it wrote, and every read of an operator's word
+    // below is taken from *that* and not from `src`: `src` was read at the top
+    // of `apply`, and a "not a reminder" press landing in between was both
+    // clobbered by this write and then invisible to the `intent_refused`
+    // checks — so the arm went on to re-arm the very row the operator refused.
+    let meta = record_intent(core, corpus_id, j.intent.as_deref()).await?;
     // Events only. The due rows are withdrawn where the new reading actually
     // replaces them — see the `remind` arm below — because several paths
     // through it decide the reading names no reminder they can file and
@@ -157,7 +162,7 @@ pub async fn apply(
         }
     }
 
-    let forced = src.metadata["intent"].as_str();
+    let forced = meta["intent"].as_str();
     // The door outranks the model. `engram -r` is a person saying "remind
     // me", and the forcing was only ever consumed *inside* the `remind` arm —
     // so a model answering `none` (or `journal`) for an explicit reminder fell
@@ -171,7 +176,7 @@ pub async fn apply(
     match read_as {
         Some("journal")
             if JOURNALABLE.contains(&src.origin.as_str())
-                && !intent_refused(&src.metadata, Intent::Journal) =>
+                && !intent_refused(&meta, Intent::Journal) =>
         {
             // The reading says this is an entry and not a reminder, so the
             // reminder the previous reading filed is withdrawn — the delete
@@ -181,7 +186,7 @@ pub async fn apply(
             core.set_entry(corpus_id, true).await?;
         }
         Some("remind") => {
-            if intent_refused(&src.metadata, Intent::Remind) {
+            if intent_refused(&meta, Intent::Remind) {
                 // The operator has said this is not a reminder. Their word,
                 // not the model's, and it takes the read rows with it.
                 core.store.delete_read_due(anchor_id).await?;
@@ -385,10 +390,13 @@ pub const JOURNALABLE: &[&str] = &[
 async fn record_intent(
     core: &Core,
     corpus_id: &str,
-    src: &crate::store::corpora::Corpus,
     intent: Option<&str>,
-) -> Result<()> {
-    let mut meta = src.metadata.clone();
+) -> Result<serde_json::Value> {
+    // Read here rather than reusing `apply`'s snapshot from the top of the
+    // call: this is a read-modify-write of a column `set_reminder` and
+    // `set_entry` also write, and the further back the read is, the wider the
+    // window in which an operator's press is overwritten by a stale clone.
+    let mut meta = core.store.get_corpus(corpus_id).await?.metadata;
     // Indexing a `Value` that is not an object panics, and this one comes
     // straight out of a column — the guard `describe::park_failed` and
     // `extract` both carry. This runs at the very top of `apply`, so a corpus
@@ -402,7 +410,8 @@ async fn record_intent(
     if let Some(m) = meta.as_object_mut() {
         m.remove("intent_score");
     }
-    core.store.set_corpus_metadata(corpus_id, &meta).await
+    core.store.set_corpus_metadata(corpus_id, &meta).await?;
+    Ok(meta)
 }
 
 /// The first instant a rule names after the capture, at `DEFAULT_HOUR`.

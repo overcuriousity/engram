@@ -1466,7 +1466,11 @@ fn audio_extension(mime: &str) -> &str {
         "x-wav" | "wave" => "wav",
         // An empty or unrecognised type is still a recording, and the one
         // format a browser produces without saying so is WebM.
-        "" => "webm",
+        // `application/octet-stream` says the same nothing: it is what a
+        // multipart part with no `Content-Type` is read as, and passing it
+        // through named the file `recording.octet-stream`, which the local
+        // servers refuse — they pick the demuxer from the name.
+        "" | "octet-stream" => "webm",
         other => other,
     }
 }
@@ -3099,5 +3103,6 @@ mod tests {
         assert_eq!(audio_extension("audio/mpeg"), "mp3");
         assert_eq!(audio_extension("audio/x-wav"), "wav");
         assert_eq!(audio_extension(""), "webm");
+        assert_eq!(audio_extension("application/octet-stream"), "webm");
     }
 }

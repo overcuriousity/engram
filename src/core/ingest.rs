@@ -1024,7 +1024,15 @@ impl Core {
         // back with it, or that reminder is never pushed at any rung again.
         // Every other path that moves a moment or its artifact calls this;
         // this one was the hole.
-        self.store.rearm_remind().await?;
+        //
+        // Best-effort, as on the supersession path above and in
+        // `complete_moment`: the restore, the lineage mark and the `Embed`
+        // enqueue have all committed by here, so a transient SQLITE_BUSY on
+        // the re-arm reported a restore that *happened* as failed, and the
+        // operator retried it. The background sweep re-arms on its own tick.
+        if let Err(e) = self.store.rearm_remind().await {
+            tracing::warn!(artifact_id, error = %e, "could not re-arm Remind after a restore");
+        }
         tracing::info!(artifact_id, "restored a superseded artifact to search");
         Ok(())
     }
@@ -1325,7 +1333,12 @@ impl Core {
                 self.store.mark_source_restored(id).await?;
             }
             self.reopen_the_pairs_that_were_waiting_on(id).await;
-            self.store.rearm_remind().await?;
+            // Best-effort for the reason `unsupersede_locked` gives: the
+            // exhume has committed, and failing here calls a restore that
+            // happened a failure.
+            if let Err(e) = self.store.rearm_remind().await {
+                tracing::warn!(artifact_id = id, error = %e, "could not re-arm Remind after an exhume");
+            }
             return Ok(());
         }
         if art.superseded_by.is_some() {
@@ -1345,8 +1358,11 @@ impl Core {
         self.reopen_the_pairs_that_were_waiting_on(id).await;
         // Same reason as `unsupersede_locked`: the Remind unit only sees
         // moments on active artifacts, and an artifact coming back active may
-        // be the one whose reminder disarmed it.
-        self.store.rearm_remind().await?;
+        // be the one whose reminder disarmed it. Best-effort there and here —
+        // the reactivation is already written.
+        if let Err(e) = self.store.rearm_remind().await {
+            tracing::warn!(artifact_id = id, error = %e, "could not re-arm Remind after a reactivation");
+        }
         tracing::info!(artifact_id = id, "reactivated an artifact");
         Ok(())
     }
