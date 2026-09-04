@@ -88,6 +88,20 @@ pub async fn pass(core: &Core) -> Result<Pass> {
     let Some(_claim) = sweep::Sweeping::claim(core) else {
         return Ok(Pass::default());
     };
+    // The one safeguard everything else leans on. When the self-generated
+    // evidence has stopped agreeing with the people using the base, the loop
+    // adopts nothing, reverts nothing, keeps recording, and says so on Ops.
+    // Suspension is a state, not a failure.
+    if let Some(a) = crate::eval::anchor::agreement(core).await?
+        && !crate::eval::anchor::trustworthy(&a)
+    {
+        tracing::warn!(
+            agreed = a.agreed,
+            disagreed = a.disagreed,
+            "observations no longer agree with verdicts; the base is not moving"
+        );
+        return Ok(Pass::default());
+    }
     let current = *core.ranking.read().expect("ranking lock");
     if GenerationParams::from(current) != live.params {
         // The generation says one thing and the running parameters another.
@@ -450,6 +464,92 @@ mod tests {
             eval_runs(&core).await,
             runs + 1,
             "and the pass went looking again"
+        );
+    }
+
+    /// `n` searches judged gaps whose queries nonetheless carry a positive
+    /// observation: the evidence saying "answered" where the person said
+    /// "nothing here", over and over.
+    pub(crate) async fn disagree_loudly(core: &Core, n: usize) {
+        use crate::store::feedback::{Door, Labeller, NewEvent, Verdict};
+        let live = core.store.live_generation().await.unwrap().unwrap().id;
+        for i in 0..n {
+            let query = format!("a question the base could not answer {i}");
+            let id = core
+                .store
+                .record_search(
+                    NewEvent {
+                        fold_onto: None,
+                        query: query.clone(),
+                        door: Door::Ui,
+                        scope: None,
+                        filters: "{}".into(),
+                        query_vec: vec![0.1, 0.2],
+                        embed_model: "fake".into(),
+                        candidates: vec![],
+                        answered: false,
+                    },
+                    0,
+                )
+                .await
+                .unwrap();
+            core.store
+                .judge(&id, Verdict::Gap, Labeller::Deck)
+                .await
+                .unwrap();
+            core.store
+                .record_observation(&NewObservation {
+                    generation_id: live.clone(),
+                    query,
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    artifact_id: Some("art-that-was-not-an-answer".into()),
+                    rank: Some(1),
+                    source: Source::Cited,
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_base_whose_evidence_stopped_agreeing_suspends_itself() {
+        let (mut core, before) = seeded_with_observations().await;
+        core.evolve.autonomous = true;
+        disagree_loudly(&core, 20).await;
+
+        assert!(run(&core).await.unwrap().is_none());
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            before
+        );
+        assert!(
+            core.store.latest_eval_run().await.unwrap().is_none(),
+            "suspended means nothing is even replayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_suspended_base_reverts_nothing_and_keeps_recording() {
+        let (core, _) = adopted_and_watching().await;
+        observe_badly_under_live(&core, 16).await;
+        let live = core.store.live_generation().await.unwrap().unwrap().id;
+        disagree_loudly(&core, 20).await;
+
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            live,
+            "a base that cannot trust its evidence acts on none of it"
+        );
+        assert!(
+            core.store
+                .observations_for_generation(&live, 100)
+                .await
+                .unwrap()
+                .len()
+                >= 36,
+            "collection carries on"
         );
     }
 

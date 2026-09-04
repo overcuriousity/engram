@@ -13,6 +13,7 @@
 //! measures, which knob to sweep for which metric, and — the part worth
 //! reading before trusting a number — what neither of them can measure.
 
+pub mod anchor;
 pub mod claims;
 pub mod export;
 pub mod lived;
