@@ -961,8 +961,12 @@ feed_sweep = false
 #
 # `true` and `false` still read, as "full" and "off".
 #
-# Off, for the reason `feed_sweep` is off: a default that changes ranking moves
-# only after the harness has been run. On, an idle pass replays the positive
+# "ranking" by default: the reversible half, on, because every move it makes
+# is a row `revert` undoes exactly and it can no longer move where there is
+# nothing to measure it against — no judged search and no rehearsed probe
+# means no move. "full" is asked for, because a merge, a burial or a
+# condensation is a corpus write, undo beside it or not. Under either, an idle
+# pass replays the positive
 # observations under every neighbouring setting, and a candidate that clears the
 # same gate the sweep uses — two net better, no aggregate loss — becomes the
 # live generation. The base then watches what that generation earns while it is
@@ -996,7 +1000,7 @@ feed_sweep = false
 # back is not taken again on the same artifact. The review threshold under
 # [consolidate] moves on the same pass. Every action and every undo is on
 # /ui/insights, with what you undid told apart from what the base undid.
-autonomous = "off"
+autonomous = "ranking"
 
 # Corpus actions the base may take on its own in any seven days, under
 # "full": merges, supersessions, discards, burials and condensations it

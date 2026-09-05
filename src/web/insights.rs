@@ -1823,7 +1823,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_base_that_never_moved_says_the_file_is_in_force() {
-        let core = crate::core::test_support::test_core().await;
+        let mut core = crate::core::test_support::test_core().await;
+        core.evolve.autonomous = crate::config::Autonomy::Off;
         core.store
             .insert_corpus("some text", "web", None)
             .await

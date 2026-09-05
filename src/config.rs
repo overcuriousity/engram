@@ -502,9 +502,11 @@ impl Default for SittingConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Autonomy {
     /// The idle pass does not run. Integration still files and writes probes.
-    #[default]
     Off,
-    /// Integrate, rehearse, watch; adopt and revert ranking generations.
+    /// Integrate, rehearse, watch; adopt and revert ranking generations. The
+    /// default: every move it makes is a row `revert` undoes exactly, and it
+    /// can no longer move where there is nothing to measure it against.
+    #[default]
     Ranking,
     /// Everything above, plus the corpus rules under the weekly budget.
     Full,
@@ -608,7 +610,7 @@ impl Default for EvolveConfig {
         Self {
             give_up_window_secs: 300,
             feed_sweep: false,
-            autonomous: Autonomy::Off,
+            autonomous: Autonomy::Ranking,
             max_actions_per_week: 10,
             idle_secs: 1800,
         }

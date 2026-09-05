@@ -41,8 +41,9 @@ not on it. Integration into `master` is the operator's call.
 | Ops disclosure: suspension first, live generation, standing, history | `src/web/insights.rs`, `templates/_evolve.html` | stage 2 |
 | Config: `[evolve]` `give_up_window_secs`, `feed_sweep`, `autonomous`, `idle_secs`; `[vector] candidate_multiplier` | `src/config.rs`, `config.example.toml` | 1, 2, 2b |
 
-`evolve.autonomous` ships `"off"` (a three-stage string since Sleep; `false`
-and `true` still read) and `evolve.feed_sweep` ships `false`.
+`evolve.autonomous` ships `"ranking"` (a three-stage string since Sleep;
+`false` and `true` still read as `"off"` and `"full"`) and
+`evolve.feed_sweep` ships `false`.
 
 ## Decisions made on the way that the spec does not record
 
@@ -170,11 +171,13 @@ is fixed on the branch with a test named for the rule it protects.
 ## Sleep (built after 3b, same day)
 
 **Spec:** `docs/superpowers/specs/2026-09-05-sleep-design.md`. **Plan:**
-`docs/superpowers/plans/2026-09-05-sleep.md`, tasks 1–11 built and committed
-on `feat/observations`; task 12 — flipping `evolve.autonomous` to
-`"ranking"` — is the operator's, gated on `cargo test --test eval` run on a
-real base under `"off"` and `"ranking"` and the two reports read side by
-side. Baseline after task 11: 2620 lib passing, 0 failing, 1 ignored; 7
+`docs/superpowers/plans/2026-09-05-sleep.md`, all twelve tasks built and
+committed on `feat/observations`. Task 12 — the default flipped to
+`"ranking"` — was done on the operator's word without the harness run the
+plan gated it on; the run (`--export-eval`, `cargo test --test eval` under
+`"off"` and `"ranking"`) is still worth doing on the real base, and the
+first sleep's **Last night** row is the place to look. Baseline after task
+12: 2620 lib passing, 0 failing, 1 ignored; 7
 multi-tenant; 60 Qdrant integration (57 + 3), run green against a
 throwaway Qdrant.
 

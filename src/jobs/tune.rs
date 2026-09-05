@@ -940,7 +940,7 @@ mod tests {
 
     /// A base whose second source's first two chunks were the ones an answer
     /// drew on — buried behind the leading source uncapped, and promoted the
-    /// moment a cap displaces its tail. Autonomy off, as shipped.
+    /// moment a cap displaces its tail. Autonomy as shipped: "ranking".
     pub(crate) async fn seeded_with_observations() -> (Core, String) {
         let (core, order) = seeded().await;
         let generation = generation_for(&core).await;
@@ -1338,7 +1338,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_pass_with_autonomy_off_changes_nothing() {
-        let (core, before) = seeded_with_observations().await;
+        let (mut core, before) = seeded_with_observations().await;
+        core.evolve.autonomous = crate::config::Autonomy::Off;
         assert!(run(&core).await.unwrap().is_none());
         assert_eq!(
             core.store.live_generation().await.unwrap().unwrap().id,
