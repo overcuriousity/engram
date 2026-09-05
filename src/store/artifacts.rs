@@ -1696,18 +1696,34 @@ impl Store {
     /// the nomination asked. A reminder set on the note, a merge landing on the
     /// artifact and a rescue restamping `retired_at` all move it in the minutes
     /// the model call takes, and each of them now stops the burial.
-    pub async fn bury(&self, id: &str, meta_json: &str, min_age_secs: i64) -> Result<()> {
+    ///
+    /// `vec` and `embed_model` are what the point carried, kept beside the
+    /// text so a search given up on can be compared with what was buried.
+    /// `journal` is the corpus journal's row for this burial, written in the
+    /// same transaction: a buried artifact with no row is what the journal
+    /// exists to end.
+    pub async fn bury(
+        &self,
+        id: &str,
+        meta_json: &str,
+        min_age_secs: i64,
+        vec: Option<&[f32]>,
+        embed_model: Option<&str>,
+        journal: &crate::store::actions::NewAction,
+    ) -> Result<()> {
         let reaped_at = now();
         let cutoff = reaped_at - min_age_secs;
         let mut tx = self.pool.begin().await?;
         let res = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO graveyard (id, title, text, meta_json, reaped_at)
-             SELECT art.id, art.title, art.text, ?, ? FROM artifacts art
+            "INSERT INTO graveyard (id, title, text, meta_json, reaped_at, vec, embed_model)
+             SELECT art.id, art.title, art.text, ?, ?, ?, ? FROM artifacts art
               WHERE art.id = ? AND {}",
             Self::REAPABLE
         )))
         .bind(meta_json)
         .bind(reaped_at)
+        .bind(vec.map(crate::store::feedback::vec_to_blob))
+        .bind(embed_model)
         .bind(id)
         .bind(cutoff)
         .bind(cutoff)
@@ -1728,6 +1744,7 @@ impl Store {
         .bind(id)
         .execute(&mut *tx)
         .await?;
+        crate::store::actions::insert(&mut *tx, journal).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1867,6 +1884,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The journal row a burial writes; the tests here are about the burial.
+    fn reap_row(id: &str) -> crate::store::actions::NewAction {
+        crate::store::actions::NewAction {
+            job: crate::store::actions::Job::Reap,
+            kind: crate::store::actions::Kind::Reap,
+            subject_id: id.to_string(),
+            survivor_id: None,
+            detail: None,
+            evidence: serde_json::json!({}),
+            pair_score: None,
+        }
+    }
     use crate::store::Store;
 
     fn nc(ord: i64, text: &str) -> NewArtifact {
@@ -3020,7 +3050,15 @@ mod tests {
         );
         assert!(
             matches!(
-                s.bury(&made[1].id, "{}", 90 * 86_400).await,
+                s.bury(
+                    &made[1].id,
+                    "{}",
+                    90 * 86_400,
+                    None,
+                    None,
+                    &reap_row(&made[1].id)
+                )
+                .await,
                 Err(Error::NotFound)
             ),
             "and the burial re-check refuses on the same grounds"
@@ -3094,7 +3132,15 @@ mod tests {
         );
         assert!(
             matches!(
-                s.bury(&made[1].id, "{}", 90 * 86_400).await,
+                s.bury(
+                    &made[1].id,
+                    "{}",
+                    90 * 86_400,
+                    None,
+                    None,
+                    &reap_row(&made[1].id)
+                )
+                .await,
                 Err(Error::NotFound)
             ),
             "so the verdict about it must not be applied either"
@@ -3126,7 +3172,9 @@ mod tests {
             .await
             .unwrap();
         backdate_retired_at(&s, &id, 100 * 86_400).await;
-        s.bury(&id, "{}", 90 * 86_400).await.unwrap();
+        s.bury(&id, "{}", 90 * 86_400, None, None, &reap_row(&id))
+            .await
+            .unwrap();
         assert!(
             s.list_embedded_artifact_ids().await.unwrap().is_empty(),
             "a burial is not a write that went missing"
@@ -3160,7 +3208,8 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            s.bury(&made[0].id, "{}", 0).await,
+            s.bury(&made[0].id, "{}", 0, None, None, &reap_row(&made[0].id))
+                .await,
             Err(Error::NotFound)
         ));
         let row = s.get_artifact(&made[0].id).await.unwrap();
@@ -3176,9 +3225,12 @@ mod tests {
             .await
             .unwrap();
         backdate_retired_at(&s, &made[0].id, 60).await;
-        s.bury(&made[0].id, "{}", 0).await.unwrap();
+        s.bury(&made[0].id, "{}", 0, None, None, &reap_row(&made[0].id))
+            .await
+            .unwrap();
         assert!(matches!(
-            s.bury(&made[0].id, "{}", 0).await,
+            s.bury(&made[0].id, "{}", 0, None, None, &reap_row(&made[0].id))
+                .await,
             Err(Error::NotFound)
         ));
     }
@@ -3200,7 +3252,9 @@ mod tests {
         let (loser, keeper) = (made[0].id.clone(), made[1].id.clone());
         s.set_superseded_by(&loser, Some(&keeper)).await.unwrap();
         backdate_retired_at(&s, &loser, 60).await;
-        s.bury(&loser, "{}", 0).await.unwrap();
+        s.bury(&loser, "{}", 0, None, None, &reap_row(&loser))
+            .await
+            .unwrap();
 
         // The keeper goes; the loser's pointer now names nothing.
         s.delete_artifact(&keeper).await.unwrap();
@@ -3230,7 +3284,9 @@ mod tests {
             .unwrap();
         let before = s.get_artifact(&id).await.unwrap().embed_rev;
         backdate_retired_at(&s, &id, 60).await;
-        s.bury(&id, "{}", 0).await.unwrap();
+        s.bury(&id, "{}", 0, None, None, &reap_row(&id))
+            .await
+            .unwrap();
 
         assert!(s.exhume(&id).await.unwrap());
         let row = s.get_artifact(&id).await.unwrap();
@@ -3259,9 +3315,16 @@ mod tests {
             .await
             .unwrap();
         backdate_retired_at(&s, &made[0].id, 60).await;
-        s.bury(&made[0].id, r#"{"reason":"nothing new"}"#, 0)
-            .await
-            .unwrap();
+        s.bury(
+            &made[0].id,
+            r#"{"reason":"nothing new"}"#,
+            0,
+            None,
+            None,
+            &reap_row(&made[0].id),
+        )
+        .await
+        .unwrap();
 
         let row = s.get_artifact(&made[0].id).await.unwrap();
         assert_eq!(row.text, "");

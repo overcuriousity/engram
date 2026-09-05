@@ -1204,7 +1204,17 @@ pub(crate) mod tests {
         // A negative age floor, because the row was retired this same second
         // and `bury` re-checks `reap_candidates`' predicate — the sweep's own
         // `min_age_days` is what stands there in production.
-        core.store.bury(&ids[0], "{}", -60).await.unwrap();
+        core.store
+            .bury(
+                &ids[0],
+                "{}",
+                -60,
+                None,
+                None,
+                &crate::jobs::reap::test_support::row(&ids[0]),
+            )
+            .await
+            .unwrap();
         core.store.mark_lifecycle_dirty(&ids[0]).await.unwrap();
 
         assert_eq!(repair_lifecycle_drift(&core).await.unwrap(), 1);

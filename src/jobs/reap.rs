@@ -41,6 +41,17 @@ pub async fn run(core: &Core) -> Result<Report> {
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
     for c in &cands {
+        // A burial taken back — by a person, or by the base for a search
+        // given up on — is not bought again. Read before the judge call,
+        // which is the expensive step.
+        if core
+            .store
+            .action_was_undone(&c.id, crate::store::actions::Kind::Reap)
+            .await?
+        {
+            tracing::debug!(artifact_id = %c.id, "a burial taken back before; left alone");
+            continue;
+        }
         let verdict = judge_one(core, c).await;
         // Counted only where a judgement actually came back. `jobs::did_work`
         // calls any non-zero number in the report work, so counting the
@@ -355,11 +366,44 @@ async fn reap_one(
         "retired_at": c.retired_at,
     })
     .to_string();
+    // The vector goes into the grave beside the text, read before the point
+    // is deleted. A store that cannot answer buries without it, and says so:
+    // the burial is the point, the vector is what lets a give-up find it.
+    let dense = match core.vectors.dense_of(&c.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(artifact_id = %c.id, error = %e, "buried without its vector");
+            None
+        }
+    };
+    let journal = crate::store::actions::NewAction {
+        job: crate::store::actions::Job::Reap,
+        kind: crate::store::actions::Kind::Reap,
+        subject_id: c.id.clone(),
+        survivor_id: None,
+        detail: Some(reason.to_string()),
+        evidence: serde_json::json!({
+            "status": c.status.as_str(),
+            "retired_at": c.retired_at,
+            "created_at": c.created_at,
+        }),
+        pair_score: None,
+    };
     let _guard = core.lifecycle_lock.lock().await;
     // `bury` sets `lifecycle_dirty` inside its own transaction, so from the
     // instant the text is wiped the drift repair can finish the delete below
-    // if this process never gets to it.
-    core.store.bury(&c.id, &meta, min_age_secs).await?;
+    // if this process never gets to it. The journal row rides the same
+    // transaction.
+    core.store
+        .bury(
+            &c.id,
+            &meta,
+            min_age_secs,
+            dense.as_deref(),
+            c.embed_model.as_deref(),
+            &journal,
+        )
+        .await?;
     core.vectors
         .delete_artifacts(std::slice::from_ref(&c.id))
         .await?;
@@ -486,6 +530,22 @@ async fn judge_one(
         .await;
     permit.finished();
     crate::infer::prompt::parse_reap(&reply?)
+}
+
+/// The journal row a burial writes, for tests elsewhere that bury by hand.
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) fn row(id: &str) -> crate::store::actions::NewAction {
+        crate::store::actions::NewAction {
+            job: crate::store::actions::Job::Reap,
+            kind: crate::store::actions::Kind::Reap,
+            subject_id: id.to_string(),
+            survivor_id: None,
+            detail: None,
+            evidence: serde_json::json!({}),
+            pair_score: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -711,6 +771,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_burial_taken_back_before_is_not_bought_again() {
+        use crate::store::actions::{Kind, UndoneBy};
+        let mut core = test_core().await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+        ]));
+        core.reaper = Some(scripted.clone());
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        core.store
+            .record_action(&test_support::row(&ids[0]))
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(&ids[0], Kind::Reap, UndoneBy::Operator, "restored")
+            .await
+            .unwrap();
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped), (0, 0));
+        assert_eq!(
+            scripted.calls(),
+            0,
+            "the judge was asked about a burial taken back"
+        );
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .reaped_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn a_worthless_verdict_reaches_the_graveyard_and_the_point_dies() {
         let mut core = test_core().await;
         core.reaper = Some(std::sync::Arc::new(
@@ -736,6 +833,21 @@ mod tests {
             .expect("a grave");
         assert!(text.contains("stale duplicate fact"));
         assert!(meta.contains("covered"));
+        // The journal row rode the burial, and the grave kept the vector.
+        let rows = core
+            .store
+            .open_actions(&[crate::store::actions::Kind::Reap], 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject_id, ids[0]);
+        assert_eq!(rows[0].detail.as_deref(), Some("covered"));
+        let kept: i64 = sqlx::query_scalar("SELECT vec IS NOT NULL FROM graveyard WHERE id = ?")
+            .bind(&ids[0])
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1, "the vector was not kept in the grave");
         assert!(
             core.vectors
                 .payloads_of(std::slice::from_ref(&ids[0]))

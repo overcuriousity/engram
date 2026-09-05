@@ -718,11 +718,17 @@ CREATE INDEX IF NOT EXISTS idx_moments_series   ON moments(series_id);
 -- ever wrong invisibly. `meta_json` snapshots what the stub no longer says:
 -- provenance, tags, span, and the judge's one-line reason.
 CREATE TABLE IF NOT EXISTS graveyard (
-  id         TEXT PRIMARY KEY,
-  title      TEXT,
-  text       TEXT NOT NULL,
-  meta_json  TEXT NOT NULL,
-  reaped_at  INTEGER NOT NULL
+  id          TEXT PRIMARY KEY,
+  title       TEXT,
+  text        TEXT NOT NULL,
+  meta_json   TEXT NOT NULL,
+  reaped_at   INTEGER NOT NULL,
+  -- The dense vector the point carried and the model that made it, kept so a
+  -- search given up on can be compared with what was buried without an
+  -- embedding. NULL for rows buried before the vector was kept, and for a
+  -- point the store no longer had.
+  vec         BLOB,
+  embed_model TEXT
 );
 
 -- ── The corpus journal ───────────────────────────────────────────────────────

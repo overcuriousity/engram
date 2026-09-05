@@ -25,6 +25,27 @@ use crate::store::moments::{Kind, NewMoment, Source};
 /// Idempotent per re-synthesis: read rows are replaced, done and set rows
 /// are kept, and an operator's refusal (`intent_refused`) outlives any
 /// number of re-reads.
+/// The corpus journal's row for a moment this reading filed. Best-effort,
+/// like everything on this path: a row that failed to write is a warning,
+/// never a lost reminder.
+async fn journal(core: &Core, moment_id: &str, anchor_id: &str, what: &str) {
+    if let Err(err) = core
+        .store
+        .record_action(&crate::store::actions::NewAction {
+            job: crate::store::actions::Job::Judgement,
+            kind: crate::store::actions::Kind::Moment,
+            subject_id: moment_id.to_string(),
+            survivor_id: None,
+            detail: Some(what.to_string()),
+            evidence: serde_json::json!({ "artifact": anchor_id }),
+            pair_score: None,
+        })
+        .await
+    {
+        tracing::warn!(moment_id, error = %err, "could not journal a filed moment");
+    }
+}
+
 pub async fn apply(
     core: &Core,
     corpus_id: &str,
@@ -129,7 +150,7 @@ pub async fn apply(
                 continue;
             }
         }
-        if let Err(err) = core
+        match core
             .store
             .insert_moment(&NewMoment {
                 artifact_id: anchor_id.into(),
@@ -143,7 +164,10 @@ pub async fn apply(
             })
             .await
         {
-            tracing::warn!(corpus_id, error = %err, "could not record a judged event");
+            Ok(moment_id) => journal(core, &moment_id, anchor_id, "event").await,
+            Err(err) => {
+                tracing::warn!(corpus_id, error = %err, "could not record a judged event");
+            }
         }
     }
 
@@ -315,7 +339,8 @@ pub async fn apply(
             // between leaves the artifact with two open readings of the same
             // prose.
             core.store.delete_read_due(anchor_id).await?;
-            core.store
+            let moment_id = core
+                .store
                 .insert_moment(&NewMoment {
                     artifact_id: anchor_id.into(),
                     kind: Kind::Due,
@@ -331,6 +356,7 @@ pub async fn apply(
                     series_id: None,
                 })
                 .await?;
+            journal(core, &moment_id, anchor_id, "due").await;
             core.store.rearm_remind().await?;
             // A note a completed reminder retired, being read as a reminder
             // again. `complete_moment` retires the corpus so a finished
@@ -1103,6 +1129,15 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].moment.source, Source::Classified);
         assert!(rows[0].moment.at.is_some());
+        // The journal names the moment the reading filed.
+        let journal = core
+            .store
+            .open_actions(&[crate::store::actions::Kind::Moment], 10)
+            .await
+            .unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].subject_id, rows[0].moment.id);
+        assert_eq!(journal[0].detail.as_deref(), Some("due"));
     }
 
     #[tokio::test]

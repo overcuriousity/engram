@@ -16,6 +16,12 @@ use crate::store::segments::SegmentState;
 /// something different depending on when it ran.
 ///
 /// Arms a job; calls no model. The job queue and `[pacing]` bound the load.
+/// The journal's name for one window: the subject of a promotion, and what
+/// `undo_promotion` stamps.
+pub fn window_key(corpus_id: &str, idx: i64) -> String {
+    format!("{corpus_id}#{idx}")
+}
+
 pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize> {
     let activation = core.store.activation_of(ids).await?;
     let mut armed = 0;
@@ -76,6 +82,17 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
                 &crate::jobs::window::unit_target(corpus_id, idx),
                 idx,
             )
+            .await?;
+        core.store
+            .record_action(&crate::store::actions::NewAction {
+                job: crate::store::actions::Job::Promote,
+                kind: crate::store::actions::Kind::Promote,
+                subject_id: window_key(corpus_id, idx),
+                survivor_id: None,
+                detail: None,
+                evidence: serde_json::json!({ "passage": id, "activation": earned }),
+                pair_score: None,
+            })
             .await?;
         tracing::info!(
             artifact_id = %id,
@@ -514,6 +531,19 @@ mod tests {
                 .segment_keeps_artifacts(&corpus, 0)
                 .await
                 .unwrap()
+        );
+        // And the journal says which window, on what.
+        let rows = core
+            .store
+            .open_actions(&[crate::store::actions::Kind::Promote], 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject_id, window_key(&corpus, 0));
+        assert!(
+            rows[0].evidence_json.contains(&p),
+            "{}",
+            rows[0].evidence_json
         );
         assert!(
             core.store

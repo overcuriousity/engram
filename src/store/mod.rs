@@ -150,7 +150,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 13] = [
+        const ADDITIVE: [(&str, &str, &str); 15] = [
             (
                 "artifacts",
                 "updated_at",
@@ -242,6 +242,18 @@ impl Store {
                 "search_candidates",
                 "band",
                 "ALTER TABLE search_candidates ADD COLUMN band INTEGER NOT NULL DEFAULT 0",
+            ),
+            // Both nullable, no default: NULL is the truth about every row
+            // buried before the vector was kept.
+            (
+                "graveyard",
+                "vec",
+                "ALTER TABLE graveyard ADD COLUMN vec BLOB",
+            ),
+            (
+                "graveyard",
+                "embed_model",
+                "ALTER TABLE graveyard ADD COLUMN embed_model TEXT",
             ),
         ];
         for (table, column, ddl) in ADDITIVE {

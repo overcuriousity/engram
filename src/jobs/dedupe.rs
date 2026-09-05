@@ -37,8 +37,42 @@
 use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::infer::prompt::{MergedDraft, Relation};
+use crate::store::actions::{Job, Kind, NewAction};
 use crate::store::artifacts::{Chunk, Provenance};
 use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
+
+/// The journal row for one thing this job did to one artifact.
+fn action(
+    kind: Kind,
+    pair: &ArtifactPair,
+    subject: &str,
+    survivor: Option<&str>,
+    detail: Option<&str>,
+) -> NewAction {
+    NewAction {
+        job: Job::Dedupe,
+        kind,
+        subject_id: subject.to_string(),
+        survivor_id: survivor.map(str::to_string),
+        detail: detail.map(str::to_string),
+        evidence: serde_json::json!({ "pair_id": pair.id, "a": pair.a_id, "b": pair.b_id }),
+        pair_score: Some(pair.score),
+    }
+}
+
+/// Whether this job already did this to any of these artifacts and had it
+/// taken back — by a person, or by the base on what use showed. The journal
+/// is the memory, and a verdict repeated over it goes to a person instead.
+async fn taken_back_before(core: &Core, kind: Kind, subjects: &[&str]) -> Result<bool> {
+    for id in subjects {
+        if core.store.action_was_undone(id, kind).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+const TAKEN_BACK: &str = "This was done to one of these before and taken back. Resolve by hand.";
 
 /// What the model decided, with everything the write path needs already read.
 pub struct Settlement {
@@ -475,11 +509,25 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .await;
             }
 
+            if taken_back_before(core, Kind::Supersede, &[&obsolete]).await? {
+                return settle(core, &s.pair, PairState::Contradiction, Some(TAKEN_BACK)).await;
+            }
             // The side effect FIRST. A failure here leaves the pair pending, so
             // the unit retries under the queue's backoff — the reverse order
             // left the verdict recorded on the pair but never applied, because
             // `run` skips a pair that is no longer Pending.
-            core.supersede(&obsolete, &winner).await?;
+            core.supersede_with(
+                &obsolete,
+                &winner,
+                Some(action(
+                    Kind::Supersede,
+                    &s.pair,
+                    &obsolete,
+                    Some(&winner),
+                    s.detail.as_deref(),
+                )),
+            )
+            .await?;
             tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
             // Done, with the model's reasoning kept as the record of why.
             // Leaving it Superseded listed the applied replacement as awaiting
@@ -497,6 +545,10 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             // to the new one. `insert_merged_artifact` flattens both of them to
             // captured roots, and `subsumed_merges` catches the merged member.
             let sources: Vec<String> = s.members.iter().map(|m| m.id.clone()).collect();
+            let subjects: Vec<&str> = sources.iter().map(String::as_str).collect();
+            if taken_back_before(core, Kind::Merge, &subjects).await? {
+                return settle(core, &s.pair, PairState::Contradiction, Some(TAKEN_BACK)).await;
+            }
             // `Validation` is the merge path's own refusal — a root it may not
             // rewrite — and not a failure to retry. Retrying is precisely the
             // damage: the pair would stay `Pending`, `arm_dedupe` re-arms it,
@@ -525,6 +577,19 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 }
                 Err(e) => return Err(e),
             };
+            // One row per original, naming the merge, before the pair says it
+            // happened: a merge with no row is what the journal exists to end.
+            for source in &sources {
+                core.store
+                    .record_action(&action(
+                        Kind::Merge,
+                        &s.pair,
+                        source,
+                        Some(&m.id),
+                        s.detail.as_deref(),
+                    ))
+                    .await?;
+            }
             // `merged_into` rather than a detail string: if the embed never
             // lands, the sweep's reap has to find exactly this pair and reopen
             // it (`reap_stranded`).
@@ -578,6 +643,17 @@ pub(crate) async fn discard_both(
             retire.push(id.clone());
         }
     }
+    // The judge does not repeat what was taken back; a person may.
+    if by == DecidedBy::Model
+        && taken_back_before(
+            core,
+            Kind::Discard,
+            &retire.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .await?
+    {
+        return settle_as(core, pair, PairState::Contradiction, Some(TAKEN_BACK), by).await;
+    }
     // A side that other artifacts are hidden *behind* is not this pass's to
     // retire. `core.deprecate` refuses a supersession loser and has no rule for
     // a winner, so retiring one would leave `A -> W` with both ends out of
@@ -616,7 +692,11 @@ pub(crate) async fn discard_both(
     // of `apply` documents: a failure part-way leaves the pair answerable
     // rather than recorded as answered and never applied.
     for id in &retire {
-        core.deprecate(id).await?;
+        // Journaled as the base's action only when it is one: a person's
+        // press is theirs, and the journal is what the base did to itself.
+        let journal =
+            (by == DecidedBy::Model).then(|| action(Kind::Discard, pair, id, None, detail));
+        core.deprecate_with(id, journal).await?;
     }
     // The one line that says this happened. `core.deprecate` logs an id apiece,
     // byte-identical to an operator pressing the button, and the pair settles
@@ -875,6 +955,36 @@ mod tests {
             pair.detail.as_deref(),
             Some("each body is its own file path"),
             "the only record of why both sides went was dropped"
+        );
+        // The judge's discard is the base's action, one row a side.
+        let rows = core
+            .store
+            .open_actions(&[crate::store::actions::Kind::Discard], 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.survivor_id.is_none()));
+        assert!(rows.iter().all(|r| ids.contains(&r.subject_id)));
+    }
+
+    #[tokio::test]
+    async fn a_discard_by_a_person_journals_nothing() {
+        let core = test_core().await;
+        let ids = seed(&core, &[("a", [1.0, 0.0]), ("b", [0.93, 0.37])]).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        let row = core.store.get_pair(pair).await.unwrap();
+
+        discard_both(&core, &row, Some("mine"), DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        assert!(
+            core.store
+                .open_actions(&[crate::store::actions::Kind::Discard], 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a person's press is theirs, not the base's"
         );
     }
 
@@ -1146,6 +1256,82 @@ mod tests {
             );
             assert!(c.superseded_by.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn a_replacement_journals_the_loser_naming_the_winner() {
+        use crate::store::actions::Kind;
+        let mut core = test_core().await;
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
+        ])));
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let rows = core
+            .store
+            .open_actions(&[Kind::Supersede], 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject_id, ids[0]);
+        assert_eq!(rows[0].survivor_id.as_deref(), Some(ids[1].as_str()));
+        assert_eq!(rows[0].detail.as_deref(), Some("old flag vs new flag"));
+        assert!(rows[0].pair_score.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_action_taken_back_is_not_taken_again_on_the_same_subject() {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        let mut core = test_core().await;
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
+        ])));
+        let ids = disagreeing(&core).await;
+        core.store
+            .record_action(&NewAction {
+                job: Job::Dedupe,
+                kind: Kind::Supersede,
+                subject_id: ids[0].clone(),
+                survivor_id: Some(ids[1].clone()),
+                detail: None,
+                evidence: serde_json::json!({}),
+                pair_score: None,
+            })
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(&ids[0], Kind::Supersede, UndoneBy::Operator, "put back")
+            .await
+            .unwrap();
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(
+            p.state,
+            PairState::Contradiction,
+            "handed to a person, not repeated"
+        );
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none()
+        );
+        assert!(
+            core.store
+                .open_actions(&[Kind::Supersede], 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no new row for a verdict that was not applied"
+        );
     }
 
     #[tokio::test]
@@ -1724,6 +1910,47 @@ mod tests {
                 .is_empty(),
             "the merge was blamed for a value an earlier one had dropped"
         );
+    }
+
+    #[tokio::test]
+    async fn a_merge_journals_one_row_per_original_naming_the_merge() {
+        use crate::store::actions::Kind;
+        let mut core = test_core().await;
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"duplicate","detail":"same thing",
+                "merged":{"title":"Pool","text":"the pool holds sixteen connections","tags":[],"caveats":[]}}"#
+                .into(),
+        ])));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Pool sizing", "sixteen connections", [1.0, 0.0]),
+                ("Connections", "sixteen connections", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let merged = core
+            .store
+            .get_pair(pair)
+            .await
+            .unwrap()
+            .merged_into
+            .expect("the pair names its merge");
+        let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|r| r.survivor_id.as_deref() == Some(merged.as_str()))
+        );
+        let subjects: std::collections::HashSet<String> =
+            rows.iter().map(|r| r.subject_id.clone()).collect();
+        assert_eq!(subjects, ids.iter().cloned().collect());
+        assert_eq!(rows[0].detail.as_deref(), Some("same thing"));
+        assert!(rows[0].pair_score.is_some());
     }
 
     #[tokio::test]

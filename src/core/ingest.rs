@@ -1156,6 +1156,18 @@ impl Core {
     /// on, since the artifact is already listed on Ops with its `superseded_by`
     /// set, even if the search-side flag has not caught up yet.
     pub async fn supersede(&self, loser_id: &str, winner_id: &str) -> Result<()> {
+        self.supersede_with(loser_id, winner_id, None).await
+    }
+
+    /// `supersede`, journaling what a corpus job did. The row is written under
+    /// the lifecycle guard once the artifact is hidden, so nothing can read a
+    /// hidden artifact with no row, or a row for an artifact still live.
+    pub async fn supersede_with(
+        &self,
+        loser_id: &str,
+        winner_id: &str,
+        journal: Option<crate::store::actions::NewAction>,
+    ) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         // Neither side may be retired. `set_superseded_by` writes
         // `status = 'superseded'` unconditionally, so superseding an artifact
@@ -1181,6 +1193,9 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&loser_id.to_string()))
             .await?;
+        if let Some(a) = journal {
+            self.store.record_action(&a).await?;
+        }
         // Every other question about the loser now belongs to the winner. Done
         // after the artifact is hidden, and its failure is logged rather than
         // returned: the supersession itself has happened by this point, so
@@ -1238,6 +1253,15 @@ impl Core {
     /// payload first would instead hide the artifact behind a row that still
     /// says active, and the repair, reading the row, would undo it.
     pub async fn deprecate(&self, id: &str) -> Result<()> {
+        self.deprecate_with(id, None).await
+    }
+
+    /// `deprecate`, journaling what a corpus job did; see `supersede_with`.
+    pub async fn deprecate_with(
+        &self,
+        id: &str,
+        journal: Option<crate::store::actions::NewAction>,
+    ) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         // A superseded artifact is already out of search, and `deprecate` does
         // not clear `superseded_by`, so this would leave a row that is both:
@@ -1264,6 +1288,9 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
             .await?;
+        if let Some(a) = journal {
+            self.store.record_action(&a).await?;
+        }
         tracing::info!(artifact_id = id, "deprecated an artifact");
         Ok(())
     }
@@ -3828,7 +3855,17 @@ mod tests {
             .execute(&core.store.pool)
             .await
             .unwrap();
-        core.store.bury(&root, "{}", 100).await.unwrap();
+        core.store
+            .bury(
+                &root,
+                "{}",
+                100,
+                None,
+                None,
+                &crate::jobs::reap::test_support::row(&root),
+            )
+            .await
+            .unwrap();
         assert!(
             core.store
                 .get_artifact(&root)
