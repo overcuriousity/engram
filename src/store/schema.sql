@@ -900,3 +900,34 @@ CREATE TABLE IF NOT EXISTS rehearsal_results (
 );
 CREATE INDEX IF NOT EXISTS idx_rehearsal_results_probe ON rehearsal_results(rehearsal_id, at DESC);
 CREATE INDEX IF NOT EXISTS idx_rehearsal_results_generation ON rehearsal_results(generation_id, at DESC);
+
+-- ── Sleep ────────────────────────────────────────────────────────────────────
+-- One row per sleep, whatever it did: the journal a person reads in the
+-- morning. Flat counts, so `jobs::did_work` reads them; ids where a person
+-- can follow one to its undo.
+CREATE TABLE IF NOT EXISTS sleep_runs (
+  id             TEXT PRIMARY KEY,
+  started        INTEGER NOT NULL,
+  ended          INTEGER NOT NULL,
+  -- Why it stopped: finished | activity | suspended | no_evidence | budget
+  stopped        TEXT NOT NULL,
+  generation_id  TEXT NOT NULL,
+  integrated     INTEGER NOT NULL DEFAULT 0,
+  novel          INTEGER NOT NULL DEFAULT 0,
+  known          INTEGER NOT NULL DEFAULT 0,
+  conflicts      INTEGER NOT NULL DEFAULT 0,
+  rehearsed      INTEGER NOT NULL DEFAULT 0,
+  found          INTEGER NOT NULL DEFAULT 0,
+  adopted        TEXT,
+  reverted       TEXT,
+  refused        TEXT,
+  undone         INTEGER NOT NULL DEFAULT 0,
+  restored       INTEGER NOT NULL DEFAULT 0,
+  interference   INTEGER NOT NULL DEFAULT 0,
+  condensed      INTEGER NOT NULL DEFAULT 0,
+  budget_used    INTEGER NOT NULL DEFAULT 0,
+  budget         INTEGER NOT NULL DEFAULT 0,
+  -- JSON: the corpus_actions ids and artifact_pairs ids this pass wrote.
+  detail         TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_sleep_runs_started ON sleep_runs(started DESC);

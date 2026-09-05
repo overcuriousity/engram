@@ -1,0 +1,23 @@
+{# What the base did while nobody was there, newest first, in words. Every
+   number a person can act on has a page: conflicts are on the pair queue,
+   adoptions, condensations and undos on the evolve block below. #}
+{% if let Some(s) = sleep %}
+<div id="sleep" class="judge-tune">
+  <h3>Last night</h3>
+  {% if s.runs.is_empty() %}
+  <p class="muted hint">The base has not slept yet: it sleeps after {{ s.idle_mins }} quiet minutes, on the retention sweep's tick.</p>
+  {% else %}
+  <ul class="mono">
+    {% for r in s.runs %}<li>{{ r }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if s.unrehearsed_count > 0 %}
+  <details class="judge-tune-history">
+    <summary class="muted">unrehearsed ({{ s.unrehearsed_count }}) — nothing has asked for these</summary>
+    <ul class="mono">
+      {% for (id, title) in s.unrehearsed %}<li><a href="/ui/artifacts/{{ id }}">{{ title }}</a></li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{% endif %}

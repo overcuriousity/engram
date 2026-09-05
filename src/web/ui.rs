@@ -225,6 +225,12 @@ pub struct ArtifactDetail {
     /// is what this resembles, the other is what it has been reached for
     /// together with, and they answer different questions.
     pub seen_together: Vec<SeenTogether>,
+    /// What the base found when this arrived, as a sentence. `None` before
+    /// the artifact has been integrated.
+    pub tag: Option<String>,
+    /// The probes for this artifact, one line each: class, the question
+    /// shortened, and where it last found this.
+    pub probes: Vec<String>,
     /// "in 2 h", "3 d ago", … when this artifact carries an open reminder —
     /// regardless of `time.horizon_hours`, unlike the same badge on a result
     /// row: opening the artifact itself is the one place a reminder set for
@@ -3412,7 +3418,53 @@ pub(crate) async fn build_artifact_detail(
         // reminder, on the same screen.
         .and_then(|m| m.snoozed_until.or(m.at))
         .map(ago_or_ahead);
+    let tag = match core.store.integration_of(&c.id).await? {
+        Some(i) => Some(match i.tag {
+            crate::store::integrations::Tag::Novel => {
+                "When it arrived, nothing in the base was near it.".to_string()
+            }
+            crate::store::integrations::Tag::Known => format!(
+                "When it arrived, the base already held something like it{}.",
+                i.nearest_id
+                    .as_deref()
+                    .map(|n| format!(" ({})", crate::web::insights::short(n)))
+                    .unwrap_or_default()
+            ),
+            crate::store::integrations::Tag::Conflict => format!(
+                "When it arrived, it disagreed with something the base held: {}",
+                i.detail.unwrap_or_default()
+            ),
+        }),
+        None => None,
+    };
+    let mut probes = Vec::new();
+    for p in core.store.rehearsals_of(&c.id).await? {
+        let last = core
+            .store
+            .results_of(&p.id, 1)
+            .await?
+            .first()
+            .map(|r| r.rank);
+        let q: String = p.query.chars().take(64).collect();
+        probes.push(format!(
+            "{} · \u{201c}{}{}\u{201d} · {}",
+            p.class.as_str(),
+            q,
+            if p.query.chars().count() > 64 {
+                "…"
+            } else {
+                ""
+            },
+            match last {
+                Some(Some(r)) => format!("rank {r}"),
+                Some(None) => "not found".to_string(),
+                None => "not yet rehearsed".to_string(),
+            }
+        ));
+    }
     Ok(ArtifactDetail {
+        tag,
+        probes,
         due_in,
         continues_at,
         related,

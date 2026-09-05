@@ -323,6 +323,31 @@ impl Store {
             .collect()
     }
 
+    /// Artifacts in results that nothing has ever asked for: no live probe,
+    /// and no positive observation naming them. The count, and the oldest
+    /// `limit` as `(id, title)`.
+    pub async fn unrehearsed(&self, limit: usize) -> Result<(i64, Vec<(String, Option<String>)>)> {
+        const WHERE: &str = "a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
+                AND a.embed_state = 'embedded'
+                AND NOT EXISTS (SELECT 1 FROM rehearsals r WHERE r.artifact_id = a.id AND r.retired_at IS NULL)
+                AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.artifact_id = a.id AND o.strength > 0 AND o.excluded_at IS NULL)";
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM artifacts a WHERE {WHERE}"
+        )))
+        .fetch_one(&self.pool)
+        .await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT a.id, a.title FROM artifacts a WHERE {WHERE} ORDER BY a.created_at ASC, a.id ASC LIMIT ?"
+        )))
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok((
+            count,
+            rows.iter().map(|r| (r.get("id"), r.get("title"))).collect(),
+        ))
+    }
+
     /// Results older than `retain_days`. Zero keeps for ever, as it does for
     /// the observations this shares a clock with.
     pub async fn expire_rehearsal_results(&self, retain_days: i64) -> Result<u64> {
@@ -508,5 +533,53 @@ mod tests {
             0,
             "zero keeps for ever"
         );
+    }
+
+    #[tokio::test]
+    async fn unrehearsed_is_what_no_probe_and_no_positive_observation_names() {
+        let store = Store::memory().await.unwrap();
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let new: Vec<_> = ["probed", "opened", "nothing"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| crate::store::artifacts::NewArtifact {
+                ordinal: i as i64,
+                text: t.to_string(),
+                corpus_span: None,
+                title: Some(t.to_string()),
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            })
+            .collect();
+        let ids: Vec<String> = store
+            .insert_artifacts(&src.id, &new)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        for id in &ids {
+            store.mark_embedded(id, "fake", 0).await.unwrap();
+        }
+        let g = generation(&store).await;
+        store.record_rehearsal(&probe(&ids[0], "q")).await.unwrap();
+        store
+            .record_observation(&crate::store::observations::NewObservation {
+                generation_id: g,
+                query: "q".into(),
+                query_vec: vec![0.1],
+                embed_model: "fake".into(),
+                artifact_id: Some(ids[1].clone()),
+                rank: Some(1),
+                source: crate::store::observations::Source::Opened,
+                event_id: None,
+            })
+            .await
+            .unwrap();
+        let (count, list) = store.unrehearsed(10).await.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(list, vec![(ids[2].clone(), Some("nothing".to_string()))]);
     }
 }

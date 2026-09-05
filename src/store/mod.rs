@@ -22,6 +22,7 @@ pub mod pursuits;
 pub mod rehearsals;
 pub mod segments;
 pub mod shingle;
+pub mod sleep_runs;
 pub mod sweeps;
 
 use crate::error::Result;

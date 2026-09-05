@@ -210,6 +210,16 @@
              hx-target="closest [data-terms]" hx-swap="outerHTML"
              hx-push-url="true">continues in the next passage →</a></p>
         {% endif %}
+        {% if let Some(t) = d.tag %}
+        {# What the base found when this arrived: its salience, as a word. #}
+        <p class="muted hint">{{ t }}</p>
+        {% endif %}
+        {% if !d.probes.is_empty() %}
+        <details class="muted">
+          <summary>what has asked for this ({{ d.probes.len() }})</summary>
+          <ul class="mono">{% for p in d.probes %}<li>{{ p }}</li>{% endfor %}</ul>
+        </details>
+        {% endif %}
         {% if !d.caveats.is_empty() %}
         {# Emitted by the same synthesis call that wrote the artifact, from what
            the source states. Shown but deliberately not embedded. #}

@@ -176,6 +176,9 @@ struct InsightsTemplate {
     /// apply route is behind `CanJudge`, and a block offering what a press
     /// would refuse is a lie.
     tune: Option<TuneView>,
+    /// What the base did while nobody was there. `None` before a generation
+    /// exists, like `evolve`.
+    sleep: Option<SleepView>,
     /// What the base did to its own ranking. `None` before a generation
     /// exists, which is a base whose boot path has not run yet.
     evolve: Option<EvolveView>,
@@ -564,6 +567,7 @@ async fn page(tenant: Tenant) -> Result<Response> {
 
     Ok(HtmlTemplate(InsightsTemplate {
         tune,
+        sleep: sleep_view(&tenant.core).await?,
         evolve: evolve_view(&tenant.core).await?,
         held: tenant.core.store.held().await?,
         used: tenant
@@ -762,6 +766,105 @@ async fn tune_view(tenant: &Tenant, flash: &str) -> Result<TuneView> {
     })
 }
 
+// ── Last night ──────────────────────────────────────────────────────────────
+
+/// The `_sleep.html` block: what the base did while nobody was there, in
+/// words, and what nothing has ever asked for.
+struct SleepView {
+    /// One sentence chain per sleep, newest first.
+    runs: Vec<String>,
+    /// How long a base has to be quiet before it sleeps, for the empty state.
+    idle_mins: i64,
+    /// Artifacts nothing has asked for: the count, and the oldest few.
+    unrehearsed_count: i64,
+    unrehearsed: Vec<(String, String)>,
+}
+
+/// One sleep as a sentence chain. Every number a person can act on has a
+/// page: conflicts are on the pair queue, adoptions and undos on the evolve
+/// block below this one.
+fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
+    let mut s = format!("{} — ", ago(r.started));
+    match r.stopped.as_str() {
+        "suspended" => s.push_str("suspended: observations no longer agree with verdicts. "),
+        "no_evidence" => s.push_str("nothing moved: no evidence on either side. "),
+        "activity" => s.push_str("stopped: you came back. "),
+        "budget" => s.push_str("budget spent. "),
+        _ => {}
+    }
+    s.push_str(&format!(
+        "Integrated {} — {} new, {} known, {} conflict{} waiting for you. Rehearsed {} probe{}, {} found.",
+        r.integrated,
+        r.novel,
+        r.known,
+        r.conflicts,
+        if r.conflicts == 1 { "" } else { "s" },
+        r.rehearsed,
+        if r.rehearsed == 1 { "" } else { "s" },
+        r.found
+    ));
+    if let Some(a) = &r.adopted {
+        s.push_str(&format!(" Adopted {}.", short(a)));
+    }
+    if let Some(a) = &r.reverted {
+        s.push_str(&format!(" Took back {}.", short(a)));
+    }
+    if let Some(a) = &r.refused {
+        s.push_str(&format!(" Refused {} on the base's own probes.", short(a)));
+    }
+    if r.undone + r.restored > 0 {
+        s.push_str(&format!(
+            " Took {} corpus action{} back; restored {}.",
+            r.undone,
+            if r.undone == 1 { "" } else { "s" },
+            r.restored
+        ));
+    }
+    if r.interference > 0 {
+        s.push_str(&format!(
+            " Filed {} pair{} for interference.",
+            r.interference,
+            if r.interference == 1 { "" } else { "s" }
+        ));
+    }
+    if r.condensed > 0 {
+        s.push_str(&format!(" Condensed {}.", r.condensed));
+    }
+    if r.budget > 0 {
+        s.push_str(&format!(
+            " {} of {} actions this week.",
+            r.budget_used, r.budget
+        ));
+    }
+    s
+}
+
+async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
+    if core.store.live_generation().await?.is_none() {
+        return Ok(None);
+    }
+    let runs = core
+        .store
+        .sleep_runs(7)
+        .await?
+        .iter()
+        .map(sleep_sentence)
+        .collect();
+    let (unrehearsed_count, list) = core.store.unrehearsed(20).await?;
+    Ok(Some(SleepView {
+        runs,
+        idle_mins: core.evolve.idle_secs / 60,
+        unrehearsed_count,
+        unrehearsed: list
+            .into_iter()
+            .map(|(id, title)| {
+                let label = title.unwrap_or_else(|| short(&id).to_string());
+                (id, label)
+            })
+            .collect(),
+    }))
+}
+
 // ── What the base did on its own ────────────────────────────────────────────
 
 /// The `_evolve.html` block: the state of the self-tuning loop, in words.
@@ -847,7 +950,7 @@ fn params_str(p: &crate::store::generations::GenerationParams) -> String {
 
 /// The tail of an id. Ids are ULIDs, so two minted in one sitting share their
 /// head; the tail is what tells them apart.
-fn short(id: &str) -> &str {
+pub(crate) fn short(id: &str) -> &str {
     &id[id.len().saturating_sub(8)..]
 }
 
@@ -1602,6 +1705,47 @@ mod tests {
         );
         assert!(
             body.contains("reconsidered 3 of what it hid, took 1 back, and restored 2"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_night_says_what_the_sleep_did_and_lists_what_nothing_has_asked_for() {
+        let (core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        let live = core.store.live_generation().await.unwrap().unwrap().id;
+        core.store
+            .record_sleep_run(&crate::store::sleep_runs::SleepRun {
+                id: crate::store::new_id(),
+                started: crate::store::now() - 60,
+                ended: crate::store::now(),
+                stopped: "finished".into(),
+                generation_id: live,
+                integrated: 12,
+                novel: 3,
+                known: 8,
+                conflicts: 1,
+                rehearsed: 340,
+                found: 300,
+                refused: Some("gen-refused-abcd1234".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let body = insights(core).await;
+        assert!(body.contains("Last night"), "{body}");
+        assert!(
+            body.contains("Integrated 12 — 3 new, 8 known, 1 conflict waiting for you."),
+            "{body}"
+        );
+        assert!(body.contains("Rehearsed 340 probes, 300 found."), "{body}");
+        assert!(
+            body.contains("Refused abcd1234 on the base&#39;s own probes."),
+            "{body}"
+        );
+        // Six artifacts, one probed by the fixture, two opened by the
+        // observations: three nothing has asked for.
+        assert!(
+            body.contains("unrehearsed (3) — nothing has asked for these"),
             "{body}"
         );
     }

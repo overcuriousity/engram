@@ -101,15 +101,57 @@ pub async fn run_if_quiet(core: &Core) -> Result<Pass> {
     // for. Under "off" this is the whole of what a quiet base does.
     let started = crate::store::now();
     let integrated = crate::jobs::sleep::integrate(core, started).await?;
-    if !core.evolve.autonomous.moves_ranking() || integrated.stopped {
-        return Ok(Pass {
+    let p = if !core.evolve.autonomous.moves_ranking() || integrated.stopped {
+        Pass {
             integrated,
+            stopped: if integrated.stopped { "activity" } else { "" },
             ..Default::default()
-        });
-    }
-    let mut p = pass(core).await?;
-    p.integrated = integrated;
+        }
+    } else {
+        let mut p = pass(core).await?;
+        p.integrated = integrated;
+        p
+    };
+    journal(core, started, &p).await?;
     Ok(p)
+}
+
+/// One row in `sleep_runs`, whatever the sleep did. Written here and not in
+/// `pass`, because this is where the phases converge — and a base under
+/// "off", which only integrates, still slept.
+async fn journal(core: &Core, started: i64, p: &Pass) -> Result<()> {
+    let Some(live) = core.store.live_generation().await? else {
+        return Ok(());
+    };
+    core.store
+        .record_sleep_run(&crate::store::sleep_runs::SleepRun {
+            id: crate::store::new_id(),
+            started,
+            ended: crate::store::now(),
+            stopped: if p.stopped.is_empty() {
+                "finished".into()
+            } else {
+                p.stopped.into()
+            },
+            generation_id: live.id,
+            integrated: p.integrated.integrated as i64,
+            novel: p.integrated.novel as i64,
+            known: p.integrated.known as i64,
+            conflicts: p.integrated.conflicts as i64,
+            rehearsed: p.replayed.rehearsed as i64,
+            found: p.replayed.found as i64,
+            adopted: p.adopted.clone(),
+            reverted: p.reverted.clone(),
+            refused: p.refused.clone(),
+            undone: p.undone as i64,
+            restored: p.restored as i64,
+            interference: 0,
+            condensed: 0,
+            budget_used: 0,
+            budget: 0,
+            detail: "{}".into(),
+        })
+        .await
 }
 
 async fn quiet(core: &Core) -> Result<bool> {
