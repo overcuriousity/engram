@@ -45,6 +45,12 @@ pub async fn run(core: &Core) -> Result<Report> {
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
     for c in &cands {
+        // The week's budget, before the judge call: a burial is the one
+        // action here that destroys text, and the cap is on taking it.
+        if !core.may_act().await? {
+            tracing::info!("budget spent; the rest of the nominees wait for the window to move");
+            break;
+        }
         // A burial taken back — by a person, or by the base for a search
         // given up on — is not bought again. Read before the judge call,
         // which is the expensive step.
@@ -771,6 +777,25 @@ mod tests {
             "stale duplicate fact",
             "the one stage that destroys text must re-check its own gate"
         );
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_spent_budget_judges_nothing_and_buries_nothing() {
+        let mut core = test_core().await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+        ]));
+        core.reaper = Some(scripted.clone());
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_week = 0;
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped), (0, 0));
+        assert_eq!(scripted.calls(), 0);
         assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
     }
 

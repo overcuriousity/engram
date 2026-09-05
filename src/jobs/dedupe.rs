@@ -98,6 +98,17 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         // one of its members while this one waited out a backoff.
         return Ok(());
     }
+    // The week's budget, read before the judge call: a verdict this unit may
+    // not act on is a call spent for nothing. The pair stays pending and the
+    // next arming asks again once the window has moved. Only under "full";
+    // below it this sweep is under its own switch, as it was.
+    if !core.may_act().await? {
+        tracing::info!(
+            pair = id,
+            "budget spent; the pair waits for the window to move"
+        );
+        return Ok(());
+    }
 
     // Reported, not swallowed. `a_id` and `b_id` are `ON DELETE CASCADE` and
     // every pool sets `foreign_keys`, so a pair naming an artifact that is gone
@@ -1224,6 +1235,30 @@ mod tests {
             PairState::Pending,
             "reactivating the survivor left the duplicate buried"
         );
+    }
+
+    #[tokio::test]
+    async fn a_spent_budget_leaves_the_pair_pending_without_spending_the_judge() {
+        let mut core = test_core().await;
+        let judge = Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"replaced","obsolete":"A","detail":"older"}"#.into(),
+        ]));
+        core.judge = Some(judge.clone());
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_week = 0;
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        assert_eq!(judge.calls(), 0, "the budget is read before the call");
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::Pending
+        );
+        // Below "full" the sweep is under its own switch and the budget is
+        // not consulted.
+        core.evolve.autonomous = crate::config::Autonomy::Ranking;
+        run(&core, &pair.to_string()).await.unwrap();
+        assert_eq!(judge.calls(), 1);
     }
 
     #[tokio::test]
