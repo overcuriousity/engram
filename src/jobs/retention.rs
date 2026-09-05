@@ -30,6 +30,10 @@ pub struct Report {
     pub adopted: usize,
     /// Generations the idle pass took back. Zero or one.
     pub reverted: usize,
+    /// Corpus actions the pass took back on evidence.
+    pub undone: usize,
+    /// Artifacts the pass restored for a search given up on.
+    pub restored: usize,
 }
 
 /// What the base holds, as opposed to what this pass did to it.
@@ -86,6 +90,8 @@ pub async fn run(core: &Core) -> Result<Report> {
         Ok(p) => {
             report.adopted = usize::from(p.adopted.is_some());
             report.reverted = usize::from(p.reverted.is_some());
+            report.undone = p.undone;
+            report.restored = p.restored;
         }
         Err(e) => {
             tracing::warn!(error = %e, "the idle pass failed; the live generation is unchanged");

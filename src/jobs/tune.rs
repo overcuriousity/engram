@@ -59,6 +59,11 @@ pub struct Pass {
     pub adopted: Option<String>,
     /// The generation taken back, if the one under watch did not hold.
     pub reverted: Option<String>,
+    /// Corpus actions rule 1 took back: a merge or a supersession whose
+    /// survivor was no longer found where the original was.
+    pub undone: usize,
+    /// Artifacts rule 2 restored for a search given up on.
+    pub restored: usize,
 }
 
 /// Run the pass whatever the clock says. The adopted generation's id, or
@@ -114,6 +119,19 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         );
         return Ok(Pass::default());
     }
+
+    // The corpus half, before the ranking half's own gates: a base under
+    // watch, or one whose parameters drifted, still answers for what it hid.
+    // Same switch, same claim, same anchor — the rules read the same
+    // observations the ladder does.
+    let started = crate::store::now();
+    let retracted = crate::jobs::retract::run(core, &live, started).await?;
+    let mut out = Pass {
+        undone: retracted.undone,
+        restored: retracted.restored,
+        ..Default::default()
+    };
+
     let current = *core.ranking.read().expect("ranking lock");
     if GenerationParams::from(current) != live.params {
         // The generation says one thing and the running parameters another.
@@ -124,7 +142,7 @@ pub async fn pass(core: &Core) -> Result<Pass> {
             generation = %live.id,
             "the live generation does not describe the running parameters; the pass did nothing"
         );
-        return Ok(Pass::default());
+        return Ok(out);
     }
 
     // A live generation with a parent and a prediction is under watch, and
@@ -137,15 +155,20 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         let new = lived(core, &live.id).await?;
         let old = lived(core, &parent.id).await?;
         if !holds_up(&new, &old) {
-            return revert(core, &live, &new, &old).await;
+            let p = revert(core, &live, &new, &old).await?;
+            out.reverted = p.reverted;
+            return Ok(out);
         }
         if !settled(&new, &old) {
             tracing::debug!(generation = %live.id, ?new, ?old, "under watch; nothing proposed");
-            return Ok(Pass::default());
+            return Ok(out);
         }
     }
 
-    propose(core, &live, current).await
+    let p = propose(core, &live, current).await?;
+    out.adopted = p.adopted;
+    out.reverted = p.reverted;
+    Ok(out)
 }
 
 /// Put the predecessor back, and remember the candidate that failed.
@@ -178,6 +201,7 @@ async fn revert(
     Ok(Pass {
         adopted: None,
         reverted: Some(live.id.clone()),
+        ..Default::default()
     })
 }
 
@@ -307,6 +331,7 @@ async fn spread_step(
     Ok(Pass {
         adopted: Some(id),
         reverted: None,
+        ..Default::default()
     })
 }
 
@@ -353,6 +378,7 @@ async fn adopt(
     Ok(Pass {
         adopted: Some(id),
         reverted: None,
+        ..Default::default()
     })
 }
 

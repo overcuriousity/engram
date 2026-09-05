@@ -22,7 +22,7 @@ use crate::store::eval_runs::{DiffRow, NewEvalRun};
 /// The `k` in recall@k, and the depth a rank is looked for in. The judge
 /// page's own figure is recall@10; a sweep reporting recall@20 beside it would
 /// be two numbers with one name.
-const LIMIT: usize = 10;
+pub(crate) const LIMIT: usize = 10;
 
 /// The grid's axes. Both are scoring knobs — they reorder what retrieval
 /// already returned — which is what makes a sweep cheap enough to run on a
@@ -253,7 +253,7 @@ pub(crate) struct Pair {
 /// setting: a sweep re-ranks every pair under every grid candidate, so the
 /// work is pairs times grid, and a base that has been used for a year would
 /// otherwise make one pass unbounded.
-const OBSERVATION_LIMIT: usize = 500;
+pub(crate) const OBSERVATION_LIMIT: usize = 500;
 
 /// Where one configuration put the answer to one pair. `None` past `LIMIT`.
 ///
@@ -261,7 +261,7 @@ const OBSERVATION_LIMIT: usize = 500;
 /// the pipeline as configured, reranker included, and lets the scope decide.
 /// The idle pass may spend no inference at all, so it passes `false` and
 /// measures the ordering that feeds the reranker where one serves search.
-async fn rank_of(
+pub(crate) async fn rank_of(
     core: &Core,
     pair: &Pair,
     params: RankingParams,

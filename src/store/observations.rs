@@ -97,6 +97,27 @@ pub struct Observation {
     pub source: Source,
     pub strength: f32,
     pub event_id: Option<String>,
+    /// The model the query vector came from: what a buried vector has to
+    /// match before the two are compared.
+    pub embed_model: String,
+}
+
+const COLUMNS: &str = "id, created_at, generation_id, query, query_vec, artifact_id,                        rank, source, strength, event_id, embed_model";
+
+fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Observation> {
+    Ok(Observation {
+        id: r.get("id"),
+        created_at: r.get("created_at"),
+        generation_id: r.get("generation_id"),
+        query: r.get("query"),
+        query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+        artifact_id: r.get("artifact_id"),
+        rank: r.get("rank"),
+        source: Source::parse(&r.get::<String, _>("source"))?,
+        strength: r.get("strength"),
+        event_id: r.get("event_id"),
+        embed_model: r.get("embed_model"),
+    })
 }
 
 /// Write one observation through whatever executor the caller has.
@@ -148,33 +169,55 @@ impl Store {
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<Observation>> {
-        sqlx::query(
-            "SELECT id, created_at, generation_id, query, query_vec, artifact_id,
-                    rank, source, strength, event_id
-               FROM observations
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM observations
               WHERE generation_id = ? AND excluded_at IS NULL
               ORDER BY created_at DESC, id DESC
-              LIMIT ?",
-        )
+              LIMIT ?"
+        )))
         .bind(generation_id)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?
-        .into_iter()
-        .map(|r| {
-            Ok(Observation {
-                id: r.get("id"),
-                created_at: r.get("created_at"),
-                generation_id: r.get("generation_id"),
-                query: r.get("query"),
-                query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-                artifact_id: r.get("artifact_id"),
-                rank: r.get("rank"),
-                source: Source::parse(&r.get::<String, _>("source"))?,
-                strength: r.get("strength"),
-                event_id: r.get("event_id"),
-            })
-        })
+        .iter()
+        .map(read)
+        .collect()
+    }
+
+    /// Positive observations naming `artifact_id`, made at or before `before`,
+    /// under any generation of the era `(embed_recipe, chat_model)`. Newest
+    /// first, at most `limit`. What rule 1 replays: the record of a subject
+    /// being found, from before it was hidden. At-or-before, because the clock
+    /// is seconds and an observation in the same second as the hiding was
+    /// still made of a subject that was live.
+    pub async fn observations_naming(
+        &self,
+        artifact_id: &str,
+        before: i64,
+        embed_recipe: &str,
+        chat_model: &str,
+        limit: usize,
+    ) -> Result<Vec<Observation>> {
+        sqlx::query(
+            "SELECT o.id, o.created_at, o.generation_id, o.query, o.query_vec, o.artifact_id,
+                    o.rank, o.source, o.strength, o.event_id, o.embed_model
+               FROM observations o
+               JOIN generations g ON g.id = o.generation_id
+              WHERE o.artifact_id = ? AND o.created_at <= ? AND o.strength > 0
+                AND o.excluded_at IS NULL
+                AND g.embed_recipe = ? AND g.chat_model = ?
+              ORDER BY o.created_at DESC, o.id DESC
+              LIMIT ?",
+        )
+        .bind(artifact_id)
+        .bind(before)
+        .bind(embed_recipe)
+        .bind(chat_model)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(read)
         .collect()
     }
 
