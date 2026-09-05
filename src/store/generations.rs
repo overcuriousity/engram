@@ -33,6 +33,8 @@ pub struct GenerationParams {
     pub spread_max: usize,
     #[serde(default = "crate::config::default_rerank_knob")]
     pub rerank: bool,
+    #[serde(default = "crate::config::default_review_min")]
+    pub review_min: f32,
 }
 
 impl Default for GenerationParams {
@@ -51,6 +53,7 @@ impl From<crate::core::ranking::RankingParams> for GenerationParams {
             prime_lift: p.prime_lift,
             spread_max: p.spread_max,
             rerank: p.rerank,
+            review_min: p.review_min,
         }
     }
 }
@@ -65,6 +68,7 @@ impl From<GenerationParams> for crate::core::ranking::RankingParams {
             prime_lift: p.prime_lift,
             spread_max: p.spread_max,
             rerank: p.rerank,
+            review_min: p.review_min,
         }
     }
 }
@@ -731,6 +735,7 @@ mod tests {
             prime_lift: 2,
             spread_max: 5,
             rerank: false,
+            review_min: 0.84,
         };
         let back: crate::core::ranking::RankingParams = GenerationParams::from(r).into();
         assert_eq!(back, r);

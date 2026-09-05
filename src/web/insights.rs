@@ -830,14 +830,15 @@ async fn rules_str(core: &crate::core::Core) -> Result<Option<String>> {
 
 fn params_str(p: &crate::store::generations::GenerationParams) -> String {
     format!(
-        "recency {:.2}, cap {}, pool ×{}, half-life {}d, lift {}, spread {}, rerank {}",
+        "recency {:.2}, cap {}, pool ×{}, half-life {}d, lift {}, spread {}, rerank {}, review {:.2}",
         p.recency_weight,
         cap_str(p.per_source_cap),
         p.candidate_multiplier,
         p.recency_half_life_days,
         p.prime_lift,
         p.spread_max,
-        if p.rerank { "on" } else { "off" }
+        if p.rerank { "on" } else { "off" },
+        p.review_min
     )
 }
 

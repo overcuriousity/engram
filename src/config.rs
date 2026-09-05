@@ -847,7 +847,7 @@ impl Default for ConsolidateConfig {
         Self {
             enabled: true,
             near_dupe_min: 0.90,
-            review_min: 0.88,
+            review_min: default_review_min(),
             auto_supersede: 0.95,
             per_point: 5,
             interval_hours: 24,
@@ -973,6 +973,10 @@ pub(crate) fn default_spread_max() -> usize {
 /// reranker the file named, which is "on" wherever one was configured.
 pub(crate) fn default_rerank_knob() -> bool {
     true
+}
+/// The shipped `consolidate.review_min`, read by the generation shapes.
+pub(crate) fn default_review_min() -> f32 {
+    0.88
 }
 fn default_pinned_boost() -> f32 {
     0.15
@@ -2009,6 +2013,8 @@ pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> st
     doc["vector"]["recency_half_life_days"] = toml_edit::value(i64::from(p.recency_half_life_days));
     doc["associate"]["prime_lift"] = toml_edit::value(p.prime_lift as i64);
     doc["associate"]["spread_max"] = toml_edit::value(p.spread_max as i64);
+    let review = (f64::from(p.review_min) * 1000.0).round() / 1000.0;
+    doc["consolidate"]["review_min"] = toml_edit::value(review);
     // `rerank` has no key of its own: the file says "on" by naming a reranker
     // under `[infer]`, and that is not this function's to add or remove.
     write_beside_and_rename(path, &doc.to_string())
@@ -2039,6 +2045,7 @@ pub fn ranking_keys_in_env() -> Vec<String> {
                     | "ENGRAM__VECTOR__RECENCY_HALF_LIFE_DAYS"
                     | "ENGRAM__ASSOCIATE__PRIME_LIFT"
                     | "ENGRAM__ASSOCIATE__SPREAD_MAX"
+                    | "ENGRAM__CONSOLIDATE__REVIEW_MIN"
             )
         })
         .collect()
@@ -3083,6 +3090,7 @@ mod tests {
                 prime_lift: 2,
                 spread_max: 5,
                 rerank: true,
+                review_min: 0.84,
             },
         )
         .unwrap();
@@ -3090,6 +3098,7 @@ mod tests {
         assert!(out.contains("candidate_multiplier = 5"), "{out}");
         assert!(out.contains("prime_lift = 2"), "{out}");
         assert!(out.contains("spread_max = 5"), "{out}");
+        assert!(out.contains("review_min = 0.84"), "{out}");
         assert!(out.contains("recency_half_life_days = 90"), "{out}");
         assert!(
             out.contains("# a comment the apply path must not eat"),

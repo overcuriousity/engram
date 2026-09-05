@@ -29,6 +29,8 @@ pub struct RunParams {
     pub spread_max: usize,
     #[serde(default = "crate::config::default_rerank_knob")]
     pub rerank: bool,
+    #[serde(default = "crate::config::default_review_min")]
+    pub review_min: f32,
 }
 
 impl Default for RunParams {
@@ -47,6 +49,7 @@ impl From<crate::core::ranking::RankingParams> for RunParams {
             prime_lift: p.prime_lift,
             spread_max: p.spread_max,
             rerank: p.rerank,
+            review_min: p.review_min,
         }
     }
 }
@@ -61,6 +64,7 @@ impl From<RunParams> for crate::core::ranking::RankingParams {
             prime_lift: p.prime_lift,
             spread_max: p.spread_max,
             rerank: p.rerank,
+            review_min: p.review_min,
         }
     }
 }

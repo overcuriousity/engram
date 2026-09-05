@@ -295,19 +295,132 @@ async fn spread_step(
 ) -> Result<Pass> {
     let use_ = core.store.band_use(&live.id, current.spread_max).await?;
     let Some(next) = next_spread(current.spread_max, use_) else {
-        return Ok(Pass::default());
+        return review_step(core, live, current, tried).await;
     };
     let candidate = crate::core::ranking::RankingParams {
         spread_max: next,
         ..current
     };
     if tried.contains(&GenerationParams::from(candidate)) {
-        return Ok(Pass::default());
+        return review_step(core, live, current, tried).await;
     }
     let predicted = match use_.band_used + use_.tail_used {
         0 => 0.0,
         n => use_.band_used as f64 / n as f64,
     };
+    let id = adopt_lived(core, live, candidate, predicted).await?;
+    tracing::info!(
+        generation = %id,
+        spread_max = next,
+        band_used = use_.band_used,
+        tail_used = use_.tail_used,
+        "adopted a generation on what the band earned"
+    );
+    Ok(Pass {
+        adopted: Some(id),
+        reverted: None,
+        ..Default::default()
+    })
+}
+
+/// The review threshold's rule. Two signals, each a rate over the lowest
+/// recorded band against the band above it, compared with one-decision
+/// noise: `wrong` — the lowest band's actions taken back more often — steps
+/// up; `short` — the lowest band acting as often — steps down. Wrong first.
+/// A rung at or above `auto_supersede` is never offered, and a hand-set value
+/// off the ladder holds.
+pub fn next_review_min(
+    current: f32,
+    auto_supersede: f32,
+    low: crate::store::pairs::BandRecord,
+    above: crate::store::pairs::BandRecord,
+) -> Option<f32> {
+    use crate::core::ranking::REVIEW_MINS;
+    let at = REVIEW_MINS
+        .iter()
+        .position(|r| (r - current).abs() < 1e-6)?;
+    let rate = |n: usize, d: usize| (d > 0).then(|| n as f64 / d as f64);
+    let noise = |a: usize, b: usize| 1.0 / a as f64 + 1.0 / b as f64;
+    if let (Some(lw), Some(aw)) = (rate(low.undone, low.acted), rate(above.undone, above.acted))
+        && lw - aw > noise(low.acted, above.acted)
+    {
+        return REVIEW_MINS
+            .get(at + 1)
+            .copied()
+            .filter(|r| *r < auto_supersede);
+    }
+    if let (Some(ls), Some(as_)) = (rate(low.acted, low.judged), rate(above.acted, above.judged))
+        && as_ - ls <= noise(low.judged, above.judged)
+    {
+        return at.checked_sub(1).map(|i| REVIEW_MINS[i]);
+    }
+    None
+}
+
+/// The last step, asked when nothing else moved: the review threshold on
+/// what its lowest band earned and what was taken back.
+async fn review_step(
+    core: &Core,
+    live: &Generation,
+    current: crate::core::ranking::RankingParams,
+    tried: &[GenerationParams],
+) -> Result<Pass> {
+    use crate::core::ranking::REVIEW_MINS;
+    let Some(at) = REVIEW_MINS
+        .iter()
+        .position(|r| (r - current.review_min).abs() < 1e-6)
+    else {
+        return Ok(Pass::default());
+    };
+    let hi = REVIEW_MINS
+        .get(at + 1)
+        .copied()
+        .unwrap_or(1.0)
+        .min(core.consolidate.auto_supersede);
+    let low = core.store.band_record(current.review_min, hi).await?;
+    let above = core.store.band_record(hi, 1.0).await?;
+    let Some(next) = next_review_min(
+        current.review_min,
+        core.consolidate.auto_supersede,
+        low,
+        above,
+    ) else {
+        return Ok(Pass::default());
+    };
+    let candidate = crate::core::ranking::RankingParams {
+        review_min: next,
+        ..current
+    };
+    if tried.contains(&GenerationParams::from(candidate)) {
+        return Ok(Pass::default());
+    }
+    let predicted = match low.judged {
+        0 => 0.0,
+        n => low.acted as f64 / n as f64,
+    };
+    let id = adopt_lived(core, live, candidate, predicted).await?;
+    tracing::info!(
+        generation = %id,
+        review_min = next,
+        ?low,
+        ?above,
+        "adopted a generation on what the lowest band earned"
+    );
+    Ok(Pass {
+        adopted: Some(id),
+        reverted: None,
+        ..Default::default()
+    })
+}
+
+/// Make `candidate` live on lived evidence: no run to name, `predicted` the
+/// rate that argued for it.
+async fn adopt_lived(
+    core: &Core,
+    live: &Generation,
+    candidate: crate::core::ranking::RankingParams,
+    predicted: f64,
+) -> Result<String> {
     let id = core
         .store
         .adopt_generation_lived(
@@ -321,18 +434,7 @@ async fn spread_step(
         )
         .await?;
     *core.ranking.write().expect("ranking lock") = candidate;
-    tracing::info!(
-        generation = %id,
-        spread_max = next,
-        band_used = use_.band_used,
-        tail_used = use_.tail_used,
-        "adopted a generation on what the band earned"
-    );
-    Ok(Pass {
-        adopted: Some(id),
-        reverted: None,
-        ..Default::default()
-    })
+    Ok(id)
 }
 
 async fn judged_count(core: &Core) -> Result<i64> {
@@ -677,6 +779,154 @@ mod tests {
             .into_iter()
             .map(|s| Box::leak(s.into_boxed_str()) as &'static str)
             .collect()
+    }
+
+    #[test]
+    fn the_review_threshold_steps_down_when_its_lowest_band_acts_like_the_band_above_and_up_when_its_actions_are_taken_back_more()
+     {
+        use crate::store::pairs::BandRecord;
+        let b = |judged, acted, undone| BandRecord {
+            judged,
+            acted,
+            undone,
+        };
+        // short: low acts 8/10, above 9/10 — within one decision → down a rung
+        assert_eq!(
+            next_review_min(0.88, 0.95, b(10, 8, 0), b(10, 9, 0)),
+            Some(0.84)
+        );
+        // low acts 2/10 against 9/10 → hold
+        assert_eq!(next_review_min(0.88, 0.95, b(10, 2, 0), b(10, 9, 0)), None);
+        // wrong: low's actions taken back 4/8, above's 0/9 → up a rung
+        assert_eq!(
+            next_review_min(0.88, 0.95, b(10, 8, 4), b(10, 9, 0)),
+            Some(0.92)
+        );
+        // wrong wins over short when both fire
+        assert_eq!(
+            next_review_min(0.84, 0.95, b(10, 9, 5), b(10, 9, 0)),
+            Some(0.88)
+        );
+        // a rung at or above auto_supersede is never offered
+        assert_eq!(next_review_min(0.92, 0.93, b(10, 8, 4), b(10, 9, 0)), None);
+        assert_eq!(next_review_min(0.88, 0.92, b(10, 8, 4), b(10, 9, 0)), None);
+        // nothing judged in a band is no evidence
+        assert_eq!(next_review_min(0.88, 0.95, b(0, 0, 0), b(10, 9, 0)), None);
+        // a hand-set value off the ladder holds
+        assert_eq!(next_review_min(0.85, 0.95, b(10, 8, 0), b(10, 9, 0)), None);
+        // the bottom rung cannot step down
+        assert_eq!(next_review_min(0.80, 0.95, b(10, 9, 0), b(10, 9, 0)), None);
+    }
+
+    /// `n` pairs in `[lo, hi)` settled by the judge, `acted` of them with a
+    /// journal row, `undone` of those taken back.
+    async fn band(core: &Core, lo: f32, n: usize, acted: usize, undone: usize) {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        use crate::store::pairs::{DecidedBy, PairState};
+        for i in 0..n {
+            let score = lo + 0.001 * i as f32;
+            let src = core.store.insert_corpus("x", "web", None).await.unwrap();
+            let made = core
+                .store
+                .insert_artifacts(
+                    &src.id,
+                    &[
+                        crate::store::artifacts::NewArtifact {
+                            ordinal: 0,
+                            text: format!("one {score}"),
+                            corpus_span: None,
+                            title: None,
+                            category: None,
+                            tags: vec![],
+                            segment_idx: None,
+                            caveats: vec![],
+                        },
+                        crate::store::artifacts::NewArtifact {
+                            ordinal: 1,
+                            text: format!("two {score}"),
+                            corpus_span: None,
+                            title: None,
+                            category: None,
+                            tags: vec![],
+                            segment_idx: None,
+                            caveats: vec![],
+                        },
+                    ],
+                )
+                .await
+                .unwrap();
+            core.store
+                .record_pair(&made[0].id, &made[1].id, score)
+                .await
+                .unwrap();
+            let id = core
+                .store
+                .pairs_by_state(PairState::Pending, 100)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|p| (p.score - score).abs() < 1e-6)
+                .unwrap()
+                .id;
+            core.store
+                .set_pair_state(id, PairState::Dismissed, None, DecidedBy::Model)
+                .await
+                .unwrap();
+            if i < acted {
+                let subject = format!("s{score}");
+                core.store
+                    .record_action(&NewAction {
+                        job: Job::Dedupe,
+                        kind: Kind::Supersede,
+                        subject_id: subject.clone(),
+                        survivor_id: None,
+                        detail: None,
+                        evidence: serde_json::json!({}),
+                        pair_score: Some(score),
+                    })
+                    .await
+                    .unwrap();
+                if i < undone {
+                    core.store
+                        .undo_action_on(&subject, Kind::Supersede, UndoneBy::Evidence, "lost")
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_base_whose_lowest_band_acts_like_the_one_above_lowers_the_review_threshold_when_nothing_else_moves()
+     {
+        let (mut core, parent) = seeded_with_nothing_to_gain().await;
+        core.evolve.autonomous = true;
+        assert_eq!(core.ranking.read().unwrap().review_min, 0.88);
+        band(&core, 0.88, 10, 8, 0).await;
+        band(&core, 0.92, 10, 9, 0).await;
+
+        let adopted = run(&core).await.unwrap().expect("review_min steps down");
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        assert_eq!(live.id, adopted);
+        assert_eq!(live.params.review_min, 0.84);
+        assert_eq!(live.parent_id.as_deref(), Some(parent.as_str()));
+        assert!(live.run_id.is_none());
+        assert_eq!(
+            core.ranking.read().unwrap().review_min,
+            0.84,
+            "relate reads it from here"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lowest_band_whose_actions_are_taken_back_raises_the_review_threshold() {
+        let (mut core, _) = seeded_with_nothing_to_gain().await;
+        core.evolve.autonomous = true;
+        band(&core, 0.88, 10, 8, 4).await;
+        band(&core, 0.92, 10, 9, 0).await;
+
+        run(&core).await.unwrap().expect("review_min steps up");
+        assert_eq!(core.ranking.read().unwrap().review_min, 0.92);
     }
 
     #[tokio::test]

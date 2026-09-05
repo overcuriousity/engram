@@ -148,6 +148,15 @@ impl PairState {
 /// `set_pair_state` writes `detail` unconditionally, so it nulled it, while
 /// `apply_supersede_ui` carries the judge's through on purpose.
 ///
+/// One score band's record: pairs the judge settled there, the base's
+/// actions in it, and how many of those were taken back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandRecord {
+    pub judged: usize,
+    pub acted: usize,
+    pub undone: usize,
+}
+
 /// Passed rather than defaulted at every call site, so that a new operator
 /// surface cannot be recorded as the model by forgetting to say otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -412,6 +421,37 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_pair).collect())
+    }
+
+    /// Pairs the judge settled with a cosine in `[lo, hi)`, and, from the
+    /// corpus journal, how many of the base's dedupe actions in that band
+    /// there were and how many were taken back. What the review threshold's
+    /// rule reads: two of these, for the band just above the threshold and
+    /// for everything above that.
+    pub async fn band_record(&self, lo: f32, hi: f32) -> Result<BandRecord> {
+        let judged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifact_pairs
+              WHERE score >= ? AND score < ? AND state <> 'pending' AND decided_by = 'model'",
+        )
+        .bind(lo)
+        .bind(hi)
+        .fetch_one(&self.pool)
+        .await?;
+        let r = sqlx::query(
+            "SELECT COUNT(*) AS acted,
+                    COALESCE(SUM(CASE WHEN undone_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS undone
+               FROM corpus_actions
+              WHERE job = 'dedupe' AND pair_score >= ? AND pair_score < ?",
+        )
+        .bind(lo)
+        .bind(hi)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(BandRecord {
+            judged: judged as usize,
+            acted: r.get::<i64, _>("acted") as usize,
+            undone: r.get::<i64, _>("undone") as usize,
+        })
     }
 
     /// How many pairs sit in a state, for a page that shows only the first few
@@ -1372,6 +1412,65 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_band_record_counts_judged_pairs_and_the_journal_s_actions_in_its_score_range() {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        let s = Store::memory().await.unwrap();
+        // Four pairs at four scores, three settled by the judge, one pending.
+        let mut ids = Vec::new();
+        for (i, score) in [0.81f32, 0.86, 0.90, 0.82].into_iter().enumerate() {
+            let (a, b) = two_artifacts(&s).await;
+            s.record_pair(&a, &b, score).await.unwrap();
+            let id = s
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|p| (p.score - score).abs() < 1e-6)
+                .unwrap()
+                .id;
+            if i < 3 {
+                s.set_pair_state(id, PairState::Dismissed, None, DecidedBy::Model)
+                    .await
+                    .unwrap();
+            }
+            ids.push(id);
+        }
+        // The base acted on two of them; the lower one was taken back.
+        let row = |score: f32| NewAction {
+            job: Job::Dedupe,
+            kind: Kind::Supersede,
+            subject_id: format!("s{score}"),
+            survivor_id: None,
+            detail: None,
+            evidence: serde_json::json!({}),
+            pair_score: Some(score),
+        };
+        s.record_action(&row(0.81)).await.unwrap();
+        s.record_action(&row(0.90)).await.unwrap();
+        s.undo_action_on("s0.81", Kind::Supersede, UndoneBy::Operator, "back")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.band_record(0.80, 0.88).await.unwrap(),
+            BandRecord {
+                judged: 2,
+                acted: 1,
+                undone: 1
+            },
+            "the pending pair is not judged"
+        );
+        assert_eq!(
+            s.band_record(0.88, 1.0).await.unwrap(),
+            BandRecord {
+                judged: 1,
+                acted: 1,
+                undone: 0
+            }
+        );
+    }
     use crate::store::Store;
     use crate::store::artifacts::NewArtifact;
 

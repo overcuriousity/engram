@@ -494,6 +494,7 @@ impl Core {
                 crate::core::ranking::RankingParams::from_config(
                     &cfg.vector,
                     &cfg.associate,
+                    &cfg.consolidate,
                     cfg.infer.rerank.is_some(),
                 ),
             )),

@@ -61,6 +61,10 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         .vectors
         .neighbours(artifact_id, core.consolidate.per_point)
         .await?;
+    // The live generation's, not the file's: a base with autonomy on moves
+    // this threshold on what its lowest band earned. Read once, before any
+    // await, so the lock is never held across one.
+    let review_min = core.ranking.read().expect("ranking lock").review_min;
 
     for h in hits {
         // `similarity` and not `score`. `review_min` is a cosine, and `score`
@@ -74,7 +78,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
             );
             continue;
         };
-        if similarity < core.consolidate.review_min {
+        if similarity < review_min {
             continue;
         }
         // Ordinary rather than an error: the vector store can list a point
@@ -427,6 +431,44 @@ mod tests {
 
         assert_eq!(from_a, 1, "the first member found nothing");
         assert_eq!(after_b, 1, "the second member filed the same pair twice");
+    }
+
+    #[tokio::test]
+    async fn the_review_threshold_is_the_live_generation_s_not_the_file_s() {
+        // A neighbour at cosine 0.86: below the shipped 0.88, above a rung
+        // the base may step down to.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.86, 0.51]),
+            ],
+        )
+        .await;
+        assert_eq!(core.ranking.read().unwrap().review_min, 0.88);
+
+        run(&core, &ids[1]).await.unwrap();
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "below the threshold, nothing is asked"
+        );
+
+        core.ranking.write().unwrap().review_min = 0.84;
+        run(&core, &ids[1]).await.unwrap();
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the lowered rung admits it"
+        );
     }
 
     #[tokio::test]

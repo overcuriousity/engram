@@ -26,6 +26,10 @@ pub const HALF_LIVES: [u32; 5] = [30, 90, 180, 365, 730];
 pub const PRIME_LIFTS: [usize; 4] = [0, 1, 2, 4];
 /// The rungs for `spread_max`: how many linked artifacts hang under the list.
 pub const SPREADS: [usize; 6] = [0, 1, 2, 3, 5, 8];
+/// The rungs for `review_min`: the cosine at which a pair is worth asking the
+/// judge about. A rung at or above `consolidate.auto_supersede` is never
+/// offered.
+pub const REVIEW_MINS: [f32; 4] = [0.80, 0.84, 0.88, 0.92];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RankingParams {
@@ -47,6 +51,10 @@ pub struct RankingParams {
     /// Whether the configured reranker runs. Meaningless where none is
     /// configured: serving treats it as `false` there.
     pub rerank: bool,
+    /// The cosine at which a pair of artifacts is worth asking the judge
+    /// about. A corpus job's threshold, carried here because the generation
+    /// is the running configuration and `relate.rs` reads it off this lock.
+    pub review_min: f32,
 }
 
 /// The shipped values — the same ones `VectorConfig`'s serde defaults hold,
@@ -61,6 +69,7 @@ impl Default for RankingParams {
             prime_lift: crate::config::default_prime_lift(),
             spread_max: crate::config::default_spread_max(),
             rerank: crate::config::default_rerank_knob(),
+            review_min: crate::config::default_review_min(),
         }
     }
 }
@@ -72,6 +81,7 @@ impl RankingParams {
     pub fn from_config(
         cfg: &VectorConfig,
         associate: &crate::config::AssociateConfig,
+        consolidate: &crate::config::ConsolidateConfig,
         reranker_configured: bool,
     ) -> Self {
         Self {
@@ -88,6 +98,7 @@ impl RankingParams {
             prime_lift: associate.prime_lift,
             spread_max: associate.spread_max,
             rerank: reranker_configured,
+            review_min: consolidate.review_min,
         }
     }
 }
@@ -119,6 +130,7 @@ mod tests {
                 ..vector_config(3)
             },
             &Default::default(),
+            &Default::default(),
             false,
         );
         assert_eq!(p.candidate_multiplier, 5);
@@ -132,11 +144,13 @@ mod tests {
             spread_max: 5,
             ..Default::default()
         };
-        let p = RankingParams::from_config(&vector_config(3), &associate, true);
+        let p =
+            RankingParams::from_config(&vector_config(3), &associate, &Default::default(), true);
         assert_eq!(p.prime_lift, 2);
         assert_eq!(p.spread_max, 5);
         assert!(p.rerank);
-        let p = RankingParams::from_config(&vector_config(3), &associate, false);
+        let p =
+            RankingParams::from_config(&vector_config(3), &associate, &Default::default(), false);
         assert!(
             !p.rerank,
             "no reranker configured means the knob starts off"
@@ -156,6 +170,20 @@ mod tests {
     }
 
     #[test]
+    fn the_review_threshold_is_read_from_the_file_and_its_rung_sits_mid_ladder() {
+        let consolidate = crate::config::ConsolidateConfig {
+            review_min: 0.84,
+            ..Default::default()
+        };
+        let p =
+            RankingParams::from_config(&vector_config(3), &Default::default(), &consolidate, false);
+        assert_eq!(p.review_min, 0.84);
+        let d = RankingParams::default();
+        assert!(REVIEW_MINS.contains(&d.review_min));
+        assert!(REVIEW_MINS.windows(2).all(|w| w[0] < w[1]), "ascending");
+    }
+
+    #[test]
     fn the_shipped_values_sit_in_the_middle_of_their_ladders() {
         // A ladder walked from its end can only go one way; the pass would
         // then be told the shipped value is an extreme, which nobody decided.
@@ -169,13 +197,23 @@ mod tests {
     #[test]
     fn a_cap_of_zero_is_no_cap_rather_than_a_search_that_returns_nothing() {
         assert_eq!(
-            RankingParams::from_config(&vector_config(0), &Default::default(), false)
-                .per_source_cap,
+            RankingParams::from_config(
+                &vector_config(0),
+                &Default::default(),
+                &Default::default(),
+                false
+            )
+            .per_source_cap,
             None
         );
         assert_eq!(
-            RankingParams::from_config(&vector_config(3), &Default::default(), false)
-                .per_source_cap,
+            RankingParams::from_config(
+                &vector_config(3),
+                &Default::default(),
+                &Default::default(),
+                false
+            )
+            .per_source_cap,
             Some(3)
         );
     }
