@@ -1,4 +1,5 @@
 pub mod associate;
+pub mod condense;
 pub mod consolidate;
 pub mod context;
 pub mod dedupe;
@@ -144,6 +145,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Probe, _) => probe::run(core, &job.target_id).await,
+        (Stage::Condense, _) => condense::run(core, &job.target_id).await,
         (Stage::Describe, _) => describe::run(core, &job.target_id).await,
         (Stage::Extract, _) => extract::run(core, &job.target_id).await,
         (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,

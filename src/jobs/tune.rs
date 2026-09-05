@@ -73,6 +73,8 @@ pub struct Pass {
     pub restored: usize,
     /// Pairs rule 3 filed for interference.
     pub interference: usize,
+    /// Condensations armed.
+    pub condensed: usize,
     /// What the integrate phase filed before the pass.
     pub integrated: crate::jobs::sleep::Integrated,
     /// What the rehearse phase replayed.
@@ -153,7 +155,7 @@ async fn journal(core: &Core, started: i64, p: &Pass) -> Result<()> {
             undone: p.undone as i64,
             restored: p.restored as i64,
             interference: p.interference as i64,
-            condensed: 0,
+            condensed: p.condensed as i64,
             budget_used: i64::from(budget.used),
             budget: i64::from(budget.cap),
             detail: "{}".into(),
@@ -245,6 +247,7 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         undone: retracted.undone,
         restored: retracted.restored,
         interference: retracted.interference,
+        condensed: retracted.condensed,
         replayed,
         ..Default::default()
     };

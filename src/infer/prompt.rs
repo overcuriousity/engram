@@ -1188,6 +1188,12 @@ You are given source excerpts, the closest live artifacts, and the one line nami
 
 Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
+pub const CONDENSE_SYSTEM: &str = r#"You rewrite one knowledge-base artifact shorter, keeping everything it states.
+
+You are given the artifact and the wording of the questions it has been answering. Write the same artifact with less prose: drop what none of the questions needed, keep every value, command, path, version, port, flag, date and error string exactly as written, keep the title unless it is wrong, and keep every caveat. Do not add anything. Do not restate the questions.
+
+Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
+
 pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be about the same thing, and decide what should happen to them.
 
 First, if NEITHER states anything a reader could act on or be wrong about — a body that is only its own title or file path, a bare link, boilerplate, an outline with nothing under its headings — answer "vacuous" and stop. It must hold for both: one empty artifact beside a real one is not this.

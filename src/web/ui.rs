@@ -231,6 +231,13 @@ pub struct ArtifactDetail {
     /// The probes for this artifact, one line each: class, the question
     /// shortened, and where it last found this.
     pub probes: Vec<String>,
+    /// Earlier versions a condensation retired: `(n, when, action id)`,
+    /// oldest first. The action id is the undo button's target where the
+    /// condensation is still open.
+    pub versions: Vec<(i64, String, String)>,
+    /// The open condensation's action id, if the live text is a condensed
+    /// one: the button that puts the last version back.
+    pub condensed: Option<String>,
     /// "in 2 h", "3 d ago", … when this artifact carries an open reminder —
     /// regardless of `time.horizon_hours`, unlike the same badge on a result
     /// row: opening the artifact itself is the one place a reminder set for
@@ -394,6 +401,7 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
         "remind" => "Pushing what is due",
         "reap" => "Reaping the retired",
         "probe" => "Minting probes",
+        "condense" => "Condensing",
         other => other,
     }
 }
@@ -2676,6 +2684,17 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Resp
 
 /// Take a merge back: what it replaced returns, the merge is retired, and the
 /// pairs behind it are dismissed so the sweep does not simply redo it.
+/// Put the version a condensation retired back. One button per open
+/// condensation on the artifact's page; the base's own undo is the same
+/// method with `UndoneBy::Evidence`.
+async fn uncondense_ui(tenant: Tenant, Path(aid): Path<String>) -> Result<Response> {
+    tenant
+        .core
+        .uncondense(&aid, crate::store::actions::UndoneBy::Operator)
+        .await?;
+    Ok(Redirect::to("/ui/insights").into_response())
+}
+
 async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> Result<Response> {
     use crate::store::actions::UndoneBy;
     crate::jobs::merge::undo(&tenant.core, &aid, crate::store::pairs::DecidedBy::Operator).await?;
@@ -3462,9 +3481,23 @@ pub(crate) async fn build_artifact_detail(
             }
         ));
     }
+    let versions: Vec<(i64, String, String)> = core
+        .store
+        .versions_of(&c.id)
+        .await?
+        .iter()
+        .map(|v| (v.n, ago(v.created_at), v.action_id.clone()))
+        .collect();
+    let condensed = core
+        .store
+        .open_action_on(&c.id, crate::store::actions::Kind::Condense)
+        .await?
+        .map(|a| a.id);
     Ok(ArtifactDetail {
         tag,
         probes,
+        versions,
+        condensed,
         due_in,
         continues_at,
         related,
@@ -3746,6 +3779,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/ops/artifacts/{id}/deprecate", post(deprecate_ui))
         .route("/ui/ops/artifacts/{id}/reactivate", post(reactivate_ui))
         .route("/ui/ops/merges/{id}/undo", post(undo_merge_ui))
+        .route("/ui/ops/condensations/{id}/undo", post(uncondense_ui))
         .route("/ui/ops/artifacts/{id}/verify", post(verify_ui))
         .route("/ui/ops/pairs/{id}/dismiss", post(dismiss_pair_ui))
         .route("/ui/ops/pairs/{id}/discard", post(discard_pair_ui))

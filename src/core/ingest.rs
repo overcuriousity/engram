@@ -1914,6 +1914,7 @@ impl Core {
             | Stage::Dedupe
             | Stage::Relate
             | Stage::Probe
+            | Stage::Condense
             | Stage::LinkJudge
             | Stage::Generate => {
                 return Err(Error::Validation(

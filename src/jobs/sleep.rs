@@ -420,6 +420,91 @@ pub async fn interference(
     Ok((filed, false))
 }
 
+/// A stable owner dragging one competitor, with use behind it: arm a
+/// condensation. Three things, each already measured: model-written and in
+/// results; found in every retained result of at least two, with one id
+/// standing above it in every one — the measurable half of "the same
+/// competitor trails or leads it", since what trails is not in the results
+/// table; and engagement at or above `promote.activation_above`. Returns
+/// (units armed, stopped early).
+pub async fn condense_candidates(
+    core: &Core,
+    live: &crate::store::generations::Generation,
+    started: i64,
+) -> Result<(usize, bool)> {
+    use crate::store::actions::Kind;
+    let mut armed = 0;
+    let mut seen = std::collections::HashSet::new();
+    let at = crate::store::now();
+    for (probe, _) in core
+        .store
+        .latest_results_under(&live.id, OBSERVATION_LIMIT)
+        .await?
+    {
+        if core.store.activity_since(started).await? {
+            return Ok((armed, true));
+        }
+        if !seen.insert(probe.artifact_id.clone()) {
+            continue;
+        }
+        let Ok(owner) = core.store.get_artifact(&probe.artifact_id).await else {
+            continue;
+        };
+        if owner.provenance == crate::store::artifacts::Provenance::Passage || !owner.in_results() {
+            continue;
+        }
+        if core
+            .store
+            .open_action_on(&owner.id, Kind::Condense)
+            .await?
+            .is_some()
+            || core
+                .store
+                .action_was_undone(&owner.id, Kind::Condense)
+                .await?
+        {
+            continue;
+        }
+        let mut results = Vec::new();
+        for p in core.store.rehearsals_of(&owner.id).await? {
+            results.extend(core.store.results_of(&p.id, OBSERVATION_LIMIT).await?);
+        }
+        if results.len() < 2 || results.iter().any(|r| r.rank.is_none()) {
+            continue;
+        }
+        let same_company = results[0]
+            .outranked_by
+            .iter()
+            .any(|x| results.iter().all(|r| r.outranked_by.contains(x)));
+        if !same_company {
+            continue;
+        }
+        let activation = core
+            .store
+            .activation_of(std::slice::from_ref(&owner.id))
+            .await?;
+        let Some((value, stamp, created_at)) = activation.get(&owner.id) else {
+            continue;
+        };
+        let earned = crate::store::links::engagement_at(
+            *value,
+            *stamp,
+            *created_at,
+            at,
+            core.activation.half_life_days,
+        );
+        if earned < core.promote.activation_above {
+            continue;
+        }
+        if !core.may_act().await? {
+            return Ok((armed, false));
+        }
+        crate::jobs::condense::arm(core, &owner.id).await?;
+        armed += 1;
+    }
+    Ok((armed, false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

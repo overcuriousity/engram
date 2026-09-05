@@ -331,6 +331,40 @@ impl Core {
         Ok(!self.budget().await?.spent())
     }
 
+    /// Put the version a condensation retired back, and stamp the row. One
+    /// method, called by the button and by the base.
+    pub async fn uncondense(
+        &self,
+        action_id: &str,
+        by: crate::store::actions::UndoneBy,
+    ) -> crate::error::Result<()> {
+        use crate::error::Error;
+        let a = self.store.action(action_id).await?.ok_or(Error::NotFound)?;
+        if a.kind != crate::store::actions::Kind::Condense {
+            return Err(Error::Validation("not a condensation".into()));
+        }
+        if a.undone_at.is_some() {
+            return Ok(());
+        }
+        let n = serde_json::from_str::<serde_json::Value>(&a.evidence_json)
+            .ok()
+            .and_then(|v| v.get("version").and_then(|n| n.as_i64()))
+            .ok_or_else(|| Error::Store("a condense row names its version".into()))?;
+        self.store.restore_version(&a.subject_id, n).await?;
+        self.store
+            .undo_action_on(
+                &a.subject_id,
+                crate::store::actions::Kind::Condense,
+                by,
+                "the earlier version is back",
+            )
+            .await?;
+        self.store
+            .enqueue(crate::store::jobs::Stage::Embed, "artifact", &a.subject_id)
+            .await?;
+        Ok(())
+    }
+
     /// The measured line, or zero while unmeasured.
     fn measured_line(&self) -> f32 {
         f32::from_bits(self.line.load(std::sync::atomic::Ordering::Relaxed))

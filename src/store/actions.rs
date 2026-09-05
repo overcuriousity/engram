@@ -22,6 +22,8 @@ pub enum Job {
     Reap,
     Promote,
     Judgement,
+    /// The idle pass's own corpus rules: condense.
+    Sleep,
 }
 
 impl Job {
@@ -31,6 +33,7 @@ impl Job {
             Job::Reap => "reap",
             Job::Promote => "promote",
             Job::Judgement => "judgement",
+            Job::Sleep => "sleep",
         }
     }
 
@@ -40,6 +43,7 @@ impl Job {
             "reap" => Some(Job::Reap),
             "promote" => Some(Job::Promote),
             "judgement" => Some(Job::Judgement),
+            "sleep" => Some(Job::Sleep),
             _ => None,
         }
     }
@@ -60,6 +64,10 @@ pub enum Kind {
     Promote,
     /// A reminder or event filed from a reading; the subject is the moment.
     Moment,
+    /// Rewritten shorter as a new version of itself; subject and survivor
+    /// are the same artifact, and `evidence_json.version` names the version
+    /// retired.
+    Condense,
 }
 
 impl Kind {
@@ -71,6 +79,7 @@ impl Kind {
             Kind::Reap => "reap",
             Kind::Promote => "promote",
             Kind::Moment => "moment",
+            Kind::Condense => "condense",
         }
     }
 
@@ -82,6 +91,7 @@ impl Kind {
             "reap" => Some(Kind::Reap),
             "promote" => Some(Kind::Promote),
             "moment" => Some(Kind::Moment),
+            "condense" => Some(Kind::Condense),
             _ => None,
         }
     }
@@ -246,6 +256,18 @@ impl Store {
     }
 
     /// The open row on this subject of this kind, if any.
+    pub async fn action(&self, id: &str) -> Result<Option<Action>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM corpus_actions WHERE id = ?"
+        )))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(read)
+        .transpose()
+    }
+
     pub async fn open_action_on(&self, subject_id: &str, kind: Kind) -> Result<Option<Action>> {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM corpus_actions

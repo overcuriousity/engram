@@ -24,6 +24,7 @@ pub mod segments;
 pub mod shingle;
 pub mod sleep_runs;
 pub mod sweeps;
+pub mod versions;
 
 use crate::error::Result;
 use sqlx::Row;

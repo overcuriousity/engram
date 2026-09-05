@@ -931,3 +931,21 @@ CREATE TABLE IF NOT EXISTS sleep_runs (
   detail         TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_sleep_runs_started ON sleep_runs(started DESC);
+
+-- ── Versions ─────────────────────────────────────────────────────────────────
+-- The versions a condensation retired. The live text stays in `artifacts`;
+-- every earlier one is here, readable in place and one call from live. The
+-- row is written in the same transaction as the text it retires and the
+-- journal row that says so: nothing may read a condensed artifact with no
+-- record of what it was.
+CREATE TABLE IF NOT EXISTS artifact_versions (
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  n           INTEGER NOT NULL,
+  text        TEXT NOT NULL,
+  title       TEXT,
+  caveats     TEXT NOT NULL DEFAULT '[]',
+  created_at  INTEGER NOT NULL,
+  -- The corpus_actions row that retired this version.
+  action_id   TEXT NOT NULL,
+  PRIMARY KEY (artifact_id, n)
+);

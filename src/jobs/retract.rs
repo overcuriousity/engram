@@ -36,6 +36,8 @@ pub struct Retracted {
     pub restored: usize,
     /// Pairs rule 3 filed for interference.
     pub interference: usize,
+    /// Condensations armed.
+    pub condensed: usize,
 }
 
 /// Both rules, in order. `started` is when the pass began: a search or a
@@ -48,6 +50,7 @@ pub async fn run(core: &Core, live: &Generation, started: i64) -> Result<Retract
         undone,
         restored: 0,
         interference: 0,
+        condensed: 0,
     };
     if stopped {
         return Ok(out);
@@ -57,8 +60,13 @@ pub async fn run(core: &Core, live: &Generation, started: i64) -> Result<Retract
     if stopped {
         return Ok(out);
     }
-    let (interference, _) = crate::jobs::sleep::interference(core, live, started).await?;
+    let (interference, stopped) = crate::jobs::sleep::interference(core, live, started).await?;
     out.interference = interference;
+    if stopped {
+        return Ok(out);
+    }
+    let (condensed, _) = crate::jobs::sleep::condense_candidates(core, live, started).await?;
+    out.condensed = condensed;
     let last = serde_json::json!({
         "at": crate::store::now(),
         "reconsidered": out.reconsidered,
@@ -211,7 +219,7 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
                     .undo_actions_under(&survivor, UndoneBy::Evidence, &reason)
                     .await?;
             }
-            Kind::Promote | Kind::Moment => continue,
+            Kind::Promote | Kind::Moment | Kind::Condense => continue,
         }
         restored += 1;
         tracing::info!(
@@ -257,7 +265,7 @@ pub(crate) async fn rule_one(
         .await?
         .map(|s| crate::store::Cursor::parse(&s))
         .unwrap_or_default();
-    let kinds = [Kind::Merge, Kind::Supersede];
+    let kinds = [Kind::Merge, Kind::Supersede, Kind::Condense];
     let mut batch = core
         .store
         .open_actions_after(&kinds, &after, ACTION_LIMIT)
@@ -290,6 +298,42 @@ pub(crate) async fn rule_one(
             .await?
             .is_none()
         {
+            continue;
+        }
+        // A condensation's record is its probes, before and after: are they
+        // still finding the artifact where they found it? The same
+        // `recommend` shape as the merge case, pointed the same way — the
+        // record before is the candidate, the replay after is the base.
+        if a.kind == Kind::Condense {
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for p in core.store.rehearsals_of(&a.subject_id).await? {
+                for r in core
+                    .store
+                    .results_of(&p.id, sweep::OBSERVATION_LIMIT)
+                    .await?
+                {
+                    let rank = r.rank.map(|n| (n - 1).max(0) as usize);
+                    if r.at <= a.at {
+                        before.push(rank);
+                    } else {
+                        after.push(rank);
+                    }
+                }
+            }
+            if before.is_empty() || after.is_empty() {
+                continue;
+            }
+            reconsidered += 1;
+            if !sweep::recommend(&after, &before) {
+                continue;
+            }
+            core.uncondense(&a.id, UndoneBy::Evidence).await?;
+            undone += 1;
+            tracing::info!(
+                subject = %a.subject_id,
+                "took a condensation back on evidence: its probes stopped finding it"
+            );
             continue;
         }
         let named = core
@@ -346,7 +390,7 @@ pub(crate) async fn rule_one(
                     .undo_action_on(&a.subject_id, Kind::Supersede, UndoneBy::Evidence, &reason)
                     .await? as usize;
             }
-            _ => unreachable!("only merge and supersede are read"),
+            _ => unreachable!("only merge and supersede reach here"),
         }
         tracing::info!(
             subject = %a.subject_id,
@@ -414,6 +458,87 @@ mod tests {
             evidence: serde_json::json!({}),
             pair_score: Some(0.9),
         }
+    }
+
+    #[tokio::test]
+    async fn rule_one_takes_a_condensation_back_when_its_probes_stop_finding_it() {
+        let (mut core, order) = seeded().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let g = generation_for(&core).await;
+        let id = order[0].clone();
+        let before = core.store.get_artifact(&id).await.unwrap();
+        // Three probes found it at rank 1 before the condensation; three
+        // did not find it after. The clock on the results is set by hand.
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        let pid = core
+            .store
+            .record_rehearsal(&crate::store::rehearsals::NewRehearsal {
+                class: crate::store::rehearsals::Class::Cue,
+                query: "q".into(),
+                query_vec,
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: id.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let result = |rank: Option<i64>| crate::store::rehearsals::NewResult {
+            rehearsal_id: pid.clone(),
+            generation_id: g.id.clone(),
+            rank,
+            outranked_by: vec![],
+        };
+        let mut early = Vec::new();
+        for _ in 0..3 {
+            early.push(
+                core.store
+                    .record_rehearsal_result(&result(Some(1)))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let (action, _) = core
+            .store
+            .condense_artifact(&id, "shorter", None, &[], serde_json::json!({}))
+            .await
+            .unwrap();
+        let at = core.store.action(&action).await.unwrap().unwrap().at;
+        for rid in &early {
+            sqlx::query("UPDATE rehearsal_results SET at = ? WHERE id = ?")
+                .bind(at - 10)
+                .bind(rid)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+        }
+        let mut late = Vec::new();
+        for _ in 0..3 {
+            late.push(
+                core.store
+                    .record_rehearsal_result(&result(None))
+                    .await
+                    .unwrap(),
+            );
+        }
+        for rid in &late {
+            sqlx::query("UPDATE rehearsal_results SET at = ? WHERE id = ?")
+                .bind(at + 10)
+                .bind(rid)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+        }
+        let (reconsidered, undone, _) = rule_one(&core, &g, crate::store::now()).await.unwrap();
+        assert_eq!((reconsidered, undone), (1, 1));
+        let back = core.store.get_artifact(&id).await.unwrap();
+        assert_eq!(back.text, before.text);
+        assert!(
+            core.store
+                .action_was_undone(&id, Kind::Condense)
+                .await
+                .unwrap()
+        );
     }
 
     /// The seeded base, with the top hit of the second source (`order[3]`)

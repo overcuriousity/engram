@@ -84,13 +84,17 @@ pub enum Stage {
     /// failure domain for the reason `Relate` is: a failed cue embed must not
     /// fail the artifact's embed.
     Probe,
+    /// One model-written artifact, rewritten shorter as a new version of
+    /// itself. One generation, under "full" and the weekly budget; a draft
+    /// that would lose a value or a literal is refused without writing.
+    Condense,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 20] = [
+    pub const ALL: [Stage; 21] = [
         Stage::Synthesize,
         Stage::Enrich,
         Stage::SegmentWindow,
@@ -111,6 +115,7 @@ impl Stage {
         Stage::Remind,
         Stage::Reap,
         Stage::Probe,
+        Stage::Condense,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -135,6 +140,7 @@ impl Stage {
             Stage::Remind => "remind",
             Stage::Reap => "reap",
             Stage::Probe => "probe",
+            Stage::Condense => "condense",
         }
     }
     /// Is someone waiting on this? `0` foreground, `1` background.
@@ -171,7 +177,8 @@ impl Stage {
             | Stage::Context
             | Stage::Remind
             | Stage::Reap
-            | Stage::Probe => 1,
+            | Stage::Probe
+            | Stage::Condense => 1,
         }
     }
 
@@ -197,6 +204,7 @@ impl Stage {
             "remind" => Some(Stage::Remind),
             "reap" => Some(Stage::Reap),
             "probe" => Some(Stage::Probe),
+            "condense" => Some(Stage::Condense),
             _ => None,
         }
     }

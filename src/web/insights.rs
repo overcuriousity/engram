@@ -909,6 +909,11 @@ fn action_str(a: &crate::store::actions::Action) -> String {
         Kind::Reap => format!("buried {}", short(&a.subject_id)),
         Kind::Promote => format!("promoted window {}", a.subject_id),
         Kind::Moment => format!("filed a reminder, moment {}", short(&a.subject_id)),
+        Kind::Condense => format!(
+            "condensed {} ({})",
+            short(&a.subject_id),
+            a.detail.as_deref().unwrap_or("a version retired")
+        ),
     };
     let ended = match a.undone_by {
         Some(UndoneBy::Evidence) => " — taken back on evidence",
