@@ -221,6 +221,24 @@ impl Store {
         .collect()
     }
 
+    /// Give-ups recorded after `after` (a `created_at`), oldest first, at
+    /// most `limit`. What rule 2 reads, behind a cursor it keeps in `meta`.
+    pub async fn gave_ups_since(&self, after: i64, limit: usize) -> Result<Vec<Observation>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {COLUMNS} FROM observations
+              WHERE source = 'gave_up' AND created_at > ? AND excluded_at IS NULL
+              ORDER BY created_at ASC, id ASC
+              LIMIT ?"
+        )))
+        .bind(after)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(read)
+        .collect()
+    }
+
     /// Stop reading an observation back without losing it.
     pub async fn exclude_observation(&self, id: &str) -> Result<()> {
         sqlx::query("UPDATE observations SET excluded_at = ? WHERE id = ? AND excluded_at IS NULL")

@@ -1749,6 +1749,27 @@ impl Store {
         Ok(())
     }
 
+    /// Every buried vector made by `embed_model`: `(artifact_id, vec)`. The
+    /// graveyard is small — a bounded number of burials a day — so a
+    /// give-up is compared with all of it in Rust rather than through the
+    /// vector store, which no longer holds the point.
+    pub async fn graveyard_vectors(&self, embed_model: &str) -> Result<Vec<(String, Vec<f32>)>> {
+        Ok(
+            sqlx::query("SELECT id, vec FROM graveyard WHERE vec IS NOT NULL AND embed_model = ?")
+                .bind(embed_model)
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .map(|r| {
+                    (
+                        r.get::<String, _>("id"),
+                        crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("vec")),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     /// Point a still-reapable candidate at the rewrite the sweep made for it.
     ///
     /// `bury`'s guard, applied to the other verdict. `rescue_one` works from a
