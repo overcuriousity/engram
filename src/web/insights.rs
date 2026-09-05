@@ -884,10 +884,10 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
                 )
             }
         }
-        _ if !core.evolve.autonomous => {
-            "autonomy is off: the file is in force, and the base proposes nothing on its own."
-                .to_string()
-        }
+        _ if !core.evolve.autonomous.moves_ranking() => format!(
+            "autonomy is {}: the file is in force, and the base proposes nothing on its own.",
+            core.evolve.autonomous.as_str()
+        ),
         _ => "set by hand or at boot; the base may propose a change when it has been quiet."
             .to_string(),
     };

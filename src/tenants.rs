@@ -715,7 +715,7 @@ pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
         params,
         &cfg.infer.embed.fingerprint(),
         &chat_model,
-        cfg.evolve.autonomous,
+        cfg.evolve.autonomous.moves_ranking(),
     )
     .await?;
     // Serve under it. Shared by every clone of this core, so the requests

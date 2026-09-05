@@ -941,11 +941,25 @@ give_up_window_secs = 300
 # about.
 feed_sweep = false
 
-# Let a quiet base move its own ranking parameters — the recency weight, the
-# per-source cap, the candidate pool depth, the recency half-life, the prime
-# lift, whether the configured reranker runs, and the width of the associated
-# band — on what use left behind, and take a move back on the same evidence,
-# with nobody pressing anything.
+# How much a quiet base may do on its own. Three stages:
+#
+#   "off"     — nothing. The base still files each new capture (what was near
+#               it when it arrived) and writes probes, so /ui/insights can say
+#               which artifacts nothing has ever asked for; it replays nothing.
+#   "ranking" — it may move its own ranking parameters — the recency weight,
+#               the per-source cap, the candidate pool depth, the recency
+#               half-life, the prime lift, whether the configured reranker
+#               runs, the width of the associated band, the review threshold —
+#               on what use left behind, and take a move back on the same
+#               evidence. Every move is a row `revert` undoes exactly, and no
+#               move is made where there is nothing to measure it against.
+#   "full"    — everything above, and the corpus rules: taking its own merges,
+#               replacements, discards and burials back where the evidence
+#               says so, filing duplicates it finds by displacement, and
+#               condensing an artifact into a shorter version of itself that
+#               loses no value, command or path — behind `max_actions_per_week`.
+#
+# `true` and `false` still read, as "full" and "off".
 #
 # Off, for the reason `feed_sweep` is off: a default that changes ranking moves
 # only after the harness has been run. On, an idle pass replays the positive
@@ -973,16 +987,25 @@ feed_sweep = false
 # call per observation would have changed. The band is not replayed at all; it
 # moves on what it earned while serving.
 #
-# The same switch lets the base take its own corpus actions back. Every merge,
-# replacement, discard and burial the corpus jobs make is journaled, and the
-# quiet pass reads the journal against the same observations: a merge or a
-# replacement whose survivor is no longer found where the original was is
-# undone, and anything hidden or buried that a search given up on would have
-# been answered by is restored. An action taken back is not taken again on the
-# same artifact. The review threshold under [consolidate] moves on the same
-# pass. Every action and every undo is on /ui/insights, with what you undid
-# told apart from what the base undid.
-autonomous = false
+# Under "full" the base also takes its own corpus actions back. Every merge,
+# replacement, discard, burial and condensation the corpus jobs make is
+# journaled, and the quiet pass reads the journal against the same
+# observations: a merge or a replacement whose survivor is no longer found
+# where the original was is undone, and anything hidden or buried that a
+# search given up on would have been answered by is restored. An action taken
+# back is not taken again on the same artifact. The review threshold under
+# [consolidate] moves on the same pass. Every action and every undo is on
+# /ui/insights, with what you undid told apart from what the base undid.
+autonomous = "off"
+
+# Corpus actions the base may take on its own in any seven days, under
+# "full": merges, supersessions, discards, burials and condensations it
+# journals. Undos are never counted — taking something back is not spending.
+# Reached, the corpus jobs keep finding and stop acting: pairs stay queued,
+# nominees stay nominated, and the journal says "budget spent" until the
+# window moves. Small on purpose. The worst week the base can have is this
+# many actions, each with an undo beside it.
+max_actions_per_week = 10
 
 # How long the base has to have been quiet — no search, no question — before
 # the idle pass runs. Its searches embed nothing (each observation keeps the

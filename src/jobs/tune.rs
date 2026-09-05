@@ -84,7 +84,7 @@ pub async fn run(core: &Core) -> Result<Option<String>> {
 /// Quiet is read off the base rather than a ticker: no search recorded and no
 /// question asked inside the window. What the retention unit calls.
 pub async fn run_if_quiet(core: &Core) -> Result<Pass> {
-    if !core.evolve.autonomous || !quiet(core).await? {
+    if !core.evolve.autonomous.moves_ranking() || !quiet(core).await? {
         return Ok(Pass::default());
     }
     pass(core).await
@@ -98,7 +98,7 @@ async fn quiet(core: &Core) -> Result<bool> {
 }
 
 pub async fn pass(core: &Core) -> Result<Pass> {
-    if !core.evolve.autonomous {
+    if !core.evolve.autonomous.moves_ranking() {
         return Ok(Pass::default());
     }
     let Some(live) = core.store.live_generation().await? else {
@@ -132,7 +132,14 @@ pub async fn pass(core: &Core) -> Result<Pass> {
     // Same switch, same claim, same anchor — the rules read the same
     // observations the ladder does.
     let started = crate::store::now();
-    let retracted = crate::jobs::retract::run(core, &live, started).await?;
+    // The corpus half is a corpus rule and runs where the others will: under
+    // "full". A file that said `true` reads as "full", so nothing an operator
+    // turned on turns off.
+    let retracted = if core.evolve.autonomous.acts_on_corpus() {
+        crate::jobs::retract::run(core, &live, started).await?
+    } else {
+        crate::jobs::retract::Retracted::default()
+    };
     let mut out = Pass {
         undone: retracted.undone,
         restored: retracted.restored,
@@ -607,7 +614,7 @@ mod tests {
     #[tokio::test]
     async fn the_flip_is_asked_when_the_ladder_proposes_nothing_and_is_adopted_like_any_move() {
         let (mut core, parent) = seeded_with_a_burying_reranker().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         let adopted = run(&core).await.unwrap().expect("the flip adopts");
         let live = core.store.live_generation().await.unwrap().unwrap();
         assert_eq!(live.id, adopted);
@@ -631,7 +638,7 @@ mod tests {
         observe(&core, &generation, &order[3], 3).await;
         observe(&core, &generation, &order[4], 2).await;
         let mut core = core;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         let before = reranker.calls();
         run(&core).await.unwrap().expect("the cap clears");
         let live = core.store.live_generation().await.unwrap().unwrap();
@@ -755,7 +762,7 @@ mod tests {
     async fn a_base_whose_band_is_used_more_than_its_tail_widens_the_band_when_nothing_else_moves()
     {
         let (mut core, parent) = seeded_with_nothing_to_gain().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         let spread = core.ranking.read().unwrap().spread_max;
         assert_eq!(spread, 3, "the shipped rung");
         // Four opens on the band, two on the tail: two net events, the band
@@ -786,7 +793,7 @@ mod tests {
     #[tokio::test]
     async fn a_band_nobody_uses_narrows_one_rung() {
         let (mut core, _) = seeded_with_nothing_to_gain().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         let ranked: Vec<&str> = order_of(&core).await;
         let band = [ranked[4], ranked[5]];
         for _ in 0..3 {
@@ -937,7 +944,7 @@ mod tests {
     async fn a_base_whose_lowest_band_acts_like_the_one_above_lowers_the_review_threshold_when_nothing_else_moves()
      {
         let (mut core, parent) = seeded_with_nothing_to_gain().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         assert_eq!(core.ranking.read().unwrap().review_min, 0.88);
         band(&core, 0.88, 10, 8, 0).await;
         band(&core, 0.92, 10, 9, 0).await;
@@ -958,7 +965,7 @@ mod tests {
     #[tokio::test]
     async fn a_lowest_band_whose_actions_are_taken_back_raises_the_review_threshold() {
         let (mut core, _) = seeded_with_nothing_to_gain().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         band(&core, 0.88, 10, 8, 4).await;
         band(&core, 0.92, 10, 9, 0).await;
 
@@ -983,7 +990,7 @@ mod tests {
     #[tokio::test]
     async fn a_candidate_that_clears_the_gate_becomes_the_live_generation() {
         let (mut core, before) = seeded_with_observations().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         let adopted = run(&core).await.unwrap().expect("a candidate cleared");
 
         let live = core.store.live_generation().await.unwrap().unwrap();
@@ -1012,7 +1019,7 @@ mod tests {
     #[tokio::test]
     async fn a_pass_that_finds_nothing_better_leaves_the_generation_alone() {
         let (mut core, before) = seeded_with_nothing_to_gain().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         assert!(run(&core).await.unwrap().is_none());
         assert_eq!(
             core.store.live_generation().await.unwrap().unwrap().id,
@@ -1025,7 +1032,7 @@ mod tests {
     /// A base that has just adopted a generation, with the one it replaced.
     pub(crate) async fn adopted_and_watching() -> (Core, String) {
         let (mut core, parent) = seeded_with_observations().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         run(&core).await.unwrap().expect("a candidate cleared");
         (core, parent)
     }
@@ -1121,7 +1128,7 @@ mod tests {
         let generation = generation_for(&core).await;
         observe(&core, &generation, &order[3], 4).await;
         observe(&core, &generation, &order[4], 5).await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         run(&core).await.unwrap().expect("a candidate cleared");
         let live = core.store.live_generation().await.unwrap().unwrap().id;
         for artifact in &order[..3] {
@@ -1192,7 +1199,7 @@ mod tests {
     #[tokio::test]
     async fn a_base_whose_evidence_stopped_agreeing_suspends_itself() {
         let (mut core, before) = seeded_with_observations().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         disagree_loudly(&core, 20).await;
 
         assert!(run(&core).await.unwrap().is_none());
@@ -1269,7 +1276,7 @@ mod tests {
         // pass cannot see the difference, and neither can this test without a
         // vector store that writes to the log on its own first read.
         let (mut core, before) = seeded_with_observations().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         somebody_returns(&core).await;
 
         assert!(run(&core).await.unwrap().is_none());
@@ -1288,7 +1295,7 @@ mod tests {
         // Resumption is recomputation. The pass is bounded, so a restart costs
         // a pass, and no partial state has to be kept correct across a sitting.
         let (mut core, _) = seeded_with_observations().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         let id = somebody_returns(&core).await;
         assert!(run(&core).await.unwrap().is_none(), "interrupted");
 
@@ -1312,7 +1319,7 @@ mod tests {
         // supposed to be asleep.
         let (mut core, embedder) =
             crate::core::test_support::test_core_counting_embed_calls().await;
-        core.evolve.autonomous = true;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         let generation = generation_for(&core).await;
         observe(&core, &generation, "art-1", 4).await;
         observe(&core, &generation, "art-2", 5).await;

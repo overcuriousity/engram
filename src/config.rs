@@ -494,6 +494,66 @@ impl Default for SittingConfig {
     }
 }
 
+/// How much a quiet base may do on its own. Three stages rather than a
+/// switch, because the two halves are not equally reversible: a ranking
+/// generation is a row `revert_generation` undoes exactly, while a merge, a
+/// burial or a condensation is a corpus write with an undo beside it. The
+/// reversible half can be a default; the other half is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Autonomy {
+    /// The idle pass does not run. Integration still files and writes probes.
+    #[default]
+    Off,
+    /// Integrate, rehearse, watch; adopt and revert ranking generations.
+    Ranking,
+    /// Everything above, plus the corpus rules under the weekly budget.
+    Full,
+}
+
+impl Autonomy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Autonomy::Off => "off",
+            Autonomy::Ranking => "ranking",
+            Autonomy::Full => "full",
+        }
+    }
+    /// Ranking generations may be adopted and reverted.
+    pub fn moves_ranking(self) -> bool {
+        matches!(self, Autonomy::Ranking | Autonomy::Full)
+    }
+    /// The corpus rules may act: retract, interference, condense.
+    pub fn acts_on_corpus(self) -> bool {
+        matches!(self, Autonomy::Full)
+    }
+}
+
+impl<'de> Deserialize<'de> for Autonomy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = Autonomy;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(r#"true, false, "off", "ranking" or "full""#)
+            }
+            // A file written before the stages existed: `true` was the whole
+            // loop, ranking and corpus both, and stays that.
+            fn visit_bool<E: serde::de::Error>(self, b: bool) -> std::result::Result<Autonomy, E> {
+                Ok(if b { Autonomy::Full } else { Autonomy::Off })
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Autonomy, E> {
+                match s {
+                    "off" => Ok(Autonomy::Off),
+                    "ranking" => Ok(Autonomy::Ranking),
+                    "full" => Ok(Autonomy::Full),
+                    other => Err(E::unknown_variant(other, &["off", "ranking", "full"])),
+                }
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 /// Recording what use leaves behind.
 ///
 /// Nothing here changes what a search or an ask returns. It decides only what
@@ -519,15 +579,22 @@ pub struct EvolveConfig {
     /// it recommends, a recommendation changes ranking, and a default that
     /// changes ranking moves only after the harness has been run.
     pub feed_sweep: bool,
-    /// Let a quiet base move its own ranking parameters on what use left
-    /// behind, and take the move back on the same evidence.
+    /// How much a quiet base may do on its own: nothing, move its own
+    /// ranking, or also act on the corpus. See `Autonomy`.
     ///
     /// Off, for the reason `feed_sweep` is: a default that changes ranking
-    /// moves only after the harness has been run. On, the idle pass adopts a
-    /// candidate that clears the sweep's gate as a new generation, watches
-    /// what it earns while serving, and reverts it when it does not hold. The
-    /// file is never written; the insights page says which generation is live.
-    pub autonomous: bool,
+    /// moves only after the harness has been run. Under `"ranking"` the idle
+    /// pass adopts a candidate that clears the sweep's gate as a new
+    /// generation, watches what it earns while serving, and reverts it when
+    /// it does not hold — on observations and on the base's own probes both.
+    /// Under `"full"` the corpus rules run too, behind `max_actions_per_week`.
+    /// The file is never written; the insights page says which generation is
+    /// live. `true` and `false` still read, as `"full"` and `"off"`.
+    pub autonomous: Autonomy,
+    /// Corpus actions the base may take on its own in any seven days under
+    /// `"full"`. Undone or not, an action counts: it was taken. Reached, the
+    /// corpus jobs keep finding and stop acting until the window moves.
+    pub max_actions_per_week: u32,
     /// How long a base has to have been quiet before the idle pass runs.
     ///
     /// Quiet means no search and no question. The pass takes its searches on
@@ -541,7 +608,8 @@ impl Default for EvolveConfig {
         Self {
             give_up_window_secs: 300,
             feed_sweep: false,
-            autonomous: false,
+            autonomous: Autonomy::Off,
+            max_actions_per_week: 10,
             idle_secs: 1800,
         }
     }
@@ -2671,6 +2739,10 @@ impl Config {
         // hundred fields to work out which of them the mode decided is the
         // question this line answers directly.
         let mut head = format!("# learn.mode = \"{}\"\n", c.learn.mode.as_str());
+        head.push_str(&format!(
+            "# evolve.autonomous = \"{}\"\n",
+            c.evolve.autonomous.as_str()
+        ));
         if c.learn.resolved.is_empty() {
             head.push_str("# nothing was resolved from it: every key it stands for is set\n");
         } else {
@@ -2788,6 +2860,41 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autonomy_reads_the_old_bool_and_the_three_words() {
+        #[derive(Deserialize)]
+        struct Probe {
+            autonomous: Autonomy,
+        }
+        let parse = |s: &str| {
+            config::Config::builder()
+                .add_source(config::File::from_str(s, config::FileFormat::Toml))
+                .build()
+                .unwrap()
+                .try_deserialize::<Probe>()
+        };
+        let read = |s: &str| parse(s).unwrap().autonomous;
+        assert_eq!(read("autonomous = false"), Autonomy::Off);
+        assert_eq!(
+            read("autonomous = true"),
+            Autonomy::Full,
+            "true meant the whole loop"
+        );
+        assert_eq!(read(r#"autonomous = "off""#), Autonomy::Off);
+        assert_eq!(read(r#"autonomous = "ranking""#), Autonomy::Ranking);
+        assert_eq!(read(r#"autonomous = "full""#), Autonomy::Full);
+        assert!(parse(r#"autonomous = "sometimes""#).is_err());
+    }
+
+    #[test]
+    fn the_ranking_stage_moves_ranking_and_touches_no_corpus() {
+        assert!(!Autonomy::Off.moves_ranking());
+        assert!(Autonomy::Ranking.moves_ranking());
+        assert!(!Autonomy::Ranking.acts_on_corpus());
+        assert!(Autonomy::Full.acts_on_corpus());
+        assert_eq!(EvolveConfig::default().max_actions_per_week, 10);
+    }
 
     /// Environment variables are process-global, but `cargo test` runs tests on
     /// parallel threads. Without this, the env-override test mutates `ENGRAM__*`
