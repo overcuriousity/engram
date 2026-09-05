@@ -243,6 +243,10 @@ pub(crate) struct Pair {
     /// recorded. Handed in on the Judge door so a rung of `prime_lift` can be
     /// replayed; a pair without one ties on that axis.
     pub(crate) priming: Option<crate::core::search::Priming>,
+    /// Where the artifact was actually served, 0-based, for a pair that came
+    /// from an observation. The rerank axis's base: the one row that has the
+    /// reranker in it where the reranker is live. `None` for a judged pair.
+    pub(crate) served: Option<usize>,
 }
 
 /// How many observations one sweep will draw on. A bound rather than a
@@ -340,6 +344,7 @@ async fn pairs_to_replay(core: &Core) -> Result<(Vec<Pair>, i64)> {
                     satisfies,
                     query_vec: None,
                     priming: None,
+                    served: None,
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -412,6 +417,7 @@ pub(crate) async fn observation_pairs(
                     satisfies,
                     query_vec: Some(o.query_vec),
                     priming,
+                    served: o.rank.map(|r| (r - 1).max(0) as usize),
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -569,6 +575,65 @@ impl Scored {
     }
 }
 
+/// The other value of the rerank knob, and what it promised.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Flip {
+    pub params: RankingParams,
+    /// MRR of the flipped replay, less MRR over the served ranks.
+    pub predicted: f64,
+    /// The two rows' aggregates, for the journal: the served record is the
+    /// base of this axis, not the pre-rerank replay the ladder measures from.
+    pub served_mrr: f64,
+    pub served_recall: f64,
+    pub mrr: f64,
+    pub recall: f64,
+}
+
+/// Offer the rerank flip, if a reranker serves search and the flip clears
+/// `recommend` against the ranks that were actually served.
+///
+/// Its own base, because the served rank is the only row that has the
+/// reranker in it where the reranker is live. Where the live value is "on",
+/// the candidate is the replay without the reranker, which costs nothing;
+/// where it is "off", the candidate is one reranker call per pair — spent
+/// only because the operator configured the reranker, and only here.
+pub(crate) async fn rerank_flip(
+    core: &Core,
+    pairs: &[Pair],
+    current: RankingParams,
+    stop_after: Option<i64>,
+) -> Result<Option<Flip>> {
+    if !core.reranks_search() {
+        return Ok(None);
+    }
+    let with_served: Vec<&Pair> = pairs.iter().filter(|p| p.served.is_some()).collect();
+    if with_served.is_empty() {
+        return Ok(None);
+    }
+    let served: Vec<Option<usize>> = with_served.iter().map(|p| p.served).collect();
+    let flipped = RankingParams {
+        rerank: !current.rerank,
+        ..current
+    };
+    let mut ranks = Vec::with_capacity(with_served.len());
+    for pair in &with_served {
+        if let Some(since) = stop_after
+            && core.store.activity_since(since).await?
+        {
+            return Ok(None);
+        }
+        ranks.push(rank_of(core, pair, flipped, flipped.rerank).await?);
+    }
+    Ok(recommend(&served, &ranks).then(|| Flip {
+        params: flipped,
+        predicted: mrr(&ranks) - mrr(&served),
+        served_mrr: mrr(&served),
+        served_recall: recall_at(&served, LIMIT),
+        mrr: mrr(&ranks),
+        recall: recall_at(&ranks, LIMIT),
+    }))
+}
+
 /// Run a sweep if the judgements have paid for one.
 ///
 /// Called after every verdict, off the request path: the verdict must not wait
@@ -649,7 +714,24 @@ pub(crate) mod test_support {
     /// assumed, because which source leads is a property of the fake
     /// embedder's hashes and nothing this is testing.
     pub(crate) async fn seeded() -> (crate::core::Core, Vec<String>) {
-        let core = crate::core::test_support::test_core().await;
+        seeded_on(crate::core::test_support::test_core().await).await
+    }
+
+    /// The same base on a core that has the reversing, counting fake
+    /// reranker. `order` is still the vector order: the pass replays with
+    /// the reranker off, and the tests that want the reranked order reverse
+    /// it themselves.
+    pub(crate) async fn seeded_with_reranker() -> (
+        crate::core::Core,
+        Vec<String>,
+        std::sync::Arc<crate::infer::fake::FakeReranker>,
+    ) {
+        let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
+        let (core, order) = seeded_on(core).await;
+        (core, order, reranker)
+    }
+
+    pub(crate) async fn seeded_on(core: crate::core::Core) -> (crate::core::Core, Vec<String>) {
         for (raw, text) in [("raw one", QUERY), ("raw two", "unrelated words")] {
             let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
             let new: Vec<crate::store::artifacts::NewArtifact> = (0..3)
@@ -685,7 +767,9 @@ pub(crate) mod test_support {
             mark: false,
             include_deprecated: false,
             include_superseded: false,
-            rerank: true,
+            // The vector order, whatever reranker the core has: the ladder
+            // replays with the reranker off, and this is its baseline.
+            rerank: false,
             explain: false,
         };
         core.search_with_ranking(&q, params, Door::Judge)
@@ -892,6 +976,89 @@ mod tests {
             .as_ref()
             .expect("the pair carries its context");
         assert!(priming.sitting.contains(&order[5]));
+    }
+
+    fn served_pair(order: &[String], i: usize, served: usize) -> Pair {
+        Pair {
+            query: QUERY.into(),
+            satisfies: vec![order[i].clone()],
+            query_vec: None,
+            priming: None,
+            served: Some(served),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replay_without_the_reranker_that_places_two_net_pairs_better_adopts_rerank_off() {
+        // The fake reranker reverses the list. Served ranks are what it
+        // produced; the replay without it is the vector order.
+        let (core, order, _) = super::test_support::seeded_with_reranker().await;
+        let current = RankingParams {
+            rerank: true,
+            ..*core.ranking.read().unwrap()
+        };
+        let pairs = vec![served_pair(&order, 0, 5), served_pair(&order, 1, 4)];
+        let flip = rerank_flip(&core, &pairs, current, None)
+            .await
+            .unwrap()
+            .expect("a flip is offered");
+        assert!(!flip.params.rerank);
+        assert!(flip.predicted > 0.0, "{flip:?}");
+        assert_eq!(
+            RankingParams {
+                rerank: true,
+                ..flip.params
+            },
+            current,
+            "the flip moves the one knob"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flip_that_would_not_place_two_net_pairs_better_is_not_offered() {
+        let (core, order, _) = super::test_support::seeded_with_reranker().await;
+        let current = RankingParams {
+            rerank: true,
+            ..*core.ranking.read().unwrap()
+        };
+        // Served where the vector order already puts them: a tie.
+        let pairs = vec![served_pair(&order, 0, 0), served_pair(&order, 1, 1)];
+        assert!(
+            rerank_flip(&core, &pairs, current, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn no_reranker_means_no_flip_is_offered() {
+        let (core, order) = seeded().await;
+        let current = *core.ranking.read().unwrap();
+        let pairs = vec![served_pair(&order, 0, 5), served_pair(&order, 1, 4)];
+        assert!(
+            rerank_flip(&core, &pairs, current, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flip_to_rerank_on_costs_one_call_per_pair_and_a_judged_pair_costs_none() {
+        let (core, order, reranker) = super::test_support::seeded_with_reranker().await;
+        let current = RankingParams {
+            rerank: false,
+            ..*core.ranking.read().unwrap()
+        };
+        let mut pairs: Vec<Pair> = (0..3).map(|i| served_pair(&order, i, i)).collect();
+        pairs.push(Pair {
+            served: None,
+            ..served_pair(&order, 3, 3)
+        });
+        let before = reranker.calls();
+        let _ = rerank_flip(&core, &pairs, current, None).await.unwrap();
+        assert_eq!(reranker.calls() - before, 3);
     }
 
     #[tokio::test]
@@ -1269,6 +1436,7 @@ mod tests {
                 sitting: [order[5].clone()].into_iter().collect(),
                 due: Default::default(),
             }),
+            served: None,
         };
         let without = Pair {
             priming: None,

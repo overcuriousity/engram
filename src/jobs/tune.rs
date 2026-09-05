@@ -197,6 +197,26 @@ async fn propose(
         return Ok(Pass::default());
     };
 
+    // The ladder first. The rerank flip is scored against a different base —
+    // the served rank — so its promise is not comparable with a ladder row's,
+    // and it is asked only when the ladder proposes nothing.
+    let mut run = scored.eval_run(&pairs, judged_count(core).await?, skipped);
+    let winner = match scored.winner() {
+        Some(w) => Some((w, scored.predicted().unwrap_or(0.0))),
+        None => match sweep::rerank_flip(core, &pairs, current, Some(started)).await? {
+            Some(flip) if !tried.contains(&GenerationParams::from(flip.params)) => {
+                run.best = flip.params.into();
+                run.base_mrr = flip.served_mrr;
+                run.base_recall = flip.served_recall;
+                run.best_mrr = flip.mrr;
+                run.best_recall = flip.recall;
+                run.recommended = true;
+                Some((flip.params, flip.predicted))
+            }
+            _ => None,
+        },
+    };
+
     // Same guard as the sweep, for the same reason: an apply landing while
     // this ran means the baseline it measured against is no longer running.
     if *core.ranking.read().expect("ranking lock") != current {
@@ -204,15 +224,26 @@ async fn propose(
         return Ok(Pass::default());
     }
 
-    let judged = core.store.feedback_stats(core.weak_below()).await?.judged;
-    let run_id = core
-        .store
-        .record_eval_run(&scored.eval_run(&pairs, judged, skipped))
-        .await?;
-    let Some(winner) = scored.winner() else {
+    let run_id = core.store.record_eval_run(&run).await?;
+    let Some((winner, predicted)) = winner else {
         return Ok(Pass::default());
     };
-    let predicted = scored.predicted().unwrap_or(0.0);
+    adopt(core, live, winner, &run_id, predicted, pairs.len()).await
+}
+
+async fn judged_count(core: &Core) -> Result<i64> {
+    Ok(core.store.feedback_stats(core.weak_below()).await?.judged)
+}
+
+/// Make `winner` the live generation, naming the run that chose it.
+async fn adopt(
+    core: &Core,
+    live: &Generation,
+    winner: crate::core::ranking::RankingParams,
+    run_id: &str,
+    predicted: f64,
+    pairs: usize,
+) -> Result<Pass> {
     let id = core
         .store
         .adopt_generation(
@@ -222,20 +253,22 @@ async fn propose(
                 chat_model: live.chat_model.clone(),
                 parent_id: Some(live.id.clone()),
             },
-            &run_id,
+            run_id,
             predicted,
         )
         .await?;
     *core.ranking.write().expect("ranking lock") = winner;
     // Stamped, or the insights page would offer an Apply button for settings
     // that are already running.
-    core.store.mark_eval_run_applied(&run_id).await?;
+    core.store.mark_eval_run_applied(run_id).await?;
     tracing::info!(
         generation = %id,
         recency_weight = winner.recency_weight,
         per_source_cap = ?winner.per_source_cap,
+        prime_lift = winner.prime_lift,
+        rerank = winner.rerank,
         predicted,
-        pairs = pairs.len(),
+        pairs,
         "adopted a generation"
     );
     Ok(Pass {
@@ -323,6 +356,65 @@ mod tests {
         observe(&core, &generation, &order[0], 1).await;
         observe(&core, &generation, &order[1], 2).await;
         (core, generation)
+    }
+
+    /// A base whose reranker buries what an answer drew on: the two top hits
+    /// of the vector order, served reversed at the bottom of six. Nothing on
+    /// the ladder can lift them — the replay without the reranker already has
+    /// them at the top — so only the flip has anything to say.
+    async fn seeded_with_a_burying_reranker() -> (Core, String) {
+        let (core, order, _) = crate::eval::sweep::test_support::seeded_with_reranker().await;
+        assert!(
+            core.ranking.read().unwrap().rerank,
+            "a configured reranker starts on"
+        );
+        let generation = generation_for(&core).await;
+        observe(&core, &generation, &order[0], 6).await;
+        observe(&core, &generation, &order[1], 5).await;
+        (core, generation)
+    }
+
+    #[tokio::test]
+    async fn the_flip_is_asked_when_the_ladder_proposes_nothing_and_is_adopted_like_any_move() {
+        let (mut core, parent) = seeded_with_a_burying_reranker().await;
+        core.evolve.autonomous = true;
+        let adopted = run(&core).await.unwrap().expect("the flip adopts");
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        assert_eq!(live.id, adopted);
+        assert!(!live.params.rerank, "{:?}", live.params);
+        assert_eq!(live.parent_id.as_deref(), Some(parent.as_str()));
+        assert!(live.predicted.unwrap_or(0.0) > 0.0);
+        assert!(!core.ranking.read().unwrap().rerank, "serving follows");
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!(live.run_id.as_deref(), Some(run.id.as_str()));
+        assert!(run.recommended);
+        assert!(!run.best_params.rerank);
+    }
+
+    #[tokio::test]
+    async fn a_ladder_winner_is_taken_before_the_flip_is_asked() {
+        // Observations a cap can lift, and a reranker that buries them: the
+        // cap is measured first and wins; the flip is not asked in this pass.
+        let (core, order, reranker) =
+            crate::eval::sweep::test_support::seeded_with_reranker().await;
+        let generation = generation_for(&core).await;
+        observe(&core, &generation, &order[3], 3).await;
+        observe(&core, &generation, &order[4], 2).await;
+        let mut core = core;
+        core.evolve.autonomous = true;
+        let before = reranker.calls();
+        run(&core).await.unwrap().expect("the cap clears");
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        assert!(
+            live.params.rerank,
+            "the flip was not the move: {:?}",
+            live.params
+        );
+        assert_eq!(
+            reranker.calls(),
+            before,
+            "the ladder spends no reranker call"
+        );
     }
 
     #[tokio::test]
