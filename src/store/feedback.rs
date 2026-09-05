@@ -162,6 +162,8 @@ pub struct NewCandidate {
     pub similarity: Option<f32>,
     /// Whether it was inside the answer the searcher actually saw.
     pub shown: bool,
+    /// Appended under the ranked list by association rather than ranked.
+    pub band: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +189,14 @@ pub struct NewEvent {
     /// What priming read when this search ran, where the door primes. Kept
     /// so the idle pass can replay the search at another lift.
     pub context: Option<crate::core::search::Priming>,
+}
+
+/// What the appended band earned under one generation, beside the ranked
+/// tail of the same width. See `Store::band_use`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandUse {
+    pub band_used: usize,
+    pub tail_used: usize,
 }
 
 /// One recorded search as the pursuit sweep reads it.
@@ -429,8 +439,8 @@ impl Store {
         for (rank, c) in ev.candidates.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO search_candidates
-                   (event_id, rank, artifact_id, score, similarity, shown)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                   (event_id, rank, artifact_id, score, similarity, shown, band)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(rank as i64)
@@ -438,6 +448,7 @@ impl Store {
             .bind(c.score)
             .bind(c.similarity)
             .bind(c.shown as i64)
+            .bind(c.band as i64)
             .execute(&mut *tx)
             .await?;
         }
@@ -453,6 +464,34 @@ impl Store {
 
         tx.commit().await?;
         Ok(id)
+    }
+
+    /// Over the opened observations under one generation: how many opened
+    /// the band, and how many opened the last `spread_max` ranked hits that
+    /// were shown — the band's own width, at the weak end of the list beside
+    /// it.
+    pub async fn band_use(&self, generation_id: &str, spread_max: usize) -> Result<BandUse> {
+        let r = sqlx::query(
+            "SELECT
+               COALESCE(SUM(CASE WHEN c.band = 1 THEN 1 ELSE 0 END), 0) AS band_used,
+               COALESCE(SUM(CASE WHEN c.band = 0 AND c.rank >=
+                   (SELECT COUNT(*) FROM search_candidates s
+                     WHERE s.event_id = c.event_id AND s.band = 0 AND s.shown = 1) - ?
+                 THEN 1 ELSE 0 END), 0) AS tail_used
+             FROM observations o
+             JOIN search_candidates c
+               ON c.event_id = o.event_id AND c.artifact_id = o.artifact_id
+              AND c.shown = 1
+            WHERE o.generation_id = ? AND o.source = 'opened' AND o.excluded_at IS NULL",
+        )
+        .bind(spread_max as i64)
+        .bind(generation_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(BandUse {
+            band_used: r.get::<i64, _>("band_used") as usize,
+            tail_used: r.get::<i64, _>("tail_used") as usize,
+        })
     }
 
     /// What priming read when this search ran, or `None` where it did not
@@ -561,7 +600,7 @@ macro_rules! dealable {
         "judged_at IS NULL AND skips = 0 AND length(query) >= 3
          AND EXISTS (SELECT 1 FROM search_candidates WHERE event_id = search_events.id)
          AND COALESCE((SELECT max(COALESCE(similarity, 1.0)) FROM search_candidates
-                        WHERE event_id = search_events.id), 0) >= ?"
+                        WHERE event_id = search_events.id AND band = 0), 0) >= ?"
     };
 }
 
@@ -717,7 +756,9 @@ impl Store {
         //
         // The join is also the membership check: no row here means this
         // artifact was not in this event's pool, which is the same thing the
-        // EXISTS below refuses on.
+        // EXISTS below refuses on. An artifact can hold two rows — unshown in
+        // the ranked pool and shown in the appended band — and the open came
+        // from the one the person saw, so the shown row is the rank.
         let before = sqlx::query(
             "SELECT e.opened_at AS opened_at, e.query AS query,
                     e.query_vec AS query_vec, e.embed_model AS embed_model,
@@ -725,7 +766,9 @@ impl Store {
                FROM search_events e
                JOIN search_candidates c
                  ON c.event_id = e.id AND c.artifact_id = ?
-              WHERE e.id = ?",
+              WHERE e.id = ?
+              ORDER BY c.shown DESC, c.rank ASC
+              LIMIT 1",
         )
         .bind(artifact_id)
         .bind(event_id)
@@ -941,7 +984,7 @@ impl Store {
         let ranks: Vec<Option<i64>> = sqlx::query(
             "SELECT c.rank AS rank FROM search_events e
              LEFT JOIN search_candidates c
-               ON c.event_id = e.id AND c.artifact_id = e.expect_id
+               ON c.event_id = e.id AND c.artifact_id = e.expect_id AND c.band = 0
              WHERE e.verdict = 'hit'",
         )
         .fetch_all(&self.pool)
@@ -1101,7 +1144,7 @@ impl Store {
             let id: String = r.get("id");
             let shown: Vec<(String, Option<f32>)> = sqlx::query(
                 "SELECT artifact_id, similarity FROM search_candidates
-                  WHERE event_id = ? AND shown = 1 ORDER BY rank",
+                  WHERE event_id = ? AND shown = 1 AND band = 0 ORDER BY rank",
             )
             .bind(&id)
             .fetch_all(&self.pool)
@@ -1213,6 +1256,7 @@ mod tests {
                     score: 1.0 - i as f32 * 0.1,
                     similarity: Some(0.9 - i as f32 * 0.1),
                     shown: true,
+                    band: false,
                 })
                 .collect(),
             answered: false,
@@ -1472,6 +1516,7 @@ mod tests {
                 score: 0.9,
                 similarity: Some(0.8),
                 shown: true,
+                band: false,
             }],
             answered: false,
             context: None,
@@ -2175,6 +2220,7 @@ mod tests {
                 score: 1.0 - i as f32 / 100.0,
                 similarity: Some(0.5),
                 shown: i < 10,
+                band: false,
             })
             .collect();
         // No folding: these are separate searches, not one being typed.

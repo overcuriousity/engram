@@ -335,6 +335,10 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   score       REAL NOT NULL,
   similarity  REAL,
   shown       INTEGER NOT NULL,
+  -- 1 for an artifact appended under the ranked list by association. It was
+  -- shown, at the rank after the pool, and an open on it is an observation
+  -- like any other; the spread rule reads how often that happens.
+  band        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (event_id, rank)
 );
 -- `dealable!` asks two things of this table for every unjudged event, and the

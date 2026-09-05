@@ -118,6 +118,16 @@ impl Store {
         self.insert_live(g, None, None).await
     }
 
+    /// Record a generation adopted on lived evidence rather than a replay:
+    /// no run to name, and `predicted` is the rate that argued for it.
+    pub async fn adopt_generation_lived(
+        &self,
+        g: &NewGeneration,
+        predicted: f64,
+    ) -> Result<String> {
+        self.insert_live(g, None, Some(predicted)).await
+    }
+
     /// Record a generation the idle pass chose, carrying the run that chose it
     /// and what it promised, and make it live.
     pub async fn adopt_generation(

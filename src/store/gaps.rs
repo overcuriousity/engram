@@ -1327,6 +1327,7 @@ mod tests {
                             score: *s,
                             similarity: Some(*s),
                             shown: true,
+                            band: false,
                         })
                         .collect(),
                     answered: false,
@@ -1426,6 +1427,7 @@ mod tests {
                         score: 0.9,
                         similarity: None,
                         shown: true,
+                        band: false,
                     }],
                     answered: false,
                     context: None,

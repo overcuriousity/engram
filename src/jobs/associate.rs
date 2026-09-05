@@ -327,11 +327,13 @@ async fn replay_verdicts(core: &Core, at: i64) -> Result<usize> {
     Ok(end)
 }
 
-/// What one event actually put in front of the searcher, in rank order.
+/// What one event actually put in front of the searcher, in rank order. The
+/// ranked list only: an artifact the band recalled is in the pool, flagged,
+/// and reading it here would let a link strengthen itself by having fired.
 async fn shown_candidates(core: &Core, event_id: &str) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT artifact_id FROM search_candidates
-          WHERE event_id = ? AND shown = 1 ORDER BY rank",
+          WHERE event_id = ? AND shown = 1 AND band = 0 ORDER BY rank",
     )
     .bind(event_id)
     .fetch_all(&core.store.pool)
@@ -611,12 +613,14 @@ mod tests {
                 score: 1.0,
                 similarity: Some(0.9),
                 shown: true,
+                band: false,
             })
             .chain(unshown.iter().map(|id| NewCandidate {
                 artifact_id: (*id).clone(),
                 score: 0.1,
                 similarity: Some(0.2),
                 shown: false,
+                band: false,
             }))
             .collect();
         core.store

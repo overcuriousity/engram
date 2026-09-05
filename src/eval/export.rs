@@ -173,6 +173,7 @@ mod tests {
                         score: 0.9,
                         similarity: Some(0.7),
                         shown: true,
+                        band: false,
                     }],
                     answered: false,
                     context: None,

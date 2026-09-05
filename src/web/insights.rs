@@ -821,6 +821,10 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
                     "adopted by the base, promising MRR {:+.3}",
                     g.predicted.unwrap_or(0.0)
                 ),
+                (None, Some(_)) if g.predicted.is_some() => format!(
+                    "adopted by the base on what the band earned, at a use rate of {:.2}",
+                    g.predicted.unwrap_or(0.0)
+                ),
                 (None, Some(_)) => "set by hand".to_string(),
                 (None, None) => "starting point".to_string(),
             };

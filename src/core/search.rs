@@ -1730,9 +1730,21 @@ impl Core {
         //
         // Except at the UI door, which waits for its own capture — see
         // `captured_event` below.
+        // The band, read before the capture so it is in the pool: an open on
+        // an appended hit has to find its row, or it is not an observation.
+        // Appended after the truncate, below, so it stays outside `limit` and
+        // outside the retrieval count. The anchors are the shown window, which
+        // is what the append used to hand `associated` after the truncate.
+        let recalled = if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
+            self.associated(&results[..visible], &filter, params.spread_max)
+                .await
+        } else {
+            Vec::new()
+        };
+
         let mut captured_event = None;
         if self.learn.enabled && door.captured() {
-            let candidates: Vec<crate::store::feedback::NewCandidate> = results
+            let mut candidates: Vec<crate::store::feedback::NewCandidate> = results
                 .iter()
                 .take(self.feedback.candidates)
                 .enumerate()
@@ -1741,8 +1753,20 @@ impl Core {
                     score: r.score,
                     similarity: sims.get(&r.artifact_id).copied().flatten(),
                     shown: i < limit,
+                    band: false,
                 })
                 .collect();
+            candidates.extend(
+                recalled
+                    .iter()
+                    .map(|r| crate::store::feedback::NewCandidate {
+                        artifact_id: r.artifact_id.clone(),
+                        score: r.score,
+                        similarity: None,
+                        shown: true,
+                        band: true,
+                    }),
+            );
             let event = crate::store::feedback::NewEvent {
                 query: query.q.trim().to_string(),
                 door,
@@ -1818,30 +1842,29 @@ impl Core {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
         }
-        // After the truncate and after capture, so an association can only ever
-        // add: it is outside `limit`, outside the recorded pool, and outside the
-        // retrieval count. See `Touch::shown`.
+        // After the truncate, so an association can only ever add: it is
+        // outside `limit` and outside the retrieval count. See `Touch::shown`.
+        // It is inside the recorded pool, flagged as the band, so an open on
+        // it counts; that is what the spread rule reads.
         //
-        // Gated on the door, not on `captured()` — that predicate means
-        // "recorded for relevance feedback", an unrelated idea that happens
-        // to select the same four doors today. `Ask` is excluded because it
-        // synthesises an answer from `results` as excerpts; text that never
-        // matched the question must not become source material. `Judge` is
-        // excluded because its query is composed in full knowledge of the
-        // answer and needs a clean pool to label, not a widened one.
-        if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
-            let recalled = self.associated(&results, &filter, params.spread_max).await;
-            if !recalled.is_empty() {
-                self.mark_seen(&recalled, &HashMap::new(), false);
-                let from = results.len();
-                results.extend(recalled);
-                // The earlier pass ran before these existed. Without this an
-                // associated passage with no heading of its own renders
-                // untitled beside ranked siblings from the same note that show
-                // its name — `retrieve_round` already re-runs it after
-                // `reach_sideways` for the same reason.
-                self.fill_titles(&mut results[from..]).await;
-            }
+        // Gated on the door where `recalled` is read, not on `captured()` —
+        // that predicate means "recorded for relevance feedback", an unrelated
+        // idea that happens to select the same four doors today. `Ask` is
+        // excluded because it synthesises an answer from `results` as
+        // excerpts; text that never matched the question must not become
+        // source material. `Judge` is excluded because its query is composed
+        // in full knowledge of the answer and needs a clean pool to label, not
+        // a widened one.
+        if !recalled.is_empty() {
+            self.mark_seen(&recalled, &HashMap::new(), false);
+            let from = results.len();
+            results.extend(recalled);
+            // The earlier pass ran before these existed. Without this an
+            // associated passage with no heading of its own renders untitled
+            // beside ranked siblings from the same note that show its name —
+            // `retrieve_round` already re-runs it after `reach_sideways` for
+            // the same reason.
+            self.fill_titles(&mut results[from..]).await;
         }
         tracing::info!(
             q = %query.q,
@@ -4221,6 +4244,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_appended_hit_is_captured_in_the_band_and_an_open_on_it_is_an_observation() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("both of these"), 30.0, now_secs())
+            .await
+            .unwrap();
+        let params = *core.ranking.read().unwrap();
+        let generation = core
+            .store
+            .record_generation(&crate::store::generations::NewGeneration {
+                params: params.into(),
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+        let (out, outcome) = core
+            .search_with_ranking(&query, params, Door::Ui)
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        let event = outcome.event.expect("the UI door waits for its capture");
+        let rows =
+            sqlx::query("SELECT artifact_id, band, shown FROM search_candidates ORDER BY rank")
+                .bind(&event)
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        let band: Vec<&sqlx::sqlite::SqliteRow> = rows
+            .iter()
+            .filter(|r| r.get::<i64, _>("band") == 1)
+            .collect();
+        assert_eq!(band.len(), 1, "the appended hit is in the pool, flagged");
+        assert_eq!(band[0].get::<String, _>("artifact_id"), b);
+        assert_eq!(band[0].get::<i64, _>("shown"), 1);
+        // It is also in the ranked pool, unshown, past the limit of one: the
+        // open below has to land on the row the person saw.
+
+        assert!(core.store.open_event(&event, &b).await.unwrap());
+        let obs = core
+            .store
+            .observations_for_generation(&generation, 5)
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].artifact_id.as_deref(), Some(b.as_str()));
+        assert_eq!(
+            obs[0].rank,
+            Some(rows.len() as i64),
+            "the rank it was shown at, after the ranked pool: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn ask_and_judge_never_receive_an_association_but_ui_does() {
         // `ask` feeds `results` to the model as excerpts to synthesise an
         // answer from; text that never matched the question must not become
@@ -4294,11 +4381,16 @@ mod tests {
     /// separately-seeded cores (whose artifact ids are fresh UUIDs and so never
     /// equal) can still be compared for shape.
     async fn captured_pool(core: &crate::core::Core, a: &str, b: &str) -> Vec<(&'static str, i64)> {
-        let rows: Vec<(String, i64)> =
-            sqlx::query_as("SELECT artifact_id, shown FROM search_candidates ORDER BY rank")
-                .fetch_all(&core.store.pool)
-                .await
-                .unwrap();
+        // The ranked pool. The band is recorded beside it, flagged, so the
+        // spread rule can read it — and every reader that learns from the
+        // pool leaves the flagged rows out, which is what keeps this loop
+        // closed; step 4 of the test below checks that.
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT artifact_id, shown FROM search_candidates WHERE band = 0 ORDER BY rank",
+        )
+        .fetch_all(&core.store.pool)
+        .await
+        .unwrap();
         rows.into_iter()
             .map(|(id, shown)| {
                 let role = if id == a {
@@ -4318,7 +4410,10 @@ mod tests {
         // The failure mode of any Hebbian system: a link recalls an artifact, is
         // strengthened by having done so, and recalls it harder next time. Both
         // loops have to be closed by construction: the recalled hit must not be
-        // written as a candidate, and must not count as a retrieval.
+        // a candidate anything learns from, and must not count as a retrieval.
+        // It *is* written to the pool, flagged as the band, so an open on it
+        // is an observation the spread rule can read; the flag is what every
+        // learning reader excludes on.
         //
         // This cannot be checked by asking "is `b` absent from
         // `search_candidates`" directly: on a base this small, `b` is a
@@ -4395,6 +4490,37 @@ mod tests {
         assert!(
             (after - before).abs() < 1e-9,
             "being recalled raised activation"
+        );
+
+        // 4. The band is in the pool, flagged, and read by nothing that
+        // learns: the associate job's co-appearance read sees the ranked
+        // list alone.
+        let band: Vec<String> =
+            sqlx::query_scalar("SELECT artifact_id FROM search_candidates WHERE band = 1")
+                .fetch_all(&linked.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            band,
+            vec![b.clone()],
+            "the recalled hit is recorded as the band"
+        );
+        let event: String = sqlx::query_scalar("SELECT id FROM search_events")
+            .fetch_one(&linked.store.pool)
+            .await
+            .unwrap();
+        let shown = linked
+            .store
+            .events_between(0, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == event)
+            .expect("the event")
+            .shown;
+        assert!(
+            shown.iter().all(|(id, _)| *id != b),
+            "the pursuit's shown list read the band: {shown:?}"
         );
     }
 

@@ -1069,6 +1069,7 @@ mod tests {
                             score: 1.0 - i as f32 * 0.1,
                             similarity: Some(0.9),
                             shown: true,
+                            band: false,
                         })
                         .collect(),
                     answered: false,

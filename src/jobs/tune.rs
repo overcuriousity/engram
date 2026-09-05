@@ -226,9 +226,79 @@ async fn propose(
 
     let run_id = core.store.record_eval_run(&run).await?;
     let Some((winner, predicted)) = winner else {
-        return Ok(Pass::default());
+        // Last, and on different evidence: the band is not replayed, it is
+        // read off what it earned while serving.
+        return spread_step(core, live, current, &tried).await;
     };
     adopt(core, live, winner, &run_id, predicted, pairs.len()).await
+}
+
+/// The spread rule. Grow when the band was used more than the ranked tail
+/// beside it by more than one event could account for; shrink on the same
+/// rule the other way; hold otherwise. From zero there is no band to
+/// measure, so the first rung is offered once and the watch decides.
+pub fn next_spread(current: usize, use_: crate::store::feedback::BandUse) -> Option<usize> {
+    use crate::core::ranking::SPREADS;
+    let at = SPREADS.iter().position(|s| *s == current)?;
+    if current == 0 {
+        return SPREADS.get(1).copied();
+    }
+    let net = use_.band_used as i64 - use_.tail_used as i64;
+    if net >= 2 {
+        SPREADS.get(at + 1).copied()
+    } else if net <= -2 {
+        at.checked_sub(1).map(|i| SPREADS[i])
+    } else {
+        None
+    }
+}
+
+/// The lived step, asked only when the ladder and the flip proposed nothing.
+async fn spread_step(
+    core: &Core,
+    live: &Generation,
+    current: crate::core::ranking::RankingParams,
+    tried: &[GenerationParams],
+) -> Result<Pass> {
+    let use_ = core.store.band_use(&live.id, current.spread_max).await?;
+    let Some(next) = next_spread(current.spread_max, use_) else {
+        return Ok(Pass::default());
+    };
+    let candidate = crate::core::ranking::RankingParams {
+        spread_max: next,
+        ..current
+    };
+    if tried.contains(&GenerationParams::from(candidate)) {
+        return Ok(Pass::default());
+    }
+    let predicted = match use_.band_used + use_.tail_used {
+        0 => 0.0,
+        n => use_.band_used as f64 / n as f64,
+    };
+    let id = core
+        .store
+        .adopt_generation_lived(
+            &NewGeneration {
+                params: candidate.into(),
+                embed_recipe: live.embed_recipe.clone(),
+                chat_model: live.chat_model.clone(),
+                parent_id: Some(live.id.clone()),
+            },
+            predicted,
+        )
+        .await?;
+    *core.ranking.write().expect("ranking lock") = candidate;
+    tracing::info!(
+        generation = %id,
+        spread_max = next,
+        band_used = use_.band_used,
+        tail_used = use_.tail_used,
+        "adopted a generation on what the band earned"
+    );
+    Ok(Pass {
+        adopted: Some(id),
+        reverted: None,
+    })
 }
 
 async fn judged_count(core: &Core) -> Result<i64> {
@@ -415,6 +485,163 @@ mod tests {
             before,
             "the ladder spends no reranker call"
         );
+    }
+
+    #[test]
+    fn a_band_used_more_than_the_tail_grows_one_rung_and_less_shrinks_one() {
+        use crate::store::feedback::BandUse;
+        let u = |band_used, tail_used| BandUse {
+            band_used,
+            tail_used,
+        };
+        assert_eq!(next_spread(3, u(4, 2)), Some(5), "two net events: grow");
+        assert_eq!(next_spread(3, u(2, 4)), Some(2), "two net events: shrink");
+        assert_eq!(
+            next_spread(3, u(3, 2)),
+            None,
+            "one event could account for it"
+        );
+        assert_eq!(next_spread(3, u(3, 3)), None, "equal use holds");
+        assert_eq!(
+            next_spread(8, u(9, 0)),
+            None,
+            "the top rung has nowhere to grow"
+        );
+        assert_eq!(
+            next_spread(1, u(0, 5)),
+            Some(0),
+            "and the bottom rung is off"
+        );
+        assert_eq!(
+            next_spread(0, u(0, 0)),
+            Some(1),
+            "from zero, the first rung is tried once"
+        );
+        assert_eq!(
+            next_spread(4, u(9, 0)),
+            None,
+            "a hand-set value off the ladder holds"
+        );
+    }
+
+    /// One captured search under `generation` with `ranked` shown hits and
+    /// `band` appended ones, opened on the artifact at `open`, which names a
+    /// row of either kind.
+    async fn captured_and_opened(core: &Core, ranked: &[&str], band: &[&str], open: &str) {
+        use crate::store::feedback::{Door, NewCandidate, NewEvent};
+        let candidates = ranked
+            .iter()
+            .map(|a| NewCandidate {
+                artifact_id: (*a).to_string(),
+                score: 1.0,
+                similarity: Some(0.9),
+                shown: true,
+                band: false,
+            })
+            .chain(band.iter().map(|a| NewCandidate {
+                artifact_id: (*a).to_string(),
+                score: 0.0,
+                similarity: None,
+                shown: true,
+                band: true,
+            }))
+            .collect();
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    query: QUERY.into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: core.embedder.embed_query(QUERY).await.unwrap(),
+                    embed_model: "fake".into(),
+                    candidates,
+                    answered: false,
+                    fold_onto: None,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(core.store.open_event(&id, open).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_band_reader_tells_a_band_open_from_a_tail_open_from_a_top_open() {
+        let (core, order) = seeded().await;
+        let generation = generation_for(&core).await;
+        let ranked: Vec<&str> = order[..3].iter().map(String::as_str).collect();
+        let band = [order[5].as_str()];
+        captured_and_opened(&core, &ranked, &band, &order[5]).await;
+        let u = core.store.band_use(&generation, 1).await.unwrap();
+        assert_eq!((u.band_used, u.tail_used), (1, 0));
+
+        captured_and_opened(&core, &ranked, &band, &order[2]).await;
+        let u = core.store.band_use(&generation, 1).await.unwrap();
+        assert_eq!(
+            (u.band_used, u.tail_used),
+            (1, 1),
+            "the last ranked hit is the tail"
+        );
+
+        captured_and_opened(&core, &ranked, &band, &order[0]).await;
+        let u = core.store.band_use(&generation, 1).await.unwrap();
+        assert_eq!((u.band_used, u.tail_used), (1, 1), "the top is neither");
+    }
+
+    #[tokio::test]
+    async fn a_base_whose_band_is_used_more_than_its_tail_widens_the_band_when_nothing_else_moves()
+    {
+        let (mut core, parent) = seeded_with_nothing_to_gain().await;
+        core.evolve.autonomous = true;
+        let spread = core.ranking.read().unwrap().spread_max;
+        assert_eq!(spread, 3, "the shipped rung");
+        // Four opens on the band, two on the tail: two net events, the band
+        // earned a wider rung. The ladder sees observations at the top of the
+        // list and proposes nothing.
+        let ranked: Vec<&str> = order_of(&core).await;
+        let band = [ranked[4], ranked[5]];
+        for _ in 0..4 {
+            captured_and_opened(&core, &ranked[..3], &band, ranked[5]).await;
+        }
+        for _ in 0..2 {
+            captured_and_opened(&core, &ranked[..3], &band, ranked[2]).await;
+        }
+        let adopted = run(&core).await.unwrap().expect("spread grows");
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        assert_eq!(live.id, adopted);
+        assert_eq!(live.params.spread_max, 5);
+        assert_eq!(live.parent_id.as_deref(), Some(parent.as_str()));
+        assert!(live.run_id.is_none(), "a lived adoption names no run");
+        assert!(live.predicted.is_some());
+        assert_eq!(
+            core.ranking.read().unwrap().spread_max,
+            5,
+            "serving follows"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_band_nobody_uses_narrows_one_rung() {
+        let (mut core, _) = seeded_with_nothing_to_gain().await;
+        core.evolve.autonomous = true;
+        let ranked: Vec<&str> = order_of(&core).await;
+        let band = [ranked[4], ranked[5]];
+        for _ in 0..3 {
+            captured_and_opened(&core, &ranked[..3], &band, ranked[2]).await;
+        }
+        run(&core).await.unwrap().expect("spread shrinks");
+        assert_eq!(core.ranking.read().unwrap().spread_max, 2);
+    }
+
+    async fn order_of(core: &Core) -> Vec<&'static str> {
+        crate::eval::sweep::test_support::ranks_order(core)
+            .await
+            .into_iter()
+            .map(|s| Box::leak(s.into_boxed_str()) as &'static str)
+            .collect()
     }
 
     #[tokio::test]
