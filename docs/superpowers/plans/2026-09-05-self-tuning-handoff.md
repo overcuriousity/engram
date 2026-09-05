@@ -117,7 +117,7 @@ are collected here because Part 5 leans on several of them.
 
 ## Corrections made after 3b, on review
 
-Eight defects, all found by reading 3b as a whole rather than as a diff. Each
+Nine defects, all found by reading 3b as a whole rather than as a diff. Each
 is fixed on the branch with a test named for the rule it protects.
 
 - **`undo_actions_under` was matching on `survivor_id` alone.** A merge is an
