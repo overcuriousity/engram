@@ -80,6 +80,9 @@ pub struct NewObservation {
     pub artifact_id: Option<String>,
     pub rank: Option<i64>,
     pub source: Source,
+    /// The search event this came from: an open or a give-up. `None` for a
+    /// citation, which comes from an ask.
+    pub event_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +96,7 @@ pub struct Observation {
     pub rank: Option<i64>,
     pub source: Source,
     pub strength: f32,
+    pub event_id: Option<String>,
 }
 
 /// Write one observation through whatever executor the caller has.
@@ -109,8 +113,8 @@ where
     sqlx::query(
         "INSERT INTO observations
            (id, created_at, generation_id, query, query_vec, vec_dim,
-            embed_model, artifact_id, rank, source, strength)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            embed_model, artifact_id, rank, source, strength, event_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(now())
@@ -123,6 +127,7 @@ where
     .bind(o.rank)
     .bind(o.source.as_str())
     .bind(o.source.strength())
+    .bind(&o.event_id)
     .execute(ex)
     .await?;
     Ok(id)
@@ -145,7 +150,7 @@ impl Store {
     ) -> Result<Vec<Observation>> {
         sqlx::query(
             "SELECT id, created_at, generation_id, query, query_vec, artifact_id,
-                    rank, source, strength
+                    rank, source, strength, event_id
                FROM observations
               WHERE generation_id = ? AND excluded_at IS NULL
               ORDER BY created_at DESC, id DESC
@@ -167,6 +172,7 @@ impl Store {
                 rank: r.get("rank"),
                 source: Source::parse(&r.get::<String, _>("source"))?,
                 strength: r.get("strength"),
+                event_id: r.get("event_id"),
             })
         })
         .collect()
@@ -220,6 +226,7 @@ mod tests {
             artifact_id: artifact.map(str::to_string),
             rank,
             source,
+            event_id: None,
         }
     }
 

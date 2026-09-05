@@ -181,6 +181,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -212,6 +213,7 @@ mod tests {
                 artifact_id: artifact.map(str::to_string),
                 rank: artifact.map(|_| 1),
                 source,
+                event_id: None,
             })
             .await
             .unwrap();

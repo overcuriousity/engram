@@ -149,7 +149,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 11] = [
+        const ADDITIVE: [(&str, &str, &str); 12] = [
             (
                 "artifacts",
                 "updated_at",
@@ -226,6 +226,14 @@ impl Store {
                 "moments",
                 "origin_corpus_id",
                 "ALTER TABLE moments ADD COLUMN origin_corpus_id TEXT",
+            ),
+            // Nullable, no default, and NULL is the truth about every
+            // observation written before it: nothing recorded which search it
+            // came from.
+            (
+                "observations",
+                "event_id",
+                "ALTER TABLE observations ADD COLUMN event_id TEXT",
             ),
         ];
         for (table, column, ddl) in ADDITIVE {

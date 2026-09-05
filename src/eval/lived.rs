@@ -152,6 +152,7 @@ mod tests {
                 artifact_id: Some("art-1".into()),
                 rank: Some(1),
                 source,
+                event_id: None,
             })
             .await
             .unwrap();

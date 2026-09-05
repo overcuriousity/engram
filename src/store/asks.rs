@@ -195,6 +195,7 @@ impl Store {
                         artifact_id: Some(c.artifact_id.clone()),
                         rank: Some(i as i64 + 1),
                         source: crate::store::observations::Source::Cited,
+                        event_id: None,
                     },
                 )
                 .await?;
@@ -218,6 +219,7 @@ impl Store {
                     artifact_id: None,
                     rank: None,
                     source: crate::store::observations::Source::Unsupported,
+                    event_id: None,
                 },
             )
             .await?;

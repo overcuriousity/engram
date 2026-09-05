@@ -175,6 +175,7 @@ mod tests {
                         shown: true,
                     }],
                     answered: false,
+                    context: None,
                 },
                 0,
             )

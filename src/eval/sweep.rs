@@ -712,6 +712,7 @@ mod tests {
                 artifact_id: Some(artifact.to_string()),
                 rank: Some(1),
                 source,
+                event_id: None,
             })
             .await
             .unwrap();
@@ -810,6 +811,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 // Folding off: these are the same query on purpose, and two
                 // pairs are what the gate needs.
@@ -1008,6 +1010,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )

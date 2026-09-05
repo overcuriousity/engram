@@ -6469,6 +6469,7 @@ mod tests {
                             shown: true,
                         }],
                         answered: false,
+                        context: None,
                     },
                     // No folding: these stand for separate searches, not one
                     // being typed.
@@ -10259,6 +10260,7 @@ mod tests {
                     embed_model: core.embedder.model().to_string(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -10449,6 +10451,7 @@ mod tests {
                     embed_model: core.embedder.model().to_string(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -10480,6 +10483,7 @@ mod tests {
                         shown: true,
                     }],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -12342,6 +12346,7 @@ mod tests {
                         shown: true,
                     }],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -12444,6 +12449,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 60,
             )
@@ -12709,6 +12715,7 @@ mod tests {
                         shown: true,
                     }],
                     answered: false,
+                    context: None,
                 },
                 0,
             )

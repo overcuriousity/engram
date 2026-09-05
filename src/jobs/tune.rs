@@ -298,6 +298,7 @@ mod tests {
                 artifact_id: Some(artifact.to_string()),
                 rank: Some(rank),
                 source: Source::Cited,
+                event_id: None,
             })
             .await
             .unwrap();
@@ -401,6 +402,7 @@ mod tests {
                     artifact_id: None,
                     rank: None,
                     source: Source::GaveUp,
+                    event_id: None,
                 })
                 .await
                 .unwrap();
@@ -519,6 +521,7 @@ mod tests {
                         embed_model: "fake".into(),
                         candidates: vec![],
                         answered: false,
+                        context: None,
                     },
                     0,
                 )
@@ -537,6 +540,7 @@ mod tests {
                     artifact_id: Some("art-that-was-not-an-answer".into()),
                     rank: Some(1),
                     source: Source::Cited,
+                    event_id: None,
                 })
                 .await
                 .unwrap();
@@ -600,6 +604,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )

@@ -61,6 +61,17 @@ fn default_rerank() -> bool {
     true
 }
 
+/// What priming reads at the moment of one search: the activation of the
+/// candidates, the artifacts this sitting has been in, and the due reminders.
+/// Recorded beside the pool so a replay at another lift sees what the
+/// searcher saw, and handed back in by the idle pass on the Judge door.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Priming {
+    pub activation: HashMap<String, f64>,
+    pub sitting: std::collections::HashSet<String>,
+    pub due: std::collections::HashSet<String>,
+}
+
 /// The gate's claim for one search, held for as long as the search runs.
 ///
 /// Two shapes because the two lanes are two different things: a lease is a
@@ -1646,6 +1657,9 @@ impl Core {
             true => due_map.keys().cloned().collect(),
             false => Default::default(),
         };
+        // Kept for the capture below: what a replay needs to see this list
+        // the way the searcher did. Only a real search records it.
+        let mut primed_with: Option<Priming> = None;
         if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
@@ -1670,15 +1684,21 @@ impl Core {
                     .unwrap_or_default(),
                 false => Default::default(),
             };
+            let priming = Priming {
+                activation,
+                sitting,
+                due: due.clone(),
+            };
             results = prime(
                 results,
-                &activation,
+                &priming.activation,
                 self.associate.prime_margin,
                 params.prime_lift,
-                &sitting,
-                &due,
+                &priming.sitting,
+                &priming.due,
             );
             note_reorder(&mut results, &before, |e| &mut e.prime);
+            primed_with = Some(priming);
         }
 
         // Before the capture below, not after the truncate: the recorded
@@ -1721,6 +1741,7 @@ impl Core {
                 // named one — what keeps a second tab's keystroke from folding
                 // into the first tab's search. See `record_search`.
                 fold_onto: origin.fold_onto.clone(),
+                context: primed_with.clone(),
                 filters: serde_json::json!({
                     "tags": query.tags,
                     "category": query.category,

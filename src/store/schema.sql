@@ -346,6 +346,17 @@ CREATE TABLE IF NOT EXISTS search_candidates (
 CREATE INDEX IF NOT EXISTS idx_candidates_similarity
   ON search_candidates(event_id, similarity);
 
+-- What priming read at the moment of one search: the activation of the
+-- candidates, the artifacts this sitting had been in, and the due reminders.
+-- Recorded so the idle pass can replay the search at another `prime_lift` and
+-- see what the searcher would have seen; observations alone do not carry it.
+-- One row per event that primed, none for a door that never primes. JSON,
+-- for the reason `generations.params` is.
+CREATE TABLE IF NOT EXISTS search_context (
+  event_id  TEXT PRIMARY KEY REFERENCES search_events(id) ON DELETE CASCADE,
+  context   TEXT NOT NULL
+);
+
 -- ── Tuning sweeps ────────────────────────────────────────────────────────────
 -- One row per background sweep over the judged pairs: what the running
 -- configuration scored, the best the grid found, and whether the gate let that
@@ -775,7 +786,10 @@ CREATE TABLE IF NOT EXISTS observations (
   strength      REAL NOT NULL,
   -- Set when the artifact this names has gone. An excluded observation is not
   -- scored as a miss: a miss is a claim about ordering, and this is not one.
-  excluded_at   INTEGER
+  excluded_at   INTEGER,
+  -- The search event this came from, where it came from one: opened and
+  -- gave-up observations. NULL for a citation, which comes from an ask.
+  event_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_observations_generation
   ON observations(generation_id, created_at DESC);

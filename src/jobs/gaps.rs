@@ -396,6 +396,7 @@ mod tests {
                     embed_model: core.embedder.model().to_string(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )

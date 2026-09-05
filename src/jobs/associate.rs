@@ -631,6 +631,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates,
                     answered: false,
+                    context: None,
                 },
                 0,
             )

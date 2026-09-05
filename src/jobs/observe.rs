@@ -83,6 +83,7 @@ pub async fn run(core: &Core) -> Result<usize> {
                 artifact_id: None,
                 rank: None,
                 source: Source::GaveUp,
+                event_id: Some(r.get("id")),
             })
             .await?;
         written += 1;
@@ -143,6 +144,7 @@ mod tests {
                     }],
                     answered: false,
                     fold_onto: None,
+                    context: None,
                 },
                 0,
             )
@@ -160,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn a_search_nobody_opened_and_then_searched_past_is_a_weak_negative() {
         let (core, generation) = base().await;
-        record_at(&core, "loop device", 4_000).await;
+        let unopened = record_at(&core, "loop device", 4_000).await;
         record_at(&core, "mount loop image", 3_940).await;
 
         assert_eq!(run(&core).await.unwrap(), 1);
@@ -171,6 +173,11 @@ mod tests {
             .unwrap();
         assert_eq!(obs[0].source, Source::GaveUp);
         assert_eq!(obs[0].query, "loop device");
+        assert_eq!(
+            obs[0].event_id.as_deref(),
+            Some(unopened.as_str()),
+            "a give-up names the search it is about"
+        );
         assert!(
             obs[0].strength < 0.0 && obs[0].strength > -1.0,
             "weak, not strong"

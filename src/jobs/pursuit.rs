@@ -1072,6 +1072,7 @@ mod tests {
                         })
                         .collect(),
                     answered: false,
+                    context: None,
                 },
                 0,
             )

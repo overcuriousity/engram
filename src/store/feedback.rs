@@ -171,6 +171,9 @@ pub struct NewEvent {
     /// typing — the id it was handed by the last answer it drew. `None` from a
     /// door with nothing to name. See the fold rule in `record_search`.
     pub fold_onto: Option<String>,
+    /// What priming read when this search ran, where the door primes. Kept
+    /// so the idle pass can replay the search at another lift.
+    pub context: Option<crate::core::search::Priming>,
 }
 
 /// One recorded search as the pursuit sweep reads it.
@@ -380,6 +383,10 @@ impl Store {
                     .bind(&id)
                     .execute(&mut *tx)
                     .await?;
+                sqlx::query("DELETE FROM search_context WHERE event_id = ?")
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
                 id
             }
             None => {
@@ -421,9 +428,36 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
+        if let Some(ctx) = &ev.context {
+            let raw = serde_json::to_string(ctx)
+                .map_err(|e| crate::error::Error::Store(format!("search_context: {e}")))?;
+            sqlx::query("INSERT INTO search_context (event_id, context) VALUES (?, ?)")
+                .bind(&id)
+                .bind(raw)
+                .execute(&mut *tx)
+                .await?;
+        }
 
         tx.commit().await?;
         Ok(id)
+    }
+
+    /// What priming read when this search ran, or `None` where it did not
+    /// prime.
+    pub async fn search_context(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<crate::core::search::Priming>> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT context FROM search_context WHERE event_id = ?")
+                .bind(event_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        raw.map(|s| {
+            serde_json::from_str(&s)
+                .map_err(|e| crate::error::Error::Store(format!("search_context: {e}")))
+        })
+        .transpose()
     }
 }
 
@@ -719,6 +753,7 @@ impl Store {
                     // a cited excerpt and finds them a place apart.
                     rank: Some(row.get::<i64, _>("rank") + 1),
                     source: crate::store::observations::Source::Opened,
+                    event_id: Some(event_id.to_string()),
                 },
             )
             .await?;
@@ -1169,7 +1204,52 @@ mod tests {
                 .collect(),
             answered: false,
             fold_onto: None,
+            context: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_recorded_search_keeps_what_priming_read_and_an_open_names_the_search() {
+        let (store, generation) = observed_base().await;
+        let mut ev = event_with(&["art-1", "art-2"]);
+        ev.context = Some(crate::core::search::Priming {
+            activation: [("art-1".to_string(), 0.7)].into_iter().collect(),
+            sitting: ["art-2".to_string()].into_iter().collect(),
+            due: Default::default(),
+        });
+        let id = store.record_search(ev, 0).await.unwrap();
+        let ctx = store
+            .search_context(&id)
+            .await
+            .unwrap()
+            .expect("context stored");
+        assert_eq!(ctx.activation.get("art-1"), Some(&0.7));
+        assert!(ctx.sitting.contains("art-2"));
+
+        assert!(store.open_event(&id, "art-1").await.unwrap());
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs[0].event_id.as_deref(), Some(id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_search_without_priming_stores_no_context_and_a_fold_drops_the_old_one() {
+        let (store, _) = observed_base().await;
+        let mut first = event_with(&["art-1"]);
+        first.context = Some(crate::core::search::Priming::default());
+        let id = store.record_search(first, 60).await.unwrap();
+        assert!(store.search_context(&id).await.unwrap().is_some());
+
+        // The same searcher rewords inside the window: the event folds, and
+        // the context is the new search's — here, none.
+        let mut second = event_with(&["art-1"]);
+        second.query = "loop devices".into();
+        second.fold_onto = Some(id.clone());
+        let folded = store.record_search(second, 60).await.unwrap();
+        assert_eq!(folded, id, "this test needs the fold to happen");
+        assert!(store.search_context(&id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1325,6 +1405,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -1380,6 +1461,7 @@ mod tests {
                 shown: true,
             }],
             answered: false,
+            context: None,
         }
     }
 

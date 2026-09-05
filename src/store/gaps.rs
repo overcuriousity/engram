@@ -1293,6 +1293,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -1329,6 +1330,7 @@ mod tests {
                         })
                         .collect(),
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -1426,6 +1428,7 @@ mod tests {
                         shown: true,
                     }],
                     answered: false,
+                    context: None,
                 },
                 0,
             )

@@ -835,6 +835,7 @@ mod tests {
                         embed_model: core.embedder.model().into(),
                         candidates: vec![],
                         answered: false,
+                        context: None,
                     },
                     0,
                 )
