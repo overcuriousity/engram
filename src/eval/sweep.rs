@@ -296,6 +296,41 @@ pub(crate) async fn rank_of(
         .position(|r| pair.satisfies.iter().any(|id| id == &r.artifact_id)))
 }
 
+/// Where the answer landed, 0-based, and every artifact above it in order —
+/// the whole top `LIMIT` when it was not found. `rank_of` with the list kept,
+/// for the replay that wants to know who stood in the way.
+pub(crate) async fn rank_and_above(
+    core: &Core,
+    pair: &Pair,
+    params: RankingParams,
+) -> Result<(Option<usize>, Vec<String>)> {
+    if let Some(v) = &pair.query_vec {
+        core.remember_query_vector(&pair.query, v.clone());
+    }
+    let q = crate::core::search::SearchQuery {
+        q: pair.query.clone(),
+        limit: LIMIT,
+        tags: vec![],
+        category: None,
+        mark: false,
+        rerank: false,
+        explain: false,
+        include_deprecated: false,
+        include_superseded: false,
+    };
+    let origin = crate::store::feedback::Origin::from(crate::store::feedback::Door::Judge);
+    let (results, _) = core.search_with_ranking(&q, params, origin).await?;
+    let rank = results
+        .iter()
+        .position(|r| pair.satisfies.iter().any(|id| id == &r.artifact_id));
+    let above = results
+        .iter()
+        .take(rank.unwrap_or(results.len()))
+        .map(|r| r.artifact_id.clone())
+        .collect();
+    Ok((rank, above))
+}
+
 /// Every pair under every configuration, one row per configuration.
 ///
 /// Query-major, and that is the whole point of the function. A pass per

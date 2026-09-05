@@ -179,6 +179,124 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
     Ok(out)
 }
 
+pub const REHEARSED_AFTER: &str = "sleep.rehearsed_after";
+
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct Replayed {
+    pub rehearsed: usize,
+    pub found: usize,
+    /// Probes retired on the way: another embedder, or an owner gone.
+    pub retired: usize,
+    pub stopped: bool,
+}
+
+/// One probe as a `Pair`, `satisfies` widened to what supersedes the owner.
+pub(crate) async fn pair_of(
+    core: &Core,
+    r: &crate::store::rehearsals::Rehearsal,
+) -> crate::eval::sweep::Pair {
+    crate::eval::sweep::Pair {
+        query: r.query.clone(),
+        satisfies: crate::eval::satisfied_by(core, &r.artifact_id).await,
+        query_vec: Some(r.query_vec.clone()),
+        priming: None,
+        served: None,
+    }
+}
+
+/// Whether anything in the chain a probe is satisfied by is still in results.
+async fn owner_stands(core: &Core, satisfies: &[String]) -> bool {
+    for id in satisfies {
+        if let Ok(c) = core.store.get_artifact(id).await
+            && c.in_results()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Fragile first, then the lap. Pure vector reads; nothing embedded.
+///
+/// The lap walks `(created_at, id)` from where the last pass stopped and
+/// wraps at the end, the way `retract`'s cursor does: a probe has no end
+/// state to reach, so the cursor has no end. Half the bound goes to the
+/// probes whose last two results disagree — what wobbles is what needs
+/// rehearsing, and this is the spacing effect measured rather than scheduled.
+pub async fn rehearse(
+    core: &Core,
+    live: &crate::store::generations::Generation,
+    started: i64,
+) -> Result<Replayed> {
+    let mut out = Replayed::default();
+    let current = *core.ranking.read().expect("ranking lock");
+    let model = core.embedder.model().to_string();
+    let half = OBSERVATION_LIMIT / 2;
+
+    let mut batch = core.store.fragile_rehearsals(&live.id, half).await?;
+    let after = core
+        .store
+        .meta_get(REHEARSED_AFTER)
+        .await?
+        .map(|s| crate::store::Cursor::parse(&s))
+        .unwrap_or_default();
+    let want = OBSERVATION_LIMIT - batch.len();
+    let mut lap = core.store.rehearsals_after(&after, want).await?;
+    if lap.is_empty() && after != crate::store::Cursor::default() {
+        lap = core
+            .store
+            .rehearsals_after(&crate::store::Cursor::default(), want)
+            .await?;
+    }
+    let lap_start = batch.len();
+    batch.extend(lap);
+
+    let mut cursor = after;
+    for (i, r) in batch.iter().enumerate() {
+        if core.store.activity_since(started).await? {
+            core.store
+                .meta_set(REHEARSED_AFTER, &cursor.encode())
+                .await?;
+            out.stopped = true;
+            return Ok(out);
+        }
+        if i >= lap_start {
+            cursor = crate::store::Cursor {
+                at: r.created_at,
+                id: r.id.clone(),
+            };
+        }
+        // Another era's vector is not comparable with the live index, the
+        // way rule 2 skips give-ups from another embedder; retired, not
+        // replayed. An owner nothing answers for any more likewise.
+        let pair = pair_of(core, r).await;
+        if r.embed_model != model || !owner_stands(core, &pair.satisfies).await {
+            core.store
+                .retire_rehearsal(&r.id, crate::store::now())
+                .await?;
+            out.retired += 1;
+            continue;
+        }
+        let (rank, above) = crate::eval::sweep::rank_and_above(core, &pair, current).await?;
+        out.rehearsed += 1;
+        if rank.is_some() {
+            out.found += 1;
+        }
+        core.store
+            .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                rehearsal_id: r.id.clone(),
+                generation_id: live.id.clone(),
+                rank: rank.map(|r| r as i64 + 1),
+                outranked_by: above,
+            })
+            .await?;
+    }
+    core.store
+        .meta_set(REHEARSED_AFTER, &cursor.encode())
+        .await?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +464,65 @@ mod tests {
             .unwrap();
         assert_eq!(pair.state, crate::store::pairs::PairState::Contradiction);
         assert!(pair.detail.unwrap_or_default().contains("1.22.0"));
+    }
+
+    pub(crate) async fn live_generation(
+        core: &crate::core::Core,
+    ) -> crate::store::generations::Generation {
+        let params = *core.ranking.read().unwrap();
+        let id = core
+            .store
+            .record_generation(&crate::store::generations::NewGeneration {
+                params: params.into(),
+                embed_recipe: "fake".into(),
+                chat_model: "fake".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        core.store.generation(&id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn rehearsal_replays_each_probe_under_the_live_generation_and_the_lap_wraps() {
+        let (core, a1, _a2, _b) = two_corpora().await;
+        let live = live_generation(&core).await;
+        integrate(&core, crate::store::now()).await.unwrap();
+        let r = rehearse(&core, &live, crate::store::now()).await.unwrap();
+        assert_eq!(r.rehearsed, 2, "{r:?}");
+        assert_eq!(r.found, 2, "b's text finds both of the first corpus");
+        let p = &core.store.rehearsals_of(&a1).await.unwrap()[0];
+        let res = core.store.results_of(&p.id, 10).await.unwrap();
+        assert_eq!(res.len(), 1);
+        assert!(res[0].rank.is_some());
+        // The lap wraps: a second pass replays the same two again.
+        assert_eq!(
+            rehearse(&core, &live, crate::store::now())
+                .await
+                .unwrap()
+                .rehearsed,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_under_another_embedder_is_retired_not_replayed() {
+        let (core, a1, _, _) = two_corpora().await;
+        let live = live_generation(&core).await;
+        core.store
+            .record_rehearsal(&NewRehearsal {
+                class: Class::Cue,
+                query: "from another era".into(),
+                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                embed_model: "older-model".into(),
+                artifact_id: a1.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap();
+        let r = rehearse(&core, &live, crate::store::now()).await.unwrap();
+        assert_eq!(r.retired, 1);
+        assert_eq!(r.rehearsed, 0);
+        assert_eq!(core.store.live_rehearsal_count().await.unwrap(), 0);
     }
 }

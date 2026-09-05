@@ -100,6 +100,18 @@ pub async fn run(core: &Core) -> Result<Report> {
     }
 
     if core.feedback.retain_days > 0 {
+        match core
+            .store
+            .expire_rehearsal_results(core.feedback.retain_days)
+            .await
+        {
+            Ok(n) if n > 0 => tracing::info!(dropped = n, "expired rehearsal results"),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "could not expire rehearsal results");
+                failure.get_or_insert(e);
+            }
+        }
         match core.store.expire_feedback(core.feedback.retain_days).await {
             Ok(n) => {
                 if n > 0 {

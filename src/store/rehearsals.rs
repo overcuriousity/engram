@@ -60,6 +60,42 @@ pub struct Rehearsal {
 
 const COLUMNS: &str =
     "id, created_at, class, query, query_vec, embed_model, artifact_id, source_id, retired_at";
+/// The same columns off an aliased `rehearsals r`, for the joined reads.
+const QUALIFIED: &str = "r.id, r.created_at, r.class, r.query, r.query_vec, r.embed_model, r.artifact_id, r.source_id, r.retired_at";
+
+#[derive(Debug, Clone)]
+pub struct NewResult {
+    pub rehearsal_id: String,
+    pub generation_id: String,
+    pub rank: Option<i64>,
+    pub outranked_by: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RehearsalResult {
+    pub id: String,
+    pub rehearsal_id: String,
+    pub generation_id: String,
+    pub at: i64,
+    pub rank: Option<i64>,
+    pub outranked_by: Vec<String>,
+}
+
+fn outranked(json: &str) -> Result<Vec<String>> {
+    serde_json::from_str(json)
+        .map_err(|e| Error::Store(format!("rehearsal_results.outranked_by: {e}")))
+}
+
+fn read_result(r: &sqlx::sqlite::SqliteRow) -> Result<RehearsalResult> {
+    Ok(RehearsalResult {
+        id: r.get("id"),
+        rehearsal_id: r.get("rehearsal_id"),
+        generation_id: r.get("generation_id"),
+        at: r.get("at"),
+        rank: r.get("rank"),
+        outranked_by: outranked(&r.get::<String, _>("outranked_by"))?,
+    })
+}
 
 fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Rehearsal> {
     Ok(Rehearsal {
@@ -176,6 +212,129 @@ impl Store {
                 .await?,
         )
     }
+
+    pub async fn record_rehearsal_result(&self, r: &NewResult) -> Result<String> {
+        let id = new_id();
+        sqlx::query(
+            "INSERT INTO rehearsal_results (id, rehearsal_id, generation_id, at, rank, outranked_by)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&r.rehearsal_id)
+        .bind(&r.generation_id)
+        .bind(now())
+        .bind(r.rank)
+        .bind(serde_json::to_string(&r.outranked_by).unwrap_or_else(|_| "[]".into()))
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// Newest first, at most `limit`.
+    pub async fn results_of(
+        &self,
+        rehearsal_id: &str,
+        limit: usize,
+    ) -> Result<Vec<RehearsalResult>> {
+        sqlx::query(
+            "SELECT id, rehearsal_id, generation_id, at, rank, outranked_by
+               FROM rehearsal_results WHERE rehearsal_id = ?
+              ORDER BY at DESC, id DESC LIMIT ?",
+        )
+        .bind(rehearsal_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(read_result)
+        .collect()
+    }
+
+    /// Live probes whose last two results under `generation_id` disagree —
+    /// found then not, or a different rank, NULL counted as its own value.
+    /// What wobbles is what needs rehearsing. Oldest result first.
+    pub async fn fragile_rehearsals(
+        &self,
+        generation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Rehearsal>> {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "WITH ranked AS (
+               SELECT rehearsal_id, rank, at,
+                      ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n
+                 FROM rehearsal_results WHERE generation_id = ?
+             ),
+             last_two AS (
+               SELECT a.rehearsal_id, a.at
+                 FROM ranked a JOIN ranked b
+                   ON a.rehearsal_id = b.rehearsal_id AND a.n = 1 AND b.n = 2
+                WHERE a.rank IS NOT b.rank
+             )
+             SELECT {QUALIFIED} FROM rehearsals r
+               JOIN last_two l ON l.rehearsal_id = r.id
+              WHERE r.retired_at IS NULL
+              ORDER BY l.at ASC, r.id ASC LIMIT ?"
+        )))
+        .bind(generation_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(read)
+        .collect()
+    }
+
+    /// The latest result per live probe under `generation_id`, with the
+    /// probe. Newest results first, at most `limit`.
+    pub async fn latest_results_under(
+        &self,
+        generation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(Rehearsal, RehearsalResult)>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "WITH latest AS (
+               SELECT id, rehearsal_id, at, rank, outranked_by,
+                      ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n
+                 FROM rehearsal_results WHERE generation_id = ?
+             )
+             SELECT {QUALIFIED},
+                    x.id AS x_id, x.at AS x_at, x.rank AS x_rank, x.outranked_by AS x_outranked_by
+               FROM latest x JOIN rehearsals r ON r.id = x.rehearsal_id
+              WHERE x.n = 1 AND r.retired_at IS NULL
+              ORDER BY x.at DESC, x.id DESC LIMIT ?"
+        )))
+        .bind(generation_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let probe = read(r)?;
+                let result = RehearsalResult {
+                    id: r.get("x_id"),
+                    rehearsal_id: probe.id.clone(),
+                    generation_id: generation_id.to_string(),
+                    at: r.get("x_at"),
+                    rank: r.get("x_rank"),
+                    outranked_by: outranked(&r.get::<String, _>("x_outranked_by"))?,
+                };
+                Ok((probe, result))
+            })
+            .collect()
+    }
+
+    /// Results older than `retain_days`. Zero keeps for ever, as it does for
+    /// the observations this shares a clock with.
+    pub async fn expire_rehearsal_results(&self, retain_days: i64) -> Result<u64> {
+        if retain_days <= 0 {
+            return Ok(0);
+        }
+        Ok(sqlx::query("DELETE FROM rehearsal_results WHERE at < ?")
+            .bind(now() - retain_days * 86_400)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +421,92 @@ mod tests {
         );
         assert_eq!(store.retire_rehearsals_of(&o, 6).await.unwrap(), 1);
         assert_eq!(store.live_rehearsal_count().await.unwrap(), 0);
+    }
+
+    pub(crate) async fn generation(store: &Store) -> String {
+        store
+            .record_generation(&crate::store::generations::NewGeneration {
+                params: crate::core::ranking::RankingParams::default().into(),
+                embed_recipe: "fake".into(),
+                chat_model: "fake".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn results_are_kept_newest_first_and_a_probe_that_wobbles_is_fragile() {
+        let store = Store::memory().await.unwrap();
+        let o = owner(&store).await;
+        let g = generation(&store).await;
+        let steady = store
+            .record_rehearsal(&probe(&o, "steady"))
+            .await
+            .unwrap()
+            .unwrap();
+        let wobbly = store
+            .record_rehearsal(&probe(&o, "wobbly"))
+            .await
+            .unwrap()
+            .unwrap();
+        let once = store
+            .record_rehearsal(&probe(&o, "once"))
+            .await
+            .unwrap()
+            .unwrap();
+        let res = |r: &str, rank: Option<i64>| NewResult {
+            rehearsal_id: r.into(),
+            generation_id: g.clone(),
+            rank,
+            outranked_by: vec!["x".into()],
+        };
+        store
+            .record_rehearsal_result(&res(&steady, Some(2)))
+            .await
+            .unwrap();
+        store
+            .record_rehearsal_result(&res(&steady, Some(2)))
+            .await
+            .unwrap();
+        store
+            .record_rehearsal_result(&res(&wobbly, Some(1)))
+            .await
+            .unwrap();
+        store
+            .record_rehearsal_result(&res(&wobbly, None))
+            .await
+            .unwrap();
+        store
+            .record_rehearsal_result(&res(&once, Some(3)))
+            .await
+            .unwrap();
+
+        let w = store.results_of(&wobbly, 10).await.unwrap();
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].rank, None, "newest first");
+        assert_eq!(w[0].outranked_by, vec!["x".to_string()]);
+
+        let fragile = store.fragile_rehearsals(&g, 10).await.unwrap();
+        assert_eq!(
+            fragile.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            [wobbly.as_str()]
+        );
+
+        let latest = store.latest_results_under(&g, 10).await.unwrap();
+        assert_eq!(latest.len(), 3, "one row per live probe");
+        assert!(
+            latest
+                .iter()
+                .any(|(r, x)| r.id == wobbly && x.rank.is_none())
+        );
+
+        store.retire_rehearsal(&once, 1).await.unwrap();
+        assert_eq!(store.latest_results_under(&g, 10).await.unwrap().len(), 2);
+        assert_eq!(
+            store.expire_rehearsal_results(0).await.unwrap(),
+            0,
+            "zero keeps for ever"
+        );
     }
 }

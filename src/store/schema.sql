@@ -885,3 +885,18 @@ CREATE TABLE IF NOT EXISTS integrations (
   detail        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_integrations_tag ON integrations(tag);
+
+-- One replay of one probe under one generation: where the owner landed, and
+-- who stood above it. Expired on `feedback.retain_days` with the observations.
+CREATE TABLE IF NOT EXISTS rehearsal_results (
+  id            TEXT PRIMARY KEY,
+  rehearsal_id  TEXT NOT NULL REFERENCES rehearsals(id) ON DELETE CASCADE,
+  generation_id TEXT NOT NULL REFERENCES generations(id),
+  at            INTEGER NOT NULL,
+  -- 1-based, like observations.rank; NULL past LIMIT.
+  rank          INTEGER,
+  -- JSON list of artifact ids that stood above the owner, in order.
+  outranked_by  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rehearsal_results_probe ON rehearsal_results(rehearsal_id, at DESC);
+CREATE INDEX IF NOT EXISTS idx_rehearsal_results_generation ON rehearsal_results(generation_id, at DESC);

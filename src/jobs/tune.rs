@@ -73,6 +73,8 @@ pub struct Pass {
     pub restored: usize,
     /// What the integrate phase filed before the pass.
     pub integrated: crate::jobs::sleep::Integrated,
+    /// What the rehearse phase replayed.
+    pub replayed: crate::jobs::sleep::Replayed,
 }
 
 /// Run the pass whatever the clock says. The adopted generation's id, or
@@ -142,14 +144,23 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         return Ok(Pass::default());
     }
 
+    // Rehearse before anything reads the record: the corpus rules and the
+    // watch below read what this writes. Pure vector reads.
+    let started = crate::store::now();
+    let replayed = crate::jobs::sleep::rehearse(core, &live, started).await?;
+    if replayed.stopped {
+        return Ok(Pass {
+            replayed,
+            ..Default::default()
+        });
+    }
+
     // The corpus half, before the ranking half's own gates: a base under
     // watch, or one whose parameters drifted, still answers for what it hid.
     // Same switch, same claim, same anchor — the rules read the same
-    // observations the ladder does.
-    let started = crate::store::now();
-    // The corpus half is a corpus rule and runs where the others will: under
-    // "full". A file that said `true` reads as "full", so nothing an operator
-    // turned on turns off.
+    // observations the ladder does. A corpus rule runs where the others
+    // will: under "full". A file that said `true` reads as "full", so nothing
+    // an operator turned on turns off.
     let retracted = if core.evolve.autonomous.acts_on_corpus() {
         crate::jobs::retract::run(core, &live, started).await?
     } else {
@@ -158,6 +169,7 @@ pub async fn pass(core: &Core) -> Result<Pass> {
     let mut out = Pass {
         undone: retracted.undone,
         restored: retracted.restored,
+        replayed,
         ..Default::default()
     };
 
