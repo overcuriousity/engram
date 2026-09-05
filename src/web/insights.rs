@@ -113,6 +113,14 @@ pub struct DeprecatedRow {
     pub title: String,
 }
 
+/// One buried artifact, for the Reaped section.
+pub struct GraveRow {
+    pub id: String,
+    pub title: String,
+    pub ago: String,
+    pub reason: Option<String>,
+}
+
 /// An active artifact nobody has confirmed or retrieved in a while.
 pub struct StaleRow {
     pub id: String,
@@ -197,6 +205,8 @@ struct InsightsTemplate {
     more_merged: bool,
     more_superseded: bool,
     more_deprecated: bool,
+    more_reaped: bool,
+    reaped: Vec<GraveRow>,
     /// `TABLE_CAP`, so the line that says how many rows are showing says the
     /// number the code actually truncated to. Written out twice in the
     /// template, it drifted from the constant the first time either moved.
@@ -505,6 +515,25 @@ async fn page(tenant: Tenant) -> Result<Response> {
     let more_deprecated = deprecated.len() > DEPRECATED_CAP as usize;
     deprecated.truncate(DEPRECATED_CAP as usize);
 
+    // The graveyard, the same way: the one undo for the one stage that
+    // destroys text, and a list that stops without saying so reads as "these
+    // are all of them".
+    let mut reaped: Vec<GraveRow> = tenant
+        .core
+        .store
+        .graveyard_list(DEPRECATED_CAP + 1)
+        .await?
+        .into_iter()
+        .map(|g| GraveRow {
+            title: g.title.unwrap_or_else(|| "(untitled)".to_string()),
+            ago: ago(g.reaped_at),
+            id: g.id,
+            reason: g.reason,
+        })
+        .collect();
+    let more_reaped = reaped.len() > DEPRECATED_CAP as usize;
+    reaped.truncate(DEPRECATED_CAP as usize);
+
     // Read-only candidates: nothing here has been changed, only listed.
     let stale = tenant
         .core
@@ -574,6 +603,8 @@ async fn page(tenant: Tenant) -> Result<Response> {
         more_merged,
         more_superseded,
         more_deprecated,
+        more_reaped,
+        reaped,
         table_cap: TABLE_CAP,
         deprecated_cap: DEPRECATED_CAP,
         deprecated,
@@ -745,6 +776,56 @@ struct EvolveView {
     /// Recent generations, newest first, each with how it came to be and how
     /// it ended.
     history: Vec<String>,
+    /// What the base did to the corpus lately, newest first, with evidence
+    /// undos and operator undos told apart.
+    actions: Vec<String>,
+    /// What the two corpus rules did the last time they ran, or `None` where
+    /// they have not run yet.
+    rules: Option<String>,
+}
+
+/// One corpus action as a sentence.
+fn action_str(a: &crate::store::actions::Action) -> String {
+    use crate::store::actions::{Kind, UndoneBy};
+    let other = |s: &Option<String>| short(s.as_deref().unwrap_or("?")).to_string();
+    let what = match a.kind {
+        Kind::Merge => format!(
+            "merged {} into {}",
+            short(&a.subject_id),
+            other(&a.survivor_id)
+        ),
+        Kind::Supersede => format!(
+            "hid {} in favour of {}",
+            short(&a.subject_id),
+            other(&a.survivor_id)
+        ),
+        Kind::Discard => format!("discarded {}", short(&a.subject_id)),
+        Kind::Reap => format!("buried {}", short(&a.subject_id)),
+        Kind::Promote => format!("promoted window {}", a.subject_id),
+        Kind::Moment => format!("filed a reminder, moment {}", short(&a.subject_id)),
+    };
+    let ended = match a.undone_by {
+        Some(UndoneBy::Evidence) => " — taken back on evidence",
+        Some(UndoneBy::Operator) => " — undone by you",
+        None => "",
+    };
+    format!("{} — {}{}", ago(a.at), what, ended)
+}
+
+/// The rules' last run, as the pass wrote it to `meta`.
+async fn rules_str(core: &crate::core::Core) -> Result<Option<String>> {
+    let Some(raw) = core.store.meta_get(crate::jobs::retract::LAST_RUN).await? else {
+        return Ok(None);
+    };
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+    let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    Ok(Some(format!(
+        "Last quiet period, {}, the base reconsidered {} of what it hid, took {} back, and restored {} for a search given up on.",
+        ago(n("at")),
+        n("reconsidered"),
+        n("undone"),
+        n("restored")
+    )))
 }
 
 fn params_str(p: &crate::store::generations::GenerationParams) -> String {
@@ -842,7 +923,17 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
             )
         })
         .collect();
+    let actions = core
+        .store
+        .recent_actions(10)
+        .await?
+        .iter()
+        .map(action_str)
+        .collect();
+    let rules = rules_str(core).await?;
     Ok(Some(EvolveView {
+        actions,
+        rules,
         suspended,
         live: format!(
             "live generation {} · {} · since {}",
@@ -1430,6 +1521,127 @@ mod tests {
             super::short(&live.id),
             super::short(&parent),
             "two ids, two names"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_evolve_block_tells_an_evidence_undo_from_an_operator_undo_and_says_what_the_rules_did()
+     {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        let (core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        let row = |subject: &str, kind: Kind| NewAction {
+            job: Job::Dedupe,
+            kind,
+            subject_id: subject.into(),
+            survivor_id: Some("winner-1234abcd".into()),
+            detail: None,
+            evidence: serde_json::json!({}),
+            pair_score: None,
+        };
+        core.store
+            .record_action(&row("loser-aaaa1111", Kind::Supersede))
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(
+                "loser-aaaa1111",
+                Kind::Supersede,
+                UndoneBy::Evidence,
+                "lost",
+            )
+            .await
+            .unwrap();
+        core.store
+            .record_action(&row("loser-bbbb2222", Kind::Discard))
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(
+                "loser-bbbb2222",
+                Kind::Discard,
+                UndoneBy::Operator,
+                "button",
+            )
+            .await
+            .unwrap();
+        core.store
+            .meta_set(
+                crate::jobs::retract::LAST_RUN,
+                r#"{"at":1,"reconsidered":3,"undone":1,"restored":2}"#,
+            )
+            .await
+            .unwrap();
+
+        let body = insights(core).await;
+        assert!(
+            body.contains("what the base did to the corpus (2)"),
+            "{body}"
+        );
+        assert!(
+            body.contains("hid aaaa1111 in favour of 1234abcd — taken back on evidence"),
+            "{body}"
+        );
+        assert!(
+            body.contains("discarded bbbb2222 — undone by you"),
+            "{body}"
+        );
+        assert!(
+            body.contains("reconsidered 3 of what it hid, took 1 back, and restored 2"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reaped_section_lists_what_is_buried_with_a_restore_button() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "an old note nobody needs".into(),
+                    corpus_span: None,
+                    title: Some("Old note".into()),
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let id = made[0].id.clone();
+        core.store
+            .set_artifact_status(&id, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 400 * 86_400)
+            .bind(&id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.store
+            .bury(
+                &id,
+                r#"{"reason":"nothing new in it"}"#,
+                0,
+                None,
+                None,
+                &crate::jobs::reap::test_support::row(&id),
+            )
+            .await
+            .unwrap();
+
+        let body = insights(core).await;
+        assert!(body.contains("Reaped"), "{body}");
+        assert!(body.contains("Old note"), "{body}");
+        assert!(body.contains("nothing new in it"), "{body}");
+        assert!(
+            body.contains(&format!("/ui/ops/artifacts/{id}/reactivate")),
+            "the restore button posts to the existing route: {body}"
         );
     }
 

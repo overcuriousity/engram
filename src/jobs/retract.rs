@@ -51,11 +51,22 @@ pub async fn run(core: &Core, live: &Generation, started: i64) -> Result<Retract
     }
     let (restored, _) = rule_two(core, started).await?;
     out.restored = restored;
+    let last = serde_json::json!({
+        "at": crate::store::now(),
+        "reconsidered": out.reconsidered,
+        "undone": out.undone,
+        "restored": out.restored,
+    });
+    core.store.meta_set(LAST_RUN, &last.to_string()).await?;
     Ok(out)
 }
 
 /// Where rule 2 has read the give-ups up to: a `created_at`, in `meta`.
 const GAVE_UP_AFTER: &str = "evolve.retract.gave_up_after";
+
+/// What the rules did the last time they ran, as JSON in `meta`, for the
+/// page: `Retracted` plus `at`.
+pub const LAST_RUN: &str = "evolve.retract.last";
 
 /// Rule 2: a give-up that a hidden artifact would have answered.
 ///

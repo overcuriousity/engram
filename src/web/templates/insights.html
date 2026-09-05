@@ -250,6 +250,33 @@
 {% endif %}
 {% endif %}
 
+{% if !reaped.is_empty() %}
+<h3>Reaped</h3>
+<p class="muted">Retired for long enough that the judge called them worthless,
+  and buried: out of search and out of the index, text kept. Restore puts one
+  back in results and re-embeds it. The base restores one itself when a search
+  given up on would have been answered by it.</p>
+<table class="grid">
+  <thead><tr><th>Artifact</th><th>Buried</th><th></th></tr></thead>
+  <tbody>
+  {% for g in reaped %}
+    <tr>
+      <td><a href="/ui/artifacts/{{ g.id }}">{{ g.title }}</a></td>
+      <td class="muted">{{ g.ago }}{% if let Some(r) = g.reason %} · {{ r }}{% endif %}</td>
+      <td>
+        <form method="post" action="/ui/ops/artifacts/{{ g.id }}/reactivate">
+          <button class="btn btn-sm" type="submit">Restore</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if more_reaped %}
+<p class="muted">Showing the newest {{ deprecated_cap }}.</p>
+{% endif %}
+{% endif %}
+
 {% if !stale.is_empty() %}
 <h3>Worth a second look</h3>
 <p class="muted">

@@ -28,6 +28,16 @@ impl EmbedState {
     }
 }
 
+/// One row of the graveyard as the Reaped section lists it.
+#[derive(Debug, Clone)]
+pub struct Grave {
+    pub id: String,
+    pub title: Option<String>,
+    pub reaped_at: i64,
+    /// The judge's reason, out of `meta_json`.
+    pub reason: Option<String>,
+}
+
 /// Where an artifact stands: still current, flagged stale with no named
 /// replacement, or hidden in favour of a specific `superseded_by` artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1749,6 +1759,32 @@ impl Store {
         Ok(())
     }
 
+    /// What is in the graveyard, newest burial first, at most `limit`.
+    pub async fn graveyard_list(&self, limit: i64) -> Result<Vec<Grave>> {
+        sqlx::query(
+            "SELECT id, title, meta_json, reaped_at FROM graveyard
+              ORDER BY reaped_at DESC, id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            let meta: serde_json::Value =
+                serde_json::from_str(&r.get::<String, _>("meta_json")).unwrap_or_default();
+            Ok(Grave {
+                id: r.get("id"),
+                title: r.get("title"),
+                reaped_at: r.get("reaped_at"),
+                reason: meta
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+    }
+
     /// Every buried vector made by `embed_model`: `(artifact_id, vec)`. The
     /// graveyard is small — a bounded number of burials a day — so a
     /// give-up is compared with all of it in Rust rather than through the
@@ -1860,8 +1896,8 @@ impl Store {
         Ok(true)
     }
 
-    /// One grave, for tests and nothing else today: `(text, meta_json,
-    /// reaped_at)`.
+    /// One grave, for tests: `(text, meta_json, reaped_at)`. The page reads
+    /// `graveyard_list`.
     pub async fn graveyard_row(&self, id: &str) -> Result<Option<(String, String, i64)>> {
         let row = sqlx::query("SELECT text, meta_json, reaped_at FROM graveyard WHERE id = ?")
             .bind(id)

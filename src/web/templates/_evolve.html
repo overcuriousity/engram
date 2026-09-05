@@ -20,5 +20,16 @@
     </ul>
   </details>
   {% endif %}
+  {% if let Some(r) = e.rules %}
+  <p class="muted hint">{{ r }}</p>
+  {% endif %}
+  {% if !e.actions.is_empty() %}
+  <details class="judge-tune-history">
+    <summary class="muted">what the base did to the corpus ({{ e.actions.len() }})</summary>
+    <ul class="mono">
+      {% for a in e.actions %}<li>{{ a }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
 </div>
 {% endif %}
