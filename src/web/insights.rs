@@ -749,11 +749,14 @@ struct EvolveView {
 
 fn params_str(p: &crate::store::generations::GenerationParams) -> String {
     format!(
-        "recency {:.2}, cap {}, pool ×{}, half-life {}d",
+        "recency {:.2}, cap {}, pool ×{}, half-life {}d, lift {}, spread {}, rerank {}",
         p.recency_weight,
         cap_str(p.per_source_cap),
         p.candidate_multiplier,
-        p.recency_half_life_days
+        p.recency_half_life_days,
+        p.prime_lift,
+        p.spread_max,
+        if p.rerank { "on" } else { "off" }
     )
 }
 

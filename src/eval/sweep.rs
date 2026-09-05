@@ -214,6 +214,9 @@ fn moved(cand: RankingParams, current: RankingParams) -> usize {
         + usize::from(cand.per_source_cap != current.per_source_cap)
         + usize::from(cand.candidate_multiplier != current.candidate_multiplier)
         + usize::from(cand.recency_half_life_days != current.recency_half_life_days)
+        + usize::from(cand.prime_lift != current.prime_lift)
+        + usize::from(cand.spread_max != current.spread_max)
+        + usize::from(cand.rerank != current.rerank)
 }
 
 /// One pair to replay: a query, every id that satisfies it already resolved,

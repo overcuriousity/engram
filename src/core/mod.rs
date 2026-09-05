@@ -491,7 +491,11 @@ impl Core {
             query_cache: working.query_cache,
             consolidate: cfg.consolidate.clone(),
             ranking: Arc::new(std::sync::RwLock::new(
-                crate::core::ranking::RankingParams::from_vector(&cfg.vector),
+                crate::core::ranking::RankingParams::from_config(
+                    &cfg.vector,
+                    &cfg.associate,
+                    cfg.infer.rerank.is_some(),
+                ),
             )),
             tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             weak_floor: cfg.vector.weak_below,

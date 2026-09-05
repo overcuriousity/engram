@@ -322,9 +322,9 @@ pub struct AssociateConfig {
     /// How much more activated a hit must be than the one above it to pass it.
     /// Normalised within one result list, so this is a fraction, not a weight.
     pub prime_margin: f64,
-    /// Positions a hit may climb. `0` turns priming off, and it ships off: an
-    /// unmeasured feature that reorders results and makes a claim about the
-    /// person should not be on until the harness has run with it off and on.
+    /// Positions a hit may climb. `0` turns priming off, and it ships off. The
+    /// file's value is the starting rung: a base with `evolve.autonomous` on
+    /// moves it from here on what use leaves behind.
     pub prime_lift: usize,
 }
 
@@ -339,9 +339,9 @@ impl Default for AssociateConfig {
             judge_min_queries: 3,
             judge_per_sweep: 10,
             spread_from: 3,
-            spread_max: 3,
+            spread_max: default_spread_max(),
             prime_margin: 0.5,
-            prime_lift: 0,
+            prime_lift: default_prime_lift(),
         }
     }
 }
@@ -960,6 +960,19 @@ pub(crate) fn default_recency_half_life_days() -> u32 {
 }
 pub(crate) fn default_candidate_multiplier() -> usize {
     crate::core::search::CANDIDATE_MULTIPLIER
+}
+/// The shipped `associate.prime_lift`: off. Read by the generation shapes so
+/// a row written before the knob existed decodes as what it ran under.
+pub(crate) fn default_prime_lift() -> usize {
+    0
+}
+pub(crate) fn default_spread_max() -> usize {
+    3
+}
+/// A generation written before the rerank knob existed ran with whatever
+/// reranker the file named, which is "on" wherever one was configured.
+pub(crate) fn default_rerank_knob() -> bool {
+    true
 }
 fn default_pinned_boost() -> f32 {
     0.15
@@ -1971,7 +1984,8 @@ pub enum ConfigError {
     Invalid(String),
 }
 
-/// Write the two runtime-tunable keys back into the file they came from.
+/// Write the file-backed runtime-tunable keys back into the file they came
+/// from.
 ///
 /// An edit to the parsed document rather than a re-serialisation of the whole
 /// configuration: every comment, every blank line and every key this does not
@@ -1993,10 +2007,14 @@ pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> st
     doc["vector"]["per_source_cap"] = toml_edit::value(p.per_source_cap.map_or(0, |n| n as i64));
     doc["vector"]["candidate_multiplier"] = toml_edit::value(p.candidate_multiplier as i64);
     doc["vector"]["recency_half_life_days"] = toml_edit::value(i64::from(p.recency_half_life_days));
+    doc["associate"]["prime_lift"] = toml_edit::value(p.prime_lift as i64);
+    doc["associate"]["spread_max"] = toml_edit::value(p.spread_max as i64);
+    // `rerank` has no key of its own: the file says "on" by naming a reranker
+    // under `[infer]`, and that is not this function's to add or remove.
     write_beside_and_rename(path, &doc.to_string())
 }
 
-/// Whichever of the four swept keys the environment is currently setting.
+/// Whichever of the swept file keys the environment is currently setting.
 ///
 /// `load` layers `ENGRAM__*` *after* the file, so an operator who set one of
 /// these where the server starts gets that value back on the next boot whatever
@@ -2019,6 +2037,8 @@ pub fn ranking_keys_in_env() -> Vec<String> {
                     | "ENGRAM__VECTOR__PER_SOURCE_CAP"
                     | "ENGRAM__VECTOR__CANDIDATE_MULTIPLIER"
                     | "ENGRAM__VECTOR__RECENCY_HALF_LIFE_DAYS"
+                    | "ENGRAM__ASSOCIATE__PRIME_LIFT"
+                    | "ENGRAM__ASSOCIATE__SPREAD_MAX"
             )
         })
         .collect()
@@ -3060,11 +3080,16 @@ mod tests {
                 per_source_cap: None,
                 candidate_multiplier: 5,
                 recency_half_life_days: 90,
+                prime_lift: 2,
+                spread_max: 5,
+                rerank: true,
             },
         )
         .unwrap();
         let out = std::fs::read_to_string(&p).unwrap();
         assert!(out.contains("candidate_multiplier = 5"), "{out}");
+        assert!(out.contains("prime_lift = 2"), "{out}");
+        assert!(out.contains("spread_max = 5"), "{out}");
         assert!(out.contains("recency_half_life_days = 90"), "{out}");
         assert!(
             out.contains("# a comment the apply path must not eat"),

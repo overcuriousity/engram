@@ -23,6 +23,12 @@ pub struct RunParams {
     pub candidate_multiplier: usize,
     #[serde(default = "crate::config::default_recency_half_life_days")]
     pub recency_half_life_days: u32,
+    #[serde(default = "crate::config::default_prime_lift")]
+    pub prime_lift: usize,
+    #[serde(default = "crate::config::default_spread_max")]
+    pub spread_max: usize,
+    #[serde(default = "crate::config::default_rerank_knob")]
+    pub rerank: bool,
 }
 
 impl Default for RunParams {
@@ -38,6 +44,9 @@ impl From<crate::core::ranking::RankingParams> for RunParams {
             per_source_cap: p.per_source_cap,
             candidate_multiplier: p.candidate_multiplier,
             recency_half_life_days: p.recency_half_life_days,
+            prime_lift: p.prime_lift,
+            spread_max: p.spread_max,
+            rerank: p.rerank,
         }
     }
 }
@@ -49,6 +58,9 @@ impl From<RunParams> for crate::core::ranking::RankingParams {
             per_source_cap: p.per_source_cap,
             candidate_multiplier: p.candidate_multiplier,
             recency_half_life_days: p.recency_half_life_days,
+            prime_lift: p.prime_lift,
+            spread_max: p.spread_max,
+            rerank: p.rerank,
         }
     }
 }

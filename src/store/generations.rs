@@ -12,7 +12,7 @@ use sqlx::Row;
 /// does, and a deferred transaction takes its snapshot before the upgrade.
 const IMMEDIATE: &str = "BEGIN IMMEDIATE";
 
-/// The knobs a generation holds: the four the idle pass may move. Stored as
+/// The knobs a generation holds: the seven the idle pass may move. Stored as
 /// JSON so the set can widen without a migration — the two retrieval knobs
 /// arrived after the first rows were written, and those rows still read.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -25,6 +25,14 @@ pub struct GenerationParams {
     pub candidate_multiplier: usize,
     #[serde(default = "crate::config::default_recency_half_life_days")]
     pub recency_half_life_days: u32,
+    /// The three knobs stage 3a put on the ladder. Absent in rows written
+    /// before, which ran under the shipped values.
+    #[serde(default = "crate::config::default_prime_lift")]
+    pub prime_lift: usize,
+    #[serde(default = "crate::config::default_spread_max")]
+    pub spread_max: usize,
+    #[serde(default = "crate::config::default_rerank_knob")]
+    pub rerank: bool,
 }
 
 impl Default for GenerationParams {
@@ -40,6 +48,9 @@ impl From<crate::core::ranking::RankingParams> for GenerationParams {
             per_source_cap: p.per_source_cap,
             candidate_multiplier: p.candidate_multiplier,
             recency_half_life_days: p.recency_half_life_days,
+            prime_lift: p.prime_lift,
+            spread_max: p.spread_max,
+            rerank: p.rerank,
         }
     }
 }
@@ -51,6 +62,9 @@ impl From<GenerationParams> for crate::core::ranking::RankingParams {
             per_source_cap: p.per_source_cap,
             candidate_multiplier: p.candidate_multiplier,
             recency_half_life_days: p.recency_half_life_days,
+            prime_lift: p.prime_lift,
+            spread_max: p.spread_max,
+            rerank: p.rerank,
         }
     }
 }
@@ -392,6 +406,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_generation_row_written_before_the_late_knobs_still_reads() {
+        let old = r#"{"recency_weight":0.05,"per_source_cap":3,"candidate_multiplier":3,"recency_half_life_days":180}"#;
+        let p: GenerationParams = serde_json::from_str(old).unwrap();
+        assert_eq!(p.prime_lift, crate::config::default_prime_lift());
+        assert_eq!(p.spread_max, crate::config::default_spread_max());
+        assert!(p.rerank);
+    }
+
     #[tokio::test]
     async fn a_fresh_base_has_no_generation() {
         let store = Store::memory().await.unwrap();
@@ -695,6 +718,9 @@ mod tests {
             per_source_cap: None,
             candidate_multiplier: 5,
             recency_half_life_days: 90,
+            prime_lift: 2,
+            spread_max: 5,
+            rerank: false,
         };
         let back: crate::core::ranking::RankingParams = GenerationParams::from(r).into();
         assert_eq!(back, r);
