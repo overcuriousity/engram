@@ -505,6 +505,17 @@ async fn not_a_reminder(
             verb: "Not a reminder",
             undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id),
         });
+    // The reading that filed this moment is the one being contradicted.
+    tenant
+        .core
+        .store
+        .undo_action_on(
+            &id,
+            crate::store::actions::Kind::Moment,
+            crate::store::actions::UndoneBy::Operator,
+            "not a reminder",
+        )
+        .await?;
     render(&tenant, &f.tz, just, f.since, f.all == "1", f.head == "1").await
 }
 
@@ -901,6 +912,19 @@ mod tests {
         let core = test_core().await;
         let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        // As the reading that filed it would have journaled it.
+        core.store
+            .record_action(&crate::store::actions::NewAction {
+                job: crate::store::actions::Job::Judgement,
+                kind: crate::store::actions::Kind::Moment,
+                subject_id: id.clone(),
+                survivor_id: None,
+                detail: Some("due".into()),
+                evidence: serde_json::json!({ "artifact": aid }),
+                pair_score: None,
+            })
+            .await
+            .unwrap();
         let (app, cookie) = app_with_cookie(core.clone()).await;
 
         let band = body_of(
@@ -936,6 +960,18 @@ mod tests {
             "the row is withdrawn, not completed"
         );
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
+        // The reading that filed it is contradicted, and the journal says so.
+        assert!(
+            core.store
+                .open_action_on(&id, crate::store::actions::Kind::Moment)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            core.store.recent_actions(1).await.unwrap()[0].undone_by,
+            Some(crate::store::actions::UndoneBy::Operator)
+        );
 
         app.oneshot(form(
             &format!("/ui/artifacts/{aid}/is-a-reminder"),

@@ -179,7 +179,7 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
 /// handled by `heal_dangling_supersessions`, which restores what it hid — and a
 /// fresh merge is then correct, because the duplication is genuinely back. A
 /// decision may overrule the sweep; a deletion may not.
-pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
+pub async fn undo(core: &Core, merged_id: &str, by: crate::store::pairs::DecidedBy) -> Result<()> {
     let m = core.store.get_artifact(merged_id).await?;
     if m.provenance != Provenance::Merged {
         return Err(crate::error::Error::Validation(format!(
@@ -210,7 +210,7 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
                 crate::store::pairs::PairState::Dismissed,
                 Some("merge undone"),
                 // The undo is the review: a person pressed it.
-                crate::store::pairs::DecidedBy::Operator,
+                by,
             )
             .await?;
     }
@@ -223,7 +223,7 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
             &m.id,
             "merge undone",
             // The same press, recorded the same way as the branch above it.
-            crate::store::pairs::DecidedBy::Operator,
+            by,
         )
         .await?;
     tracing::info!(merged = %m.id, restored = restored.len(), "undid a merge");
@@ -993,7 +993,9 @@ mod tests {
             .unwrap_or_else(|| panic!("no merge was written"));
         crate::jobs::embed::run(&core, &merged_id).await.unwrap();
 
-        undo(&core, &merged_id).await.unwrap();
+        undo(&core, &merged_id, crate::store::pairs::DecidedBy::Operator)
+            .await
+            .unwrap();
 
         for id in &ids {
             let c = core.store.get_artifact(id).await.unwrap();
@@ -1126,7 +1128,9 @@ mod tests {
             .unwrap();
         // No embed ran: nothing is superseded by m yet.
 
-        undo(&core, &m.id).await.unwrap();
+        undo(&core, &m.id, crate::store::pairs::DecidedBy::Operator)
+            .await
+            .unwrap();
 
         let p = core.store.get_pair(pair).await.unwrap();
         assert_eq!(

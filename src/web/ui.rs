@@ -1959,6 +1959,16 @@ async fn artifact_dwell(
 /// promotion wrote retired, the window `verbatim` again.
 async fn unpromote_ui(tenant: Tenant, Path((cid, idx)): Path<(String, i64)>) -> Result<Response> {
     tenant.core.undo_promotion(&cid, idx).await?;
+    tenant
+        .core
+        .store
+        .undo_action_on(
+            &crate::jobs::promote::window_key(&cid, idx),
+            crate::store::actions::Kind::Promote,
+            crate::store::actions::UndoneBy::Operator,
+            "unpromoted",
+        )
+        .await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
 }
 
@@ -2660,7 +2670,13 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Resp
 /// Take a merge back: what it replaced returns, the merge is retired, and the
 /// pairs behind it are dismissed so the sweep does not simply redo it.
 async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> Result<Response> {
-    crate::jobs::merge::undo(&tenant.core, &aid).await?;
+    use crate::store::actions::UndoneBy;
+    crate::jobs::merge::undo(&tenant.core, &aid, crate::store::pairs::DecidedBy::Operator).await?;
+    tenant
+        .core
+        .store
+        .undo_actions_under(&aid, UndoneBy::Operator, "undone on Insights")
+        .await?;
     Ok(Redirect::to("/ui/insights").into_response())
 }
 
@@ -2989,6 +3005,16 @@ async fn unsupersede_ui(
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     tenant.core.unsupersede(&aid).await?;
+    tenant
+        .core
+        .store
+        .undo_action_on(
+            &aid,
+            crate::store::actions::Kind::Supersede,
+            crate::store::actions::UndoneBy::Operator,
+            "unsuperseded on Insights",
+        )
+        .await?;
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
@@ -3130,6 +3156,22 @@ async fn reactivate_ui(
     Form(back): Form<ReturnTo>,
 ) -> Result<Response> {
     tenant.core.reactivate(&aid).await?;
+    // Whichever of the two hid it stamps; the other stamps nothing.
+    for kind in [
+        crate::store::actions::Kind::Discard,
+        crate::store::actions::Kind::Reap,
+    ] {
+        tenant
+            .core
+            .store
+            .undo_action_on(
+                &aid,
+                kind,
+                crate::store::actions::UndoneBy::Operator,
+                "reactivated on Insights",
+            )
+            .await?;
+    }
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
@@ -4225,6 +4267,203 @@ mod tests {
             !r.snippet.contains('<'),
             "the snippet must not carry markup"
         );
+    }
+
+    /// One live artifact on a fresh session.
+    async fn session_with_an_artifact() -> (axum::Router, String, crate::core::Core, String) {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new(
+                "The pool holds sixteen connections.",
+                "ui",
+            ))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        (app, cookie, core, aid)
+    }
+
+    fn row_on(
+        subject: &str,
+        kind: crate::store::actions::Kind,
+    ) -> crate::store::actions::NewAction {
+        crate::store::actions::NewAction {
+            job: crate::store::actions::Job::Dedupe,
+            kind,
+            subject_id: subject.to_string(),
+            survivor_id: None,
+            detail: None,
+            evidence: serde_json::json!({}),
+            pair_score: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reactivating_a_discarded_artifact_stamps_its_row_as_undone_by_the_operator() {
+        use crate::store::actions::{Kind, UndoneBy};
+        let (app, cookie, core, aid) = session_with_an_artifact().await;
+        core.deprecate_with(&aid, Some(row_on(&aid, Kind::Discard)))
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .open_action_on(&aid, Kind::Discard)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{aid}/reactivate"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            res.status().is_redirection() || res.status().is_success(),
+            "{}",
+            res.status()
+        );
+
+        assert!(core.store.get_artifact(&aid).await.unwrap().in_results());
+        assert!(
+            core.store
+                .open_action_on(&aid, Kind::Discard)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let row = core.store.recent_actions(1).await.unwrap().remove(0);
+        assert_eq!(row.undone_by, Some(UndoneBy::Operator));
+    }
+
+    #[tokio::test]
+    async fn pressing_undo_on_a_merge_stamps_its_rows_as_taken_back_by_the_operator() {
+        use crate::store::actions::{Kind, UndoneBy};
+        let mut core = crate::core::test_support::test_core().await;
+        core.judge = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"relation":"duplicate","detail":"same claim",
+                "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
+                          "tags":[],"caveats":[]}}"#
+                    .into(),
+            ]),
+        ));
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()[0]
+            .id;
+        crate::jobs::dedupe::run(&core, &pair.to_string())
+            .await
+            .unwrap();
+        let merged = core.store.merged_artifacts(10).await.unwrap()[0].id.clone();
+        crate::jobs::embed::run(&core, &merged).await.unwrap();
+        assert_eq!(
+            core.store
+                .open_actions(&[Kind::Merge], 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        app.oneshot(form(&format!("/ui/ops/merges/{merged}/undo"), &cookie, ""))
+            .await
+            .unwrap();
+
+        assert!(
+            core.store
+                .open_actions(&[Kind::Merge], 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let rows = core.store.recent_actions(2).await.unwrap();
+        assert!(rows.iter().all(|r| r.undone_by == Some(UndoneBy::Operator)));
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
+    }
+
+    #[tokio::test]
+    async fn unsuperseding_stamps_the_supersede_row() {
+        use crate::store::actions::{Kind, UndoneBy};
+        let (app, cookie, core, aid) = session_with_an_artifact().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new(
+                "The pool holds sixteen connections, and the timeout is 30s.",
+                "ui",
+            ))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let winner = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        core.supersede_with(
+            &aid,
+            &winner,
+            Some(crate::store::actions::NewAction {
+                survivor_id: Some(winner.clone()),
+                ..row_on(&aid, Kind::Supersede)
+            }),
+        )
+        .await
+        .unwrap();
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{aid}/unsupersede"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            core.store
+                .get_artifact(&aid)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none()
+        );
+        let row = core.store.recent_actions(1).await.unwrap().remove(0);
+        assert_eq!(row.kind, Kind::Supersede);
+        assert_eq!(row.undone_by, Some(UndoneBy::Operator));
     }
 
     #[tokio::test]
