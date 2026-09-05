@@ -549,11 +549,18 @@ pub struct FakeReranker {
     /// what it is given, so a test about over-fetching has to look at this
     /// rather than at the answer.
     saw: std::sync::atomic::AtomicUsize,
+    /// How many times it was called at all, for tests about whether a
+    /// search or a replay reached the reranker.
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeReranker {
     pub fn docs_seen(&self) -> usize {
         self.saw.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -567,6 +574,7 @@ impl Reranker for FakeReranker {
     ) -> Result<Vec<(usize, f32)>> {
         self.saw
             .store(docs.len(), std::sync::atomic::Ordering::SeqCst);
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut out: Vec<(usize, f32)> = (0..docs.len()).map(|i| (i, i as f32)).collect();
         out.reverse();
         out.truncate(top_n);

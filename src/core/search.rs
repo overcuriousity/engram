@@ -990,13 +990,14 @@ impl Core {
         &self,
         results: &[SearchResult],
         filter: &SearchFilter,
+        spread_max: usize,
     ) -> Vec<SearchResult> {
         let anchors: Vec<String> = results
             .iter()
             .take(self.associate.spread_from)
             .map(|r| r.artifact_id.clone())
             .collect();
-        if anchors.is_empty() || self.associate.spread_max == 0 {
+        if anchors.is_empty() || spread_max == 0 {
             return Vec::new();
         }
         let links = match self
@@ -1029,9 +1030,7 @@ impl Core {
                 // negative `i64` and switch association silently off, which is
                 // the one failure nobody would report as a bug.
                 i64::try_from(
-                    self.associate
-                        .spread_max
-                        .saturating_mul(self.associate.spread_from.saturating_add(1)),
+                    spread_max.saturating_mul(self.associate.spread_from.saturating_add(1)),
                 )
                 .unwrap_or(i64::MAX),
             )
@@ -1048,7 +1047,7 @@ impl Core {
             results.iter().map(|r| r.artifact_id.clone()).collect();
         let mut out = Vec::new();
         for l in links {
-            if out.len() >= self.associate.spread_max {
+            if out.len() >= spread_max {
                 break;
             }
             if !have.insert(l.other.clone()) {
@@ -1327,6 +1326,7 @@ impl Core {
         // list below is a promise about work that is going to happen and it has
         // to be made before any of it starts.
         let reranking = query.rerank
+            && params.rerank
             && match door {
                 Door::Ask => self.reranks_ask(),
                 // The same predicate that arms the UI's refining pass: written
@@ -1646,10 +1646,7 @@ impl Core {
             true => due_map.keys().cloned().collect(),
             false => Default::default(),
         };
-        if self.associating()
-            && self.associate.prime_lift > 0
-            && !matches!(door, Door::Ask | Door::Judge)
-        {
+        if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let activation = self.engagement_now(&ids).await;
@@ -1677,7 +1674,7 @@ impl Core {
                 results,
                 &activation,
                 self.associate.prime_margin,
-                self.associate.prime_lift,
+                params.prime_lift,
                 &sitting,
                 &due,
             );
@@ -1802,7 +1799,7 @@ impl Core {
         // excluded because its query is composed in full knowledge of the
         // answer and needs a clean pool to label, not a widened one.
         if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
-            let recalled = self.associated(&results, &filter).await;
+            let recalled = self.associated(&results, &filter, params.spread_max).await;
             if !recalled.is_empty() {
                 self.mark_seen(&recalled, &HashMap::new(), false);
                 let from = results.len();
@@ -2591,6 +2588,26 @@ mod tests {
             without.iter().map(|h| h.text.clone()).collect::<Vec<_>>(),
             "FakeReranker reverses order, so the two must differ"
         );
+    }
+
+    #[tokio::test]
+    async fn a_generation_with_rerank_off_never_calls_the_reranker() {
+        let (core, reranker) = test_core_counting_reranked_docs().await;
+        seed(
+            &core,
+            &[("alpha", "c", &[]), ("beta", "c", &[]), ("gamma", "c", &[])],
+        )
+        .await;
+        core.ranking.write().unwrap().rerank = false;
+        core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
+        assert_eq!(
+            reranker.calls(),
+            0,
+            "rerank off in the generation must mean no call"
+        );
+        core.ranking.write().unwrap().rerank = true;
+        core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
+        assert_eq!(reranker.calls(), 1);
     }
 
     #[tokio::test]
@@ -3620,22 +3637,20 @@ mod tests {
     async fn priming_changes_the_order_a_search_returns_and_says_which_hit_moved() {
         let mut core = test_core().await;
         core.learn.enabled = true;
-        core.associate.prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
         seed(&core, &texts).await;
         reembed_all(&core).await;
 
-        let plain = {
-            let mut off = core.clone();
-            off.associate.prime_lift = 0;
-            off.search(&q("alpha text about it"), Door::Ui)
-                .await
-                .unwrap()
-        };
+        // The lift is the live generation's, read off `Core::ranking`.
+        let plain = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
         assert!(plain.len() >= 4, "this test needs a list to reorder");
         assert!(plain.iter().all(|r| !r.primed));
+        core.ranking.write().unwrap().prime_lift = 2;
 
         // The one at the bottom is the one people actually keep confirming.
         let bottom = plain.last().unwrap().artifact_id.clone();
@@ -3700,10 +3715,10 @@ mod tests {
         // they opt in." With `[learn]` off, a large activation must not move
         // the ranked order — the order must be byte-identical to
         // `prime_lift = 0`, not merely bounded.
-        let mut core = test_core().await;
+        let core = test_core().await;
         assert!(!core.learn.enabled);
         // Priming on, so that `[learn]` off is the only thing holding it.
-        core.associate.prime_lift = 2;
+        core.ranking.write().unwrap().prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -3752,7 +3767,7 @@ mod tests {
         // pool it labels to be the pool the ranking produced.
         let mut core = test_core().await;
         core.learn.enabled = true;
-        core.associate.prime_lift = 2;
+        core.ranking.write().unwrap().prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -4167,6 +4182,11 @@ mod tests {
         );
         assert_eq!(out[1].artifact_id, b);
         assert_eq!(out[1].via.as_deref(), Some(a.as_str()));
+
+        // The width is the live generation's, not the file's.
+        core.ranking.write().unwrap().spread_max = 0;
+        let out = core.search(&query, Door::Ui).await.unwrap();
+        assert_eq!(out.len(), 1, "spread zero appends nothing: {out:?}");
     }
 
     #[tokio::test]
@@ -4470,7 +4490,13 @@ mod tests {
         };
         let results = vec![dummy(a.clone()), dummy(b.clone()), dummy(c.clone())];
 
-        let out = core.associated(&results, &SearchFilter::default()).await;
+        let out = core
+            .associated(
+                &results,
+                &SearchFilter::default(),
+                core.associate.spread_max,
+            )
+            .await;
         let ids: Vec<&str> = out.iter().map(|r| r.artifact_id.as_str()).collect();
         assert!(
             ids.contains(&d.as_str()),
