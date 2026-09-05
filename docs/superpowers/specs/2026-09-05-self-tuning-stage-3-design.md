@@ -467,6 +467,14 @@ Sentences, as the suite writes them.
 
 ## Order of work
 
+*Built 2026-09-05, as two plans rather than three: 3a is Part A; 3b is Parts B
+and C together, since C's bands have nothing to read until B's journal exists.
+Each plan's "What this plan admits" lists where the tree read this spec
+differently — no `stale` kind exists to journal, rule 2 compares within one
+replay, a `review_min` move is watched by `lived`, rescues are not journaled.
+The handoff at `docs/superpowers/plans/2026-09-05-self-tuning-handoff.md`
+carries the running state.*
+
 Three plans, in this order. Each is useful on its own.
 
 1. **Stage 3a — the three knobs.** Part A. Ranking is complete after it:

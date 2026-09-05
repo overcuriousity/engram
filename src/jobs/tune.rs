@@ -25,11 +25,18 @@
 //! configured reranker: one call per observation, to ask what the reranker
 //! would have changed, spent because the operator configured it.
 //!
-//! Three kinds of move. The ladder is counterfactual: a replay under every
+//! Four kinds of move. The ladder is counterfactual: a replay under every
 //! neighbouring rung of five knobs. The rerank flip is counterfactual with its
 //! own base, the rank that was actually served. The band is lived: it widens
 //! or narrows on whether it was used more than the ranked tail beside it,
-//! asked only when the other two propose nothing. It stops the moment somebody comes back —
+//! asked only when the other two propose nothing. The review threshold is
+//! lived too, and last: it moves on what the pairs just above it earned and
+//! what was taken back, read off the corpus journal.
+//!
+//! And a corpus half, before any of that: `jobs::retract` reads the corpus
+//! journal against the same observations and takes the base's own merges,
+//! replacements, discards and burials back where the evidence says so. Same
+//! switch, same claim, same anchor. It stops the moment somebody comes back —
 //! between pairs, with nothing written — and the next quiet period starts it
 //! over. Recomputing is the resumption: the pass is bounded, so a restart
 //! costs what a pass costs, and no partial state has to be kept correct across

@@ -86,7 +86,7 @@ Read against the tree, the spec's Part B and C are built with these readings:
   ```
 - `DecidedBy::Evidence` with `as_str() == "evidence"`, parsed leniently like the others.
 
-- [ ] **Step 1: Write the failing tests in `src/store/actions.rs`**
+- [x] **Step 1: Write the failing tests in `src/store/actions.rs`**
 
 ```rust
 #[cfg(test)]
@@ -152,12 +152,12 @@ mod tests {
 
 (Check `DecidedBy`'s parse function name at `src/store/pairs.rs:151-180` and use it.)
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test --lib -- actions::tests 2>&1 | tail -5`
 Expected: compile error, no module `actions`.
 
-- [ ] **Step 3: Schema**
+- [x] **Step 3: Schema**
 
 In `src/store/schema.sql`, after `graveyard`:
 
@@ -198,7 +198,7 @@ CREATE INDEX IF NOT EXISTS idx_corpus_actions_survivor
   ON corpus_actions(survivor_id) WHERE survivor_id IS NOT NULL;
 ```
 
-- [ ] **Step 4: The module**
+- [x] **Step 4: The module**
 
 `src/store/actions.rs`, modelled on `src/store/observations.rs` (the generic `insert`, `new_id()`, `now()`, `Row` reads). The enums carry `as_str()` and `parse(&str) -> Option<Self>`. `insert` binds every field, `evidence` as `serde_json::to_string(&a.evidence)` mapped to `Error::Store`. Queries are literals:
 
@@ -220,12 +220,12 @@ CREATE INDEX IF NOT EXISTS idx_corpus_actions_survivor
 
 One private `fn read(r: &SqliteRow) -> Result<Action>` shared by the readers. `DecidedBy` in `src/store/pairs.rs` gains `Evidence` / `"evidence"` with a doc line: "the base, on what use showed — never the judge and never a person".
 
-- [ ] **Step 5: Run the gate**
+- [x] **Step 5: Run the gate**
 
 Run: `cargo fmt --all && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked 2>&1 | tail -3`
 Expected: green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A src
@@ -247,7 +247,7 @@ git commit -m "feat(evolve): a journal of what the corpus jobs did to the base"
 **Interfaces:**
 - Produces: `Core::supersede_with(&self, loser_id, winner_id, journal: Option<NewAction>) -> Result<()>` with `supersede(l, w)` = `supersede_with(l, w, None)`; `Core::deprecate_with(&self, id, journal: Option<NewAction>)` likewise; `Store::bury(&self, id, meta_json, min_age_secs, vec: Option<&[f32]>, embed_model: Option<&str>, journal: &NewAction) -> Result<()>`; `promote::window_key(corpus_id: &str, idx: i64) -> String` (`format!("{corpus_id}#{idx}")`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `src/jobs/dedupe.rs` tests, beside the existing tests that drive `apply` through the fake judge (find the ones asserting `set_pair_merged` / `supersede` / `discard_both` outcomes and copy their fixtures):
 
@@ -293,12 +293,12 @@ In `src/jobs/promote.rs` tests: after a promotion is armed, one `Kind::Promote` 
 
 In `src/jobs/judgement.rs` tests: after `apply` writes a due moment, one `Kind::Moment` row whose `subject_id` is the moment's id (read it from `store.moments_for(anchor)` or whatever the module's tests use).
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test --lib -- dedupe::tests::a_merge_journals reap::tests promote::tests judgement::tests 2>&1 | grep -E '^test |error' | head`
 Expected: compile errors on the new names.
 
-- [ ] **Step 3: `Core` methods take the row**
+- [x] **Step 3: `Core` methods take the row**
 
 In `src/core/ingest.rs`:
 
@@ -328,7 +328,7 @@ pub async fn supersede_with(
 
 Place the `record_action` right after `clear_lifecycle_dirty`, before `follow_supersession` (whose failure is logged, not returned). Same shape for `deprecate` / `deprecate_with`.
 
-- [ ] **Step 4: The dedupe arms**
+- [x] **Step 4: The dedupe arms**
 
 A helper at the top of `apply`'s module:
 
@@ -368,7 +368,7 @@ for id in &retire {
 }
 ```
 
-- [ ] **Step 5: Reap**
+- [x] **Step 5: Reap**
 
 `graveyard` gains, in the schema and on `ADDITIVE` ("both nullable, no default; NULL is the truth about every row buried before the vector was kept"):
 
@@ -403,7 +403,7 @@ core.store.bury(&c.id, &meta, min_age_secs, dense.as_deref(), c.embed_model.as_d
 
 (`Chunk.embed_model` — check the field name on `Chunk` in `src/store/artifacts.rs`; the column exists because `exhume` sets it NULL.) The memory: in `reap::run`'s loop over nominees, before judging, `if core.store.action_was_undone(&c.id, Kind::Reap).await? { continue; }` — a judge call is the expensive step, so the check goes before it.
 
-- [ ] **Step 6: Promote and judgement**
+- [x] **Step 6: Promote and judgement**
 
 `promote.rs`, after `rearm_idle_seq`:
 
@@ -421,12 +421,12 @@ core.store.record_action(&NewAction {
 
 `judgement.rs`: both `insert_moment` calls capture the returned id and record `Kind::Moment` with `job: Job::Judgement`, `subject_id: moment_id`, `detail: Some("event")` / `Some("due")`, `evidence: json!({ "artifact": anchor_id })`. The event site is inside an `if let Err(err) = ...` best-effort block; keep it best-effort: on `Ok(id)`, record and `warn!` on failure rather than return.
 
-- [ ] **Step 7: Run the gate**
+- [x] **Step 7: Run the gate**
 
 Run: `cargo fmt --all && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked 2>&1 | tail -3`
 Expected: green. `bury`'s test callers need the three new arguments (`None, None, &journal`).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add -A src
@@ -445,7 +445,7 @@ git commit -m "feat(evolve): every corpus action writes its row, and what was ta
 **Interfaces:**
 - Produces: `merge::undo(core, merged_id, by: DecidedBy) -> Result<()>`; every handler above stamps with `UndoneBy::Operator` and a reason naming the button.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `src/web/ui.rs` tests (the module has handler tests with a test tenant; find the one for `undo_merge_ui` or `reactivate_ui` and copy its setup):
 
@@ -466,23 +466,23 @@ async fn unsuperseding_stamps_the_supersede_row_and_unpromoting_stamps_the_windo
 
 In `src/web/due.rs` tests: `not-a-reminder` on a moment with a `Kind::Moment` row stamps it.
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test --lib -- ui::tests::pressing_undo ui::tests::reactivating ui::tests::unsuperseding due::tests 2>&1 | grep -E '^test ' | head`
 Expected: FAIL on the stamp assertions.
 
-- [ ] **Step 3: Stamp**
+- [x] **Step 3: Stamp**
 
 `merge::undo(core, merged_id, by)`: replace both `DecidedBy::Operator` literals with `by`. `undo_merge_ui` calls `undo(&core, &aid, DecidedBy::Operator)` then `store.undo_actions_under(&aid, UndoneBy::Operator, "undone on Insights")`. `unsupersede_ui`: after `core.unsupersede(&aid)`, `undo_action_on(&aid, Kind::Supersede, Operator, "unsuperseded on Insights")`. `reactivate_ui`: after `core.reactivate(&aid)`, stamp both `Kind::Discard` and `Kind::Reap` (the one that is open stamps 1, the other 0). `unpromote_ui`: `undo_action_on(&promote::window_key(&cid, idx), Kind::Promote, Operator, "unpromoted")`. `not_a_reminder`: `undo_action_on(&id, Kind::Moment, Operator, "not a reminder")` for the moment id in hand (the handler reads `m` first; stamp the rows of every moment on `m.artifact_id` that `set_reminder(false)` removes, which is what `store.moments_for(...)` lists — or, simpler and honest, the one moment `id` the button was on).
 
 Stamp after the action succeeds, never before.
 
-- [ ] **Step 4: Run the gate**
+- [x] **Step 4: Run the gate**
 
 Run: `cargo fmt --all && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked 2>&1 | tail -3`
 Expected: green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A src
@@ -520,7 +520,7 @@ git commit -m "feat(evolve): the operator's undos stamp the journal"
   pub struct Pass { pub adopted: Option<String>, pub reverted: Option<String>, pub undone: usize, pub restored: usize }
   ```
 
-- [ ] **Step 1: Write the failing tests in `src/jobs/retract.rs`**
+- [x] **Step 1: Write the failing tests in `src/jobs/retract.rs`**
 
 ```rust
 #[cfg(test)]
@@ -607,12 +607,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test --lib -- retract::tests 2>&1 | tail -5`
 Expected: no module `retract`.
 
-- [ ] **Step 3: The observation reader**
+- [x] **Step 3: The observation reader**
 
 `Observation` gains `embed_model: String` (select it in both readers). New reader:
 
@@ -635,7 +635,7 @@ pub async fn observations_naming(&self, artifact_id: &str, before: i64, embed_re
 
 Factor the existing row-to-`Observation` mapping into `fn read(r: &SqliteRow) -> Result<Observation>` so both readers share it.
 
-- [ ] **Step 4: The module**
+- [x] **Step 4: The module**
 
 ```rust
 //! The corpus jobs answer to the same evidence the ranking side answers to.
@@ -728,7 +728,7 @@ pub(crate) async fn rule_one(core: &Core, live: &Generation, started: i64) -> Re
 
 `sweep::OBSERVATION_LIMIT`, `Pair`, `rank_of`, `recommend` need `pub(crate)` visibility (`recommend` is `pub` already).
 
-- [ ] **Step 5: The pass runs the corpus half**
+- [x] **Step 5: The pass runs the corpus half**
 
 In `src/jobs/tune.rs` `pass()`, right after the anchor check and before the params-mismatch check:
 
@@ -761,12 +761,12 @@ async fn an_untrustworthy_anchor_stops_the_corpus_rules_too() {
 }
 ```
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run: `cargo fmt --all && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked 2>&1 | tail -3`
 Expected: green.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A src
@@ -796,7 +796,7 @@ git commit -m "feat(evolve): rule 1 — a survivor must still be found, or the b
   const GAVE_UP_AFTER: &str = "evolve.retract.gave_up_after";
   ```
 
-- [ ] **Step 1: Write the failing tests in `src/jobs/retract.rs`**
+- [x] **Step 1: Write the failing tests in `src/jobs/retract.rs`**
 
 ```rust
 /// A give-up on QUERY under the live generation.
@@ -844,18 +844,18 @@ async fn give_ups_are_read_once_and_the_cursor_moves() {
 }
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test --lib -- retract::tests::a_give_up retract::tests::a_buried retract::tests::give_ups 2>&1 | grep -E '^test |error' | head`
 Expected: compile errors on `rule_two`.
 
-- [ ] **Step 3: The readers**
+- [x] **Step 3: The readers**
 
 `gave_ups_since`: `WHERE source = 'gave_up' AND created_at > ? AND excluded_at IS NULL ORDER BY created_at ASC, id ASC LIMIT ?`, through the shared row reader.
 
 `graveyard_vectors`: `SELECT id, vec FROM graveyard WHERE vec IS NOT NULL AND embed_model = ?`, `blob_to_vec` on each.
 
-- [ ] **Step 4: The rule**
+- [x] **Step 4: The rule**
 
 ```rust
 const GAVE_UP_AFTER: &str = "evolve.retract.gave_up_after";
@@ -933,12 +933,12 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
 
 Check `SearchResult.status`'s type (`Option<ArtifactStatus>` per `src/core/search.rs:157-163`) and `meta_get`/`meta_set` names on `Store` (`jobs/promote.rs` and `jobs/observe.rs` use them). Wire `rule_two` into `run` after rule 1, honouring `stopped`. An artifact restored this pass is live for the next give-up's replay, which is the right order.
 
-- [ ] **Step 5: Run the gate**
+- [x] **Step 5: Run the gate**
 
 Run: `cargo fmt --all && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked 2>&1 | tail -3`
 Expected: green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A src
@@ -957,7 +957,7 @@ git commit -m "feat(evolve): rule 2 — a give-up a hidden artifact would have a
 **Interfaces:**
 - Produces: `Store::graveyard_list(limit: i64) -> Result<Vec<Grave>>` with `pub struct Grave { pub id: String, pub title: Option<String>, pub reaped_at: i64, pub reason: Option<String> }` (reason from `meta_json.reason`); `EvolveView { /* existing */ pub actions: Vec<String>, pub rules: Option<String> }`; meta key `evolve.retract.last` holding `Retracted` plus `at` as JSON.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `src/web/insights.rs` tests (the module renders the page with a test tenant; find `evolve_view` tests from stage 2):
 
@@ -983,12 +983,12 @@ async fn the_evolve_section_says_what_the_rules_last_did() {
 
 In `src/store/artifacts.rs` tests: `graveyard_list(10)` after a `bury` returns the row with its reason and title.
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test --lib -- insights::tests::the_reaped insights::tests::the_evolve artifacts::tests::graveyard_list 2>&1 | grep -E '^test |error' | head`
 Expected: compile errors.
 
-- [ ] **Step 3: The listing**
+- [x] **Step 3: The listing**
 
 ```rust
 pub struct Grave { pub id: String, pub title: Option<String>, pub reaped_at: i64, pub reason: Option<String> }
@@ -1010,7 +1010,7 @@ pub async fn graveyard_list(&self, limit: i64) -> Result<Vec<Grave>> {
 
 `graveyard_row`'s "for tests and nothing else today" comment is now wrong; fix it.
 
-- [ ] **Step 4: The page**
+- [x] **Step 4: The page**
 
 In `page`, fetch `graveyard_list(DEPRECATED_CAP + 1)`, set `more_reaped`, truncate, map to `GraveRow { id, title, ago: ago(reaped_at), reason }`. In `insights.html`, after the "Hidden as stale" block, the same shape:
 
@@ -1064,12 +1064,12 @@ format!("{} — {}{}", ago(a.at), what, ended)
 {% endif %}
 ```
 
-- [ ] **Step 5: Run the gate**
+- [x] **Step 5: Run the gate**
 
 Run: `cargo fmt --all && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked 2>&1 | tail -3`
 Expected: green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A src
@@ -1088,7 +1088,7 @@ git commit -m "feat(evolve): the graveyard is listed, and Insights says what the
 **Interfaces:**
 - Produces: `pub const REVIEW_MINS: [f32; 4] = [0.80, 0.84, 0.88, 0.92]`; `RankingParams.review_min: f32`; `Store::band_record(lo: f32, hi: f32) -> Result<BandRecord>` with `pub struct BandRecord { pub judged: usize, pub acted: usize, pub undone: usize }`; `tune::next_review_min(current: f32, auto_supersede: f32, low: BandRecord, above: BandRecord) -> Option<f32>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Pure rule, in `src/jobs/tune.rs`:
 
@@ -1137,12 +1137,12 @@ async fn a_base_whose_lowest_band_acts_like_the_one_above_lowers_the_review_thre
 }
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test --lib -- tune::tests::the_review_threshold pairs::tests::band_record 2>&1 | grep -E '^test |error' | head`
 Expected: compile errors.
 
-- [ ] **Step 3: The knob**
+- [x] **Step 3: The knob**
 
 As task 1 of the 3a plan did for three knobs: field, serde default, `from_config(vector, associate, consolidate, reranker_configured)` copying `consolidate.review_min`, `moved` +1, `params_str` gains `review {:.2}`, `write_ranking` writes `doc["consolidate"]["review_min"]` (rounded to three decimals like `recency_weight`), `ranking_keys_in_env` gains `ENGRAM__CONSOLIDATE__REVIEW_MIN`. The file validation `auto_supersede > review_min` stays on the file. `relate.rs:77`:
 
@@ -1154,7 +1154,7 @@ if similarity < review_min { continue; }
 
 (Read the lock once before the loop; never hold it across an await.)
 
-- [ ] **Step 4: The band record**
+- [x] **Step 4: The band record**
 
 ```rust
 pub struct BandRecord { pub judged: usize, pub acted: usize, pub undone: usize }
@@ -1177,7 +1177,7 @@ pub async fn band_record(&self, lo: f32, hi: f32) -> Result<BandRecord> {
 }
 ```
 
-- [ ] **Step 5: The rule and the step**
+- [x] **Step 5: The rule and the step**
 
 ```rust
 /// The review threshold's rule. Two signals, each a rate over the lowest
@@ -1218,12 +1218,12 @@ async fn review_step(core: &Core, live: &Generation, current: RankingParams, tri
 
 `propose` chains: ladder → flip → `spread_step` → `review_step` (each only when the previous proposed nothing; `spread_step` returns `Pass::default()` when it holds, so `review_step` runs on that).
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run: `cargo fmt --all && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked 2>&1 | tail -3`
 Expected: green; the `RankingParams` literal initializers from 3a need `review_min`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A src
@@ -1240,7 +1240,7 @@ git commit -m "feat(evolve): review_min moves on what its lowest band earned and
 - Modify: `docs/superpowers/plans/2026-09-05-self-tuning-handoff.md` (3b built; the stage is complete; what a stage 4 would be, if any)
 - Modify: `docs/superpowers/specs/2026-09-05-self-tuning-stage-3-design.md` (a "Built" note under Part B naming the admissions, as the 2b note under stage 2 does in the original spec)
 
-- [ ] **Step 1: Rewrite**
+- [x] **Step 1: Rewrite**
 
 `review_min` comment gains: "The starting rung. A base with `evolve.autonomous` on lowers it when the pairs just above it act as often as the pairs higher up, and raises it when its actions are taken back more often; the database holds what is live."
 
@@ -1250,12 +1250,12 @@ git commit -m "feat(evolve): review_min moves on what its lowest band earned and
 
 Handoff: "What exists" gains the journal, `jobs/retract.rs`, the listing, `review_min` on the ladder; "Plans, in order" marks 3b built and says the stage 3 spec is complete; the "What stage 3b has to build on" section is rewritten as "What a later stage has to build on": the thresholds that do not move yet (stale, promote, reap) and why, rescues, and the `ADDITIVE` list's length.
 
-- [ ] **Step 2: Run the gate**
+- [x] **Step 2: Run the gate**
 
 Run: `cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked 2>&1 | tail -3`
 Expected: green.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add -A config.example.toml src docs

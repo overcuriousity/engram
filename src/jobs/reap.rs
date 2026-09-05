@@ -4,9 +4,13 @@
 //! This sweep is the second look nobody was going to take by hand: free rules
 //! nominate the long-retired, one model call per nominee asks whether it still
 //! states anything the live base does not, and the verdict is acted on — the
-//! worthless are buried (text into `graveyard`, point deleted, stub kept), the
-//! valuable rewritten as live synthesized artifacts. No operator queue; the
-//! graveyard is the insurance a wrong verdict answers to.
+//! worthless are buried (text and vector into `graveyard`, point deleted,
+//! stub kept), the valuable rewritten as live synthesized artifacts. No
+//! operator queue. A wrong verdict answers to three things: the journal row
+//! every burial writes (`corpus_actions`), the Reaped listing on Insights with
+//! its Restore button, and `jobs::retract`'s second rule, which exhumes a
+//! buried artifact on its own when a search given up on would have been
+//! answered by it. A burial taken back is not bought again.
 
 use crate::core::Core;
 use crate::error::Result;

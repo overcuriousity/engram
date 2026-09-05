@@ -485,6 +485,12 @@ near_dupe_min = 0.90
 #
 # Passages are outside this entirely: they are the verbatim substrate and are
 # never one side of a pair, whatever they score.
+#
+# The starting rung. A base with `evolve.autonomous` on lowers this when the
+# pairs just above it lead to a merge, a replacement or a discard as often as
+# the pairs higher up do, and raises it when the actions taken just above it
+# are taken back more often; the database holds what is live, and
+# /ui/insights says which generation that is.
 review_min = 0.88
 # The lane judged first. It hides nothing on its own: a pair at or above it
 # goes to the judge before one below it, and the judge decides. Well clear of
@@ -818,6 +824,11 @@ default_tz = ""
 # does not run the sweep, whatever the default below says. It is the one stage
 # that destroys captured text, so an upgrade never turns it on for you — you
 # do, by writing this block.
+#
+# Buried is not gone: the text and the vector go to the graveyard, /ui/insights
+# lists it under Reaped with a Restore button, and a base with
+# `evolve.autonomous` on restores a buried artifact itself when a search given
+# up on would have been answered by it.
 enabled = true
 # How often the sweep runs. Once a day: the backlog it drains accumulated over
 # months, and there is nothing to be gained by draining it faster.
@@ -961,6 +972,16 @@ feed_sweep = false
 # configured, the live generation runs without it, and the pass asks what one
 # call per observation would have changed. The band is not replayed at all; it
 # moves on what it earned while serving.
+#
+# The same switch lets the base take its own corpus actions back. Every merge,
+# replacement, discard and burial the corpus jobs make is journaled, and the
+# quiet pass reads the journal against the same observations: a merge or a
+# replacement whose survivor is no longer found where the original was is
+# undone, and anything hidden or buried that a search given up on would have
+# been answered by is restored. An action taken back is not taken again on the
+# same artifact. The review threshold under [consolidate] moves on the same
+# pass. Every action and every undo is on /ui/insights, with what you undid
+# told apart from what the base undid.
 autonomous = false
 
 # How long the base has to have been quiet — no search, no question — before
