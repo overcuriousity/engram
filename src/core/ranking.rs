@@ -6,11 +6,13 @@
 //! change the search the *next* request runs. So they live behind
 //! `Core::ranking` rather than being copied into the places that use them.
 //!
-//! Two reorder what retrieval returned (`recency_weight`, `per_source_cap`);
-//! two change what is retrieved at all (`candidate_multiplier`,
+//! Three reorder what retrieval returned (`recency_weight`, `per_source_cap`,
+//! `prime_lift`); two change what is retrieved at all (`candidate_multiplier`,
 //! `recency_half_life_days`). Both kinds cost the idle pass the same thing —
 //! one vector read per pair per candidate — which is what lets them share a
-//! struct and a chooser.
+//! struct and a chooser. Two more sit beside them and are moved on their own
+//! rules: `rerank`, scored against the rank that was served, and
+//! `spread_max`, scored on what the appended band earned while serving.
 
 use crate::config::VectorConfig;
 

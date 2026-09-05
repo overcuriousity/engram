@@ -1,14 +1,17 @@
-# Self-tuning: where things stand, for whoever plans stage 3
+# Self-tuning: where things stand, for whoever plans stage 3b
 
-Written 2026-09-05, at the end of stage 2b. Read this before the spec's Part 5;
-it says what exists, what was decided along the way that the spec does not,
-and what stage 3 has to build on.
+Written 2026-09-05, at the end of stage 2b; updated the same day at the end of
+stage 3a. It says what exists, what was decided along the way that the spec
+does not, and what the next stage has to build on.
 
-**Spec:** `docs/superpowers/specs/2026-09-04-self-tuning-design.md`. The three
-decisions in "The three decisions this rests on" are settled. Part 5 (earned
-autonomy over the corpus jobs) is the only part with no plan.
+**Spec:** `docs/superpowers/specs/2026-09-04-self-tuning-design.md`, with its
+Part 5 replaced by `docs/superpowers/specs/2026-09-05-self-tuning-stage-3-design.md`.
+The three decisions in "The three decisions this rests on" are settled; the
+second is restated in the stage 3 spec. Stage 3 is three plans: 3a (the three
+knobs) is built; 3b (the corpus journal and two rules) and 3c (`review_min` on
+the ladder) are not planned.
 
-**Branch:** `feat/observations`, off `master`. Stages 1, 2 and 2b are on it,
+**Branch:** `feat/observations`, off `master`. Stages 1, 2, 2b and 3a are on it,
 unmerged. It compiles and passes on its own; nothing on it depends on anything
 not on it. Integration into `master` is the operator's call.
 
@@ -27,7 +30,8 @@ not on it. Integration into `master` is the operator's call.
 | Lived record and the watch gate `holds_up` / `settled` | `src/eval/lived.rs` | stage 2 |
 | The anchor: agreement with verdicts, `trustworthy` | `src/eval/anchor.rs` | stage 2 |
 | The idle pass: adopt, watch, revert, suspend, stop-on-return | `src/jobs/tune.rs`, hung off `jobs/retention.rs` | stage 2, 2b |
-| Four knobs on `RankingParams`, threaded through one pipeline | `src/core/ranking.rs`, `core/search.rs`, `vector/mod.rs` (`Recency`) | 2b |
+| Seven knobs on `RankingParams`: four from 2b; prime lift on the ladder, rerank as a flip against the served rank, spread on a lived rule | `src/core/ranking.rs`, `core/search.rs`, `vector/mod.rs` (`Recency`), `eval/sweep.rs` (`rerank_flip`), `jobs/tune.rs` (`next_spread`) | 2b, 3a |
+| What priming read, per search; which pool rows were the band; which search an observation came from | `search_context`, `search_candidates.band`, `observations.event_id` in `src/store/schema.sql`; `Priming` in `core/search.rs` | 3a |
 | Ops disclosure: suspension first, live generation, standing, history | `src/web/insights.rs`, `templates/_evolve.html` | stage 2 |
 | Config: `[evolve]` `give_up_window_secs`, `feed_sweep`, `autonomous`, `idle_secs`; `[vector] candidate_multiplier` | `src/config.rs`, `config.example.toml` | 1, 2, 2b |
 
@@ -52,14 +56,24 @@ are collected here because Part 5 leans on several of them.
 - **The pass measures with the reranker off** and embeds nothing (stored query
   vectors seed the cache). Where a reranker serves search, the pass measures
   the pre-rerank order. Flagged, accepted.
-- **Rerank on/off, `prime_lift` and spread are not tuned**, for reasons in the
-  2b plan's "What the code admits". Rerank is a judgement: the gate scores
-  ranking quality and cannot weigh the per-search model call adopting rerank
-  would impose. `prime_lift` is blocked on a fact: observations do not record
-  the sitting, and a column on `observations` is a recreated database.
-- **The pass budget covers every rung on every axis** (16), not the nearest
-  step: a tie keeps the current value, so an improvement behind a rung that
-  ties would never be reached. This corrected the 2b plan mid-execution.
+- **Rerank, `prime_lift` and spread are tuned as of 3a.** The flip is asked
+  after the ladder, not among its candidates, because its base is the served
+  rank and its MRR is not comparable with the ladder rows'. The band is not
+  replayed; the spread rule is lived. Priming is captured at every door that
+  primes, whatever the lift. See the 3a plan's "What this plan admits".
+- **The band is in the pool, flagged.** An open on an appended hit is an
+  observation; every reader that learns from the pool — the associate job's
+  co-appearance read, the pursuit's shown list, `dealable!`, the hit-rank
+  join — excludes `band = 1`, which is what keeps the Hebbian loop closed. A
+  new reader of `search_candidates` has to decide which side it is on.
+- **An open on an artifact that is both unshown in the ranked pool and shown
+  in the band records the band rank**: the row the person saw.
+- **The Apply button writes `associate.prime_lift` and `associate.spread_max`**
+  beside the four `[vector]` keys. Rerank has no file key; the file says "on"
+  by naming a reranker.
+- **The pass budget covers every rung on every axis** (19 after 3a), not the
+  nearest step: a tie keeps the current value, so an improvement behind a rung
+  that ties would never be reached. This corrected the 2b plan mid-execution.
 - **The anchor rule:** trustworthy unless disagreements are at least two and
   at least equal agreements. Suspension adopts nothing, reverts nothing, keeps
   recording, and is the first thing Insights says.
@@ -70,10 +84,16 @@ are collected here because Part 5 leans on several of them.
   task: the flag is per instance and generations are per tenant. Insights is
   the disclosure.
 
-## What stage 3 has to build on, and what it does not have yet
+## What stage 3b has to build on, and what it does not have yet
 
-The spec's Part 5 says merge, promote, consolidate, dedupe, reap and judgement
-start by proposing and earn the right to act. Read against the tree:
+Written against the original Part 5, which the stage 3 spec has since
+replaced: the corpus jobs stay autonomous and answer to observations, not to
+operator responses. Most of the facts below still hold and are what 3b reads;
+the framing of "proposals" and "lanes" does not. Two corrections found while
+brainstorming stage 3: reap's restore path exists (`Core::reactivate` exhumes
+from the graveyard, over `POST /ui/ops/artifacts/{id}/reactivate`) and only a
+listing is missing; and the pair review queue is not behind `CanJudge`, only
+the tuning Apply button is.
 
 - **A proposal record does not exist.** Nothing in stages 1–2b journals what a
   corpus job would have done. `eval_runs` is the ranking journal and does not
@@ -135,7 +155,12 @@ From the stage 1 and 2 prompts and this session:
 1. `2026-09-04-self-tuning-stage-1.md` — built.
 2. `2026-09-04-self-tuning-stage-2.md` — built, with the deviations above.
 3. `2026-09-05-self-tuning-stage-2b.md` — built, with the budget correction.
-4. Stage 3 — not planned. Start with brainstorming over Part 5 and this file;
-   the open questions are the proposal table's shape, which jobs join first
-   (consolidate has its lanes already), and whether reap's restore path is in
-   scope.
+4. `2026-09-05-self-tuning-stage-3a.md` — built, with the admissions at its
+   top.
+5. Stage 3b — not planned. Part B of the stage 3 spec: the `corpus_actions`
+   journal, rule 1 (a survivor must still be found) and rule 2 (a give-up a
+   hidden artifact would have answered), the graveyard listing, the
+   disclosure. Note that the graveyard needs its vector kept (`vec BLOB`,
+   `embed_model`), and that reap deletes the point today.
+6. Stage 3c — not planned. Part C: `review_min` on the ladder, carried by the
+   generation, read by `relate.rs` off `Core`.

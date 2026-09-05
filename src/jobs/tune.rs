@@ -17,10 +17,19 @@
 //! what its predecessor earned, and the predecessor comes back when the new
 //! one does not hold.
 //!
-//! The pass spends no inference. Every observation keeps the vector its query
-//! was searched with, so the replay embeds nothing; the reranker is left out,
-//! so it calls nothing; and its searches take the background lane, behind
-//! whoever is actually waiting. It stops the moment somebody comes back —
+//! The pass spends inference in exactly one case. Every observation keeps the
+//! vector its query was searched with, so the replay embeds nothing; the
+//! ladder replays with the reranker off, so it calls nothing; and its searches
+//! take the background lane, behind whoever is actually waiting. The one case
+//! is the rerank flip on a base whose live generation runs without a
+//! configured reranker: one call per observation, to ask what the reranker
+//! would have changed, spent because the operator configured it.
+//!
+//! Three kinds of move. The ladder is counterfactual: a replay under every
+//! neighbouring rung of five knobs. The rerank flip is counterfactual with its
+//! own base, the rank that was actually served. The band is lived: it widens
+//! or narrows on whether it was used more than the ranked tail beside it,
+//! asked only when the other two propose nothing. It stops the moment somebody comes back —
 //! between pairs, with nothing written — and the next quiet period starts it
 //! over. Recomputing is the resumption: the pass is bounded, so a restart
 //! costs what a pass costs, and no partial state has to be kept correct across

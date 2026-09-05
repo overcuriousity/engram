@@ -55,7 +55,7 @@ pub fn grid(current: RankingParams) -> Vec<RankingParams> {
 /// configuration rather than enumerated.
 ///
 /// The grid is twenty candidates over two axes and every axis added multiplies
-/// it; this is what the idle pass walks instead, over all four knobs of
+/// it; this is what the idle pass walks instead, over all five knobs of
 /// `RankingParams`. The running configuration comes first — it is the baseline
 /// — then its nearest neighbour on each axis, then the next step out on each,
 /// until `budget` is spent. A parameter set already tried and taken back is

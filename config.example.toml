@@ -102,9 +102,11 @@ recency_half_life_days = 180
 pinned_boost = 0.15
 # Chunks one document may contribute to a result list, so a long document
 # cannot fill it. 0 lets one document supply every result. This, recency_weight,
-# recency_half_life_days and candidate_multiplier are the four knobs the tuning
-# sweep and the idle pass may move; applying a recommendation rewrites them here
-# — see [feedback.tune] and [evolve].
+# recency_half_life_days and candidate_multiplier are the four knobs here the
+# tuning sweep and the idle pass may move — with `associate.prime_lift`,
+# `associate.spread_max` and whether the configured reranker runs, seven in
+# all; applying a recommendation rewrites the file-backed ones here — see
+# [feedback.tune] and [evolve].
 per_source_cap = 3
 # How many times the answer size a search fetches when the cap or the reranker
 # will narrow the list. Wider gives the cap more to choose from and costs a
@@ -484,10 +486,11 @@ near_dupe_min = 0.90
 # Passages are outside this entirely: they are the verbatim substrate and are
 # never one side of a pair, whatever they score.
 review_min = 0.88
-# Cosine at or above which the older artifact is hidden without asking. Well
-# clear of `review_min` on purpose: two genuinely distinct artifacts about one
-# subsystem sit around 0.88 routinely, and hiding at that score costs knowledge
-# rather than duplication. Ops lists what was hidden, with an undo.
+# The lane judged first. It hides nothing on its own: a pair at or above it
+# goes to the judge before one below it, and the judge decides. Well clear of
+# `review_min` on purpose: two genuinely distinct artifacts about one
+# subsystem sit around 0.88 routinely, and the pairs worth asking about first
+# are the ones that are not. Ops lists what was hidden, with an undo.
 auto_supersede = 0.95
 # Neighbours considered per artifact when it looks for duplicates.
 per_point = 5
@@ -595,15 +598,20 @@ judge_min_queries = 3
 judge_per_sweep = 10
 # How many top hits are asked what they are linked to, and how many associated
 # hits may be appended after the ranked list — outside `limit`, never instead
-# of a ranked hit.
+# of a ranked hit. `spread_max` is the starting rung: a base with
+# `evolve.autonomous` on widens or narrows the band from here on whether the
+# band is used more or less than the ranked tail beside it, and the database
+# holds what is live.
 spread_from = 3
 spread_max = 3
 # How much more accessible a hit must be than the one above it to pass it, as a
 # fraction of the most accessible hit in that list; and how many places it may
 # climb. 0 turns priming off, and it ships off: a feature that reorders results
-# and says something about you does not go on until the eval harness has been
-# run with it off and on against the frozen corpus. Accessibility here is use
-# — opened, confirmed, cited — never how often something was listed.
+# and says something about you does not go on until it has been measured.
+# `prime_lift` is the starting rung, and the idle pass is the measurement: a
+# base with `evolve.autonomous` on replays what use left behind at every rung
+# and moves from here on what it finds. Accessibility here is use — opened,
+# confirmed, cited — never how often something was listed.
 prime_margin = 0.5
 prime_lift = 0
 
@@ -923,9 +931,10 @@ give_up_window_secs = 300
 feed_sweep = false
 
 # Let a quiet base move its own ranking parameters — the recency weight, the
-# per-source cap, the candidate pool depth and the recency half-life — on what
-# use left behind, and take a move back on the same evidence, with nobody
-# pressing anything.
+# per-source cap, the candidate pool depth, the recency half-life, the prime
+# lift, whether the configured reranker runs, and the width of the associated
+# band — on what use left behind, and take a move back on the same evidence,
+# with nobody pressing anything.
 #
 # Off, for the reason `feed_sweep` is off: a default that changes ranking moves
 # only after the harness has been run. On, an idle pass replays the positive
@@ -944,11 +953,14 @@ feed_sweep = false
 # One knob per adoption, and nothing proposed while the last one is watched.
 # Slower, and it keeps the history readable and every revert exact.
 #
-# What a quiet base spends on this: sixteen vector searches per replayed
+# What a quiet base spends on this: nineteen vector searches per replayed
 # observation — the running settings and every other rung of each knob's
 # ladder, one knob moved at a time — and it stops between observations the
 # moment a search or a question arrives, writing nothing. The next quiet period
-# starts it over. No model is called.
+# starts it over. The pass spends inference in exactly one case: a reranker is
+# configured, the live generation runs without it, and the pass asks what one
+# call per observation would have changed. The band is not replayed at all; it
+# moves on what it earned while serving.
 autonomous = false
 
 # How long the base has to have been quiet — no search, no question — before
