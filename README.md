@@ -57,7 +57,11 @@ score.
   person. Nothing deleted. No merge drops a number, a command or a path. Undo on
   everything.
 - **Memory that learns** — links from co-retrieval, accessibility that decays,
-  so what you use stays reachable. It never rewrites what is stored.
+  so what you use stays reachable. While you are away it sleeps: files what
+  the day captured against what it already held, rehearses what it holds
+  against the wording of your own later captures, takes back what that
+  evidence says it got wrong, and says on Insights what it did. Everything it
+  writes is a version beside the original, never over it.
 - **Gaps** — questions the base could not answer are grouped, named and listed
   until you cover them.
 - **Reap** — what has been retired for a season (90 days by default) gets one
@@ -179,13 +183,14 @@ generation. Making retrieval better means making the background job do more,
 never adding a model call to the query path. *Ask* is the one door that
 generates at read time; every call it spends is bounded and visible on the page.
 
-**The trace is fixed; access is plastic.** Content is verbatim and never changes
-silently: a captured artifact is never rewritten in place, and nothing is
-deleted on a score. Consolidation is the one narrow exception and carries its
-own guards — originals kept and undoable, no value or literal lost. Everything
-about *how* an artifact is found may learn from use, within bounds that are
-shown: a primed hit says so, an associated hit says what recalled it, and no
-exact match is ever buried.
+**Nothing is lost, and every step is readable and reversible.** The corpus is
+verbatim and never edited. An artifact's text may be condensed by the base —
+shorter, never poorer: no value, command or path may fall — and every earlier
+version stays stored, readable in place and one press from live. Merges keep
+their originals, burials keep the text, and nothing is deleted on a score.
+Everything about *how* an artifact is found may learn from use, within bounds
+that are shown: a primed hit says so, an associated hit says what recalled it,
+and no exact match is ever buried.
 
 **Lean beats clever.** Anything that adds a storage tier, a model dependency or
 a layer crossing without a measured retrieval gain does not go in. The
@@ -199,7 +204,11 @@ what surfaces); a resurfacing list of things you had forgotten (a different
 application); LLM excerpt compression at query time (the cliff and the reranker
 do it for free); late-interaction reranking (a model dependency to beat a
 baseline hybrid search already makes strong); quantization to save memory
-nobody has run out of.
+nobody has run out of; schema artifacts written from a cluster of linked notes
+(the same digest competing with the wording it was derived from, one level up);
+drives, curiosity or self-posed questions (model calls without a measured
+retrieval gain, and against a first run with fewer services — the base sleeps,
+it does not want).
 
 ## Requirements
 

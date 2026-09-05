@@ -1008,10 +1008,16 @@ autonomous = "off"
 max_actions_per_week = 10
 
 # How long the base has to have been quiet — no search, no question — before
-# the idle pass runs. Its searches embed nothing (each observation keeps the
-# vector it was searched with) and take the background lane, so a person who
-# comes back gets ahead of it; this is what keeps it from starting under
-# somebody at all. Half an hour is a sitting having ended, not a pause in one.
+# it sleeps. A sleep is four things in order: it *integrates* every new
+# artifact (one neighbour read each — was anything near it when it came? new,
+# known, or a conflict for you), *rehearses* what it holds (the wording of
+# your later captures replayed as questions for your earlier ones, the base's
+# own probes), *reorganises* on what that showed (under "ranking" the ranking
+# generations; under "full" the corpus rules too), and *wakes* with one row
+# on /ui/insights under "Last night" saying what it did. Its searches embed
+# nothing and take the background lane, so a person who comes back gets ahead
+# of it; this is what keeps it from starting under somebody at all. Half an
+# hour is a sitting having ended, not a pause in one.
 idle_secs = 1800
 
 [capture]
