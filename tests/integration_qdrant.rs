@@ -2171,3 +2171,281 @@ async fn the_reconstructed_recency_term_matches_what_qdrant_scored() {
     );
     v.drop_collection().await.unwrap();
 }
+
+// ── Sleep: fidelity of the three phases that measure a rank ──────────────────
+//
+// The in-memory backend ignores the sparse vector and recency entirely, so
+// the ranks the sleep phases read are asserted here, against the real hybrid
+// ranking. A `Core` over this Qdrant with vectors written by hand: nothing
+// below calls an embedder — integration reads neighbours by point id, and a
+// replay seeds the query cache with the probe's stored vector.
+
+async fn sleeping_core(name: &str) -> (engram::core::Core, engram::vector::qdrant::QdrantVectors) {
+    use engram::core::{Core, Working};
+    use engram::store::Store;
+    let v = fresh(name, 4).await;
+    let again = engram::vector::qdrant::QdrantVectors::connect(&cfg(name))
+        .await
+        .unwrap();
+    let mut config = engram::config::Config::test_default();
+    config.evolve.autonomous = engram::config::Autonomy::Full;
+    let store = Store::memory().await.unwrap();
+    let core = Core::from_config_with(
+        &config,
+        std::sync::Arc::new(again),
+        store,
+        Working::default(),
+    );
+    (core, v)
+}
+
+/// One artifact in `corpus`, in SQLite as embedded and in Qdrant at `vector`.
+async fn sleeping_artifact(
+    core: &engram::core::Core,
+    v: &engram::vector::qdrant::QdrantVectors,
+    corpus: &str,
+    text: &str,
+    vector: Vec<f32>,
+    last_verified_at: i64,
+) -> String {
+    let src = core.store.insert_corpus(corpus, "web", None).await.unwrap();
+    let c = core
+        .store
+        .insert_artifacts(
+            &src.id,
+            &[engram::store::artifacts::NewArtifact {
+                ordinal: 0,
+                text: text.into(),
+                corpus_span: None,
+                title: None,
+                category: None,
+                tags: vec![],
+                segment_idx: None,
+                caveats: vec![],
+            }],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    core.store
+        .mark_embedded(&c.id, core.embedder.model(), c.embed_rev)
+        .await
+        .unwrap();
+    let mut p = point(&c.id, &src.id, vector, &[], "concept");
+    p.payload.text = text.into();
+    p.payload.title = None;
+    p.payload.last_verified_at = Some(last_verified_at);
+    v.upsert(vec![p]).await.unwrap();
+    c.id
+}
+
+fn epoch_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+async fn live_generation(core: &engram::core::Core) -> engram::store::generations::Generation {
+    let params = *core.ranking.read().unwrap();
+    let id = core
+        .store
+        .record_generation(&engram::store::generations::NewGeneration {
+            params: params.into(),
+            embed_recipe: "it".into(),
+            chat_model: "it".into(),
+            parent_id: None,
+        })
+        .await
+        .unwrap();
+    core.store.generation(&id).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn integration_tags_a_two_corpus_fixture_the_way_the_rule_says() {
+    use engram::store::integrations::Tag;
+    let (core, v) = sleeping_core("engram_it_sleep_integrate").await;
+    let now = epoch_now();
+    // The first corpus, a day before: two near-identical passages that see
+    // only each other — structure, discarded — and are novel.
+    let a1 = sleeping_artifact(
+        &core,
+        &v,
+        "first",
+        "requires 1.21.4 or later",
+        vec![1.0, 0.0, 0.0, 0.0],
+        now,
+    )
+    .await;
+    let a2 = sleeping_artifact(
+        &core,
+        &v,
+        "first",
+        "requires 1.21.4 or later, again",
+        vec![1.0, 0.0, 0.0, 0.0],
+        now,
+    )
+    .await;
+    let r = engram::jobs::sleep::integrate(&core, now).await.unwrap();
+    assert_eq!((r.integrated, r.novel), (2, 2), "{r:?}");
+    // The second corpus restates the first with one value changed, at a
+    // cosine above `auto_supersede`: the same statement carrying a different
+    // version, which is a conflict for a person.
+    let b = sleeping_artifact(
+        &core,
+        &v,
+        "second",
+        "requires 1.22.0 or later",
+        vec![0.999, 0.045, 0.0, 0.0],
+        now,
+    )
+    .await;
+    let r = engram::jobs::sleep::integrate(&core, now).await.unwrap();
+    assert_eq!((r.integrated, r.conflicts), (1, 1), "{r:?}");
+    assert_eq!(
+        core.store.integration_of(&b).await.unwrap().unwrap().tag,
+        Tag::Conflict
+    );
+    assert_eq!(
+        core.store.integration_of(&a1).await.unwrap().unwrap().tag,
+        Tag::Novel
+    );
+    // b's text is a probe for both of the first corpus; nothing probes b.
+    assert_eq!(core.store.rehearsals_of(&a1).await.unwrap().len(), 1);
+    assert_eq!(core.store.rehearsals_of(&a2).await.unwrap().len(), 1);
+    assert!(core.store.rehearsals_of(&b).await.unwrap().is_empty());
+    let pair = core.store.pair_between(&a1, &b).await.unwrap().or(core
+        .store
+        .pair_between(&a2, &b)
+        .await
+        .unwrap());
+    assert_eq!(
+        pair.unwrap().state,
+        engram::store::pairs::PairState::Contradiction
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_probe_replayed_under_two_recency_weights_moves_the_way_the_recency_term_explains() {
+    let (core, v) = sleeping_core("engram_it_sleep_recency").await;
+    let now = epoch_now();
+    let half_life_secs = 180 * 86_400;
+    // The owner is a half-life old; a competitor from another corpus sits
+    // at the same vector and is fresh. With recency off the two tie on the
+    // retrieved half and the owner may lead; with recency on the fresh one
+    // must.
+    let owner = sleeping_artifact(
+        &core,
+        &v,
+        "old",
+        "the image will not mount",
+        vec![1.0, 0.0, 0.0, 0.0],
+        now - half_life_secs,
+    )
+    .await;
+    let _fresh = sleeping_artifact(
+        &core,
+        &v,
+        "new",
+        "the image will not mount",
+        vec![1.0, 0.0, 0.0, 0.0],
+        now,
+    )
+    .await;
+    let probe = engram::store::rehearsals::Rehearsal {
+        id: "p".into(),
+        created_at: now,
+        class: engram::store::rehearsals::Class::Cue,
+        query: "why won't the image mount".into(),
+        query_vec: vec![1.0, 0.0, 0.0, 0.0],
+        embed_model: core.embedder.model().to_string(),
+        artifact_id: owner.clone(),
+        source_id: None,
+        retired_at: None,
+    };
+    let base = *core.ranking.read().unwrap();
+    let off = engram::core::ranking::RankingParams {
+        recency_weight: 0.0,
+        ..base
+    };
+    let on = engram::core::ranking::RankingParams {
+        recency_weight: 0.5,
+        recency_half_life_days: 180,
+        ..base
+    };
+    let r_off =
+        engram::eval::rehearsed::rehearsed_under(&core, off, std::slice::from_ref(&probe), None)
+            .await
+            .unwrap()
+            .unwrap();
+    let r_on =
+        engram::eval::rehearsed::rehearsed_under(&core, on, std::slice::from_ref(&probe), None)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!((r_off.probes, r_off.found, r_on.found), (1, 1, 1));
+    assert!(
+        r_on.mrr <= r_off.mrr,
+        "recency must not lift the old owner: off {r_off:?} on {r_on:?}"
+    );
+    assert!(
+        r_on.mrr <= 0.5,
+        "under recency the fresh twin leads: {r_on:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_interference_pair_is_filed_for_a_fixture_built_to_produce_one() {
+    let (core, v) = sleeping_core("engram_it_sleep_interference").await;
+    let now = epoch_now();
+    // The owner, and a competitor from another corpus that sits exactly on
+    // the probe's vector while the owner sits a little off it.
+    let owner = sleeping_artifact(
+        &core,
+        &v,
+        "one",
+        "mount with -o loop",
+        vec![0.96, 0.28, 0.0, 0.0],
+        now,
+    )
+    .await;
+    let x = sleeping_artifact(
+        &core,
+        &v,
+        "two",
+        "loop mounts, in full",
+        vec![1.0, 0.0, 0.0, 0.0],
+        now,
+    )
+    .await;
+    core.store
+        .record_rehearsal(&engram::store::rehearsals::NewRehearsal {
+            class: engram::store::rehearsals::Class::Cue,
+            query: "how do I loop mount".into(),
+            query_vec: vec![1.0, 0.0, 0.0, 0.0],
+            embed_model: core.embedder.model().to_string(),
+            artifact_id: owner.clone(),
+            source_id: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let live = live_generation(&core).await;
+    for _ in 0..2 {
+        let r = engram::jobs::sleep::rehearse(&core, &live, now)
+            .await
+            .unwrap();
+        assert_eq!((r.rehearsed, r.found), (1, 1), "{r:?}");
+    }
+    let (filed, stopped) = engram::jobs::sleep::interference(&core, &live, now)
+        .await
+        .unwrap();
+    assert!(!stopped);
+    assert_eq!(filed, 1);
+    let pair = core.store.pair_between(&owner, &x).await.unwrap().unwrap();
+    assert_eq!(pair.state, engram::store::pairs::PairState::Pending);
+    assert!(pair.detail.unwrap_or_default().contains("interference"));
+}
