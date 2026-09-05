@@ -182,16 +182,9 @@ struct InsightsTemplate {
     /// What the base did to its own ranking. `None` before a generation
     /// exists, which is a base whose boot path has not run yet.
     evolve: Option<EvolveView>,
-    /// Whether the ask door is open. See `state::ask_enabled`.
-    ///
-    /// The nav has no use for it any more — Ask is a verb on the box, not a
-    /// place to go — but `_gaps.html` still offers "ask again" beside a hole,
-    /// and that link must not exist where there is nothing to answer with.
-    ask_enabled: bool,
-    /// The holes, grouped and named by the sweep. Empty when feedback is off.
+    /// The holes, one row each: a group the sweep named, or a question it has
+    /// not grouped yet, shown under itself. Empty when feedback is off.
     gaps: Vec<crate::web::ui::GapGroup>,
-    /// Open gaps the sweep has not grouped yet.
-    loose: Vec<crate::web::ui::GapMember>,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
@@ -282,27 +275,31 @@ async fn page(tenant: Tenant) -> Result<Response> {
     // Read, never computed: the page shows what the sweep grouped and named,
     // and whatever has been judged since sits under itself until the next
     // pass. Nothing here embeds or calls a model.
-    let (gaps, loose) = if tenant.core.learn.enabled {
+    let gaps = if tenant.core.learn.enabled {
         let (rows, loose) = tenant
             .core
             .store
             .gap_rows(tenant.core.embedder.model(), tenant.core.weak_below())
             .await?;
-        (
-            rows.into_iter()
-                .map(|r| crate::web::ui::GapGroup {
-                    label: r.label,
-                    members: r
-                        .members
-                        .into_iter()
-                        .map(crate::web::ui::gap_member)
-                        .collect(),
-                })
-                .collect(),
-            loose.into_iter().map(crate::web::ui::gap_member).collect(),
-        )
+        // A group and a lone question are one row each and read the same:
+        // what the sweep called the group, or what somebody typed. Which of
+        // the two it is matters to nobody deciding what to do about it.
+        rows.into_iter()
+            .map(|r| crate::web::ui::GapGroup {
+                label: r.label,
+                members: r
+                    .members
+                    .into_iter()
+                    .map(crate::web::ui::gap_member)
+                    .collect(),
+            })
+            .chain(loose.into_iter().map(|g| crate::web::ui::GapGroup {
+                label: g.text.clone(),
+                members: vec![crate::web::ui::gap_member(g)],
+            }))
+            .collect()
     } else {
-        (vec![], vec![])
+        vec![]
     };
 
     let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
@@ -595,11 +592,9 @@ async fn page(tenant: Tenant) -> Result<Response> {
             }
             false => None,
         },
-        ask_enabled: crate::web::state::ask_enabled(&tenant),
         pairs,
         more_pairs,
         gaps,
-        loose,
         retrying,
         parked,
         superseded,

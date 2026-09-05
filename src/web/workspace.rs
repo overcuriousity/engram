@@ -9,8 +9,7 @@
 //!
 //! The three old doors still open. They are deep links into this page now,
 //! which is what keeps a bookmark, the extension's capture post and the
-//! *keep this answer* flow working. See
-//! `docs/superpowers/specs/2026-08-22-one-text-surface-design.md` §3.
+//! *keep this answer* flow working.
 
 use crate::tenants::Tenant;
 use askama::Template;
@@ -1103,7 +1102,7 @@ struct CarriedForm {
 }
 
 /// The ask door: the workspace with the question already in the box, and
-/// still. A gap's "ask again" links here.
+/// still. Anything that carries a question links here.
 ///
 /// Nothing is asked on arrival. A GET that spends a model call is a bill any
 /// link, prefetch or reload can run up, and the question is one press from
@@ -1126,8 +1125,8 @@ async fn ask_door(
     // Nothing held, no Ask button — `base_template` sets `held = false` and the
     // template renders no `[data-verb="ask"]`, so this door used to answer 200
     // with the question sitting in a box that has no way to send it and no
-    // word about why. Reachable: `_gaps.html` renders "ask again" from
-    // recorded searches, which outlive a purge of what they searched.
+    // word about why. Reachable: a question in a URL outlives a purge of
+    // what it was asked about.
     //
     // Sent to the plain page rather than 404'd, because the question survives
     // the redirect and search is the one verb an empty base can still honour.
@@ -1513,8 +1512,8 @@ mod tests {
 
     /// A question in a box with no way to send it. `held = false` renders no
     /// Ask verb, so this door used to answer 200 with the question prefilled,
-    /// no button, and no word about why — reachable from a gap's "ask again",
-    /// which outlives a purge of what it was asked about.
+    /// no button, and no word about why — reachable from any link carrying
+    /// a question, which outlives a purge of what it was asked about.
     #[tokio::test]
     async fn the_ask_door_over_an_empty_base_sends_the_question_somewhere_it_works() {
         let core = crate::core::test_support::test_core().await;

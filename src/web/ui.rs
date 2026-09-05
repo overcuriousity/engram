@@ -497,14 +497,12 @@ fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
 
 // ── Templates ───────────────────────────────────────────────────────────────
 
-/// One hole in the base, as the capture page lists it.
+/// One hole in the base, as the gap list carries it: enough to dismiss it,
+/// and its text for a hole the sweep has not grouped yet, which is shown
+/// under itself.
 pub struct GapMember {
-    /// The `GapKind`, for the dismiss route.
+    /// The `GapKind`, for the forget route.
     pub kind: String,
-    /// What asked it, in the operator's words: *judged*, *asked*, *nothing
-    /// near*, *pursued*. Four ways of saying the base did not answer, on one
-    /// list, each still able to say which one it was.
-    pub badge: &'static str,
     pub id: String,
     pub text: String,
 }
@@ -515,18 +513,8 @@ pub struct GapGroup {
 }
 
 pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
-    use crate::store::gaps::GapKind;
     GapMember {
         kind: g.kind.as_str().into(),
-        badge: match g.kind {
-            GapKind::Search => "judged",
-            GapKind::Ask => "asked",
-            GapKind::Unmatched => "nothing near",
-            GapKind::Pursuit => "pursued",
-            // What asked it, like the other four — and here what asked was the
-            // planning call, on a question somebody put to the base.
-            GapKind::Subject => "planned",
-        },
         id: g.id,
         text: g.text,
     }
@@ -1056,6 +1044,35 @@ struct TokenCreatedTemplate {
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct ForgetForm {
+    /// `kind:id` pairs, comma-joined — one row of `_gaps.html` is a group,
+    /// and forgetting is said of the group.
+    members: String,
+}
+
+/// The operator's word that a hole is not worth an answer: every question in
+/// the group is dismissed, and the row is gone.
+///
+/// A pair that does not parse is a 400 rather than a skipped member. The
+/// template writes every pair, so a bad one is a bug, and a row that stays
+/// half-forgotten would come back on reload under the same name.
+async fn gap_forget(tenant: Tenant, Form(f): Form<ForgetForm>) -> Result<Response> {
+    let mut members = Vec::new();
+    for pair in f.members.split(',').filter(|p| !p.is_empty()) {
+        let (kind, id) = pair
+            .split_once(':')
+            .ok_or_else(|| Error::Validation(format!("malformed gap member {pair}")))?;
+        let kind = crate::store::gaps::GapKind::parse(kind)
+            .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
+        members.push((kind, id.to_string()));
+    }
+    for (kind, id) in members {
+        tenant.core.store.dismiss_gap(kind, &id).await?;
+    }
+    Ok(().into_response())
+}
 
 async fn gap_dismiss(tenant: Tenant, Path((kind, id)): Path<(String, String)>) -> Result<Response> {
     let kind = crate::store::gaps::GapKind::parse(&kind)
@@ -3757,6 +3774,7 @@ pub fn ui_router() -> Router<AppState> {
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
         .route("/ui/artifacts/{id}/dwell", post(artifact_dwell))
         .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
+        .route("/ui/gaps/forget", post(gap_forget))
         // The page's spoken names. Housekeeping was the nav word for a while,
         // and `/ui/ops` still answers as the old door — but this goes straight
         // to the page rather than chaining through that shim, and it takes an
@@ -3970,33 +3988,48 @@ mod tests {
     }
 
     #[test]
-    fn the_ungrouped_gaps_say_what_being_ungrouped_means() {
-        // "not yet grouped (1)" over a question, with no indication that the
-        // grouping is a sweep that has not run rather than a state of the
-        // question itself.
+    fn a_gap_row_offers_a_box_to_fill_it_and_a_word_to_forget_it() {
+        // One row per hole, whether the sweep named it or not, and nothing on
+        // it about how the question failed: a person deciding what to do
+        // about a hole has the same two choices whichever way it was made.
         // `_gaps.html` is only ever included, so it has no template struct of
         // its own; this is one, standing in for the page that includes it.
         #[derive(Template)]
         #[template(path = "_gaps.html")]
         struct Gaps {
             gaps: Vec<GapGroup>,
-            loose: Vec<GapMember>,
-            ask_enabled: bool,
         }
         let html = askama::Template::render(&Gaps {
-            gaps: vec![],
-            ask_enabled: true,
-            loose: vec![GapMember {
-                kind: "ask".into(),
-                badge: "asked",
-                id: "g1".into(),
-                text: "wie werden bei chipkarten die private keys geschützt?".into(),
+            gaps: vec![GapGroup {
+                label: "Chipkarten".into(),
+                members: vec![
+                    GapMember {
+                        kind: "ask".into(),
+                        id: "g1".into(),
+                        text: "wie werden bei chipkarten die private keys geschützt?".into(),
+                    },
+                    GapMember {
+                        kind: "unmatched".into(),
+                        id: "s2".into(),
+                        text: "chipkarte schlüssel".into(),
+                    },
+                ],
             }],
         })
         .unwrap();
         assert!(
-            html.contains("has not run yet"),
-            "nothing says why these are ungrouped: {html}"
+            html.contains(r#"hx-post="/ui/capture""#),
+            "no box to fill it: {html}"
+        );
+        assert!(
+            html.contains(r#""members": "ask:g1,unmatched:s2""#),
+            "forget names every question in the group: {html}"
+        );
+        assert!(!html.contains("ask again"), "{html}");
+        assert!(!html.contains("covered"), "{html}");
+        assert!(
+            !html.contains("nothing near") && !html.contains("chipkarte schlüssel"),
+            "a group is its name, not its members: {html}"
         );
     }
 
@@ -5084,7 +5117,7 @@ mod tests {
     }
 
     /// The ask door, which is the workspace with the question already in the
-    /// box and Ask one press away. A gap's "ask again" links here.
+    /// box and Ask one press away — the link a question is carried by.
     ///
     /// Filled and still. A filled box otherwise carries a `load` trigger that
     /// searches it on arrival, and through this door that meant the question
@@ -10485,7 +10518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_capture_page_lists_knowledge_gaps_by_group_and_lets_one_be_covered() {
+    async fn the_insights_page_lists_a_gap_group_as_one_row_and_forgets_it_whole() {
         let (app, cookie, core) = app_session_and_core_with_feedback().await;
         // Two, because one gap is not a group: the sweep leaves a lone question
         // ungrouped rather than buying a name that restates it.
@@ -10514,36 +10547,51 @@ mod tests {
                 .unwrap();
             ids.push(id);
         }
-        let id = ids[0].clone();
-
-        // Before the sweep: listed, not yet grouped.
+        // Before the sweep: each under itself, with a box to fill it.
         let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(page.contains("Knowledge gaps"), "{page}");
-        assert!(page.contains("not yet grouped"), "{page}");
         assert!(page.contains("mount an E01"), "{page}");
+        assert!(page.contains(r#"hx-post="/ui/capture""#), "{page}");
 
+        // After: one row under the sweep's name, and forget names both.
         crate::jobs::gaps::sweep(&core).await.unwrap();
         let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(page.contains("Fake topic"), "{page}");
         assert!(
-            page.contains(&format!("/ui/gaps/ask/{id}/dismiss")),
+            !page.contains("mount an E01"),
+            "a group is its name: {page}"
+        );
+        let members = format!("ask:{},ask:{}", ids[1], ids[0]);
+        assert!(
+            page.contains(&members) || page.contains(&format!("ask:{},ask:{}", ids[0], ids[1])),
             "{page}"
         );
-        assert!(page.contains("/ui/ask?q=how"), "{page}");
 
-        for id in &ids {
-            let res = app
-                .clone()
-                .oneshot(form(&format!("/ui/gaps/ask/{id}/dismiss"), &cookie, ""))
-                .await
-                .unwrap();
-            assert_eq!(res.status(), StatusCode::OK);
-        }
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/gaps/forget",
+                &cookie,
+                &format!("members={members}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
         let page = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
             !page.contains("Knowledge gaps"),
-            "a covered gap must leave the page: {page}"
+            "a forgotten group must leave the page: {page}"
         );
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_malformed_member_is_refused_rather_than_skipped() {
+        let (app, cookie) = app_with_session().await;
+        let res = app
+            .oneshot(form("/ui/gaps/forget", &cookie, "members=ask:g1,nonsense"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -10622,8 +10670,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_question_the_operator_arrived_with_is_never_overwritten() {
-        // A gap's "ask again" is a question they chose. The sitting fills an
-        // empty box and nothing else.
+        // A question carried in the URL is one they chose. The sitting fills
+        // an empty box and nothing else.
         let (app, cookie, core) = app_session_and_core().await;
         hold_something(&core).await;
         get_body(&app, &cookie, "/ui/search/results?q=something%20else").await;

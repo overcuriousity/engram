@@ -1,50 +1,34 @@
-{# The holes, where capturing happens. A group is a name over the questions
-   in it; a question not yet grouped is shown under itself until the sweep
-   runs. "covered" is the operator's word, never the system's.
+{# The holes, one line each: what was asked and not answered, in the sweep's
+   words for a group and in the asker's own for one not yet grouped. Nothing
+   here says *how* a question failed — judged, asked, nothing near, pursued —
+   because the person reading this list is deciding what to do about it, and
+   the kinds all call for the same two things.
 
-   Four ways of saying the base did not answer, on one list: a search judged a
-   gap, a question answered "nothing here", a search nothing came close to, and
-   a run of searches that ended unsatisfied. The badge says which, because they
-   are not the same claim and an operator reading the list can tell them
-   apart. #}
-{% if !gaps.is_empty() || !loose.is_empty() %}
+   The two things. *Save* is the capture box, beside the hole it fills: what
+   was written goes through the ordinary reading, and `jobs::gaps::cover`
+   closes the hole on its own once the capture is stored — so the row is
+   swapped away on save, and the base rather than a button says whether it
+   was answered. *Forget* is the operator's word that this one is not worth
+   an answer, for every question in the group at once; it writes the same
+   dismissal a member used to be dismissed by, and nothing else reads it.
+
+   What went: a row per member, a badge per kind, "ask again" (typing it into
+   the box), and "covered" (a dismissal wearing an answer's name). #}
+{% if !gaps.is_empty() %}
 <h3 id="gaps">Knowledge gaps</h3>
-<div class="gaps">
+<p class="muted">Asked, and the base had nothing. Write what you know beside one and it closes on its own.</p>
+<ul class="gaps">
   {% for g in gaps %}
-  <details class="gap">
-    <summary>{{ g.label }} <span class="muted">({{ g.members.len() }})</span></summary>
-    <ul>
-      {% for m in g.members %}
-      <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
-        <span>{{ m.text }}</span>
-        <span class="badge">{{ m.badge }}</span>
-        {% if ask_enabled %}<a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>{% endif %}
-        <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/{{ m.kind }}/{{ m.id }}/dismiss"
-                hx-target="closest li" hx-swap="outerHTML">covered</button>
-      </li>
-      {% endfor %}
-    </ul>
-  </details>
+  <li class="gap" id="gap-{{ g.members[0].kind }}-{{ g.members[0].id }}">
+    <span class="gap-label">{{ g.label }}</span>
+    <form class="row" hx-post="/ui/capture" hx-target="closest .gap" hx-swap="outerHTML">
+      <textarea class="input" name="text" rows="1" required placeholder="add what you know"></textarea>
+      <button class="btn btn-sm">save</button>
+    </form>
+    <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/forget"
+            hx-vals='{"members": "{% for m in g.members %}{{ m.kind }}:{{ m.id }}{% if !loop.last %},{% endif %}{% endfor %}"}'
+            hx-target="closest .gap" hx-swap="outerHTML">forget</button>
+  </li>
   {% endfor %}
-  {% if !loose.is_empty() %}
-  <details class="gap">
-    {# Grouping is a sweep, not a property of the question: these are the ones
-       asked since it last ran. Without saying so, "not yet grouped" reads as
-       something wrong with the question itself. #}
-    <summary>not yet grouped <span class="muted">({{ loose.len() }})</span>
-      <span class="muted"> — the sweep that groups them has not run yet</span></summary>
-    <ul>
-      {% for m in loose %}
-      <li id="gap-{{ m.kind }}-{{ m.id }}" class="row">
-        <span>{{ m.text }}</span>
-        <span class="badge">{{ m.badge }}</span>
-        {% if ask_enabled %}<a class="btn btn-ghost btn-sm" href="/ui/ask?q={{ m.text|urlencode }}">ask again</a>{% endif %}
-        <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/{{ m.kind }}/{{ m.id }}/dismiss"
-                hx-target="closest li" hx-swap="outerHTML">covered</button>
-      </li>
-      {% endfor %}
-    </ul>
-  </details>
-  {% endif %}
-</div>
+</ul>
 {% endif %}

@@ -1,10 +1,9 @@
 //! Why a hit is where it is.
 //!
-//! A rank is the product of eight stages (see the design record,
-//! `docs/superpowers/specs/2026-08-26-ranking-explanation-design.md`, §3).
-//! Each used to say what it did in its own way or not at all. This is the one
-//! object all three doors read, so that the rail, MCP's meta line and the API
-//! cannot disagree about what happened to a result.
+//! A rank is the product of eight stages, and each used to say what it did
+//! in its own way or not at all. This is the one object all three doors read,
+//! so that the rail, MCP's meta line and the API cannot disagree about what
+//! happened to a result.
 //!
 //! Nothing here is stored and nothing here reorders anything.
 
