@@ -336,6 +336,20 @@ async fn spread_step(
 /// up; `short` — the lowest band acting as often — steps down. Wrong first.
 /// A rung at or above `auto_supersede` is never offered, and a hand-set value
 /// off the ladder holds.
+///
+/// The two signals read the noise term in opposite directions, and only
+/// `wrong` gets it for free. It asks for a *difference* to exceed the noise,
+/// so a thin band cannot fire it. `short` asks for a difference to stay
+/// *within* the noise, which a thin band satisfies by having no evidence at
+/// all — at one judged pair a side the term is 2.0 and every possible pair of
+/// rates is inside it, so the threshold would walk to the bottom rung on
+/// nothing. Hence `MIN_BAND`: the shape is right, it just has to be asked of
+/// enough pairs for the noise to mean anything.
+/// Judged pairs a band needs before `short` will read it. Ten a side puts
+/// the noise term at 0.2 — a fifth of the rate range, so the two bands have
+/// to be genuinely close for the difference to fall inside it.
+const MIN_BAND: usize = 10;
+
 pub fn next_review_min(
     current: f32,
     auto_supersede: f32,
@@ -357,6 +371,8 @@ pub fn next_review_min(
             .filter(|r| *r < auto_supersede);
     }
     if let (Some(ls), Some(as_)) = (rate(low.acted, low.judged), rate(above.acted, above.judged))
+        && low.judged >= MIN_BAND
+        && above.judged >= MIN_BAND
         && as_ - ls <= noise(low.judged, above.judged)
     {
         return at.checked_sub(1).map(|i| REVIEW_MINS[i]);
@@ -823,6 +839,19 @@ mod tests {
         assert_eq!(next_review_min(0.85, 0.95, b(10, 8, 0), b(10, 9, 0)), None);
         // the bottom rung cannot step down
         assert_eq!(next_review_min(0.80, 0.95, b(10, 9, 0), b(10, 9, 0)), None);
+        // a band too thin to say anything does not step down. Both bands act
+        // every time here, which is `short` at its strongest — and on one
+        // judged pair a side it is still nothing.
+        assert_eq!(next_review_min(0.88, 0.95, b(1, 1, 0), b(1, 1, 0)), None);
+        assert_eq!(next_review_min(0.88, 0.95, b(9, 9, 0), b(10, 10, 0)), None);
+        assert_eq!(
+            next_review_min(0.88, 0.95, b(10, 10, 0), b(10, 10, 0)),
+            Some(0.84),
+            "and does once both bands are wide enough"
+        );
+        // `wrong` needs no such floor: it asks the difference to exceed the
+        // noise, so a thin band cannot fire it either way.
+        assert_eq!(next_review_min(0.88, 0.95, b(1, 1, 1), b(1, 1, 0)), None);
     }
 
     /// `n` pairs in `[lo, hi)` settled by the judge, `acted` of them with a
@@ -888,7 +917,8 @@ mod tests {
                         subject_id: subject.clone(),
                         survivor_id: None,
                         detail: None,
-                        evidence: serde_json::json!({}),
+                        // The pair, because `band_record` counts pairs.
+                        evidence: serde_json::json!({ "pair_id": id }),
                         pair_score: Some(score),
                     })
                     .await

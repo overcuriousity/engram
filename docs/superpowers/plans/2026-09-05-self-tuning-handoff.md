@@ -115,6 +115,57 @@ are collected here because Part 5 leans on several of them.
   task: the flag is per instance and generations are per tenant. Insights is
   the disclosure.
 
+## Corrections made after 3b, on review
+
+Eight defects, all found by reading 3b as a whole rather than as a diff. Each
+is fixed on the branch with a test named for the rule it protects.
+
+- **`undo_actions_under` was matching on `survivor_id` alone.** A merge is an
+  ordinary artifact once it exists, so it can later *win* a supersession — and
+  that row names it as survivor too. Undoing the merge stamped that row as
+  well: the loser stayed superseded with no open row, invisible to both rules
+  and permanently `TAKEN_BACK` to dedupe. Scoped to `kind = 'merge'`.
+- **Rule 1 could not reach anything recent.** It read the 200 oldest *open*
+  rows, and an open row leaves that set only by being taken back — the rare
+  case. Past a few hundred actions it replayed the same 200 for ever. It now
+  walks on a cursor (meta `evolve.retract.acted_after`) and wraps at the end
+  of a lap. Rule 2's cursor only moves forward; this one has no end to reach.
+- **Both cursors are `(at, id)`, not a bare timestamp.** The clock is seconds,
+  so `created_at > cursor` loses the rest of a second whenever the limit cuts
+  inside one. `store::Cursor` is the shared type; readers order to match.
+- **`next_review_min`'s `short` signal had no floor.** It asks a difference to
+  stay *within* the noise term, which a thin band satisfies by having no
+  evidence: at one judged pair a side the term is 2.0 and every pair of rates
+  is inside it, so `review_min` walked to the bottom rung on nothing. `wrong`
+  needs no such floor because it asks the difference to *exceed* the noise.
+  `MIN_BAND = 10` judged pairs a side, and the shape is unchanged.
+- **`band_record` counted two different units.** `judged` was pairs, `acted`
+  was journal rows — and the journal is per artifact, so a merge writes two
+  and a supersession one. `acted / judged` therefore read each band's mix of
+  outcomes, not how often it led anywhere. Both sides are pairs now, grouped
+  on the `pair_id` in the row's own evidence.
+- **An evidence-undo was shrinking `judged` and not `acted`.** `merge::undo`
+  rewrites the pair's `decided_by` to `evidence`, which the `= 'model'` filter
+  then dropped — so taking a merge back pushed `review_min` *down*, when it is
+  the one event that most argues for pushing it up. `decided_by IN ('model',
+  'evidence')`.
+- **Rule 2's `best_live` folded from `0.0`.** A give-up whose replay returns no
+  live hit at all had no bar for a grave to clear, and over dense vectors
+  nearly every buried row clears zero — so an unanswerable query exhumed an
+  arbitrary artifact and blocked reap from ever reconsidering it. A give-up
+  with no live hit is now skipped: that is a gap, not an action to take back.
+- **Rule 2 read give-ups from any embedder.** The graveyard cosine comes from
+  the observation's own vector and model while the replay runs whatever is
+  loaded now, so after a model change the two compared similarities were from
+  different spaces. Give-ups not under the live model are skipped, the way
+  rule 1 skips other eras.
+- **`supersede_with` / `deprecate_with` journaled outside the transaction.**
+  Both documented that nothing can read a hidden artifact with no row, and
+  both rules and the disclosure are built on it, but the insert ran afterwards
+  on another connection. `set_superseded_by_with` and
+  `set_artifact_status_with` now carry the row in the same transaction, the
+  way `bury` always has.
+
 ## What a later stage would have to build on
 
 The stage 3 spec's "What does not move yet" is the list: `stale_after_days` /
@@ -164,5 +215,5 @@ From the stage 1 and 2 prompts and this session:
 4. `2026-09-05-self-tuning-stage-3a.md` — built, with the admissions at its
    top.
 5. `2026-09-05-self-tuning-stage-3b.md` — built, Parts B and C in one plan,
-   with the admissions at its top. The stage 3 spec is complete. Baseline at
-   the end of 3b: 2584 passing, 0 failing, 1 ignored.
+   with the admissions at its top. The stage 3 spec is complete. Baseline
+   after the review corrections above: 2590 passing, 0 failing, 1 ignored.

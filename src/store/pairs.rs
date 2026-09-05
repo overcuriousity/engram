@@ -424,14 +424,31 @@ impl Store {
     }
 
     /// Pairs the judge settled with a cosine in `[lo, hi)`, and, from the
-    /// corpus journal, how many of the base's dedupe actions in that band
-    /// there were and how many were taken back. What the review threshold's
-    /// rule reads: two of these, for the band just above the threshold and
-    /// for everything above that.
+    /// corpus journal, how many of those pairs the base acted on and how many
+    /// of those it took back. What the review threshold's rule reads: two of
+    /// these, for the band just above the threshold and for everything above
+    /// that.
+    ///
+    /// All three counts are pairs, because the rule divides them by each other
+    /// and a rate needs one unit. The journal is per *artifact* — a merge
+    /// writes a row for each original and "discard both" one for each side,
+    /// while a supersession writes one — so counting its rows would make
+    /// `acted / judged` run to two in a band that merges and to one in a band
+    /// that supersedes, and the rule would be reading each band's mix of
+    /// outcomes rather than how often it leads anywhere. The pair is named in
+    /// the row's own evidence.
+    ///
+    /// `decided_by` admits `evidence` alongside `model` for the same reason:
+    /// the only thing that writes it is `merge::undo` taking one of these very
+    /// actions back, so dropping those rows would shrink the denominator every
+    /// time the base retracts something while leaving the numerator alone —
+    /// an undo would push the threshold down, when it is the one event that
+    /// most clearly argues for pushing it up.
     pub async fn band_record(&self, lo: f32, hi: f32) -> Result<BandRecord> {
         let judged: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM artifact_pairs
-              WHERE score >= ? AND score < ? AND state <> 'pending' AND decided_by = 'model'",
+              WHERE score >= ? AND score < ? AND state <> 'pending'
+                AND decided_by IN ('model', 'evidence')",
         )
         .bind(lo)
         .bind(hi)
@@ -439,9 +456,12 @@ impl Store {
         .await?;
         let r = sqlx::query(
             "SELECT COUNT(*) AS acted,
-                    COALESCE(SUM(CASE WHEN undone_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS undone
-               FROM corpus_actions
-              WHERE job = 'dedupe' AND pair_score >= ? AND pair_score < ?",
+                    COALESCE(SUM(undone), 0) AS undone
+               FROM (SELECT MAX(undone_at IS NOT NULL) AS undone
+                       FROM corpus_actions
+                      WHERE job = 'dedupe' AND pair_score >= ? AND pair_score < ?
+                        AND json_extract(evidence_json, '$.pair_id') IS NOT NULL
+                      GROUP BY json_extract(evidence_json, '$.pair_id'))",
         )
         .bind(lo)
         .bind(hi)
@@ -1438,18 +1458,26 @@ mod tests {
             ids.push(id);
         }
         // The base acted on two of them; the lower one was taken back.
-        let row = |score: f32| NewAction {
+        let row = |score: f32, pair: i64, subject: &str| NewAction {
             job: Job::Dedupe,
             kind: Kind::Supersede,
-            subject_id: format!("s{score}"),
+            subject_id: subject.to_string(),
             survivor_id: None,
             detail: None,
-            evidence: serde_json::json!({}),
+            evidence: serde_json::json!({ "pair_id": pair }),
             pair_score: Some(score),
         };
-        s.record_action(&row(0.81)).await.unwrap();
-        s.record_action(&row(0.90)).await.unwrap();
+        s.record_action(&row(0.81, ids[0], "s0.81")).await.unwrap();
+        s.record_action(&row(0.90, ids[2], "s0.90")).await.unwrap();
         s.undo_action_on("s0.81", Kind::Supersede, UndoneBy::Operator, "back")
+            .await
+            .unwrap();
+        // A merge writes one row per original. Both name the same pair, so the
+        // band counts one action, not two.
+        s.record_action(&row(0.86, ids[1], "s0.86-a"))
+            .await
+            .unwrap();
+        s.record_action(&row(0.86, ids[1], "s0.86-b"))
             .await
             .unwrap();
 
@@ -1457,10 +1485,10 @@ mod tests {
             s.band_record(0.80, 0.88).await.unwrap(),
             BandRecord {
                 judged: 2,
-                acted: 1,
+                acted: 2,
                 undone: 1
             },
-            "the pending pair is not judged"
+            "the pending pair is not judged, and one pair is one action"
         );
         assert_eq!(
             s.band_record(0.88, 1.0).await.unwrap(),

@@ -1159,9 +1159,9 @@ impl Core {
         self.supersede_with(loser_id, winner_id, None).await
     }
 
-    /// `supersede`, journaling what a corpus job did. The row is written under
-    /// the lifecycle guard once the artifact is hidden, so nothing can read a
-    /// hidden artifact with no row, or a row for an artifact still live.
+    /// `supersede`, journaling what a corpus job did. The row rides the same
+    /// transaction as the hiding, so nothing can read a hidden artifact with
+    /// no row, or a row for an artifact still live.
     pub async fn supersede_with(
         &self,
         loser_id: &str,
@@ -1185,7 +1185,7 @@ impl Core {
             }
         }
         self.store
-            .set_superseded_by(loser_id, Some(winner_id))
+            .set_superseded_by_with(loser_id, Some(winner_id), journal.as_ref())
             .await?;
         self.vectors
             .set_lifecycle(loser_id, ArtifactStatus::Superseded, Some(winner_id))
@@ -1193,9 +1193,6 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&loser_id.to_string()))
             .await?;
-        if let Some(a) = journal {
-            self.store.record_action(&a).await?;
-        }
         // Every other question about the loser now belongs to the winner. Done
         // after the artifact is hidden, and its failure is logged rather than
         // returned: the supersession itself has happened by this point, so
@@ -1280,7 +1277,7 @@ impl Core {
             )));
         }
         self.store
-            .set_artifact_status(id, ArtifactStatus::Deprecated)
+            .set_artifact_status_with(id, ArtifactStatus::Deprecated, journal.as_ref())
             .await?;
         self.vectors
             .set_lifecycle(id, ArtifactStatus::Deprecated, None)
@@ -1288,9 +1285,6 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
             .await?;
-        if let Some(a) = journal {
-            self.store.record_action(&a).await?;
-        }
         tracing::info!(artifact_id = id, "deprecated an artifact");
         Ok(())
     }

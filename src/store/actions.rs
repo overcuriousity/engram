@@ -204,14 +204,35 @@ impl Store {
     /// Open rows — not taken back — of these kinds, oldest first, at most
     /// `limit` in all.
     pub async fn open_actions(&self, kinds: &[Kind], limit: usize) -> Result<Vec<Action>> {
+        self.open_actions_after(kinds, &super::Cursor::default(), limit)
+            .await
+    }
+
+    /// The same, from a position rather than from the beginning.
+    ///
+    /// A reader with a limit needs this: an open row leaves the set only by
+    /// being taken back, which is the rare case, so a reader that always
+    /// starts at the oldest row sees the same `limit` rows on every pass and
+    /// never reaches anything written since. Rule 1 walks forward on this
+    /// cursor and wraps.
+    pub async fn open_actions_after(
+        &self,
+        kinds: &[Kind],
+        after: &super::Cursor,
+        limit: usize,
+    ) -> Result<Vec<Action>> {
         let mut out = Vec::new();
         for kind in kinds {
             let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM corpus_actions
                   WHERE kind = ? AND undone_at IS NULL
+                    AND (at > ? OR (at = ? AND id > ?))
                   ORDER BY at ASC, id ASC LIMIT ?"
             )))
             .bind(kind.as_str())
+            .bind(after.at)
+            .bind(after.at)
+            .bind(&after.id)
             .bind(limit as i64)
             .fetch_all(&self.pool)
             .await?;
@@ -276,8 +297,15 @@ impl Store {
         .rows_affected())
     }
 
-    /// Stamp every open row whose survivor is `survivor_id`: a merge's
+    /// Stamp every open *merge* row whose survivor is `survivor_id`: a merge's
     /// originals, taken back together.
+    ///
+    /// Only the merge rows. A merge is an ordinary artifact once it exists, so
+    /// it can later win a supersession — and that row names it as `survivor_id`
+    /// too. Stamping it here would report an undo that never happened, hide the
+    /// still-superseded loser from both retract rules (`open_action_on` returns
+    /// nothing for a stamped row), and make dedupe refuse it forever as
+    /// `TAKEN_BACK`.
     pub async fn undo_actions_under(
         &self,
         survivor_id: &str,
@@ -286,7 +314,7 @@ impl Store {
     ) -> Result<u64> {
         Ok(sqlx::query(
             "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?
-              WHERE survivor_id = ? AND undone_at IS NULL",
+              WHERE survivor_id = ? AND kind = 'merge' AND undone_at IS NULL",
         )
         .bind(now())
         .bind(by.as_str())
@@ -407,6 +435,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn taking_a_merge_back_leaves_a_supersession_the_merge_won() {
+        let store = Store::memory().await.unwrap();
+        store.record_action(&merge_of("a", "m")).await.unwrap();
+        // `m` exists now, so it can win a supersession of its own.
+        store
+            .record_action(&NewAction {
+                kind: Kind::Supersede,
+                ..merge_of("x", "m")
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .undo_actions_under("m", UndoneBy::Evidence, "the survivor was not found")
+                .await
+                .unwrap(),
+            1,
+            "only the merge row"
+        );
+        assert!(
+            store
+                .open_action_on("x", Kind::Supersede)
+                .await
+                .unwrap()
+                .is_some(),
+            "x is still superseded, so its row is still open"
+        );
+        assert!(!store.action_was_undone("x", Kind::Supersede).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn open_actions_walks_every_kind_asked_for_oldest_first() {
         let store = Store::memory().await.unwrap();
         store
@@ -430,6 +489,39 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reader_with_a_limit_can_walk_past_the_rows_it_has_seen() {
+        let store = Store::memory().await.unwrap();
+        for subject in ["a", "b", "c"] {
+            store.record_action(&merge_of(subject, "m")).await.unwrap();
+        }
+        // All three in the same second, which is the whole clock: the id has
+        // to break the tie or the second row is never reached.
+        let first = store.open_actions(&[Kind::Merge], 1).await.unwrap();
+        let at = super::super::Cursor {
+            at: first[0].at,
+            id: first[0].id.clone(),
+        };
+        let rest = store
+            .open_actions_after(&[Kind::Merge], &at, 10)
+            .await
+            .unwrap();
+        assert_eq!(rest.len(), 2);
+        assert!(rest.iter().all(|a| a.id != first[0].id));
+        let end = super::super::Cursor {
+            at: rest[1].at,
+            id: rest[1].id.clone(),
+        };
+        assert!(
+            store
+                .open_actions_after(&[Kind::Merge], &end, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the end of a lap: the caller starts over from the default"
         );
     }
 

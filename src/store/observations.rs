@@ -221,16 +221,27 @@ impl Store {
         .collect()
     }
 
-    /// Give-ups recorded after `after` (a `created_at`), oldest first, at
-    /// most `limit`. What rule 2 reads, behind a cursor it keeps in `meta`.
-    pub async fn gave_ups_since(&self, after: i64, limit: usize) -> Result<Vec<Observation>> {
+    /// Give-ups recorded after `after`, oldest first, at most `limit`. What
+    /// rule 2 reads, behind a cursor it keeps in `meta`.
+    ///
+    /// `(created_at, id)` and not `created_at` alone: the clock is seconds, so
+    /// a bare `created_at > ?` loses whatever else shares the cursor's second
+    /// when `limit` cuts inside it. See `Cursor`.
+    pub async fn gave_ups_since(
+        &self,
+        after: &crate::store::Cursor,
+        limit: usize,
+    ) -> Result<Vec<Observation>> {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM observations
-              WHERE source = 'gave_up' AND created_at > ? AND excluded_at IS NULL
+              WHERE source = 'gave_up' AND excluded_at IS NULL
+                AND (created_at > ? OR (created_at = ? AND id > ?))
               ORDER BY created_at ASC, id ASC
               LIMIT ?"
         )))
-        .bind(after)
+        .bind(after.at)
+        .bind(after.at)
+        .bind(&after.id)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?
@@ -342,6 +353,34 @@ mod tests {
             .unwrap();
         assert_eq!(back[0].artifact_id, None);
         assert_eq!(back[0].rank, None);
+    }
+
+    #[tokio::test]
+    async fn the_give_up_cursor_does_not_lose_the_rest_of_its_own_second() {
+        let (store, generation) = base().await;
+        // Three give-ups, all in one second — which is the whole resolution of
+        // the clock, so this is what a busy moment looks like.
+        for _ in 0..3 {
+            store
+                .record_observation(&obs(&generation, None, None, Source::GaveUp))
+                .await
+                .unwrap();
+        }
+        let cursor = crate::store::Cursor::default();
+        let first = store.gave_ups_since(&cursor, 1).await.unwrap();
+        assert_eq!(first.len(), 1);
+        let cursor = crate::store::Cursor {
+            at: first[0].created_at,
+            id: first[0].id.clone(),
+        };
+        let rest = store.gave_ups_since(&cursor, 10).await.unwrap();
+        assert_eq!(rest.len(), 2, "the other two share the cursor's second");
+        assert!(rest.iter().all(|o| o.id != first[0].id));
+        let last = crate::store::Cursor {
+            at: rest[1].created_at,
+            id: rest[1].id.clone(),
+        };
+        assert!(store.gave_ups_since(&last, 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

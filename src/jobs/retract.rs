@@ -61,8 +61,17 @@ pub async fn run(core: &Core, live: &Generation, started: i64) -> Result<Retract
     Ok(out)
 }
 
-/// Where rule 2 has read the give-ups up to: a `created_at`, in `meta`.
+/// Where rule 2 has read the give-ups up to: a `Cursor`, in `meta`.
 const GAVE_UP_AFTER: &str = "evolve.retract.gave_up_after";
+
+/// Where rule 1 has read the open actions up to: a `Cursor`, in `meta`.
+///
+/// Rule 2's cursor only ever moves forward, because an observation is written
+/// once and never reconsidered. This one wraps. An open action stays open for
+/// as long as the evidence keeps agreeing with it — which is nearly always —
+/// so there is no end of the table to arrive at, only a lap to finish and
+/// start again.
+const ACTED_AFTER: &str = "evolve.retract.acted_after";
 
 /// What the rules did the last time they ran, as JSON in `meta`, for the
 /// page: `Retracted` plus `at`.
@@ -81,26 +90,38 @@ pub const LAST_RUN: &str = "evolve.retract.last";
 pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)> {
     use crate::store::artifacts::ArtifactStatus;
     let current = *core.ranking.read().expect("ranking lock");
-    let after: i64 = core
+    let after = core
         .store
         .meta_get(GAVE_UP_AFTER)
         .await?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        .map(|s| crate::store::Cursor::parse(&s))
+        .unwrap_or_default();
     let mut restored = 0;
-    let mut cursor = after;
+    let mut cursor = after.clone();
+    let live_model = core.embedder.model().to_string();
     for o in core
         .store
-        .gave_ups_since(after, sweep::OBSERVATION_LIMIT)
+        .gave_ups_since(&after, sweep::OBSERVATION_LIMIT)
         .await?
     {
         if core.store.activity_since(started).await? {
-            core.store
-                .meta_set(GAVE_UP_AFTER, &cursor.to_string())
-                .await?;
+            core.store.meta_set(GAVE_UP_AFTER, &cursor.encode()).await?;
             return Ok((restored, true));
         }
-        cursor = o.created_at;
+        cursor = crate::store::Cursor {
+            at: o.created_at,
+            id: o.id.clone(),
+        };
+        // Both sides of the comparison below have to come from one vector
+        // space. `graveyard_vectors` is asked for the observation's model and
+        // the cosine is taken against the observation's own query vector,
+        // while the replay runs whatever is loaded now — so a give-up recorded
+        // under an older embedder would have its buried candidates scored in
+        // one space and its live hits in another, and the two numbers would
+        // not be comparable at all. Rule 1 draws the same line by era.
+        if o.embed_model != live_model {
+            continue;
+        }
         core.remember_query_vector(&o.query, o.query_vec.clone());
         let q = crate::core::search::SearchQuery {
             q: o.query.clone(),
@@ -119,11 +140,19 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
         let is_hidden = |h: &crate::core::search::SearchResult| {
             h.superseded_by.is_some() || h.status.is_some_and(|s| s != ArtifactStatus::Active)
         };
-        let best_live = hits
+        // The floor the hidden candidates have to clear, and a real one: with
+        // no live hit at all there is nothing to be better than, and a fold
+        // from zero would accept the closest grave whatever its cosine —
+        // which, over dense vectors, is very nearly any grave. A query the
+        // base answers with nothing is a gap, not a burial to take back.
+        let Some(best_live) = hits
             .iter()
             .filter(|h| !is_hidden(h))
             .filter_map(|h| h.similarity)
-            .fold(0.0f32, f32::max);
+            .reduce(f32::max)
+        else {
+            continue;
+        };
         // The best hidden hit the base itself hid, with the row that says so.
         let mut best_hidden: Option<(f32, crate::store::actions::Action)> = None;
         for h in hits.iter().filter(|h| is_hidden(h)) {
@@ -185,9 +214,7 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
             "restored what a search given up on would have been answered by"
         );
     }
-    core.store
-        .meta_set(GAVE_UP_AFTER, &cursor.to_string())
-        .await?;
+    core.store.meta_set(GAVE_UP_AFTER, &cursor.encode()).await?;
     Ok((restored, false))
 }
 
@@ -201,6 +228,12 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
 /// subject had, and the base takes it back. A subject nobody had used has no
 /// evidence and is left alone.
 ///
+/// `ACTION_LIMIT` rows a pass, from where the last pass stopped, wrapping at
+/// the end. Reading the oldest rows every time would be no rule at all past
+/// the first few hundred actions: an open row leaves the set only by being
+/// taken back, so the same rows would be replayed for ever and nothing
+/// written since would ever be looked at.
+///
 /// Returns (subjects reconsidered, actions undone, stopped early).
 pub(crate) async fn rule_one(
     core: &Core,
@@ -210,14 +243,36 @@ pub(crate) async fn rule_one(
     let current = *core.ranking.read().expect("ranking lock");
     let mut reconsidered = 0;
     let mut undone = 0;
-    for a in core
+    let after = core
         .store
-        .open_actions(&[Kind::Merge, Kind::Supersede], ACTION_LIMIT)
+        .meta_get(ACTED_AFTER)
         .await?
-    {
+        .map(|s| crate::store::Cursor::parse(&s))
+        .unwrap_or_default();
+    let kinds = [Kind::Merge, Kind::Supersede];
+    let mut batch = core
+        .store
+        .open_actions_after(&kinds, &after, ACTION_LIMIT)
+        .await?;
+    // The end of a lap. Nothing left after the cursor and the cursor is not at
+    // the start, so start it over: the rows before it are open still, and this
+    // is the pass that gets back to them.
+    if batch.is_empty() && after != crate::store::Cursor::default() {
+        batch = core
+            .store
+            .open_actions_after(&kinds, &crate::store::Cursor::default(), ACTION_LIMIT)
+            .await?;
+    }
+    let mut cursor = after;
+    for a in batch {
         if core.store.activity_since(started).await? {
+            core.store.meta_set(ACTED_AFTER, &cursor.encode()).await?;
             return Ok((reconsidered, undone, true));
         }
+        cursor = crate::store::Cursor {
+            at: a.at,
+            id: a.id.clone(),
+        };
         // A merge's rows are stamped together by the first original that
         // fails; the rest of that merge are no longer open by the time the
         // loop reaches them.
@@ -291,6 +346,7 @@ pub(crate) async fn rule_one(
             "took a corpus action back on evidence"
         );
     }
+    core.store.meta_set(ACTED_AFTER, &cursor.encode()).await?;
     Ok((reconsidered, undone, false))
 }
 
@@ -444,6 +500,40 @@ mod tests {
                 .unwrap()
                 .superseded_by
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rule_gets_back_to_an_action_it_has_already_walked_past() {
+        // The same base as above: one open supersession the gate holds. It
+        // stays open, so a reader that only ever looked at the oldest rows
+        // would be stuck on it for ever — and one that only walked forward
+        // would never see it again. It has to come round.
+        let (core, order) = seeded().await;
+        let g = generation_for(&core).await;
+        observed(&core, &g.id, &order[3], 4).await;
+        observed(&core, &g.id, &order[3], 4).await;
+        core.supersede_with(
+            &order[3],
+            &order[0],
+            Some(supersede_row(&order[3], &order[0])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rule_one(&core, &g, crate::store::now()).await.unwrap(),
+            (1, 0, false)
+        );
+        let cursor = core.store.meta_get(ACTED_AFTER).await.unwrap().unwrap();
+        assert_ne!(
+            crate::store::Cursor::parse(&cursor),
+            crate::store::Cursor::default(),
+            "the pass left a position behind"
+        );
+        assert_eq!(
+            rule_one(&core, &g, crate::store::now()).await.unwrap(),
+            (1, 0, false),
+            "the lap ended, so it starts over"
         );
     }
 
@@ -670,6 +760,62 @@ mod tests {
             (0, false)
         );
         assert!(!core.store.get_artifact(&other).await.unwrap().in_results());
+    }
+
+    #[tokio::test]
+    async fn a_give_up_with_nothing_live_to_beat_restores_nothing() {
+        // Both notes hidden, so the replay comes back with no live hit at all.
+        // There is no bar for a buried candidate to clear here, and taking the
+        // best of nothing as zero would restore whichever artifact happened to
+        // be least unlike the query. A base that answers a query with nothing
+        // has a gap, not an action to take back.
+        let (core, answer, other) = one_answer().await;
+        let g = generation_for(&core).await;
+        core.deprecate_with(&answer, Some(discard_row(&answer)))
+            .await
+            .unwrap();
+        core.deprecate_with(&other, Some(discard_row(&other)))
+            .await
+            .unwrap();
+        gave_up(&core, &g.id).await;
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
+    }
+
+    #[tokio::test]
+    async fn a_give_up_recorded_under_another_embedder_is_not_read() {
+        // Its query vector is in one space and the live replay's hits are in
+        // another; the two similarities the rule compares would not be on the
+        // same scale, and neither would the graveyard's.
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        core.deprecate_with(&answer, Some(discard_row(&answer)))
+            .await
+            .unwrap();
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        core.store
+            .record_observation(&NewObservation {
+                generation_id: g.id.clone(),
+                query: QUERY.into(),
+                query_vec,
+                embed_model: "some-other-model".into(),
+                artifact_id: None,
+                rank: None,
+                source: Source::GaveUp,
+                event_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
     }
 
     #[tokio::test]

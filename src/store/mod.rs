@@ -376,6 +376,41 @@ pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// Where a job has read a table up to, kept in `meta` between passes.
+///
+/// A second is the whole clock here, so a bare timestamp is not a position:
+/// when a page's limit cuts inside a group of rows written in the same
+/// second, `created_at > cursor` never returns the rest of that second and
+/// those rows are lost. The row id breaks the tie, and every reader that
+/// takes one of these orders by `(at, id)` to match.
+///
+/// Written as `at|id`. A bare integer reads as `(at, "")` — an older cursor,
+/// or none at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cursor {
+    pub at: i64,
+    pub id: String,
+}
+
+impl Cursor {
+    pub fn parse(s: &str) -> Self {
+        match s.split_once('|') {
+            Some((at, id)) => Cursor {
+                at: at.parse().unwrap_or(0),
+                id: id.to_string(),
+            },
+            None => Cursor {
+                at: s.parse().unwrap_or(0),
+                id: String::new(),
+            },
+        }
+    }
+
+    pub fn encode(&self) -> String {
+        format!("{}|{}", self.at, self.id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

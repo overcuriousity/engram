@@ -1154,6 +1154,24 @@ impl Store {
     /// consistent, so callers of `unsupersede`/`heal_dangling_supersessions`
     /// need no changes of their own.
     pub async fn set_superseded_by(&self, artifact_id: &str, by: Option<&str>) -> Result<()> {
+        self.set_superseded_by_with(artifact_id, by, None).await
+    }
+
+    /// The same, with the journal row for it written in the same transaction.
+    ///
+    /// Not two statements. `supersede_with` and `deprecate_with` both promise
+    /// that nothing can read a hidden artifact with no row, and both retract
+    /// rules and the Insights disclosure are built on that promise: a hidden
+    /// artifact with no open row is invisible to `open_action_on`, so it can
+    /// never be restored and is never disclosed. A separate insert afterwards
+    /// leaves exactly that state behind whenever it fails. `bury` has always
+    /// journaled inside its own transaction; these two now do too.
+    pub async fn set_superseded_by_with(
+        &self,
+        artifact_id: &str,
+        by: Option<&str>,
+        journal: Option<&crate::store::actions::NewAction>,
+    ) -> Result<()> {
         let status = if by.is_some() {
             ArtifactStatus::Superseded
         } else {
@@ -1177,12 +1195,16 @@ impl Store {
         .bind(status.as_str())
         .bind(by.is_some())
         .bind(now())
-        .bind(artifact_id)
-        .execute(&self.pool)
-        .await?;
+        .bind(artifact_id);
+        let mut tx = self.pool.begin().await?;
+        let res = res.execute(&mut *tx).await?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
+        if let Some(a) = journal {
+            crate::store::actions::insert(&mut *tx, a).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1191,11 +1213,23 @@ impl Store {
     /// other end. Does not touch `superseded_by`; callers that mean to clear
     /// a supersession should use `set_superseded_by(id, None)` instead.
     pub async fn set_artifact_status(&self, id: &str, status: ArtifactStatus) -> Result<()> {
+        self.set_artifact_status_with(id, status, None).await
+    }
+
+    /// The same, with the journal row for it written in the same transaction;
+    /// see `set_superseded_by_with`.
+    pub async fn set_artifact_status_with(
+        &self,
+        id: &str,
+        status: ArtifactStatus,
+        journal: Option<&crate::store::actions::NewAction>,
+    ) -> Result<()> {
         // Marked dirty in the same statement, like `set_superseded_by`. See
         // `dirty_lifecycle_artifacts`.
         // The same `retired_at` protocol as `set_superseded_by`: stamped on
         // the way out of `active`, cleared on the way back, in the statement
         // that moves the status.
+        let mut tx = self.pool.begin().await?;
         self.expect_updated(
             sqlx::query(
                 "UPDATE artifacts SET status = ?, lifecycle_dirty = 1,
@@ -1206,9 +1240,14 @@ impl Store {
             .bind(status != ArtifactStatus::Active)
             .bind(now())
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?,
-        )
+        )?;
+        if let Some(a) = journal {
+            crate::store::actions::insert(&mut *tx, a).await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Artifacts whose lifecycle row has changed since the payload was last
