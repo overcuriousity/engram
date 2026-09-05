@@ -73,7 +73,7 @@ pub fn candidates(
     tried: &[crate::store::generations::GenerationParams],
     budget: usize,
 ) -> Vec<RankingParams> {
-    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS};
+    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS, PRIME_LIFTS};
     let recency = outward(
         &RECENCY,
         |v| *v < current.recency_weight,
@@ -95,6 +95,11 @@ pub fn candidates(
         |v| *v < current.recency_half_life_days,
         |v| *v == current.recency_half_life_days,
     );
+    let lifts = outward(
+        &PRIME_LIFTS,
+        |v| *v < current.prime_lift,
+        |v| *v == current.prime_lift,
+    );
 
     let mut out = vec![current];
     let longest = [
@@ -102,6 +107,7 @@ pub fn candidates(
         caps.len(),
         multipliers.len(),
         half_lives.len(),
+        lifts.len(),
     ]
     .into_iter()
     .max()
@@ -128,6 +134,12 @@ pub fn candidates(
         if let Some(recency_half_life_days) = half_lives.get(i) {
             out.push(RankingParams {
                 recency_half_life_days: *recency_half_life_days,
+                ..current
+            });
+        }
+        if let Some(prime_lift) = lifts.get(i) {
+            out.push(RankingParams {
+                prime_lift: *prime_lift,
                 ..current
             });
         }
@@ -227,6 +239,10 @@ pub(crate) struct Pair {
     pub(crate) query: String,
     pub(crate) satisfies: Vec<String>,
     pub(crate) query_vec: Option<Vec<f32>>,
+    /// What priming read when the search this came from ran, where it was
+    /// recorded. Handed in on the Judge door so a rung of `prime_lift` can be
+    /// replayed; a pair without one ties on that axis.
+    pub(crate) priming: Option<crate::core::search::Priming>,
 }
 
 /// How many observations one sweep will draw on. A bound rather than a
@@ -265,9 +281,11 @@ async fn rank_of(
         include_deprecated: false,
         include_superseded: false,
     };
-    let (results, _) = core
-        .search_with_ranking(&q, params, crate::store::feedback::Door::Judge)
-        .await?;
+    let mut origin = crate::store::feedback::Origin::from(crate::store::feedback::Door::Judge);
+    if let Some(p) = &pair.priming {
+        origin = origin.primed_as(p.clone());
+    }
+    let (results, _) = core.search_with_ranking(&q, params, origin).await?;
     Ok(results
         .iter()
         .position(|r| pair.satisfies.iter().any(|id| id == &r.artifact_id)))
@@ -321,6 +339,7 @@ async fn pairs_to_replay(core: &Core) -> Result<(Vec<Pair>, i64)> {
                     query: p.query,
                     satisfies,
                     query_vec: None,
+                    priming: None,
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -384,10 +403,15 @@ pub(crate) async fn observation_pairs(
         match core.store.get_artifact(artifact).await {
             Ok(_) => {
                 let satisfies = crate::eval::satisfied_by(core, artifact).await;
+                let priming = match o.event_id.as_deref() {
+                    Some(e) => core.store.search_context(e).await?,
+                    None => None,
+                };
                 pairs.push(Pair {
                     query: o.query,
                     satisfies,
                     query_vec: Some(o.query_vec),
+                    priming,
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -826,6 +850,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_opened_observation_replays_with_what_its_search_recorded() {
+        use crate::core::search::Priming;
+        use crate::store::feedback::NewCandidate;
+        let (core, order) = seeded().await;
+        let generation = a_generation(&core).await;
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    fold_onto: None,
+                    query: QUERY.into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![NewCandidate {
+                        artifact_id: order[5].clone(),
+                        score: 0.5,
+                        similarity: Some(0.5),
+                        shown: true,
+                    }],
+                    answered: false,
+                    context: Some(Priming {
+                        activation: Default::default(),
+                        sitting: [order[5].clone()].into_iter().collect(),
+                        due: Default::default(),
+                    }),
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        core.store.open_event(&id, &order[5]).await.unwrap();
+
+        let (pairs, _) = observation_pairs(&core, &generation).await.unwrap();
+        assert_eq!(pairs.len(), 1);
+        let priming = pairs[0]
+            .priming
+            .as_ref()
+            .expect("the pair carries its context");
+        assert!(priming.sitting.contains(&order[5]));
+    }
+
+    #[tokio::test]
     async fn a_candidate_that_lifts_two_pairs_is_recorded_as_a_recommendation() {
         let (core, order) = seeded().await;
         // The second source's first two chunks: buried behind the leading
@@ -1154,7 +1223,8 @@ mod tests {
             1 + (RECENCY.len() - 1)
                 + (CAPS.len() - 1)
                 + (crate::core::ranking::MULTIPLIERS.len() - 1)
-                + (crate::core::ranking::HALF_LIVES.len() - 1),
+                + (crate::core::ranking::HALF_LIVES.len() - 1)
+                + (crate::core::ranking::PRIME_LIFTS.len() - 1),
             "every rung on every ladder, once, and nothing off them"
         );
     }
@@ -1170,6 +1240,59 @@ mod tests {
         for c in &all {
             assert!(moved(*c, current) <= 1, "{c:?}");
         }
+    }
+
+    #[test]
+    fn the_chooser_walks_the_lift_ladder_upward_from_zero() {
+        let current = RankingParams::default();
+        let grid = candidates(current, &[], crate::jobs::tune::BUDGET);
+        let lifts: Vec<usize> = grid
+            .iter()
+            .map(|c| c.prime_lift)
+            .filter(|l| *l != current.prime_lift)
+            .collect();
+        assert_eq!(lifts, vec![1, 2, 4]);
+    }
+
+    #[tokio::test]
+    async fn a_pair_with_a_sitting_ranks_differently_at_lift_two_and_the_same_without_one() {
+        use crate::core::search::Priming;
+        let (core, order) = seeded().await;
+        // The last-ranked hit was read in this sitting: at lift 2 it climbs
+        // two places on the Judge door, where priming is otherwise off.
+        let with = Pair {
+            query: QUERY.into(),
+            satisfies: vec![order[5].clone()],
+            query_vec: None,
+            priming: Some(Priming {
+                activation: Default::default(),
+                sitting: [order[5].clone()].into_iter().collect(),
+                due: Default::default(),
+            }),
+        };
+        let without = Pair {
+            priming: None,
+            ..with.clone()
+        };
+        let current = *core.ranking.read().unwrap();
+        let lifted = RankingParams {
+            prime_lift: 2,
+            ..current
+        };
+        assert_eq!(
+            rank_of(&core, &with, current, false).await.unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            rank_of(&core, &with, lifted, false).await.unwrap(),
+            Some(3),
+            "two places, no further, never past rank 1"
+        );
+        assert_eq!(
+            rank_of(&core, &without, lifted, false).await.unwrap(),
+            Some(5),
+            "no context, no lift: every rung is the same list"
+        );
     }
 
     #[test]

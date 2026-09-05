@@ -99,6 +99,10 @@ pub struct Origin {
     /// The event this search is a rewording of, named by the page that is
     /// typing. See `NewEvent::fold_onto`.
     pub fold_onto: Option<String>,
+    /// Priming inputs handed in by a replay, on the Judge door where priming
+    /// is otherwise off. Serving never sets this; the idle pass does, from
+    /// `search_context`, so the pass sees what the searcher saw.
+    pub replay: Option<crate::core::search::Priming>,
 }
 
 impl From<Door> for Origin {
@@ -108,6 +112,7 @@ impl From<Door> for Origin {
             scope: None,
             session: None,
             fold_onto: None,
+            replay: None,
         }
     }
 }
@@ -120,6 +125,7 @@ impl Door {
             scope: Some(scope.into()),
             session: None,
             fold_onto: None,
+            replay: None,
         }
     }
 }
@@ -136,6 +142,13 @@ impl Origin {
     /// can name one. See `NewEvent::fold_onto`.
     pub fn folding_onto(mut self, event_id: Option<String>) -> Origin {
         self.fold_onto = event_id;
+        self
+    }
+
+    /// A replay: prime this search with what a recorded search read, on a
+    /// door that would otherwise not prime at all.
+    pub fn primed_as(mut self, p: crate::core::search::Priming) -> Origin {
+        self.replay = Some(p);
         self
     }
 }

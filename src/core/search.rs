@@ -1660,10 +1660,10 @@ impl Core {
         // Kept for the capture below: what a replay needs to see this list
         // the way the searcher did. Only a real search records it.
         let mut primed_with: Option<Priming> = None;
-        if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
+        let primes = self.associating() && !matches!(door, Door::Ask | Door::Judge);
+        if primes || origin.replay.is_some() {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            let activation = self.engagement_now(&ids).await;
             // Off by default and empty when off: this is the only part of the
             // sitting that moves an order, and the same query ranking
             // differently in two sittings is what is disorienting about it.
@@ -1684,10 +1684,16 @@ impl Core {
                     .unwrap_or_default(),
                 false => Default::default(),
             };
-            let priming = Priming {
-                activation,
-                sitting,
-                due: due.clone(),
+            // A replay is primed with what the recorded search read, not with
+            // the base as it stands now: the activation has decayed since and
+            // the sitting is long over.
+            let priming = match origin.replay.clone() {
+                Some(p) => p,
+                None => Priming {
+                    activation: self.engagement_now(&ids).await,
+                    sitting,
+                    due: due.clone(),
+                },
             };
             results = prime(
                 results,
@@ -1698,7 +1704,11 @@ impl Core {
                 &priming.due,
             );
             note_reorder(&mut results, &before, |e| &mut e.prime);
-            primed_with = Some(priming);
+            // Only a real search records what it read; a replay is not an
+            // event.
+            if primes {
+                primed_with = Some(priming);
+            }
         }
 
         // Before the capture below, not after the truncate: the recorded
