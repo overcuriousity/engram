@@ -10,6 +10,7 @@ pub mod judgement;
 pub mod merge;
 pub mod observe;
 pub mod passages;
+pub mod probe;
 pub mod promote;
 pub mod pursuit;
 pub mod reap;
@@ -141,6 +142,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
+        (Stage::Probe, _) => probe::run(core, &job.target_id).await,
         (Stage::Describe, _) => describe::run(core, &job.target_id).await,
         (Stage::Extract, _) => extract::run(core, &job.target_id).await,
         (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,

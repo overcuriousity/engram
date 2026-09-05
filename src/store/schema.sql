@@ -840,3 +840,29 @@ CREATE INDEX IF NOT EXISTS idx_observations_generation
   ON observations(generation_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_observations_artifact
   ON observations(artifact_id) WHERE artifact_id IS NOT NULL;
+
+-- ── Rehearsal ────────────────────────────────────────────────────────────────
+-- A probe: a question the base can ask itself about one artifact, with the
+-- vector it was embedded with, so the replay costs no inference. `capture`
+-- probes are the text of a later capture that landed on this artifact at
+-- integration — worded by a person who was not looking at the answer. `cue`
+-- probes are the questions a model-written artifact was written for. Nothing
+-- is minted from an artifact's own title or body.
+CREATE TABLE IF NOT EXISTS rehearsals (
+  id           TEXT PRIMARY KEY,
+  created_at   INTEGER NOT NULL,
+  -- capture | cue
+  class        TEXT NOT NULL,
+  query        TEXT NOT NULL,
+  query_vec    BLOB NOT NULL,
+  vec_dim      INTEGER NOT NULL,
+  embed_model  TEXT NOT NULL,
+  artifact_id  TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- capture: the artifact whose text is the query. NULL for a cue.
+  source_id    TEXT,
+  -- Set when the owner leaves results for good or the probe's model is no
+  -- longer the live embedder. Not replayed, not counted, never deleted.
+  retired_at   INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rehearsals_once ON rehearsals(artifact_id, class, query);
+CREATE INDEX IF NOT EXISTS idx_rehearsals_lap ON rehearsals(created_at, id) WHERE retired_at IS NULL;

@@ -361,6 +361,14 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
             "could not arm the neighbour query; the sweep will find its pairs"
         );
     }
+    // The cues a model-written artifact was written for become probes: an
+    // embedding each, in a unit of its own for the reason `relate` is one.
+    if chunk.provenance != crate::store::artifacts::Provenance::Passage
+        && !chunk.cues.is_empty()
+        && let Err(e) = crate::jobs::probe::arm(core, &chunk.id).await
+    {
+        tracing::warn!(artifact_id = %chunk.id, error = %e, "could not arm the cue probes");
+    }
     // The judged capture reads its own time now — see `jobs::judgement` —
     // so no per-artifact moments stage is armed here any more.
     // A merged artifact hides what it replaced only once it is itself in the

@@ -18,6 +18,7 @@ pub mod moments;
 pub mod observations;
 pub mod pairs;
 pub mod pursuits;
+pub mod rehearsals;
 pub mod segments;
 pub mod shingle;
 pub mod sweeps;

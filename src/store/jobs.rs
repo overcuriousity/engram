@@ -79,13 +79,18 @@ pub enum Stage {
     /// like `Consolidate`, so at most one sits in the queue; model calls are
     /// bounded by `reap.max_judged_per_run`.
     Reap,
+    /// One model-written artifact, its cues embedded as probes. An embedding
+    /// per cue, no generation. Armed at `mark_indexed`, idle-only, its own
+    /// failure domain for the reason `Relate` is: a failed cue embed must not
+    /// fail the artifact's embed.
+    Probe,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 19] = [
+    pub const ALL: [Stage; 20] = [
         Stage::Synthesize,
         Stage::Enrich,
         Stage::SegmentWindow,
@@ -105,6 +110,7 @@ impl Stage {
         Stage::Context,
         Stage::Remind,
         Stage::Reap,
+        Stage::Probe,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -128,6 +134,7 @@ impl Stage {
             Stage::Context => "context",
             Stage::Remind => "remind",
             Stage::Reap => "reap",
+            Stage::Probe => "probe",
         }
     }
     /// Is someone waiting on this? `0` foreground, `1` background.
@@ -163,7 +170,8 @@ impl Stage {
             | Stage::ArmDedupe
             | Stage::Context
             | Stage::Remind
-            | Stage::Reap => 1,
+            | Stage::Reap
+            | Stage::Probe => 1,
         }
     }
 
@@ -188,6 +196,7 @@ impl Stage {
             "context" => Some(Stage::Context),
             "remind" => Some(Stage::Remind),
             "reap" => Some(Stage::Reap),
+            "probe" => Some(Stage::Probe),
             _ => None,
         }
     }
