@@ -95,7 +95,8 @@ pub struct Generation {
     /// What the pass said it would gain, as an MRR delta over the replay. A
     /// generation with a parent and a prediction is one the base is watching.
     pub predicted: Option<f64>,
-    /// `live` | `superseded` | `reverted`.
+    /// `live` | `superseded` | `reverted` | `refused` — the last never was
+    /// live: the ladder chose it and rehearsal refused it.
     pub state: String,
 }
 
@@ -174,6 +175,34 @@ impl Store {
         Ok(id)
     }
 
+    /// A candidate the ladder chose and rehearsal refused. Never live; a row
+    /// so `tried_candidates` does not offer it again under these models.
+    pub async fn refuse_generation(
+        &self,
+        g: &NewGeneration,
+        run_id: &str,
+        predicted: f64,
+    ) -> Result<String> {
+        let id = new_id();
+        sqlx::query(
+            "INSERT INTO generations
+               (id, created_at, params, embed_recipe, chat_model, parent_id,
+                run_id, predicted, state)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'refused')",
+        )
+        .bind(&id)
+        .bind(now())
+        .bind(json(&g.params)?)
+        .bind(&g.embed_recipe)
+        .bind(&g.chat_model)
+        .bind(&g.parent_id)
+        .bind(run_id)
+        .bind(predicted)
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
     /// Take a generation back: it becomes `reverted` and its parent is live
     /// again. Returns the parent, or `None` — and changes nothing — for a
     /// generation with nowhere to go back to.
@@ -244,7 +273,7 @@ impl Store {
     ) -> Result<Vec<GenerationParams>> {
         sqlx::query_scalar::<_, String>(
             "SELECT params FROM generations
-              WHERE state = 'reverted' AND embed_recipe = ? AND chat_model = ?",
+              WHERE state IN ('reverted', 'refused') AND embed_recipe = ? AND chat_model = ?",
         )
         .bind(embed_recipe)
         .bind(chat_model)

@@ -18,6 +18,7 @@ pub mod claims;
 pub mod export;
 pub mod lived;
 pub mod metrics;
+pub mod rehearsed;
 pub mod sweep;
 
 use anyhow::{Context, Result};

@@ -773,6 +773,9 @@ struct EvolveView {
     /// Whether it is under watch and what it promised, or that autonomy is off,
     /// or that the base is free to propose.
     standing: String,
+    /// What the live generation scores on the base's own probes, in words —
+    /// and that it is a comparison, not a score.
+    rehearsed: String,
     /// Recent generations, newest first, each with how it came to be and how
     /// it ended.
     history: Vec<String>,
@@ -891,6 +894,15 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
         _ => "set by hand or at boot; the base may propose a change when it has been quiet."
             .to_string(),
     };
+    let rehearsed = crate::eval::rehearsed::rehearsed_live(core, &live.id).await?;
+    let rehearsed = if rehearsed.probes == 0 {
+        "No probe has been rehearsed under this generation yet.".to_string()
+    } else {
+        format!(
+            "On the base's own probes: {} of {} found, MRR {:.3}. A comparison between generations, not a score — a probe is the wording of a later capture, not a question anyone asked.",
+            rehearsed.found, rehearsed.probes, rehearsed.mrr
+        )
+    };
     let history = core
         .store
         .generation_history(10)
@@ -912,6 +924,7 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
             };
             let ended = match g.state.as_str() {
                 "reverted" => "taken back",
+                "refused" => "refused on the base's own probes",
                 _ => "superseded",
             };
             format!(
@@ -943,6 +956,7 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
             ago(live.created_at)
         ),
         standing,
+        rehearsed,
         history,
     }))
 }

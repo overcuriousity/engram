@@ -75,6 +75,11 @@ pub struct Pass {
     pub integrated: crate::jobs::sleep::Integrated,
     /// What the rehearse phase replayed.
     pub replayed: crate::jobs::sleep::Replayed,
+    /// The candidate refused on the base's own probes, if one was.
+    pub refused: Option<String>,
+    /// Why the pass ended early, where it did: `suspended`, `no_evidence`,
+    /// `activity`. Empty for a pass that ran to the end.
+    pub stopped: &'static str,
 }
 
 /// Run the pass whatever the clock says. The adopted generation's id, or
@@ -129,11 +134,15 @@ pub async fn pass(core: &Core) -> Result<Pass> {
     let Some(_claim) = sweep::Sweeping::claim(core) else {
         return Ok(Pass::default());
     };
-    // The one safeguard everything else leans on. When the self-generated
-    // evidence has stopped agreeing with the people using the base, the loop
-    // adopts nothing, reverts nothing, keeps recording, and says so on Ops.
-    // Suspension is a state, not a failure.
-    if let Some(a) = crate::eval::anchor::agreement(core).await?
+    // The one safeguard everything else leans on, on two sides. Human
+    // verdicts, where any judged search has an observation beside it, can
+    // suspend: when the self-generated evidence has stopped agreeing with
+    // the people using the base, the loop adopts nothing, reverts nothing,
+    // keeps recording, and says so on Ops. Suspension is a state, not a
+    // failure. Rehearsal, where any probe has been replayed, is the second
+    // side, read below.
+    let agreement = crate::eval::anchor::agreement(core).await?;
+    if let Some(a) = agreement
         && !crate::eval::anchor::trustworthy(&a)
     {
         tracing::warn!(
@@ -141,7 +150,10 @@ pub async fn pass(core: &Core) -> Result<Pass> {
             disagreed = a.disagreed,
             "observations no longer agree with verdicts; the base is not moving"
         );
-        return Ok(Pass::default());
+        return Ok(Pass {
+            stopped: "suspended",
+            ..Default::default()
+        });
     }
 
     // Rehearse before anything reads the record: the corpus rules and the
@@ -151,6 +163,20 @@ pub async fn pass(core: &Core) -> Result<Pass> {
     if replayed.stopped {
         return Ok(Pass {
             replayed,
+            stopped: "activity",
+            ..Default::default()
+        });
+    }
+
+    // Nothing on either side is the case this used to walk past: no judged
+    // search with an observation beside it, and no probe ever replayed. A
+    // base with nothing to measure a move against does not move.
+    let probes = crate::eval::rehearsed::probe_set(core, &live.id).await?;
+    if agreement.is_none() && probes.is_empty() {
+        tracing::warn!("no evidence on either side; the base is not moving");
+        return Ok(Pass {
+            replayed,
+            stopped: "no_evidence",
             ..Default::default()
         });
     }
@@ -195,20 +221,56 @@ pub async fn pass(core: &Core) -> Result<Pass> {
     {
         let new = lived(core, &live.id).await?;
         let old = lived(core, &parent.id).await?;
-        if !holds_up(&new, &old) {
+        // The second side of the watch: both parameter sets replayed on one
+        // probe set, now. A generation that loses on probes is taken back
+        // with no observations at all, and two that cannot be told apart on
+        // enough probes end the watch on a base nobody searches.
+        let mut rehearsal_lost = false;
+        let mut rehearsal_settled = false;
+        if !probes.is_empty() {
+            let r_new = crate::eval::rehearsed::rehearsed_under(
+                core,
+                live.params.into(),
+                &probes,
+                Some(started),
+            )
+            .await?;
+            let r_old = crate::eval::rehearsed::rehearsed_under(
+                core,
+                parent.params.into(),
+                &probes,
+                Some(started),
+            )
+            .await?;
+            match (r_new, r_old) {
+                (Some(n), Some(o)) => {
+                    rehearsal_lost = n.loses_to(&o);
+                    rehearsal_settled = n.indistinguishable(&o) || o.loses_to(&n);
+                }
+                _ => {
+                    out.stopped = "activity";
+                    return Ok(out);
+                }
+            }
+        }
+        if !holds_up(&new, &old) || rehearsal_lost {
             let p = revert(core, &live, &new, &old).await?;
             out.reverted = p.reverted;
             return Ok(out);
         }
-        if !settled(&new, &old) {
+        if !settled(&new, &old) && !rehearsal_settled {
             tracing::debug!(generation = %live.id, ?new, ?old, "under watch; nothing proposed");
             return Ok(out);
         }
     }
 
-    let p = propose(core, &live, current).await?;
+    let p = propose(core, &live, current, &probes).await?;
     out.adopted = p.adopted;
     out.reverted = p.reverted;
+    out.refused = p.refused;
+    if !p.stopped.is_empty() {
+        out.stopped = p.stopped;
+    }
     Ok(out)
 }
 
@@ -252,6 +314,7 @@ async fn propose(
     core: &Core,
     live: &Generation,
     current: crate::core::ranking::RankingParams,
+    probes: &[crate::store::rehearsals::Rehearsal],
 ) -> Result<Pass> {
     let started = crate::store::now();
     let (pairs, skipped) = sweep::observation_pairs(core, &live.id).await?;
@@ -304,6 +367,50 @@ async fn propose(
         // read off what it earned while serving.
         return spread_step(core, live, current, &tried).await;
     };
+    // The yardstick. A candidate the observations chose is replayed on the
+    // base's own probes beside the running configuration; one that loses
+    // by more than a probe's worth is refused and not offered again. Never
+    // the other way: probes refuse and revert, they do not adopt.
+    if !probes.is_empty() {
+        let r_live =
+            crate::eval::rehearsed::rehearsed_under(core, current, probes, Some(started)).await?;
+        let r_cand =
+            crate::eval::rehearsed::rehearsed_under(core, winner, probes, Some(started)).await?;
+        match (r_live, r_cand) {
+            (Some(l), Some(c)) if c.loses_to(&l) => {
+                let id = core
+                    .store
+                    .refuse_generation(
+                        &NewGeneration {
+                            params: winner.into(),
+                            embed_recipe: live.embed_recipe.clone(),
+                            chat_model: live.chat_model.clone(),
+                            parent_id: Some(live.id.clone()),
+                        },
+                        &run_id,
+                        predicted,
+                    )
+                    .await?;
+                tracing::info!(
+                    generation = %id,
+                    live = ?l,
+                    candidate = ?c,
+                    "the ladder's candidate loses on the base's own probes; refused"
+                );
+                return Ok(Pass {
+                    refused: Some(id),
+                    ..Default::default()
+                });
+            }
+            (Some(_), Some(_)) => {}
+            _ => {
+                return Ok(Pass {
+                    stopped: "activity",
+                    ..Default::default()
+                });
+            }
+        }
+    }
     adopt(core, live, winner, &run_id, predicted, pairs.len()).await
 }
 
@@ -572,7 +679,8 @@ mod tests {
     /// Name the running configuration as the live generation.
     async fn generation_for(core: &Core) -> String {
         let params = *core.ranking.read().unwrap();
-        core.store
+        let generation = core
+            .store
             .record_generation(&NewGeneration {
                 params: params.into(),
                 embed_recipe: "recipe-a".into(),
@@ -580,7 +688,182 @@ mod tests {
                 parent_id: None,
             })
             .await
+            .unwrap();
+        rehearsed_once(core, &generation).await;
+        generation
+    }
+
+    /// One probe, for whatever leads the list, with a result under
+    /// `generation`: the base has rehearsed something, so the anchor has a
+    /// side to read. One probe cannot refuse or revert anything — its noise
+    /// term is 2.0 — so nothing here moves a test's outcome; it only keeps
+    /// the pass from returning on no evidence.
+    pub(crate) async fn rehearsed_once(core: &Core, generation: &str) {
+        let order = crate::eval::sweep::test_support::ranks_order(core).await;
+        let Some(lead) = order.first() else {
+            return;
+        };
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        let Some(pid) = core
+            .store
+            .record_rehearsal(&crate::store::rehearsals::NewRehearsal {
+                class: crate::store::rehearsals::Class::Capture,
+                query: QUERY.into(),
+                query_vec,
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: lead.clone(),
+                source_id: None,
+            })
+            .await
             .unwrap()
+        else {
+            return;
+        };
+        core.store
+            .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                rehearsal_id: pid,
+                generation_id: generation.to_string(),
+                rank: Some(1),
+                outranked_by: vec![],
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_pass_does_nothing_and_says_so_where_there_is_no_evidence_on_either_side() {
+        let (mut core, generation) = seeded_with_observations().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        // No verdict has an observation beside it; take the one rehearsed
+        // probe away and the anchor is absent on both sides.
+        for p in core
+            .store
+            .rehearsals_after(&crate::store::Cursor::default(), 10)
+            .await
+            .unwrap()
+        {
+            core.store.retire_rehearsal(&p.id, 1).await.unwrap();
+        }
+        let p = pass(&core).await.unwrap();
+        assert!(
+            p.adopted.is_none(),
+            "the None that walked past the anchor no longer does"
+        );
+        assert_eq!(p.stopped, "no_evidence");
+        assert!(core.store.latest_eval_run().await.unwrap().is_none());
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            generation
+        );
+    }
+
+    /// Thirty probes for the third chunk of the leading source, worded as
+    /// the query, each with a result under `generation`. Uncapped it stands
+    /// at rank 3; under any cap the ladder proposes it is displaced and
+    /// refilled behind the other source, at rank 6 or worse. Thirty, because
+    /// the noise term is `2/n` and a fall from a third to a sixth has to
+    /// clear it.
+    async fn probes_the_cap_buries(core: &Core, generation: &str, buried: &str) -> usize {
+        let buried = buried.to_string();
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        let mut n = 0;
+        for i in 0..30 {
+            let Some(pid) = core
+                .store
+                .record_rehearsal(&crate::store::rehearsals::NewRehearsal {
+                    class: crate::store::rehearsals::Class::Cue,
+                    // Distinct queries so the unique index keeps them all;
+                    // the vector is the same, so the replay is the same.
+                    query: format!("{QUERY} #{i}"),
+                    query_vec: query_vec.clone(),
+                    embed_model: core.embedder.model().to_string(),
+                    artifact_id: buried.clone(),
+                    source_id: None,
+                })
+                .await
+                .unwrap()
+            else {
+                continue;
+            };
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: pid,
+                    generation_id: generation.to_string(),
+                    rank: Some(3),
+                    outranked_by: vec![],
+                })
+                .await
+                .unwrap();
+            n += 1;
+        }
+        n
+    }
+
+    #[tokio::test]
+    async fn a_candidate_that_loses_on_the_bases_own_probes_is_refused_and_not_offered_again() {
+        let (mut core, generation) = seeded_with_observations().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let live = core.store.generation(&generation).await.unwrap().unwrap();
+        let order = crate::eval::sweep::test_support::ranks_order(&core).await;
+        assert_eq!(
+            probes_the_cap_buries(&core, &generation, &order[2]).await,
+            30
+        );
+        let p = pass(&core).await.unwrap();
+        let refused = p.refused.expect("the cap buries the probed chunk");
+        assert!(p.adopted.is_none());
+        let g = core.store.generation(&refused).await.unwrap().unwrap();
+        assert_eq!(g.state, "refused");
+        assert!(
+            core.store
+                .tried_candidates(&live.embed_recipe, &live.chat_model)
+                .await
+                .unwrap()
+                .contains(&g.params)
+        );
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            generation,
+            "nothing moved"
+        );
+        // The next pass does not offer it again. It may refuse the next rung
+        // of the same knob on the same probes; it never re-offers this one,
+        // and the base stays put.
+        let again = pass(&core).await.unwrap();
+        assert!(again.adopted.is_none(), "{again:?}");
+        if let Some(r) = &again.refused {
+            let h = core.store.generation(r).await.unwrap().unwrap();
+            assert_ne!(
+                h.params, g.params,
+                "a refused candidate is not offered again"
+            );
+        }
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            generation
+        );
+    }
+
+    #[tokio::test]
+    async fn a_watched_generation_that_loses_on_probes_is_reverted_with_no_observations_at_all() {
+        let (mut core, parent) = seeded_with_observations().await;
+        // The chunk the cap will displace, read under the uncapped parent
+        // before anything is adopted: `ranks_order` reads the live params.
+        let buried = crate::eval::sweep::test_support::ranks_order(&core).await[2].clone();
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        run(&core).await.unwrap().expect("a candidate cleared");
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        assert_eq!(live.parent_id.as_deref(), Some(parent.as_str()));
+        // Nothing observed under the adopted generation: the lived watch
+        // cannot decide. The probes can — the cap it adopted buries the
+        // probed chunk.
+        assert_eq!(probes_the_cap_buries(&core, &live.id, &buried).await, 30);
+        let p = pass(&core).await.unwrap();
+        assert_eq!(p.reverted.as_deref(), Some(live.id.as_str()), "{p:?}");
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            parent
+        );
     }
 
     /// A used excerpt, at the rank the uncapped list gave it, carrying the
