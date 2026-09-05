@@ -71,6 +71,8 @@ pub struct Pass {
     pub undone: usize,
     /// Artifacts rule 2 restored for a search given up on.
     pub restored: usize,
+    /// Pairs rule 3 filed for interference.
+    pub interference: usize,
     /// What the integrate phase filed before the pass.
     pub integrated: crate::jobs::sleep::Integrated,
     /// What the rehearse phase replayed.
@@ -123,6 +125,11 @@ async fn journal(core: &Core, started: i64, p: &Pass) -> Result<()> {
     let Some(live) = core.store.live_generation().await? else {
         return Ok(());
     };
+    let budget = if core.evolve.autonomous.acts_on_corpus() {
+        core.budget().await?
+    } else {
+        crate::core::Budget { used: 0, cap: 0 }
+    };
     core.store
         .record_sleep_run(&crate::store::sleep_runs::SleepRun {
             id: crate::store::new_id(),
@@ -145,10 +152,10 @@ async fn journal(core: &Core, started: i64, p: &Pass) -> Result<()> {
             refused: p.refused.clone(),
             undone: p.undone as i64,
             restored: p.restored as i64,
-            interference: 0,
+            interference: p.interference as i64,
             condensed: 0,
-            budget_used: 0,
-            budget: 0,
+            budget_used: i64::from(budget.used),
+            budget: i64::from(budget.cap),
             detail: "{}".into(),
         })
         .await
@@ -237,6 +244,7 @@ pub async fn pass(core: &Core) -> Result<Pass> {
     let mut out = Pass {
         undone: retracted.undone,
         restored: retracted.restored,
+        interference: retracted.interference,
         replayed,
         ..Default::default()
     };

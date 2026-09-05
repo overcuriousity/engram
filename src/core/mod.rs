@@ -295,7 +295,42 @@ pub struct Core {
     pub tuning: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Corpus actions the base has taken in the last seven days, against the
+/// week's cap. A bound on the blast radius, not a rate limit on finding.
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    pub used: u32,
+    pub cap: u32,
+}
+
+impl Budget {
+    pub fn spent(&self) -> bool {
+        self.used >= self.cap
+    }
+}
+
 impl Core {
+    pub async fn budget(&self) -> crate::error::Result<Budget> {
+        let used = self
+            .store
+            .actions_since(crate::store::now() - 7 * 86_400)
+            .await?;
+        Ok(Budget {
+            used: used.clamp(0, u32::MAX as i64) as u32,
+            cap: self.evolve.max_actions_per_week,
+        })
+    }
+
+    /// Whether a corpus action may be taken now. Only under `"full"` is the
+    /// budget consulted: the stages below it do not budget the sweeps that
+    /// were autonomous before the stages existed.
+    pub async fn may_act(&self) -> crate::error::Result<bool> {
+        if !self.evolve.autonomous.acts_on_corpus() {
+            return Ok(true);
+        }
+        Ok(!self.budget().await?.spent())
+    }
+
     /// The measured line, or zero while unmeasured.
     fn measured_line(&self) -> f32 {
         f32::from_bits(self.line.load(std::sync::atomic::Ordering::Relaxed))

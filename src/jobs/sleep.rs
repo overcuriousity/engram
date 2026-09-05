@@ -297,6 +297,129 @@ pub async fn rehearse(
     Ok(out)
 }
 
+/// Ids that stood above the owner in **every** retained result — at least
+/// two — and are from another corpus. One result is not a pattern; a
+/// same-corpus neighbour is structure.
+pub fn interferers<F>(
+    results: &[crate::store::rehearsals::RehearsalResult],
+    own_corpus: Option<&str>,
+    corpus_of: F,
+) -> Vec<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if results.len() < 2 {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    for x in &results[0].outranked_by {
+        if results.iter().all(|r| r.outranked_by.contains(x))
+            && !out.contains(x)
+            && (own_corpus.is_none() || corpus_of(x).as_deref() != own_corpus)
+        {
+            out.push(x.clone());
+        }
+    }
+    out
+}
+
+/// Rule 3: forgetting by displacement. A probe owner outranked by the same
+/// artifact in every retained result has been answered for by it; the cosine
+/// at embed time did not call them duplicates, behaviour did. File the pair
+/// for the judge; the chain after this is dedupe's, unchanged. Returns
+/// (pairs filed, stopped early).
+pub async fn interference(
+    core: &Core,
+    live: &crate::store::generations::Generation,
+    started: i64,
+) -> Result<(usize, bool)> {
+    use crate::store::actions::Kind;
+    let mut filed = 0;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (probe, _) in core
+        .store
+        .latest_results_under(&live.id, OBSERVATION_LIMIT)
+        .await?
+    {
+        if core.store.activity_since(started).await? {
+            return Ok((filed, true));
+        }
+        if !seen.insert(probe.artifact_id.clone()) {
+            continue;
+        }
+        let Ok(owner) = core.store.get_artifact(&probe.artifact_id).await else {
+            continue;
+        };
+        if !owner.in_results() {
+            continue;
+        }
+        // Every retained result of every live probe of this owner, together.
+        let mut results = Vec::new();
+        for p in core.store.rehearsals_of(&owner.id).await? {
+            results.extend(core.store.results_of(&p.id, OBSERVATION_LIMIT).await?);
+        }
+        let mut corpora: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for r in &results {
+            for x in &r.outranked_by {
+                if !corpora.contains_key(x) {
+                    let c = core
+                        .store
+                        .get_artifact(x)
+                        .await
+                        .ok()
+                        .and_then(|a| a.corpus_id);
+                    corpora.insert(x.clone(), c);
+                }
+            }
+        }
+        let found = interferers(&results, owner.corpus_id.as_deref(), |id| {
+            corpora.get(id).cloned().flatten()
+        });
+        for x in found {
+            // Filing is not acting, but it is what leads to one: it stops at
+            // the budget with the rest of the corpus half.
+            if !core.may_act().await? {
+                return Ok((filed, false));
+            }
+            // A pair the base once acted on and took back is a person's now.
+            if core.store.action_was_undone(&owner.id, Kind::Merge).await?
+                || core
+                    .store
+                    .action_was_undone(&owner.id, Kind::Supersede)
+                    .await?
+                || core.store.action_was_undone(&x, Kind::Merge).await?
+                || core.store.action_was_undone(&x, Kind::Supersede).await?
+            {
+                continue;
+            }
+            if core.store.pair_between(&owner.id, &x).await?.is_some() {
+                continue;
+            }
+            let detail = format!(
+                "interference: {x} stood above this in every one of {} rehearsals",
+                results.len()
+            );
+            let score = core
+                .vectors
+                .neighbours(&owner.id, core.consolidate.per_point)
+                .await?
+                .into_iter()
+                .find(|h| h.payload.artifact_id == x)
+                .and_then(|h| h.similarity)
+                .unwrap_or(0.0);
+            if core
+                .store
+                .record_pair_with_detail(&owner.id, &x, score, &detail)
+                .await?
+            {
+                filed += 1;
+            }
+        }
+    }
+    Ok((filed, false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +626,125 @@ mod tests {
                 .rehearsed,
             2
         );
+    }
+
+    #[test]
+    fn an_interferer_stands_above_in_every_result_at_least_twice_and_from_another_corpus() {
+        let res = |above: &[&str]| crate::store::rehearsals::RehearsalResult {
+            id: String::new(),
+            rehearsal_id: String::new(),
+            generation_id: String::new(),
+            at: 0,
+            rank: Some(2),
+            outranked_by: above.iter().map(|s| s.to_string()).collect(),
+        };
+        let corpus = |id: &str| {
+            Some(if id == "twin" {
+                "mine".to_string()
+            } else {
+                "theirs".to_string()
+            })
+        };
+        assert!(
+            interferers(&[res(&["x"])], Some("mine"), corpus).is_empty(),
+            "one result is not a pattern"
+        );
+        assert_eq!(
+            interferers(&[res(&["x", "y"]), res(&["x"])], Some("mine"), corpus),
+            vec!["x".to_string()]
+        );
+        assert!(interferers(&[res(&["x"]), res(&["y"])], Some("mine"), corpus).is_empty());
+        assert!(
+            interferers(&[res(&["twin"]), res(&["twin"])], Some("mine"), corpus).is_empty(),
+            "same corpus is structure"
+        );
+    }
+
+    #[tokio::test]
+    async fn interference_files_one_pending_pair_and_never_the_same_pair_twice() {
+        let (mut core, a1, _a2, b) = two_corpora().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let live = live_generation(&core).await;
+        // A probe for a1 that b — another corpus — has outranked twice.
+        // Hand-written results keep the fake embedder's ordering out of it.
+        let pid = core
+            .store
+            .record_rehearsal(&NewRehearsal {
+                class: Class::Cue,
+                query: "q".into(),
+                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: a1.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: pid.clone(),
+                    generation_id: live.id.clone(),
+                    rank: Some(2),
+                    outranked_by: vec![b.clone()],
+                })
+                .await
+                .unwrap();
+        }
+        let (filed, _) = interference(&core, &live, crate::store::now())
+            .await
+            .unwrap();
+        assert_eq!(filed, 1);
+        let pair = core.store.pair_between(&a1, &b).await.unwrap().unwrap();
+        assert_eq!(pair.state, crate::store::pairs::PairState::Pending);
+        assert!(pair.detail.unwrap_or_default().contains("interference"));
+        assert_eq!(
+            interference(&core, &live, crate::store::now())
+                .await
+                .unwrap()
+                .0,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn interference_stops_filing_when_the_week_is_spent() {
+        let (mut core, a1, _a2, b) = two_corpora().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_week = 0;
+        let live = live_generation(&core).await;
+        let pid = core
+            .store
+            .record_rehearsal(&NewRehearsal {
+                class: Class::Cue,
+                query: "q".into(),
+                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: a1.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: pid.clone(),
+                    generation_id: live.id.clone(),
+                    rank: Some(2),
+                    outranked_by: vec![b.clone()],
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            interference(&core, &live, crate::store::now())
+                .await
+                .unwrap()
+                .0,
+            0
+        );
+        assert!(core.store.pair_between(&a1, &b).await.unwrap().is_none());
     }
 
     #[tokio::test]

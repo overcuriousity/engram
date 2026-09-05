@@ -34,6 +34,8 @@ pub struct Retracted {
     pub undone: usize,
     /// Artifacts rule 2 restored.
     pub restored: usize,
+    /// Pairs rule 3 filed for interference.
+    pub interference: usize,
 }
 
 /// Both rules, in order. `started` is when the pass began: a search or a
@@ -45,12 +47,18 @@ pub async fn run(core: &Core, live: &Generation, started: i64) -> Result<Retract
         reconsidered,
         undone,
         restored: 0,
+        interference: 0,
     };
     if stopped {
         return Ok(out);
     }
-    let (restored, _) = rule_two(core, started).await?;
+    let (restored, stopped) = rule_two(core, started).await?;
     out.restored = restored;
+    if stopped {
+        return Ok(out);
+    }
+    let (interference, _) = crate::jobs::sleep::interference(core, live, started).await?;
+    out.interference = interference;
     let last = serde_json::json!({
         "at": crate::store::now(),
         "reconsidered": out.reconsidered,

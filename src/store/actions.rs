@@ -263,6 +263,17 @@ impl Store {
 
     /// Whether an action of this kind on this subject was ever taken back —
     /// the memory an action site reads before acting again.
+    /// Every action taken after `at`, undone or not. The budget's read: an
+    /// action counts because it was taken, whoever took it back.
+    pub async fn actions_since(&self, at: i64) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM corpus_actions WHERE at > ?")
+                .bind(at)
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
     pub async fn action_was_undone(&self, subject_id: &str, kind: Kind) -> Result<bool> {
         Ok(sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM corpus_actions
@@ -342,6 +353,19 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_budget_counts_every_action_in_the_window_undone_or_not() {
+        let store = Store::memory().await.unwrap();
+        store.record_action(&merge_of("a", "m")).await.unwrap();
+        store.record_action(&merge_of("b", "m")).await.unwrap();
+        store
+            .undo_actions_under("m", UndoneBy::Evidence, "gone")
+            .await
+            .unwrap();
+        assert_eq!(store.actions_since(0).await.unwrap(), 2);
+        assert_eq!(store.actions_since(i64::MAX).await.unwrap(), 0);
+    }
 
     fn merge_of(subject: &str, survivor: &str) -> NewAction {
         NewAction {
