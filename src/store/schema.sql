@@ -866,3 +866,22 @@ CREATE TABLE IF NOT EXISTS rehearsals (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rehearsals_once ON rehearsals(artifact_id, class, query);
 CREATE INDEX IF NOT EXISTS idx_rehearsals_lap ON rehearsals(created_at, id) WHERE retired_at IS NULL;
+
+-- ── Integration ──────────────────────────────────────────────────────────────
+-- What the base found when a new artifact was run against the rest of it,
+-- once, when it arrived. The tag is surprise at encoding: novel (nothing near),
+-- known (something near that agrees), conflict (something near enough to be
+-- the same statement, carrying different values). Written once; a re-embed
+-- does not re-tag, because what the base knew when the artifact came is the
+-- meaning of the word.
+CREATE TABLE IF NOT EXISTS integrations (
+  artifact_id   TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+  at            INTEGER NOT NULL,
+  -- novel | known | conflict
+  tag           TEXT NOT NULL,
+  nearest_id    TEXT,
+  nearest_score REAL,
+  -- For a conflict: the fact tokens each side carries that the other does not.
+  detail        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_integrations_tag ON integrations(tag);

@@ -11,6 +11,7 @@ pub mod feedback;
 pub mod gaps;
 pub mod generations;
 pub mod insights;
+pub mod integrations;
 pub mod jobs;
 pub mod lineage;
 pub mod links;

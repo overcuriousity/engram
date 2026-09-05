@@ -71,6 +71,8 @@ pub struct Pass {
     pub undone: usize,
     /// Artifacts rule 2 restored for a search given up on.
     pub restored: usize,
+    /// What the integrate phase filed before the pass.
+    pub integrated: crate::jobs::sleep::Integrated,
 }
 
 /// Run the pass whatever the clock says. The adopted generation's id, or
@@ -84,10 +86,23 @@ pub async fn run(core: &Core) -> Result<Option<String>> {
 /// Quiet is read off the base rather than a ticker: no search recorded and no
 /// question asked inside the window. What the retention unit calls.
 pub async fn run_if_quiet(core: &Core) -> Result<Pass> {
-    if !core.evolve.autonomous.moves_ranking() || !quiet(core).await? {
+    if !quiet(core).await? {
         return Ok(Pass::default());
     }
-    pass(core).await
+    // Bookkeeping whatever the stage: one neighbour read per new artifact, no
+    // inference, and what lets the page say which artifacts nothing has asked
+    // for. Under "off" this is the whole of what a quiet base does.
+    let started = crate::store::now();
+    let integrated = crate::jobs::sleep::integrate(core, started).await?;
+    if !core.evolve.autonomous.moves_ranking() || integrated.stopped {
+        return Ok(Pass {
+            integrated,
+            ..Default::default()
+        });
+    }
+    let mut p = pass(core).await?;
+    p.integrated = integrated;
+    Ok(p)
 }
 
 async fn quiet(core: &Core) -> Result<bool> {
