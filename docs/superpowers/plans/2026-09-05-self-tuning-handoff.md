@@ -41,7 +41,8 @@ not on it. Integration into `master` is the operator's call.
 | Ops disclosure: suspension first, live generation, standing, history | `src/web/insights.rs`, `templates/_evolve.html` | stage 2 |
 | Config: `[evolve]` `give_up_window_secs`, `feed_sweep`, `autonomous`, `idle_secs`; `[vector] candidate_multiplier` | `src/config.rs`, `config.example.toml` | 1, 2, 2b |
 
-`evolve.autonomous` and `evolve.feed_sweep` ship `false`.
+`evolve.autonomous` ships `"off"` (a three-stage string since Sleep; `false`
+and `true` still read) and `evolve.feed_sweep` ships `false`.
 
 ## Decisions made on the way that the spec does not record
 
@@ -165,6 +166,50 @@ is fixed on the branch with a test named for the rule it protects.
   on another connection. `set_superseded_by_with` and
   `set_artifact_status_with` now carry the row in the same transaction, the
   way `bury` always has.
+
+## Sleep (built after 3b, same day)
+
+**Spec:** `docs/superpowers/specs/2026-09-05-sleep-design.md`. **Plan:**
+`docs/superpowers/plans/2026-09-05-sleep.md`, tasks 1–11 built and committed
+on `feat/observations`; task 12 — flipping `evolve.autonomous` to
+`"ranking"` — is the operator's, gated on `cargo test --test eval` run on a
+real base under `"off"` and `"ranking"` and the two reports read side by
+side. Baseline after task 11: 2620 lib passing, 0 failing, 1 ignored; 7
+multi-tenant; 60 Qdrant integration (57 + 3), run green against a
+throwaway Qdrant.
+
+| Piece | Where |
+|---|---|
+| `Autonomy { Off, Ranking, Full }`, `bool` still read (`true` → `Full`); `max_actions_per_week` | `src/config.rs` |
+| Probes: `rehearsals`, classes `capture` / `cue`; cue minting at `mark_indexed` via `Stage::Probe` | `src/store/rehearsals.rs`, `src/jobs/probe.rs` |
+| Integrate: `integrations` tag `novel` / `known` / `conflict`; conflict → `Contradiction` pair; capture probes for what it landed on | `src/store/integrations.rs`, `src/jobs/sleep.rs` |
+| Rehearse: `rehearsal_results`, fragile-first then a wrapping lap on `meta.sleep.rehearsed_after`; `sweep::rank_and_above` | `src/jobs/sleep.rs`, `src/eval/sweep.rs` |
+| Calibrate: `Rehearsed`, `rehearsed_under` (counterfactual), the anchor that returns on no evidence, the refused candidate (`generations.state = 'refused'`), rehearsal terms on the watch | `src/eval/rehearsed.rs`, `src/jobs/tune.rs`, `src/store/generations.rs` |
+| Wake: `sleep_runs`, **Last night** on Insights, *unrehearsed*, the tag and probes on the artifact pane | `src/store/sleep_runs.rs`, `src/web/insights.rs`, `_sleep.html`, `src/web/ui.rs` |
+| Budget: `Core::budget` / `may_act`, read in dedupe (before the judge), reap (per nominee), condense, interference | `src/core/mod.rs`, `src/jobs/{dedupe,reap,condense,sleep}.rs` |
+| Interference (rule 3): one id above the owner in every retained result, from another corpus → `Pending` pair with reason in `detail` | `src/jobs/sleep.rs` |
+| Condense: `artifact_versions`, `Stage::Condense`, `CONDENSE_SYSTEM`, `losses()` as the guard, `Core::uncondense`, rule 1 generalised, `/ui/ops/condensations/{id}/undo` | `src/store/versions.rs`, `src/jobs/condense.rs`, `src/jobs/retract.rs`, `src/web/ui.rs` |
+
+Decisions made on the way that the spec does not record:
+
+- **Integration has no cursor.** The `integrations` table is the memory:
+  the work list is `artifacts LEFT JOIN integrations` on embedded, in-results
+  rows. An artifact embedded late is not skipped.
+- **`"off"` still integrates**, from `run_if_quiet`, and journals a sleep.
+- **Every fixture that names a generation seeds one rehearsed probe**
+  (`tune::tests::rehearsed_once`), so the anchor has a side to read; one
+  probe has a noise term of 2.0 and can move nothing.
+- **A displaced hit is refilled, not dropped** (`cap_per_corpus`), so a cap
+  moves a probed chunk from rank 3 to 6; the tests use thirty probes for a
+  loss of a third to clear `2/n`.
+- **Bare digits are not fact tokens** (`facts::is_fact`), so a conflict
+  fixture needs versions, not ports.
+- **`retract` runs under `"full"` only.** Below it the corpus half is
+  `Retracted::default()`.
+- **Condense reads "trails or leads" as "leads"**: what trails is not in
+  `outranked_by`.
+- **The evidence JSON carries `version`**; `uncondense` reads it there, not
+  from `detail`.
 
 ## What a later stage would have to build on
 
