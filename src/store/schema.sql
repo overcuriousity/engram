@@ -725,6 +725,41 @@ CREATE TABLE IF NOT EXISTS graveyard (
   reaped_at  INTEGER NOT NULL
 );
 
+-- ── The corpus journal ───────────────────────────────────────────────────────
+-- Every action a corpus job takes on its own: what was hidden, buried or
+-- created, in favour of what, on what evidence, and whether it was later taken
+-- back — by a person, or by the base on what use showed. The record the
+-- ranking side has in `generations`, for the corpus. Rows are never deleted;
+-- retention leaves them alone, as it leaves observations alone.
+CREATE TABLE IF NOT EXISTS corpus_actions (
+  id            TEXT PRIMARY KEY,
+  at            INTEGER NOT NULL,
+  -- dedupe | reap | promote | judgement
+  job           TEXT NOT NULL,
+  -- merge | supersede | discard | reap | promote | moment
+  kind          TEXT NOT NULL,
+  -- The artifact hidden or buried, the window promoted (`corpus_id#idx`), or
+  -- the moment written.
+  subject_id    TEXT NOT NULL,
+  -- For merge and supersede: what now answers for the subject.
+  survivor_id   TEXT,
+  detail        TEXT,
+  evidence_json TEXT NOT NULL,
+  -- The pair's cosine, for the dedupe kinds. A column rather than a JSON
+  -- path, because the review threshold's bands read it in aggregate.
+  pair_score    REAL,
+  undone_at     INTEGER,
+  -- operator | evidence
+  undone_by     TEXT,
+  undone_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_corpus_actions_open
+  ON corpus_actions(kind, at) WHERE undone_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_corpus_actions_subject
+  ON corpus_actions(subject_id, kind);
+CREATE INDEX IF NOT EXISTS idx_corpus_actions_survivor
+  ON corpus_actions(survivor_id) WHERE survivor_id IS NOT NULL;
+
 -- Cursors that have no row to live on. Three keys so far:
 -- `associate.events_after`, `associate.judged_after`, `pursuit.events_after`.
 CREATE TABLE IF NOT EXISTS meta (

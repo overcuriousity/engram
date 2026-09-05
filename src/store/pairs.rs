@@ -157,6 +157,9 @@ pub enum DecidedBy {
     Model,
     /// A person pressed something.
     Operator,
+    /// The base, on what use showed — never the judge and never a person. An
+    /// action taken back because the evidence turned.
+    Evidence,
 }
 
 impl DecidedBy {
@@ -164,6 +167,7 @@ impl DecidedBy {
         match self {
             DecidedBy::Model => "model",
             DecidedBy::Operator => "operator",
+            DecidedBy::Evidence => "evidence",
         }
     }
 
@@ -175,6 +179,7 @@ impl DecidedBy {
         match s {
             "model" => Some(DecidedBy::Model),
             "operator" => Some(DecidedBy::Operator),
+            "evidence" => Some(DecidedBy::Evidence),
             _ => None,
         }
     }
