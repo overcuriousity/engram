@@ -64,11 +64,25 @@ pub async fn probe_set(core: &Core, live_id: &str) -> Result<Vec<Rehearsal>> {
 }
 
 /// Replay `probes` under `params`, now. `None` when somebody came back.
+///
+/// `rerank` is the caller's, because it is the one axis a replay cannot infer
+/// from `params` alone. `search_inner` computes `query.rerank && params.rerank`,
+/// so this used to hard-code `false` and the field was inert in every
+/// rehearsal: the rerank-flip candidate `tune::propose` emits differs from
+/// `current` in that field and nothing else, both sides replayed identically,
+/// `loses_to` was never true, and the flip cleared the refusal gate whatever it
+/// would actually have done. `sweep::flip_offer` passes `flipped.rerank` for
+/// exactly this reason.
+///
+/// The caller passes `false` where the axis is held constant across the
+/// comparison, which is every ladder candidate: a reranker run on both sides
+/// cancels out of the verdict and costs a call per probe to do it.
 pub async fn rehearsed_under(
     core: &Core,
     params: RankingParams,
     probes: &[Rehearsal],
     started: Option<i64>,
+    rerank: bool,
 ) -> Result<Option<Rehearsed>> {
     let mut ranks = Vec::with_capacity(probes.len());
     for p in probes {
@@ -78,7 +92,7 @@ pub async fn rehearsed_under(
             return Ok(None);
         }
         let pair = crate::jobs::sleep::pair_of(core, p).await;
-        ranks.push(crate::eval::sweep::rank_of(core, &pair, params, false).await?);
+        ranks.push(crate::eval::sweep::rank_of(core, &pair, params, rerank).await?);
     }
     Ok(Some(Rehearsed::from_ranks(&ranks)))
 }

@@ -2375,16 +2375,29 @@ async fn a_probe_replayed_under_two_recency_weights_moves_the_way_the_recency_te
         recency_half_life_days: 180,
         ..base
     };
-    let r_off =
-        engram::eval::rehearsed::rehearsed_under(&core, off, std::slice::from_ref(&probe), None)
-            .await
-            .unwrap()
-            .unwrap();
-    let r_on =
-        engram::eval::rehearsed::rehearsed_under(&core, on, std::slice::from_ref(&probe), None)
-            .await
-            .unwrap()
-            .unwrap();
+    // `false`: the recency knob is the axis here, and the reranker is held
+    // constant across both replays, so running it would cancel out of the
+    // comparison and cost a call per probe to do it.
+    let r_off = engram::eval::rehearsed::rehearsed_under(
+        &core,
+        off,
+        std::slice::from_ref(&probe),
+        None,
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let r_on = engram::eval::rehearsed::rehearsed_under(
+        &core,
+        on,
+        std::slice::from_ref(&probe),
+        None,
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!((r_off.probes, r_off.found, r_on.found), (1, 1, 1));
     assert!(
         r_on.mrr <= r_off.mrr,

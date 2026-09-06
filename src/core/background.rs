@@ -145,20 +145,34 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     if core.recommends() {
         out.push((Stage::Context, CONSOLIDATE_TARGET));
     }
-    // Revisiting the retired. Behind its own switch and the judge's
-    // existence: the rules alone may nominate but never tombstone, so a base
-    // with no judge model gets no sweep rather than a rules-only one.
-    if core.reap.enabled && core.judge.is_some() {
+    // Revisiting the retired. Behind its own switch, the judge's existence,
+    // and the corpus permission: the rules alone may nominate but never
+    // tombstone, so a base with no judge model gets no sweep rather than a
+    // rules-only one.
+    //
+    // `acts_on_corpus()` and not `may_act()`, which answers `true`
+    // unconditionally below `full` and so was no gate at all here. Burial is
+    // the one action in the system that destroys text, and `jobs::retract` —
+    // the path that takes one back — is itself gated on `acts_on_corpus()`.
+    // Without this the stock config buried up to `max_judged_per_run`
+    // artifacts a day at the default `ranking`, with the weekly cap never
+    // applying and its own recovery path switched off at that same level.
+    if core.reap.enabled && core.judge.is_some() && core.evolve.autonomous.acts_on_corpus() {
         out.push((Stage::Reap, CONSOLIDATE_TARGET));
     }
     if core.associating() {
         out.push((Stage::Associate, ASSOCIATE_TARGET));
         // Its own period as a floor. The association sweep arming it is what
         // orders the two; this is what keeps pursuits running at the cadence
-        // they ran at before, rather than at the association sweep's. No second
-        // condition of its own any more — a pursuit runs behind `[learn]`, and
-        // `associating()` is `[learn]`.
-        out.push((Stage::Pursuit, ASSOCIATE_TARGET));
+        // they ran at before, rather than at the association sweep's. The
+        // `[learn]` half of its gate is `associating()` above; what it adds of
+        // its own is the generator, as `Reap` is behind the judge. A pursuit
+        // that reaches `Generate` with no `[infer.generate]` writes no artifact,
+        // and the branch that used to close it as unsatisfied was gone — so
+        // every one of them sat `open` for ever, accumulating on Ops.
+        if core.generator.is_some() {
+            out.push((Stage::Pursuit, ASSOCIATE_TARGET));
+        }
     }
     out
 }
@@ -723,12 +737,13 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn the_reap_sweep_is_armed_only_when_enabled_and_a_judge_exists() {
+    async fn the_reap_sweep_is_armed_only_when_enabled_a_judge_exists_and_it_may_act() {
         use crate::store::jobs::Stage;
-        let core = crate::core::test_support::test_core().await;
+        let mut core = crate::core::test_support::test_core().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
         assert!(
             periodic_units(&core).iter().any(|(s, _)| *s == Stage::Reap),
-            "on by default when a judge is configured"
+            "on when a judge is configured and the base may act on the corpus"
         );
         assert_eq!(
             periodic_period(&core, Stage::Reap),
@@ -736,6 +751,7 @@ mod tests {
         );
 
         let mut off = crate::core::test_support::test_core().await;
+        off.evolve.autonomous = crate::config::Autonomy::Full;
         off.reap.enabled = false;
         assert!(
             !periodic_units(&off).iter().any(|(s, _)| *s == Stage::Reap),
@@ -743,6 +759,7 @@ mod tests {
         );
 
         let mut judgeless = crate::core::test_support::test_core().await;
+        judgeless.evolve.autonomous = crate::config::Autonomy::Full;
         judgeless.judge = None;
         assert!(
             !periodic_units(&judgeless)
@@ -750,6 +767,27 @@ mod tests {
                 .any(|(s, _)| *s == Stage::Reap),
             "no judge, no sweep — the rules alone may never tombstone"
         );
+
+        // And the level below `full`, which is the shipped default. `may_act`
+        // answers `true` unconditionally there, so it was no gate at all: a
+        // stock config with any `[infer.judge]` model buried up to
+        // `max_judged_per_run` artifacts a day with the weekly cap never
+        // applying, while `jobs::retract` — the path that takes a burial back
+        // — is itself behind `acts_on_corpus()` and so was switched off.
+        for level in [
+            crate::config::Autonomy::Off,
+            crate::config::Autonomy::Ranking,
+        ] {
+            let mut below = crate::core::test_support::test_core().await;
+            below.evolve.autonomous = level;
+            assert!(
+                !periodic_units(&below)
+                    .iter()
+                    .any(|(s, _)| *s == Stage::Reap),
+                "the one sweep that destroys text needs the same permission as \
+                 the one that undoes it: {level:?}"
+            );
+        }
     }
 
     #[tokio::test]

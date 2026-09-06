@@ -224,7 +224,14 @@
             {% for (n, when, _aid) in d.versions %}<li>version {{ n }} · {{ when }}</li>{% endfor %}
           </ul>
           {% if let Some(aid) = d.condensed %}
-          <form method="post" action="/ui/ops/condensations/{{ aid }}/undo">
+          {# The same shape as the four buttons above, and for the reason
+             `ReturnTo` was introduced: this one had no `hx-post` and no `to`,
+             so pressing it from a search result took the whole window to
+             /ui/insights and the results being worked through were gone. #}
+          <form method="post" action="/ui/ops/condensations/{{ aid }}/undo"
+                hx-post="/ui/ops/condensations/{{ aid }}/undo?terms={{ d.terms|urlencode }}"
+                hx-target="closest [data-artifact]" hx-swap="outerHTML">
+            <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
             <button type="submit" class="quiet-link">Restore the last version</button>
           </form>
           {% endif %}

@@ -513,15 +513,18 @@ async fn not_a_reminder(
     // reminder — undo" over a row still sitting two lines below is the band
     // telling the reader something they can see is untrue.
     // The undo only where the artifact can honour it: `is_a_reminder` hands
-    // the note back to the judged read, and an artifact with no corpus — every
-    // merge — has no note to hand back. The deletion still happens; the button
-    // does not appear.
+    // the note back to the judged read, and not every artifact has a note to
+    // hand back. `Core::can_be_a_reminder` is the same predicate that method
+    // decides on — asked here rather than restated, because the corpus is only
+    // the first of its four conditions and checking that one alone offered the
+    // button on a capture of several windows and on one whose promotion an
+    // operator had undone, where pressing it restored nothing. The deletion
+    // still happens; the button does not appear.
     let takes_it_back = tenant
         .core
-        .store
-        .get_artifact(&m.artifact_id)
+        .can_be_a_reminder(&m.artifact_id)
         .await
-        .is_ok_and(|a| a.corpus_id.is_some());
+        .unwrap_or(false);
     let just = tenant
         .core
         .set_reminder(&m.artifact_id, false)
@@ -549,7 +552,16 @@ async fn is_a_reminder(
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
 ) -> UiResult<Response> {
-    tenant.core.set_reminder(&id, true).await?;
+    // The band only offers this where `can_be_a_reminder` said it would work,
+    // so a `false` here is the window having changed underneath an open page.
+    // Said out loud rather than dropped: the row simply not reappearing is the
+    // symptom, and this is the only place that knows why.
+    if !tenant.core.set_reminder(&id, true).await? {
+        tracing::info!(
+            artifact_id = id,
+            "nothing to hand back to the judged read; the reminder was not restored"
+        );
+    }
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 

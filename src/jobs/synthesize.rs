@@ -1158,6 +1158,58 @@ Then run sync.";
         );
     }
 
+    /// And the same when the retry *parses* and merely says nothing. The merge
+    /// fell back only on a literal `None`, but `parse_judged_response` answers
+    /// `Some(..)` for every reply that parses and every field of the JUDGE
+    /// block is `#[serde(default)]` — so a retry that omits it yields
+    /// `Some(Judgement::default())`, an empty judgement that won against a full
+    /// one and took the reminder with it. `Judgement::says_something` is the
+    /// filter; `is_some` never was.
+    #[tokio::test]
+    async fn a_re_segmentation_that_says_nothing_does_not_retract_the_judgement() {
+        let mut core = test_core().await;
+        let synthesizer = std::sync::Arc::new(
+            crate::infer::fake::JudgingParaphraser::new(
+                "backup/",
+                crate::infer::Judgement {
+                    intent: Some("remind".into()),
+                    when: Some("2099-09-04T09:00".into()),
+                    rule: None,
+                    events: vec![],
+                    links: vec![],
+                },
+            )
+            .answering_an_empty_judgement_on_retry(),
+        );
+        core.synthesizer = synthesizer.clone();
+        let out = core
+            .ingest(
+                "erinnere mich Freitag, /mnt/backup/nightly.sh prüfen",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+
+        crate::jobs::test_support::drain(&core).await;
+
+        assert_eq!(synthesizer.calls(), 2, "exactly one re-segmentation");
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "an empty JUDGE block is not a retraction: {rows:?}"
+        );
+        assert!(rows[0].moment.at.is_some());
+        let chunks = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.contains("/mnt/backup/nightly.sh")),
+            "and the retry's literal is still what is stored: {chunks:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_literal_the_retry_also_drops_is_stored_flagged() {
         let mut core = test_core().await;

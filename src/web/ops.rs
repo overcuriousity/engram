@@ -323,12 +323,29 @@ async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Resp
 /// Put the version a condensation retired back. One button per open
 /// condensation on the artifact's page; the base's own undo is the same
 /// method with `UndoneBy::Evidence`.
-async fn uncondense_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Response> {
+/// The path is the *condensation's* id and `artifact_changed` wants the
+/// artifact's, so the action is read for its `subject_id` before it is undone
+/// — after which the row still names the same artifact, but reading it first
+/// keeps the failure ordinary: no such action is a `404` with nothing written.
+async fn uncondense_ui(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Path(aid): Path<String>,
+    Query(p): Query<ArtifactViewParams>,
+    Form(back): Form<ReturnTo>,
+) -> UiResult<Response> {
+    let artifact_id = tenant
+        .core
+        .store
+        .action(&aid)
+        .await?
+        .ok_or(crate::error::Error::NotFound)?
+        .subject_id;
     tenant
         .core
         .uncondense(&aid, crate::store::actions::UndoneBy::Operator)
         .await?;
-    Ok(Redirect::to("/ui/insights").into_response())
+    artifact_changed(&tenant, &headers, &artifact_id, &p.terms, &back).await
 }
 
 /// A pair waiting on a person.
@@ -614,6 +631,37 @@ pub(crate) fn routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
+    /// Every button in the artifact pane that posts to `/ui/ops` must carry an
+    /// `hx-post` and a `to`, or pressing it from a search result navigates the
+    /// whole window away and the results being worked through are gone — the
+    /// failure `ReturnTo` exists to prevent. "Restore the last version" was a
+    /// bare `<form method="post">` for exactly as long as nothing checked, and
+    /// `uncondense_ui` redirected to /ui/insights whatever page it was pressed
+    /// from. Asserted over the template rather than on that one button, so the
+    /// next button added is held to it too.
+    #[test]
+    fn every_ops_button_in_the_artifact_pane_returns_to_where_it_was_pressed() {
+        let tpl = include_str!("templates/_artifact_detail.html");
+        let mut checked = 0;
+        for form in tpl.split("<form ").skip(1) {
+            let head = &form[..form.find('>').expect("an opening form tag")];
+            if !head.contains("/ui/ops/") {
+                continue;
+            }
+            let body = &form[..form.find("</form>").expect("a closed form")];
+            assert!(head.contains("hx-post="), "no hx-post: {head}");
+            assert!(
+                body.contains(r#"name="to""#),
+                "nothing to return to: {head}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 5,
+            "the pane's ops buttons went missing: {checked}"
+        );
+    }
+
     use super::*;
     use crate::web::test_support::{
         app_session_and_core, app_with_cookie, artifacts, body_of, form, get_body, row_on,

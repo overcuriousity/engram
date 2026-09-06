@@ -659,8 +659,14 @@ impl Store {
     /// it deserves a place on a list.
     pub async fn open_due_for_artifact(&self, artifact_id: &str) -> Result<Option<Moment>> {
         Ok(sqlx::query(
+            // `COALESCE(snoozed_until, at)`, and not the raw `at`, because that
+            // is the instant this row is *rendered* at two lines below and the
+            // instant `due_for` and `open_due` both order on. Ordering on `at`
+            // picked the earliest row as captured and then displayed its snooze:
+            // a Monday row snoozed to next Friday beat a Wednesday one, so the
+            // pane said "in 10 days" while the band correctly said Wednesday.
             "SELECT * FROM moments WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL
-             ORDER BY at IS NULL, at LIMIT 1",
+             ORDER BY COALESCE(snoozed_until, at) IS NULL, COALESCE(snoozed_until, at) LIMIT 1",
         )
         .bind(artifact_id)
         .fetch_optional(&self.pool)
@@ -1951,6 +1957,30 @@ mod tests {
     /// Unlike `due_for`, no horizon: an artifact's own pane asks whether it
     /// carries a reminder at all, not whether one is close enough to belong
     /// on a list.
+    #[tokio::test]
+    async fn open_due_for_artifact_reads_a_snooze_as_the_rows_own_instant() {
+        // The pane renders `snoozed_until.or(at)`, so ordering on the raw `at`
+        // picked the earliest row *as captured* and then displayed its snooze:
+        // a Monday row put aside until next Friday beat a Wednesday one, and
+        // the pane said "in 10 days" while the band — which orders on
+        // `COALESCE(snoozed_until, at)`, as `due_for` does — said Wednesday.
+        let (s, aid) = store_with_artifact().await;
+        let monday = s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        let wednesday = s.insert_moment(&due(&aid, Some(3_000))).await.unwrap();
+        assert_eq!(
+            s.open_due_for_artifact(&aid).await.unwrap().unwrap().id,
+            monday,
+            "the earlier row, while nothing is put aside"
+        );
+
+        assert!(s.snooze(&monday, 10_000).await.unwrap());
+        let hit = s.open_due_for_artifact(&aid).await.unwrap().unwrap();
+        assert_eq!(
+            hit.id, wednesday,
+            "a snooze past the other row hands the pane that row instead"
+        );
+    }
+
     #[tokio::test]
     async fn open_due_for_artifact_ignores_the_horizon_but_not_done_or_undated() {
         let (s, aid) = store_with_artifact().await;

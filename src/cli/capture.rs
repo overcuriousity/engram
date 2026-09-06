@@ -72,7 +72,9 @@ pub async fn run(
             .map(String::as_str)
             .collect();
         return Err(Error::Validation(format!(
-            "{}: names nothing that can be read, and the other arguments are paths.              Nothing was captured. Correct the path, or quote the whole line to              store it as a note.",
+            "{}: names nothing that can be read, and the other arguments are paths. \
+             Nothing was captured. Correct the path, or quote the whole line to \
+             store it as a note.",
             strays.join(", ")
         )));
     };

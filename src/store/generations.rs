@@ -372,12 +372,24 @@ const FILE_PARAMS_SEEN: &str = "evolve.file_params";
 /// while the file kept saying what it said. Who wins is decided by what
 /// changed:
 ///
-/// - the file was edited since the last boot, or autonomy is off: the file
-///   wins, and a generation is minted from it so the journal shows the hand
-///   that moved the knob. Turning the loop off is therefore the way back to
-///   the file, exactly.
+/// - the file was edited since the last boot: the file wins, and a generation
+///   is minted from it so the journal shows the hand that moved the knob.
+/// - autonomy is off and the live generation is one *the loop* adopted: the
+///   file wins for the same reason. Turning the loop off is therefore the way
+///   back to the file, exactly.
 /// - otherwise the live generation wins, because nothing about the operator's
 ///   intent changed and the loop's move is the newer fact.
+///
+/// "The loop adopted it" is `run_id`, and that qualifier is load-bearing: a
+/// generation a *person* applied carries none, and reverting one on the
+/// autonomy switch reverted the operator rather than the loop. The way in is
+/// the ordinary one. `insights::tune_apply` writes `config.toml`, swaps
+/// `core.ranking` and restates the generation, but the process-wide `Config`
+/// it was built from is loaded once at boot and never reloaded — so the next
+/// time this base is evicted and reopened, `generation_check` hands us the
+/// *stale* file params, and under `learn.mode = "learning"` (which resolves to
+/// `autonomous = "off"`) the old unconditional `!autonomous` undid the Apply in
+/// both the journal and the serving core.
 ///
 /// The caller serves under whatever comes back. Without this a restart would
 /// quietly return the ranking to the file while every observation kept being
@@ -394,7 +406,7 @@ pub async fn boot_generation(
         None => None,
     };
     let mut live = ensure_generation(store, file, embed_recipe, chat_model).await?;
-    let file_wins = !autonomous || seen != Some(file);
+    let file_wins = seen != Some(file) || (!autonomous && live.run_id.is_some());
     if live.params != file && file_wins {
         tracing::info!(
             recency_weight = file.recency_weight,
@@ -709,6 +721,38 @@ mod tests {
             p(0.05, Some(3)),
             "off leaves today's behaviour exactly"
         );
+    }
+
+    #[tokio::test]
+    async fn switching_autonomy_off_does_not_revert_what_a_person_applied() {
+        // The loop's adoptions go back to the file when autonomy is switched
+        // off; a person's Apply must not, and `run_id` is what tells them
+        // apart. The way in is ordinary and had nothing to do with autonomy:
+        // `insights::tune_apply` writes `config.toml`, but the process-wide
+        // `Config` a core is rebuilt from is loaded once at boot, so the next
+        // open hands us the *stale* file params — and under
+        // `learn.mode = "learning"`, which resolves to `autonomous = "off"`,
+        // the old unconditional `!autonomous` undid the operator in both the
+        // journal and the serving core.
+        let store = Store::memory().await.unwrap();
+        let file = p(0.05, Some(3));
+        let first = boot_generation(&store, file, "recipe-a", "qwen", false)
+            .await
+            .unwrap();
+        let applied = restate_generation(&store, &first, p(0.25, Some(3)))
+            .await
+            .unwrap();
+        assert!(
+            applied.run_id.is_none(),
+            "nobody proposed this; a person did"
+        );
+
+        // The file the reopened core is built from is the stale one.
+        let g = boot_generation(&store, file, "recipe-a", "qwen", false)
+            .await
+            .unwrap();
+        assert_eq!(g.id, applied.id, "the Apply survives the reopen");
+        assert_eq!(g.params, p(0.25, Some(3)), "and is what the base serves");
     }
 
     #[tokio::test]

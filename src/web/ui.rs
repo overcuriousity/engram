@@ -5828,13 +5828,17 @@ mod tests {
         // staged file sits inside it, so the serialisation is pinned to the
         // fields the search actually takes — without this, every keystroke
         // carries a filename into the query string. `rerank` is on the list
-        // for the refining pass, whose own flag rides this form's GET,
-        // `explain` for the same reason, and `tz` because the echo under the
-        // box reads a date out of what is being typed: a name missing here is
-        // a flag the fragment is never asked with, however carefully the rest
-        // is wired.
+        // for the refining pass, whose own flag rides this form's GET, and
+        // `explain` for the same reason: a name missing here is a flag the
+        // fragment is never asked with, however carefully the rest is wired.
+        //
+        // `tz` is deliberately absent. It was on this list under a comment
+        // saying the echo "reads a date out of what is being typed", but
+        // `UiSearchParams` has no `tz` field and `fate_echo` does no date
+        // parsing, so serde discarded it on every keystroke. The zone belongs
+        // to the capture path, which reads the `#box-tz` hidden input directly.
         assert!(
-            page.contains(r#"hx-params="q,category,rerank,explain,fold,tz""#),
+            page.contains(r#"hx-params="q,category,rerank,explain,fold""#),
             "{page}"
         );
     }

@@ -90,7 +90,27 @@ pub fn holds_up(new: &Lived, old: &Lived) -> bool {
 /// when the two were compared. Neither is a number anybody chose: a base in
 /// heavy use decides quickly and a quiet one waits.
 pub fn settled(new: &Lived, old: &Lived) -> bool {
-    let (Some(new_rate), Some(old_rate)) = (new.rate(), old.rate()) else {
+    // The two empty sides are not the same question, and answering them
+    // together with `false` is what wedged this.
+    //
+    // Nothing left on the *older* side ends the watch. With
+    // `old.observations == 0` this function's own second criterion — "as many
+    // observations as the older had" — is trivially true, but the `rate()`
+    // guard returned before it ever got there; `holds_up` answers `true` in
+    // the same case, so the base neither adopted nor reverted and Insights
+    // read "under watch … Nothing else is proposed" for the life of the base.
+    // The way in is ordinary: `exclude_orphaned_observations` zeroes the
+    // parent generation. There is nothing left to separate the two, so the
+    // watch ends and the newer generation keeps its place — which is what a
+    // tie already decides.
+    let Some(old_rate) = old.rate() else {
+        return true;
+    };
+    // Nothing on the *newer* side decides nothing, and must go on waiting: a
+    // generation adopted a moment ago has no observations yet, and ending its
+    // watch here would settle every adoption before any evidence about it
+    // existed — which is the whole of what a watch is for.
+    let Some(new_rate) = new.rate() else {
         return false;
     };
     let one_observation = 2.0 / new.observations as f64 + 2.0 / old.observations as f64;
@@ -230,6 +250,33 @@ mod tests {
         };
         assert!(holds_up(&new, &old));
         assert!(!settled(&new, &old), "and nothing is decided about it");
+    }
+
+    #[test]
+    fn a_watch_whose_record_was_orphaned_ends_rather_than_wedging() {
+        // `exclude_orphaned_observations` zeroes the parent generation, and
+        // there is then nothing to measure the newer one against. `settled`
+        // used to answer `false` here while `holds_up` answered `true`, so the
+        // base neither adopted nor reverted and Insights read "under watch …
+        // Nothing else is proposed" for the life of the base.
+        let new = Lived {
+            positives: 3,
+            negatives: 1.0,
+            observations: 4,
+        };
+        let orphaned = Lived {
+            positives: 0,
+            negatives: 0.0,
+            observations: 0,
+        };
+        assert!(
+            settled(&new, &orphaned),
+            "nothing left to separate it from ends the watch"
+        );
+        assert!(
+            holds_up(&new, &orphaned),
+            "and the newer generation keeps its place, as a tie already decides"
+        );
     }
 
     #[test]

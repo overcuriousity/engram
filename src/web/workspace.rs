@@ -1840,12 +1840,14 @@ mod tests {
             "a reranker serving search is what arms the refining pass"
         );
         assert!(
-            html.contains(r#"hx-params="q,category,rerank,explain,fold,tz""#),
+            html.contains(r#"hx-params="q,category,rerank,explain,fold""#),
             "hx-params is the allowlist for what rides a search GET; without \
              `rerank` on it the refining pass's own flag is filtered off the \
              wire and the server only ever runs the fast path — and `explain` \
              was missing from it for exactly as long as the rail's why-line \
-             was unreachable"
+             was unreachable. `tz` is not on it and must not be: \
+             `UiSearchParams` has no such field, so serde dropped it on every \
+             keystroke — the capture path reads `#box-tz` directly"
         );
     }
 

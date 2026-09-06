@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn timestamps_render_as_a_readable_date() {
-        // 2026-08-09T07:00:00Z
+        // 2026-04-08T07:00:00Z
         assert_eq!(fmt_time(1_775_631_600), "2026-04-08 07:00");
         assert_eq!(fmt_time(0), "1970-01-01 00:00");
     }

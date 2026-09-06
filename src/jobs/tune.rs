@@ -296,11 +296,17 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         let mut rehearsal_lost = false;
         let mut rehearsal_settled = false;
         if !probes.is_empty() {
+            // Reranked only where the two generations disagree about it. Held
+            // constant it cancels out of the verdict and costs a reranker call
+            // per probe to do so; where it *is* what separates them, replaying
+            // without it made the two sides identical by construction.
+            let axis = live.params.rerank != parent.params.rerank;
             let r_new = crate::eval::rehearsed::rehearsed_under(
                 core,
                 live.params.into(),
                 &probes,
                 Some(started),
+                axis && live.params.rerank,
             )
             .await?;
             let r_old = crate::eval::rehearsed::rehearsed_under(
@@ -308,6 +314,7 @@ pub async fn pass(core: &Core) -> Result<Pass> {
                 parent.params.into(),
                 &probes,
                 Some(started),
+                axis && parent.params.rerank,
             )
             .await?;
             match (r_new, r_old) {
@@ -459,10 +466,28 @@ async fn propose(
     // by more than a probe's worth is refused and not offered again. Never
     // the other way: probes refuse and revert, they do not adopt.
     if !probes.is_empty() {
-        let r_live =
-            crate::eval::rehearsed::rehearsed_under(core, current, probes, Some(started)).await?;
-        let r_cand =
-            crate::eval::rehearsed::rehearsed_under(core, winner, probes, Some(started)).await?;
+        // As in the watch above: the reranker is run only where the candidate
+        // and the running configuration differ about it. That is the flip and
+        // nothing else, and it is the one candidate this gate could not read —
+        // replayed with the axis off, a flip and its own current are the same
+        // configuration, so `loses_to` was false however the flip would serve.
+        let axis = winner.rerank != current.rerank;
+        let r_live = crate::eval::rehearsed::rehearsed_under(
+            core,
+            current,
+            probes,
+            Some(started),
+            axis && current.rerank,
+        )
+        .await?;
+        let r_cand = crate::eval::rehearsed::rehearsed_under(
+            core,
+            winner,
+            probes,
+            Some(started),
+            axis && winner.rerank,
+        )
+        .await?;
         match (r_live, r_cand) {
             (Some(l), Some(c)) if c.loses_to(&l) => {
                 let id = core
@@ -1047,6 +1072,45 @@ mod tests {
         assert_eq!(live.run_id.as_deref(), Some(run.id.as_str()));
         assert!(run.recommended);
         assert!(!run.best_params.rerank);
+    }
+
+    /// The rerank axis has to reach the replay, and only when the caller says
+    /// so. Hard-coded `false` made the field inert: the flip candidate
+    /// `tune::propose` emits differs from `current` in that field alone, so
+    /// both sides replayed identically, `loses_to` was never true, and the flip
+    /// cleared the refusal gate whatever it would actually have done.
+    #[tokio::test]
+    async fn the_rerank_flag_reaches_the_replay_and_only_when_it_is_asked_for() {
+        use crate::eval::rehearsed::{probe_set, rehearsed_under};
+        let (core, _order, reranker) =
+            crate::eval::sweep::test_support::seeded_with_reranker().await;
+        let generation = generation_for(&core).await;
+        let probes = probe_set(&core, &generation).await.unwrap();
+        assert!(
+            !probes.is_empty(),
+            "the fixture must give this something to replay"
+        );
+        let params = *core.ranking.read().unwrap();
+
+        let before = reranker.calls();
+        rehearsed_under(&core, params, &probes, None, false)
+            .await
+            .unwrap()
+            .expect("nobody came back");
+        assert_eq!(
+            reranker.calls(),
+            before,
+            "held constant across a comparison, the reranker is not run"
+        );
+
+        rehearsed_under(&core, params, &probes, None, true)
+            .await
+            .unwrap()
+            .expect("nobody came back");
+        assert!(
+            reranker.calls() > before,
+            "and where the axis is what is under test, it is"
+        );
     }
 
     #[tokio::test]

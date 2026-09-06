@@ -303,6 +303,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
 pub struct JudgingParaphraser {
     drop_token: String,
     judgement: Judgement,
+    empty_on_retry: bool,
     calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -311,8 +312,21 @@ impl JudgingParaphraser {
         Self {
             drop_token: drop_token.to_string(),
             judgement,
+            empty_on_retry: false,
             calls: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The retry answers `Some(Judgement::default())` instead of `None` — a
+    /// reply that parsed and simply said nothing about the note as a moment.
+    ///
+    /// The commoner of the two shapes, and the one the merge could not see:
+    /// `parse_judged_response` answers `Some(..)` for every reply that parses
+    /// and `moment`, `events` and `links` are all `#[serde(default)]`, so a
+    /// retry that omits the JUDGE block lands here and not on `None`.
+    pub fn answering_an_empty_judgement_on_retry(mut self) -> Self {
+        self.empty_on_retry = true;
+        self
     }
 
     pub fn calls(&self) -> usize {
@@ -346,7 +360,11 @@ impl Synthesizer for JudgingParaphraser {
                 caveats: vec![],
                 pinned: false,
             }],
-            judgement: first.then(|| self.judgement.clone()),
+            judgement: if first {
+                Some(self.judgement.clone())
+            } else {
+                self.empty_on_retry.then(Judgement::default)
+            },
         })
     }
 

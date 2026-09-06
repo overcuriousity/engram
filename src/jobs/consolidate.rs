@@ -477,6 +477,16 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
+    // The week's budget, before anything is armed. `dedupe::run` reads it too
+    // and returns with the pair still `Pending` — correct for the unit, but it
+    // meant this pass re-armed the same pairs every interval for the rest of
+    // the week and reported `armed = n` each time, so the empty-run backoff
+    // that exists to stop exactly this treadmill never engaged. Arming nothing
+    // is what lets it engage.
+    if !core.may_act().await? {
+        tracing::info!("budget spent; no pairs armed until the window moves");
+        return Ok(0);
+    }
     let pending = core.store.pairs_to_judge(200).await?;
 
     let mut armed = 0usize;
@@ -2173,6 +2183,29 @@ pub(crate) mod tests {
                 .len(),
             1,
             "the pending pair must be left exactly as it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spent_week_arms_no_pairs_rather_than_arming_the_same_ones_for_ever() {
+        // `dedupe::run` reads the budget too and returns with the pair still
+        // `Pending` — correct for the unit, but this pass then re-armed the
+        // same pairs every interval for the rest of the week and reported
+        // `armed = n` each time, so the empty-run backoff that exists to stop
+        // exactly this treadmill never engaged.
+        let mut core = test_core().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_week = 0;
+        disagreeing(&core).await;
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 0, "nothing is armed");
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "and the pair waits, exactly as it was"
         );
     }
 

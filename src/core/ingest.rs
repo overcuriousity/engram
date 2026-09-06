@@ -1354,6 +1354,16 @@ impl Core {
             self.store.set_artifact_status(id, s).await?;
         }
         self.store.set_superseded_by(id, None).await?;
+        // Last, and after both setters. `exhume` clears `lifecycle_dirty`
+        // deliberately — until the `Embed` below lands there is no point for
+        // the drift repair to write a payload onto — but `set_artifact_status`
+        // and `set_superseded_by` each raise it again in their own statement,
+        // so the flag was `1` by the time this returned and the repair wrote
+        // onto the point the burial had deleted. Clearing it here is the
+        // ordering that makes `exhume`'s comment true.
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
+            .await?;
         self.store.enqueue(Stage::Embed, "artifact", id).await?;
         tracing::info!(artifact_id = id, "exhumed a reaped artifact");
         Ok(true)
@@ -1820,6 +1830,77 @@ impl Core {
             .await
     }
 
+    /// The window `set_reminder(id, true)` would hand back to the judged read,
+    /// or `None` where there is nothing to hand back.
+    ///
+    /// Four conditions, and they were spelled out inside `set_reminder` alone
+    /// while `web::due::not_a_reminder` decided whether to *offer* the undo on
+    /// the first of them — so a capture of several windows, or one whose
+    /// promotion an operator had undone, was offered "Not a reminder — undo",
+    /// and pressing it restored nothing and said nothing. One predicate, asked
+    /// by both, is what keeps the button's promise the same as the method's.
+    ///
+    /// Reads only: a caller that merely asks changes no metadata and arms no
+    /// unit.
+    async fn reminder_reread(&self, artifact_id: &str) -> Result<Option<i64>> {
+        let art = self.store.get_artifact(artifact_id).await?;
+        // A merge belongs to no corpus, so there is no note to read again.
+        let Some(cid) = art.corpus_id.as_deref() else {
+            return Ok(None);
+        };
+        // A capture that splits into windows is read window by window and
+        // never judged (`jobs::window`, `judging = all.len() == 1`), the same
+        // reason `refuse_a_reminder_too_large_to_judge` turns a long
+        // `engram -r` away at the door. Pressing the button here used to
+        // re-promote the whole document and produce no judgement and no
+        // moment at all; nothing is armed and the caller is told so.
+        //
+        // `!= 1` and not `> 1`. Zero is the same answer as many and for a
+        // nearer reason: there is no window to hand back, so arming one for a
+        // `segment_idx` the artifact still carries would queue a unit against
+        // a segment that does not exist — and returning `true` would have the
+        // page report a reminder armed that nothing will ever judge. The
+        // sibling `ask_the_judged_read_for_a_reminder` has always spelled the
+        // empty case out; this one guarded only the long-capture half of it.
+        let windows = self.store.segments_for_corpus(cid).await?.len();
+        if windows != 1 {
+            tracing::info!(
+                corpus_id = cid,
+                windows,
+                "a reminder is read in one pass; this capture has no single window to re-read"
+            );
+            return Ok(None);
+        }
+        // Nothing to re-read: an artifact with no window cannot be handed back
+        // to the judged call, and saying it was armed something was a claim
+        // about a job that was never queued.
+        let Some(idx) = art.segment_idx else {
+            tracing::info!(
+                artifact_id,
+                "artifact belongs to no window; there is nothing to re-read"
+            );
+            return Ok(None);
+        };
+        // The same mark, for the same reason — see
+        // `ask_the_judged_read_for_a_reminder`. Read before any metadata is
+        // written, so a refusal changes nothing at all.
+        if self.store.segment_no_promote(cid, idx).await? {
+            tracing::info!(
+                corpus_id = cid,
+                window = idx,
+                "this window's promotion was undone; it is not read again for a reminder"
+            );
+            return Ok(None);
+        }
+        Ok(Some(idx))
+    }
+
+    /// Whether "is a reminder" has anything to do on this artifact. What the
+    /// band asks before offering the undo; `reminder_reread` is the answer.
+    pub async fn can_be_a_reminder(&self, artifact_id: &str) -> Result<bool> {
+        Ok(self.reminder_reread(artifact_id).await?.is_some())
+    }
+
     /// The reminder's half of `set_entry`: "this is not a reminder", with an
     /// undo, and it sticks.
     ///
@@ -1867,50 +1948,11 @@ impl Core {
         let src = self.store.get_corpus(cid).await?;
         let mut meta = src.metadata.clone();
         if on {
-            // A capture that splits into windows is read window by window and
-            // never judged (`jobs::window`, `judging = all.len() == 1`), the
-            // same reason `refuse_a_reminder_too_large_to_judge` turns a long
-            // `engram -r` away at the door. Pressing the button here used to
-            // re-promote the whole document and produce no judgement and no
-            // moment at all; nothing is armed and the caller is told so.
-            let windows = self.store.segments_for_corpus(cid).await?.len();
-            // `!= 1` and not `> 1`. Zero is the same answer as many and for a
-            // nearer reason: there is no window to hand back, so arming one
-            // for a `segment_idx` the artifact still carries would queue a
-            // unit against a segment that does not exist — and returning
-            // `true` would have the page report a reminder armed that nothing
-            // will ever judge. The sibling `ask_the_judged_read_for_a_reminder`
-            // has always spelled the empty case out; this one guarded only the
-            // long-capture half of it.
-            if windows != 1 {
-                tracing::info!(
-                    corpus_id = cid,
-                    windows,
-                    "a reminder is read in one pass; this capture has no single window to re-read"
-                );
-                return Ok(false);
-            }
-            // Nothing to re-read: an artifact with no window cannot be handed
-            // back to the judged call, and saying it was armed something was
-            // a claim about a job that was never queued.
-            let Some(idx) = art.segment_idx else {
-                tracing::info!(
-                    artifact_id,
-                    "artifact belongs to no window; there is nothing to re-read"
-                );
+            // Asked as one question, so the band's undo and this method cannot
+            // disagree about it — see `reminder_reread`.
+            let Some(idx) = self.reminder_reread(artifact_id).await? else {
                 return Ok(false);
             };
-            // The same mark, for the same reason — see
-            // `ask_the_judged_read_for_a_reminder`. Read before the metadata is
-            // written, so a refusal changes nothing at all.
-            if self.store.segment_no_promote(cid, idx).await? {
-                tracing::info!(
-                    corpus_id = cid,
-                    window = idx,
-                    "this window's promotion was undone; it is not read again for a reminder"
-                );
-                return Ok(false);
-            }
             crate::core::moments::allow_intent(&mut meta, intent);
             self.store.set_corpus_metadata(cid, &meta).await?;
             // Hand the note back to the judged read: re-run its window's
@@ -3823,6 +3865,68 @@ mod tests {
         );
     }
 
+    /// The band offers "Not a reminder — undo" on `can_be_a_reminder`, and it
+    /// used to decide on `corpus_id.is_some()` alone. `set_reminder(id, true)`
+    /// refuses on three more conditions, so the button appeared on captures it
+    /// could not honour, reported success and restored nothing — which is
+    /// precisely what the optional undo exists to prevent.
+    #[tokio::test]
+    async fn the_undo_is_offered_only_where_the_reminder_can_actually_come_back() {
+        use crate::store::artifacts::NewArtifact;
+        let core = test_core().await;
+        let out = core
+            .ingest("erinnere mich Freitag, die Rechnung zu senden", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let read = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.in_results())
+            .expect("a live artifact");
+        assert!(
+            core.can_be_a_reminder(&read.id).await.unwrap(),
+            "one window, read from a note: there is something to hand back"
+        );
+
+        // A corpus is not enough on its own. This one belongs to no window, so
+        // there is nothing for the judged read to be handed.
+        let src = core
+            .store
+            .insert_corpus("a note nothing segmented", "web", None)
+            .await
+            .unwrap();
+        let windowless = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    text: "a note nothing segmented".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        assert!(
+            core.store
+                .get_artifact(&windowless)
+                .await
+                .unwrap()
+                .corpus_id
+                .is_some(),
+            "the old predicate would have offered the button here"
+        );
+        assert!(
+            !core.can_be_a_reminder(&windowless).await.unwrap(),
+            "and pressing it would have restored nothing"
+        );
+    }
+
     /// A restore out of a merge is an operator overruling the merge for this
     /// one source, and the lineage has to record it or `merge::finish`'s
     /// unfinished-merge repair re-hides the source on the next sweep tick, and
@@ -3920,6 +4024,21 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "and the repair may never hide it again"
+        );
+        // And it is not left marked dirty. `exhume` clears the flag on purpose
+        // — the burial deleted the point, and until the `Embed` lands there is
+        // nothing for the drift repair to write a payload onto — but
+        // `set_artifact_status` and `set_superseded_by` each raise it again in
+        // their own statement, so it was `1` by the time `reactivate`
+        // returned and the repair wrote onto the deleted point.
+        let dirty: i64 = sqlx::query_scalar("SELECT lifecycle_dirty FROM artifacts WHERE id = ?")
+            .bind(&root)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            dirty, 0,
+            "the point arrives with the embed, payload and all"
         );
     }
 

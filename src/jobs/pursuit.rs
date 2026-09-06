@@ -22,10 +22,19 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     if p.state != "open" || p.artifact_id.is_some() {
         return Ok(());
     }
+    let now = crate::store::now();
+    // Closed, not merely returned from. `periodic_units` no longer arms this
+    // stage without a generator, but a unit queued before that model was taken
+    // out of the config still arrives here — and a bare `Ok(())` left the
+    // pursuit `open` with no artifact and no reason, which is a row Ops shows
+    // for ever and nobody can act on. Every other exit from this function says
+    // why it took nothing; so does this one.
     let Some(generator) = core.generator.clone() else {
+        core.store
+            .close_pursuit(pursuit_id, "unsatisfied", "no generator configured", now)
+            .await?;
         return Ok(());
     };
-    let now = crate::store::now();
 
     // The engaged artifacts resolved to what was captured, in engagement
     // order. A synthesized artifact the operator pivoted through contributes
@@ -771,6 +780,40 @@ mod tests {
         for id in &ids {
             assert!(core.store.get_artifact(id).await.unwrap().in_results());
         }
+    }
+
+    /// With `[learn]` on and no `[infer.generate]`, `generate` returned a bare
+    /// `Ok(())` and the pursuit stayed `open` with no artifact and no reason —
+    /// a row Ops shows for ever that nobody can act on. `periodic_units` no
+    /// longer arms the stage without a generator, but a unit queued before the
+    /// model was taken out of the config still arrives here.
+    #[tokio::test]
+    async fn a_pursuit_with_no_generator_closes_unsatisfied_rather_than_sitting_open() {
+        let mut core = test_core().await;
+        // `[learn]` on, `[infer.generate]` absent: the shape an operator
+        // reaches by taking the model out of a working config.
+        core.generator = None;
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(100, &["how do I read the journal".into()], &ids, None)
+            .await
+            .unwrap();
+
+        generate(&core, &pid).await.unwrap();
+
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "unsatisfied", "closed, and not left open");
+        assert_eq!(p.reason.as_deref(), Some("no generator configured"));
+        assert!(p.artifact_id.is_none());
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "and nothing was written"
+        );
     }
 
     /// A generation reads originals. A pursuit whose engaged source is itself

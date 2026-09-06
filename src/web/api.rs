@@ -1796,8 +1796,13 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
 
 #[derive(serde::Deserialize)]
 pub struct MomentsQuery {
+    /// The window's lower bound, and `kind=event`'s alone — see `list_moments`
+    /// for why a `due` query has none. Accepted on a `due` query and not
+    /// consulted there.
     #[serde(default)]
     pub from: Option<i64>,
+    /// The window's upper bound, on both kinds. Defaults to the base's
+    /// `time.horizon_hours` out.
     #[serde(default)]
     pub to: Option<i64>,
     /// `due` (the default) or `event`.
@@ -1807,6 +1812,15 @@ pub struct MomentsQuery {
 
 /// Reminders and dates in a window. `due` answers what the front page shows —
 /// open rows only, undated last; `event` answers what refers to the window.
+///
+/// `from` bounds an `event` query and only that one. A `due` query has no lower
+/// bound by design: an overdue reminder is the one that most deserves to be
+/// listed, so a client asking for next week is still told about the row that
+/// went past three weeks ago. Said here because the parameter is accepted on
+/// both and consulted on one, which is not a thing a caller can see from the
+/// answer — and because giving `due` the bound instead would both hide those
+/// overdue rows and, passed as `open_due`'s first argument, un-hide everything
+/// snoozed between here and the window as though it were currently due.
 async fn list_moments(
     tenant: Tenant,
     Query(q): Query<MomentsQuery>,
@@ -1831,8 +1845,17 @@ async fn list_moments(
     ))
 }
 
+/// Strike a reminder. `404` where there was no open row to strike, exactly as
+/// `moment_snooze` answers it.
+///
+/// The `bool` used to be discarded and every call answered `204`. A phone
+/// client posting to an id that a re-read or another device had already
+/// settled was told it had succeeded, struck the row locally, and went on
+/// being pushed at by a reminder its own screen no longer showed.
 async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
-    tenant.core.complete_moment(&id).await?;
+    if !tenant.core.complete_moment(&id).await? {
+        return Err(Error::NotFound);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1891,7 +1914,8 @@ async fn moment_snooze(
         && m.at.is_none()
     {
         return Err(Error::Validation(
-            "this reminder has no date, so there is nothing to put it aside until;              set a date first"
+            "this reminder has no date, so there is nothing to put it aside until; \
+             set a date first"
                 .into(),
         ));
     }
@@ -2286,6 +2310,53 @@ pub(crate) mod tests {
             !core.store.is_retired(&cid).await.unwrap(),
             "and undoing brings it back"
         );
+    }
+
+    /// `moment_done` discarded the `bool` and answered `204` whatever it did,
+    /// so a phone client posting to an id a re-read or another device had
+    /// already settled was told it succeeded, struck the row locally, and went
+    /// on being pushed at by a reminder its own screen no longer showed. The
+    /// sibling `moment_snooze` answers `404` for exactly this case.
+    #[tokio::test]
+    async fn striking_a_reminder_that_is_not_there_is_a_404_and_not_a_204() {
+        let (app, token, core) = app_token_and_core().await;
+        let (_, id) = corpus_with_due(&core, None).await;
+
+        let first = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::NO_CONTENT, "there was a row");
+
+        let again = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            again.status(),
+            StatusCode::NOT_FOUND,
+            "and now there is not"
+        );
+
+        let never = app
+            .oneshot(post_json(
+                "/api/v1/moments/no-such-moment/done",
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(never.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

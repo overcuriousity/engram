@@ -59,7 +59,11 @@
                   input[!event.isComposing] changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() && open_with.is_empty() %},
                   load{% endif %}"
-      hx-params="q,category,rerank,explain,fold,tz"
+      {# No `tz` here. `UiSearchParams` has no such field and `fate_echo` does
+         no date parsing, so serde discarded it on every keystroke. The capture
+         path is what wants the zone, and app.js reads `#box-tz` directly for
+         it — this allowlist governs the *search* fragment and nothing else. #}
+      hx-params="q,category,rerank,explain,fold"
       hx-indicator="#search-spinner"{% if search_reranks %} data-rerank="true"{% endif %}>
   {# `/ui?explain=1` and nothing else. `hx-params` above is an allowlist, so
      the name has to appear in both places or the fragment is asked without it

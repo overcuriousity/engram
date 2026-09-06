@@ -167,7 +167,18 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
                 // for. The retry's own judgement still wins where it has one.
                 let first_judgement = reply.judgement.take();
                 reply = second;
-                reply.judgement = reply.judgement.take().or(first_judgement);
+                // `says_something()` and not `is_some()`. `parse_judged_response`
+                // answers `Some(..)` for every reply that parses, and `moment`,
+                // `events` and `links` are all `#[serde(default)]` — so a retry
+                // that parsed but left the JUDGE block out yielded
+                // `Some(Judgement::default())`, which is an empty judgement that
+                // won against a full one. The capture this whole retry exists
+                // for — "erinnere mich Freitag, /mnt/backup prüfen", where the
+                // second call fixes the path and answers `"moment": null` —
+                // lost its reminder to a `Some` that said nothing at all.
+                if !reply.judgement.as_ref().is_some_and(|j| j.says_something()) {
+                    reply.judgement = first_judgement;
+                }
             }
             // The first reply parsed; it merely paraphrased. Keeping it and
             // letting `flag_unverified` mark what went missing beats losing a
