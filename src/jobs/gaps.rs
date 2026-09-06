@@ -113,6 +113,31 @@ fn is_typed_from(g: &crate::store::gaps::GapVec, event_id: &str) -> bool {
 }
 
 pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
+    // The search this capture was typed from, where the box named one. Not a
+    // gap like the others: it is the query somebody typed on their way to
+    // writing this very text, so what closes it is the link and not a score —
+    // see `close_line` below.
+    let typed_from =
+        crate::core::ingest::typed_from(&core.store.get_corpus(corpus_id).await?.metadata)
+            .map(str::to_string);
+    cover_answering(core, corpus_id, typed_from).await
+}
+
+/// The same check, against a corpus that is not where the link was recorded.
+///
+/// For the capture whose text the base already held byte for byte. `ingest`
+/// answers that one with the stored corpus and stores nothing — no artifacts,
+/// no embed job, so no `settle_corpus` and no `cover` — while the page that
+/// sent it swaps the gap's row away on the 2xx. The hole was still open, and
+/// came back on the next load. The link is a person's claim and not a
+/// measurement: they wrote this text in answer to that query, and it is no
+/// less true for the answer having already been in the base. What closes the
+/// hole is the artifact the stored corpus already has.
+pub async fn cover_answering(
+    core: &Core,
+    corpus_id: &str,
+    typed_from: Option<String>,
+) -> Result<usize> {
     if !core.learn.enabled {
         return Ok(0);
     }
@@ -123,13 +148,6 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
     if open.gaps.is_empty() {
         return Ok(0);
     }
-    // The search this capture was typed from, where the box named one. Not a
-    // gap like the others: it is the query somebody typed on their way to
-    // writing this very text, so what closes it is the link and not a score —
-    // see `close_line` below.
-    let typed_from =
-        crate::core::ingest::typed_from(&core.store.get_corpus(corpus_id).await?.metadata)
-            .map(str::to_string);
     // Moved to the front before the cap bites. Every other gap the cap leaves
     // out is simply not checked by this capture, which is the accepted cost of
     // the ceiling — but this one is the reason the capture exists, and nothing
@@ -550,6 +568,42 @@ mod tests {
         assert_eq!(
             covered[0].text,
             "Erinnerung Termin Foto Dienstausweis Mittwoch 0900 Zimmer A323"
+        );
+    }
+
+    /// And a capture whose text the base already held closes its hole too.
+    ///
+    /// `ingest` answers a duplicate with the stored corpus and stores nothing
+    /// — no artifacts, no embed job, so no `settle_corpus` and no `cover` —
+    /// while the page that sent it has already swapped the hole's row away on
+    /// the 2xx. The hole stayed open and came back on the next load. The link
+    /// is a claim about what somebody wrote, not a measurement, and it holds
+    /// whether or not this call stored anything.
+    #[tokio::test]
+    async fn a_capture_the_base_already_had_still_closes_the_hole_it_was_typed_into() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let text = "Erinnerung Termin Foto Dienstausweis Mittwoch 0900 Zimmer A323";
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let first = unmatched_search(&core, text, v.clone()).await;
+        // Out of reach of the measurement, so the link is the only thing that
+        // could close anything.
+        core.set_weak_below(1.0);
+        let corpus = captured_from(&core, text, &first).await;
+
+        // The same sentence written again, from a search of its own.
+        let again = unmatched_search(&core, text, v).await;
+        let same = captured_from(&core, text, &again).await;
+        assert_eq!(same, corpus, "the stored corpus, and no second one");
+
+        let open = core
+            .store
+            .open_gaps(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap();
+        assert!(
+            open.gaps.iter().all(|g| g.gap.id != again),
+            "the second query is still a hole the page would ask back at them"
         );
     }
 

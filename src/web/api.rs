@@ -1932,10 +1932,7 @@ async fn moment_unsnooze(tenant: Tenant, Path(id): Path<String>) -> Result<Statu
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The instants a moment may name: the range a calendar year can be spelled
-/// in, which is also the range every reader of a moment can do arithmetic in.
-const YEAR_ONE: i64 = -62_135_596_800;
-const END_OF_9999: i64 = 253_402_300_799;
+use crate::core::moments::{END_OF_9999, YEAR_ONE};
 
 #[derive(serde::Deserialize)]
 pub struct NewMomentBody {

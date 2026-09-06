@@ -382,11 +382,11 @@ pub(crate) async fn rule_one(
                 satisfies: satisfies.clone(),
                 query_vec: Some(o.query_vec),
                 priming: None,
-                // Measured where the replay beside it is measured; see
-                // `sweep::served_at`.
-                served: sweep::served_at(o.rank),
+                served_rank: o.rank,
             };
-            observed.push(pair.served);
+            // Measured where the replay beside it is measured; see
+            // `sweep::served_at`.
+            observed.push(pair.served());
             replayed.push(sweep::rank_of(core, &pair, current, false).await?);
         }
         // `recommend` pointed the other way: the subject's record is the

@@ -455,6 +455,7 @@ impl Core {
                 self.ask_the_judged_read_for_a_reminder(&existing.id)
                     .await?;
             }
+            self.close_the_gap_this_answered(&existing.id, &c.metadata);
             return Ok(IngestOutcome::existing(&existing));
         }
 
@@ -516,6 +517,7 @@ impl Core {
                     self.ask_the_judged_read_for_a_reminder(&existing.id)
                         .await?;
                 }
+                self.close_the_gap_this_answered(&existing.id, &c.metadata);
                 return Ok(IngestOutcome::existing(&existing));
             }
         };
@@ -1738,6 +1740,32 @@ impl Core {
     /// The same route `set_reminder(on = true)` takes, and refused for the
     /// same reason on a capture that splits: a multi-window corpus is read
     /// window by window and never judged.
+    /// The hole a capture answered, closed against a corpus that was already
+    /// stored.
+    ///
+    /// The other half of what the `forced_remind` calls beside it are for: a
+    /// capture whose bytes the base already holds adds no text, and so reaches
+    /// no embed job, no `settle_corpus` and no `jobs::gaps::cover` — while the
+    /// page that sent it has already swapped the hole's row away on the 2xx.
+    /// Left here, the hole came back on the next load. The link the box
+    /// carries is a claim about what was written and not a measurement, so it
+    /// holds whether or not this call stored anything.
+    ///
+    /// On the background handle and best-effort, like every other coverage
+    /// check: a capture that is stored is stored.
+    fn close_the_gap_this_answered(&self, corpus_id: &str, metadata: &serde_json::Value) {
+        let Some(event) = typed_from(metadata).map(str::to_string) else {
+            return;
+        };
+        let core = self.clone();
+        let id = corpus_id.to_string();
+        self.background.spawn(async move {
+            if let Err(e) = crate::jobs::gaps::cover_answering(&core, &id, Some(event)).await {
+                tracing::warn!(corpus_id = %id, error = %e, "could not close the gap a stored capture answered");
+            }
+        });
+    }
+
     async fn ask_the_judged_read_for_a_reminder(&self, corpus_id: &str) -> Result<()> {
         let src = self.store.get_corpus(corpus_id).await?;
         let mut meta = src.metadata.clone();

@@ -244,13 +244,28 @@ pub(crate) struct Pair {
     /// recorded. Handed in on the Judge door so a rung of `prime_lift` can be
     /// replayed; a pair without one ties on that axis.
     pub(crate) priming: Option<crate::core::search::Priming>,
-    /// Where the artifact was actually served, 0-based, for a pair that came
-    /// from an observation. The rerank axis's base: the one row that has the
-    /// reranker in it where the reranker is live. `None` for a judged pair.
+    /// The rank this observation was served at — 1-based and unbounded, as
+    /// `observations.rank` records it. The rerank axis's base: the one row
+    /// that has the reranker in it where the reranker is live. `None` for a
+    /// judged pair, and for an observation that recorded no rank at all.
     ///
-    /// Measured at `LIMIT`, because that is where everything it is compared
-    /// against is measured. See `served_at`.
-    pub(crate) served: Option<usize>,
+    /// Raw, and narrowed to the window by `served()` at the point of
+    /// measurement. Stored already narrowed, "served beyond `LIMIT`" and
+    /// "never served" were the same `None`, and `rerank_flip` — which selects
+    /// on exactly that — threw away every deep observation in the sample.
+    /// Those are the rows `observation_pairs` spends half its budget going out
+    /// of its way to gather, so the axis could not accumulate the evidence it
+    /// needs to offer a flip.
+    pub(crate) served_rank: Option<i64>,
+}
+
+impl Pair {
+    /// Where the artifact was served, 0-based, as the replay measures it —
+    /// `None` past `LIMIT`, which is a miss on both sides alike. See
+    /// `served_at`.
+    pub(crate) fn served(&self) -> Option<usize> {
+        served_at(self.served_rank)
+    }
 }
 
 /// The place an observation was served at, 0-based, as the replay measures it.
@@ -403,7 +418,7 @@ async fn pairs_to_replay(core: &Core) -> Result<(Vec<Pair>, i64)> {
                     satisfies,
                     query_vec: None,
                     priming: None,
-                    served: None,
+                    served_rank: None,
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -504,7 +519,7 @@ pub(crate) async fn observation_pairs(
                     satisfies,
                     query_vec: Some(o.query_vec),
                     priming,
-                    served: served_at(o.rank),
+                    served_rank: o.rank,
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -693,11 +708,14 @@ pub(crate) async fn rerank_flip(
     if !core.reranks_search() {
         return Ok(None);
     }
-    let with_served: Vec<&Pair> = pairs.iter().filter(|p| p.served.is_some()).collect();
+    // Every pair that came from an observation with a rank on it, deep ones
+    // included: a place past `LIMIT` is a miss the base has to be charged
+    // with, not a row to leave out of the sample.
+    let with_served: Vec<&Pair> = pairs.iter().filter(|p| p.served_rank.is_some()).collect();
     if with_served.is_empty() {
         return Ok(None);
     }
-    let served: Vec<Option<usize>> = with_served.iter().map(|p| p.served).collect();
+    let served: Vec<Option<usize>> = with_served.iter().map(|p| p.served()).collect();
     let flipped = RankingParams {
         rerank: !current.rerank,
         ..current
@@ -1111,7 +1129,7 @@ mod tests {
 
         let (pairs, _) = observation_pairs(&core, &generation).await.unwrap();
         assert_eq!(pairs.len(), OBSERVATION_LIMIT, "the budget is still spent");
-        let inside = pairs.iter().filter(|p| p.served.is_some()).count();
+        let inside = pairs.iter().filter(|p| p.served().is_some()).count();
         assert_eq!(
             inside, 5,
             "every observation the window can see is drawn on, deep ones or not"
@@ -1135,13 +1153,15 @@ mod tests {
             .unwrap();
     }
 
+    /// `served` is 0-based, the way the replay measures; the column it stands
+    /// for counts from one.
     fn served_pair(order: &[String], i: usize, served: usize) -> Pair {
         Pair {
             query: QUERY.into(),
             satisfies: vec![order[i].clone()],
             query_vec: None,
             priming: None,
-            served: Some(served),
+            served_rank: Some(served as i64 + 1),
         }
     }
 
@@ -1169,6 +1189,42 @@ mod tests {
             current,
             "the flip moves the one knob"
         );
+    }
+
+    /// A served place past `LIMIT` is a miss the base is charged with, not a
+    /// row to leave out of the sample.
+    ///
+    /// `served_at` maps every rank at or past `LIMIT` to `None`, so selecting
+    /// on the narrowed value could not tell "served, deep" from "never
+    /// served" — and threw away exactly the deep observations
+    /// `observation_pairs` spends half its budget going out of its way to
+    /// gather. With nothing left in the sample the axis could never
+    /// accumulate the evidence a flip needs.
+    #[tokio::test]
+    async fn the_rerank_axis_keeps_the_deep_observations_the_budget_went_after() {
+        let (core, order, _) = super::test_support::seeded_with_reranker().await;
+        let current = RankingParams {
+            rerank: true,
+            ..*core.ranking.read().unwrap()
+        };
+        let deep = |i: usize| Pair {
+            query: QUERY.into(),
+            satisfies: vec![order[i].clone()],
+            query_vec: None,
+            priming: None,
+            served_rank: Some(LIMIT as i64 + 3),
+        };
+        let pairs = vec![deep(0), deep(1)];
+        assert!(
+            pairs.iter().all(|p| p.served().is_none()),
+            "narrowed to the window, both are misses — which is the point"
+        );
+        let flip = rerank_flip(&core, &pairs, current, None)
+            .await
+            .unwrap()
+            .expect("two pairs the reranker buried are two the flip can recover");
+        assert_eq!(flip.served_recall, 0.0, "the base found neither of them");
+        assert!(flip.recall > 0.0, "and the flip finds them");
     }
 
     #[tokio::test]
@@ -1210,7 +1266,7 @@ mod tests {
         };
         let mut pairs: Vec<Pair> = (0..3).map(|i| served_pair(&order, i, i)).collect();
         pairs.push(Pair {
-            served: None,
+            served_rank: None,
             ..served_pair(&order, 3, 3)
         });
         let before = reranker.calls();
@@ -1593,7 +1649,7 @@ mod tests {
                 sitting: [order[5].clone()].into_iter().collect(),
                 due: Default::default(),
             }),
-            served: None,
+            served_rank: None,
         };
         let without = Pair {
             priming: None,

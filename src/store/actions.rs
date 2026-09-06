@@ -287,13 +287,28 @@ impl Store {
     /// the memory an action site reads before acting again.
     /// Every action taken after `at`, undone or not. The budget's read: an
     /// action counts because it was taken, whoever took it back.
+    ///
+    /// `moment` rows excepted, and they are the one exception. The budget is a
+    /// bound on how much of the corpus the base may rearrange without being
+    /// asked — merges, supersessions, burials, promotions, condensations, each
+    /// one a write to somebody's text with an undo beside it. A reminder read
+    /// out of a capture is none of that: it is the reading itself, filed by
+    /// `judgement::journal` so the corpus journal can show what the base made
+    /// of a note, and it never consults `may_act` because there is nothing
+    /// there to permit.
+    ///
+    /// Counted, it made the two features eat each other. Ten dated captures in
+    /// a week reach the default cap of ten, and then dedupe, reap, condense
+    /// and the sleep pass's corpus half all stand down for the rest of the
+    /// window — silently, because a spent budget is an ordinary state that
+    /// logs at info and waits.
     pub async fn actions_since(&self, at: i64) -> Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM corpus_actions WHERE at > ?")
-                .bind(at)
-                .fetch_one(&self.pool)
-                .await?,
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM corpus_actions WHERE at > ? AND kind != 'moment'",
         )
+        .bind(at)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     pub async fn action_was_undone(&self, subject_id: &str, kind: Kind) -> Result<bool> {
@@ -387,6 +402,35 @@ mod tests {
             .unwrap();
         assert_eq!(store.actions_since(0).await.unwrap(), 2);
         assert_eq!(store.actions_since(i64::MAX).await.unwrap(), 0);
+    }
+
+    /// A reminder read out of a capture is not a corpus rearrangement, and the
+    /// cap on rearranging the corpus must not be spent by reading notes. Ten
+    /// dated captures in a week used to reach the default cap of ten and stand
+    /// dedupe, reap, condense and the sleep pass down for the rest of it.
+    #[tokio::test]
+    async fn reading_a_reminder_out_of_a_note_does_not_spend_the_week_s_budget() {
+        let store = Store::memory().await.unwrap();
+        store.record_action(&merge_of("a", "m")).await.unwrap();
+        for i in 0..20 {
+            store
+                .record_action(&NewAction {
+                    job: Job::Judgement,
+                    kind: Kind::Moment,
+                    subject_id: format!("moment-{i}"),
+                    survivor_id: None,
+                    detail: Some("due".into()),
+                    evidence: serde_json::json!({ "artifact": "a" }),
+                    pair_score: None,
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.actions_since(0).await.unwrap(),
+            1,
+            "only the merge is a corpus action"
+        );
     }
 
     fn merge_of(subject: &str, survivor: &str) -> NewAction {

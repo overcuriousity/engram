@@ -962,20 +962,25 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
     } else {
         CorpusStatus::Ready
     };
-    let ready = status == CorpusStatus::Ready;
     core.store.set_corpus_status(corpus_id, status).await?;
-    if ready {
-        // On the background handle, not on this path: the document is stored
-        // and settled either way, and a vector query per open gap is not
-        // something the last chunk's embedding should wait behind.
-        let core = core.clone();
-        let id = corpus_id.to_string();
-        core.clone().background.spawn(async move {
-            if let Err(e) = crate::jobs::gaps::cover(&core, &id).await {
-                tracing::warn!(corpus_id = %id, error = %e, "could not check what this capture answered");
-            }
-        });
-    }
+    // Both settled states, `partial` included. A window the model refused
+    // leaves a hole in the document; it does not make the chunks that *did*
+    // embed unable to answer a question somebody asked. Gated on `ready`, the
+    // whole coverage check — the distance measurement and the link a capture
+    // carries from the box it was typed into — never ran for a corpus that
+    // settled `partial`, which is the case `fix(gaps)` cited as the reason the
+    // link had to exist in the first place.
+    //
+    // On the background handle, not on this path: the document is stored and
+    // settled either way, and a vector query per open gap is not something the
+    // last chunk's embedding should wait behind.
+    let core = core.clone();
+    let id = corpus_id.to_string();
+    core.clone().background.spawn(async move {
+        if let Err(e) = crate::jobs::gaps::cover(&core, &id).await {
+            tracing::warn!(corpus_id = %id, error = %e, "could not check what this capture answered");
+        }
+    });
     Ok(())
 }
 

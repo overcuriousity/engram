@@ -333,8 +333,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         match anchor {
             Some(anchor) => {
                 if let Err(e) =
-                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids, &text)
-                        .await
+                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids).await
                 {
                     tracing::warn!(
                         corpus_id,

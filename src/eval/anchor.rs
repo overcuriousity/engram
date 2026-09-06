@@ -32,10 +32,25 @@ pub struct Agreement {
 
 /// How often the self-generated evidence and the human verdicts say the same
 /// thing. `None` where no judged search has an observation to compare with.
+///
+/// One tally per distinct query, and the newest verdict is the one that counts.
+/// The evidence side of the comparison is looked up *by query text* — every
+/// positive observation ever recorded for that query, whichever search event
+/// produced it — so a query somebody judged thirty times contributed thirty
+/// identical comparisons to a sample of five hundred. That is not thirty
+/// pieces of evidence, it is one, weighted thirty times: a single query
+/// somebody kept re-judging could carry six percent of the anchor on its own,
+/// and one stray verdict on it then moved `trustworthy` and suspended the
+/// whole autonomous loop. Newest, because the question this asks is whether
+/// agreement holds *now*, and a query re-judged is somebody correcting
+/// themselves.
 pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
     let verdicts = sqlx::query(
-        "SELECT query, verdict, expect_id FROM search_events
-          WHERE verdict IN ('hit', 'gap')
+        "SELECT query, verdict, expect_id FROM (
+           SELECT query, verdict, expect_id, judged_at, id,
+                  ROW_NUMBER() OVER (PARTITION BY query ORDER BY judged_at DESC, id DESC) AS n
+             FROM search_events WHERE verdict IN ('hit', 'gap')
+         ) WHERE n = 1
           ORDER BY judged_at DESC, id DESC LIMIT ?",
     )
     .bind(VERDICT_LIMIT)
@@ -232,6 +247,52 @@ mod tests {
             Some(Agreement {
                 agreed: 1,
                 disagreed: 1
+            })
+        );
+    }
+
+    /// One query is one piece of evidence, however many times it was judged.
+    ///
+    /// The evidence side is looked up by query *text* — every positive
+    /// observation ever recorded for that query — so a query somebody judged
+    /// thirty times contributed thirty identical comparisons to a sample of
+    /// five hundred. That is one piece of evidence weighted thirty times, and
+    /// one stray verdict on such a query could carry the anchor and suspend
+    /// the autonomous loop on its own.
+    #[tokio::test]
+    async fn a_query_judged_many_times_is_still_one_piece_of_evidence() {
+        let (core, g) = base().await;
+        observed(&core, &g, "mount the image", Some("art-1"), Source::Cited).await;
+        for _ in 0..30 {
+            judged(&core, "mount the image", Verdict::Hit, Some("art-1")).await;
+        }
+        judged(&core, "loop device", Verdict::Hit, Some("art-2")).await;
+        observed(&core, &g, "loop device", Some("art-9"), Source::Opened).await;
+
+        assert_eq!(
+            agreement(&core).await.unwrap(),
+            Some(Agreement {
+                agreed: 1,
+                disagreed: 1
+            }),
+            "one tally per query, not one per verdict row"
+        );
+    }
+
+    /// And the newest verdict is the one that counts: a query re-judged is
+    /// somebody correcting themselves, and the question this asks is whether
+    /// agreement holds now.
+    #[tokio::test]
+    async fn the_newest_verdict_on_a_query_is_the_one_that_counts() {
+        let (core, g) = base().await;
+        observed(&core, &g, "mount the image", Some("art-1"), Source::Cited).await;
+        judged(&core, "mount the image", Verdict::Hit, Some("art-9")).await;
+        judged(&core, "mount the image", Verdict::Hit, Some("art-1")).await;
+        assert_eq!(
+            agreement(&core).await.unwrap(),
+            Some(Agreement {
+                agreed: 1,
+                disagreed: 0
             })
         );
     }

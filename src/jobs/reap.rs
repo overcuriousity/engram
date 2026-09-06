@@ -92,6 +92,19 @@ pub async fn run(core: &Core) -> Result<Report> {
                     tracing::info!(artifact_id = %c.id, reason, "valuable, but over this run's rescue cap; it waits");
                     continue;
                 }
+                // The writer this rewrite needs, asked for before the row is
+                // touched. `rescue_one` refuses with a `Validation` when there
+                // is none, and every `rescue_one` failure used to stand the
+                // candidate down — so a base with a `[infer.reap]` judge and no
+                // generator paid `max_judged_per_run` model calls a sweep to
+                // push every valuable thing it owns ninety days out of reach,
+                // one restamp at a time, while `report.judged` stayed non-zero
+                // and the empty-run backoff never engaged. A role that has not
+                // arrived is a wait, exactly as it is for `Describe`.
+                if core.generator.is_none() {
+                    tracing::info!(artifact_id = %c.id, reason, "valuable, but no generator model to rewrite it with; it waits");
+                    continue;
+                }
                 match rescue_one(core, c, &reason).await {
                     Ok(new_id) => {
                         report.rescued += 1;
@@ -99,7 +112,16 @@ pub async fn run(core: &Core) -> Result<Report> {
                     }
                     Err(e) => {
                         tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact; it waits");
-                        step_aside(core, &c.id).await;
+                        // Restamped only where the failure is about this row —
+                        // no source text left to rewrite from, a reply that
+                        // would not parse, an endpoint that refused this text.
+                        // An endpoint that merely did not answer says nothing
+                        // about the candidate, and the sweep's own cadence is
+                        // its retry; standing the row down for it would push
+                        // the whole backlog forward on every outage.
+                        if !matches!(e, crate::error::Error::Inference { .. }) {
+                            step_aside(core, &c.id).await;
+                        }
                     }
                 }
             }

@@ -669,24 +669,43 @@ pub fn rule_count(rule: &str) -> Option<u32> {
     parse_rule(rule).ok()?.count
 }
 
+/// The instants a moment may name: the range a calendar year can be spelled
+/// in, which is also the range every reader of a moment can do arithmetic in.
+/// `api::set_moment` holds a raw timestamp to it, and `resolve_local` holds
+/// every wall-clock time typed at the base to it.
+pub const YEAR_ONE: i64 = -62_135_596_800;
+pub const END_OF_9999: i64 = 253_402_300_799;
+
 /// A local wall-clock time as an instant, choosing for the operator on the
 /// two days a year when the zone cannot. An ambiguous fall-back hour takes
 /// its earlier reading; a time inside a spring-forward gap rolls forward to
 /// the first instant the zone has again, in quarter-hour steps — chrono's
 /// mapping for a gap is `None` with nothing to call `earliest()` on, and
 /// treating that as "no answer" silently dropped a date the operator named.
+///
+/// `None` outside years 1 to 9999, the same range `api::set_moment` holds a
+/// timestamp to, and the arithmetic is checked. `%Y` parses a signed
+/// six-digit year, so `when=+262142-12-31T23:59` reached here from the band's
+/// own form: the gap recovery added quarter-hours to a `NaiveDateTime` already
+/// at chrono's ceiling, and `+` on that panics — inside a handler, which
+/// aborts the connection. The range is the fix and the checked add is the
+/// belt: neither should depend on the other being there.
 pub(crate) fn resolve_local(dt: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
+    let stamped = |d: chrono::DateTime<Tz>| {
+        let ts = d.timestamp();
+        (YEAR_ONE..=END_OF_9999).contains(&ts).then_some(ts)
+    };
     if let Some(d) = tz.from_local_datetime(&dt).earliest() {
-        return Some(d.timestamp());
+        return stamped(d);
     }
     // Gaps are 30 or 60 minutes almost everywhere (Lord Howe's is 30); three
     // hours of quarter-hour steps covers the historical 2 h ones too.
     (1..=12)
         .find_map(|q| {
-            tz.from_local_datetime(&(dt + chrono::Duration::minutes(15 * q)))
-                .earliest()
+            dt.checked_add_signed(chrono::Duration::minutes(15 * q))
+                .and_then(|shifted| tz.from_local_datetime(&shifted).earliest())
         })
-        .map(|d| d.timestamp())
+        .and_then(stamped)
 }
 
 /// The next occurrence strictly after `at`, keeping `at`'s wall-clock time in
@@ -1204,6 +1223,40 @@ mod tests {
 
     fn berlin() -> chrono_tz::Tz {
         chrono_tz::Tz::Europe__Berlin
+    }
+
+    /// A wall-clock time no calendar can spell is not a date, and asking for
+    /// one must not take the connection down with it.
+    ///
+    /// `%Y` parses a signed six-digit year, so the due band's own form carried
+    /// `when=+262142-12-31T23:59` straight here. The zone had no such instant,
+    /// the gap recovery added quarter-hours to a `NaiveDateTime` already at
+    /// chrono's ceiling, and `+` on that panics inside the handler.
+    #[test]
+    fn a_year_no_calendar_can_spell_is_refused_rather_than_panicked_over() {
+        let ceiling = chrono::NaiveDateTime::MAX;
+        assert_eq!(resolve_local(ceiling, berlin()), None);
+        assert_eq!(resolve_local(chrono::NaiveDateTime::MIN, berlin()), None);
+        let past_9999 = chrono::NaiveDate::from_ymd_opt(20_000, 1, 1)
+            .expect("chrono spells it even though a moment may not")
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(resolve_local(past_9999, berlin()), None);
+        // The bound is on the instant and not on the local year, so the first
+        // midnight of the year 10000 in a zone east of UTC is still 9999 to
+        // everything that reads the stamp — and is allowed.
+        let just_inside = chrono::NaiveDate::from_ymd_opt(10_000, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert!(resolve_local(just_inside, berlin()).is_some_and(|at| at <= END_OF_9999));
+        // And an ordinary date still resolves, inside the range on both sides.
+        let ordinary = chrono::NaiveDate::from_ymd_opt(2026, 9, 11)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        let at = resolve_local(ordinary, berlin()).expect("an ordinary date");
+        assert!((YEAR_ONE..=END_OF_9999).contains(&at));
     }
     fn local(at: i64) -> String {
         berlin()

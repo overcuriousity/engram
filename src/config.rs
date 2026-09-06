@@ -548,6 +548,14 @@ impl<'de> Deserialize<'de> for Autonomy {
                     "off" => Ok(Autonomy::Off),
                     "ranking" => Ok(Autonomy::Ranking),
                     "full" => Ok(Autonomy::Full),
+                    // The same back-compatibility `visit_bool` carries, spelled
+                    // for the reader that has no booleans. Every environment
+                    // value arrives as a string, so `ENGRAM__EVOLVE__AUTONOMOUS=false`
+                    // reached `visit_bool` never and `unknown_variant` always —
+                    // and the server refused to boot on a setting the release
+                    // notes said was still read.
+                    "true" => Ok(Autonomy::Full),
+                    "false" => Ok(Autonomy::Off),
                     other => Err(E::unknown_variant(other, &["off", "ranking", "full"])),
                 }
             }
@@ -2890,6 +2898,13 @@ mod tests {
         assert_eq!(read(r#"autonomous = "ranking""#), Autonomy::Ranking);
         assert_eq!(read(r#"autonomous = "full""#), Autonomy::Full);
         assert!(parse(r#"autonomous = "sometimes""#).is_err());
+        // And the same two words as strings, which is the only way an
+        // environment variable can spell them: `visit_bool` is never reached
+        // from `ENGRAM__EVOLVE__AUTONOMOUS=false`, so the back-compatibility
+        // the line above proves existed only for a config file, and a server
+        // configured that way refused to boot with `unknown variant`.
+        assert_eq!(read(r#"autonomous = "false""#), Autonomy::Off);
+        assert_eq!(read(r#"autonomous = "true""#), Autonomy::Full);
     }
 
     /// `#[serde(default)]` on the `Config` field covers an absent section and

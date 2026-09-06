@@ -202,7 +202,7 @@ pub(crate) async fn pair_of(
         satisfies: crate::eval::satisfied_by(core, &r.artifact_id).await,
         query_vec: Some(r.query_vec.clone()),
         priming: None,
-        served: None,
+        served_rank: None,
     }
 }
 
@@ -250,6 +250,16 @@ pub async fn rehearse(
             .rehearsals_after(&crate::store::Cursor::default(), want)
             .await?;
     }
+    // The two halves overlap, and the overlap has to go. A fragile probe is a
+    // live probe like any other, so the lap walks straight over the ones
+    // already in hand — and on a base whose probes all fit in one lap, that is
+    // every one of them. `rehearsal_results` has no uniqueness, so a probe
+    // measured twice in one pass writes two rows off a single reading, and
+    // every test spelled "at least two retained results" then passes on one
+    // observation agreeing with itself: interference files a pair, condense
+    // arms a rewrite, and neither has the second measurement it says it has.
+    let held: std::collections::HashSet<String> = batch.iter().map(|r| r.id.clone()).collect();
+    let lap: Vec<_> = lap.into_iter().filter(|r| !held.contains(&r.id)).collect();
     let lap_start = batch.len();
     batch.extend(lap);
 
@@ -275,10 +285,6 @@ pub async fn rehearse(
         let stale = r.embed_model != model;
         let stands = owner_stands(core, &pair.satisfies).await;
         if stale || !stands {
-            core.store
-                .retire_rehearsal(&r.id, crate::store::now())
-                .await?;
-            out.retired += 1;
             // The two retirements are not the same event. An owner that left
             // results is a question with nothing left to answer it, and it
             // stays retired. A changed embedder is not: the question is as
@@ -288,9 +294,44 @@ pub async fn rehearse(
             // `embed::mark_indexed` — so a base that changed embedder lost
             // every probe it had, and with them the anchor that refuses a
             // candidate and reverts a generation.
+            //
+            // Which is why the stale probe is retired only once its
+            // replacement exists, or once it is certain none ever will.
+            // `retired_at` is a one-way door and every reader filters on it,
+            // and a capture probe's replacement is minted from the artifact
+            // its query *is* — an artifact that, on the pass right after the
+            // embedder changed, has very often not been re-embedded yet.
+            // Retired first and re-minted after, that probe was thrown away
+            // for the reason it was being kept: the sweep ran while the
+            // re-embed was still queued. `Waiting` leaves it live for the
+            // pass that finds the artifact ready.
             if stale && stands {
-                out.reminted += usize::from(remint(core, r, &model).await?);
+                // The vector first, and the retirement only after it is in
+                // hand. `idx_rehearsals_live` is unique over
+                // `(artifact_id, class, query)` where `retired_at IS NULL`, so
+                // the replacement cannot be written beside the old row — the
+                // retirement has to come first, and that is exactly what made
+                // the loss possible. Deciding here and writing below keeps
+                // both: nothing is retired that has no replacement coming, and
+                // nothing is inserted against a row still holding the index.
+                match remintable(core, r, &model).await? {
+                    // Left live for the pass that finds the artifact embedded.
+                    Remintable::Waiting => continue,
+                    Remintable::Gone => {}
+                    Remintable::From(query_vec) => {
+                        core.store
+                            .retire_rehearsal(&r.id, crate::store::now())
+                            .await?;
+                        out.retired += 1;
+                        out.reminted += usize::from(remint(core, r, &model, query_vec).await?);
+                        continue;
+                    }
+                }
             }
+            core.store
+                .retire_rehearsal(&r.id, crate::store::now())
+                .await?;
+            out.retired += 1;
             continue;
         }
         let (rank, above) = crate::eval::sweep::rank_and_above(core, &pair, current).await?;
@@ -326,30 +367,69 @@ pub async fn rehearse(
 /// `false` where the source is gone, not yet re-embedded, or already has a
 /// live probe for this question. None of those is a failure: the next lap
 /// comes round.
-async fn remint(core: &Core, r: &crate::store::rehearsals::Rehearsal, model: &str) -> Result<bool> {
-    let query_vec = match r.class {
+/// The query vector a re-mint would carry, or why there is none.
+///
+/// Asked before the old probe is retired, which is the whole point of it
+/// being a separate step. `retired_at` is a one-way door and every reader
+/// filters on it, so a probe retired ahead of a replacement that never came
+/// is a probe the base has lost — and a capture probe's replacement is minted
+/// from the artifact its query *is*, an artifact that, on the pass right
+/// after the embedder changed, has very often not been re-embedded yet. That
+/// pass used to retire every probe it had and re-mint almost none of them.
+async fn remintable(
+    core: &Core,
+    r: &crate::store::rehearsals::Rehearsal,
+    model: &str,
+) -> Result<Remintable> {
+    Ok(match r.class {
         Class::Cue => {
             let permit = core.gate.background_light().await;
             let v = core.embedder.embed_query(&r.query).await;
             permit.finished();
-            v?
+            Remintable::From(v?)
         }
         Class::Capture => {
             let Some(source) = r.source_id.as_deref() else {
-                return Ok(false);
+                return Ok(Remintable::Gone);
             };
             let Ok(a) = core.store.get_artifact(source).await else {
-                return Ok(false);
+                return Ok(Remintable::Gone);
             };
+            // Not yet, rather than never: the embed queue is what makes both
+            // of these true, and it drains.
             if a.embed_model.as_deref() != Some(model) {
-                return Ok(false);
+                return Ok(Remintable::Waiting);
             }
-            let Some(v) = core.vectors.dense_of(source).await? else {
-                return Ok(false);
-            };
-            v
+            match core.vectors.dense_of(source).await? {
+                Some(v) => Remintable::From(v),
+                None => Remintable::Waiting,
+            }
         }
-    };
+    })
+}
+
+/// Three answers and not two, because "no replacement" splits: a source that
+/// has not been re-embedded *yet* is a wait the embed queue ends, and a source
+/// that is gone is not. Only the second may retire the probe.
+enum Remintable {
+    /// The query vector for the replacement.
+    From(Vec<f32>),
+    /// Nothing to mint from yet. The old probe stays live.
+    Waiting,
+    /// Nothing to mint from, ever.
+    Gone,
+}
+
+/// Write the replacement, once the old row is out of the live index.
+///
+/// `false` where `INSERT OR IGNORE` declined — this question already stands on
+/// this artifact at the live embedder, which is a replacement either way.
+async fn remint(
+    core: &Core,
+    r: &crate::store::rehearsals::Rehearsal,
+    model: &str,
+    query_vec: Vec<f32>,
+) -> Result<bool> {
     Ok(core
         .store
         .record_rehearsal(&NewRehearsal {
@@ -437,16 +517,24 @@ pub async fn interference(
         }
         let mut corpora: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
+        // Which of these ids the base still has. `outranked_by` is free-form
+        // JSON written when the rehearsal ran, and an id in it can name an
+        // artifact a burial or a merge has since taken away — a missing row
+        // and a row with no corpus are two different answers, and reading
+        // both as `None` conflated them.
+        let mut gone: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in &results {
             for x in &r.outranked_by {
                 if !corpora.contains_key(x) {
-                    let c = core
-                        .store
-                        .get_artifact(x)
-                        .await
-                        .ok()
-                        .and_then(|a| a.corpus_id);
-                    corpora.insert(x.clone(), c);
+                    match core.store.get_artifact(x).await {
+                        Ok(a) => {
+                            corpora.insert(x.clone(), a.corpus_id);
+                        }
+                        Err(_) => {
+                            gone.insert(x.clone());
+                            corpora.insert(x.clone(), None);
+                        }
+                    }
                 }
             }
         }
@@ -454,6 +542,16 @@ pub async fn interference(
             corpora.get(id).cloned().flatten()
         });
         for x in found {
+            // `artifact_pairs` carries foreign keys on both members and
+            // `INSERT OR IGNORE` does not suppress a foreign-key violation, so
+            // filing against an id the base no longer has failed the whole
+            // retention sweep — every rule after this one included — over one
+            // artifact somebody deleted. One id skipped is the right size of
+            // consequence.
+            if gone.contains(&x) {
+                tracing::debug!(owner = %owner.id, outranker = %x, "an outranker the base no longer has; nothing to file against");
+                continue;
+            }
             // Filing is not acting, but it is what leads to one: it stops at
             // the budget with the rest of the corpus half.
             if !core.may_act().await? {
@@ -832,6 +930,158 @@ mod tests {
             interferers(&[res(&["x"]), missed(&["x", "y"])], Some("mine"), corpus).is_empty(),
             "a replay that did not find the owner is not evidence about what displaced it"
         );
+    }
+
+    /// A probe the fragile half already took is not walked over again by the
+    /// lap.
+    ///
+    /// A fragile probe is a live probe like any other, so `rehearsals_after`
+    /// returns it too — and on any base whose probes fit in one lap, that is
+    /// every one of them. `rehearsal_results` has no uniqueness, so measured
+    /// twice in one pass a probe wrote two rows off a single reading, and
+    /// "at least two retained results" then read as agreement between two
+    /// observations where there was only ever one. Interference files a pair
+    /// on that and condense arms a rewrite.
+    #[tokio::test]
+    async fn a_probe_the_fragile_half_took_is_not_measured_a_second_time_by_the_lap() {
+        let (core, a1, _a2, _b) = two_corpora().await;
+        let live = live_generation(&core).await;
+        integrate(&core, crate::store::now()).await.unwrap();
+        let pid = core.store.rehearsals_of(&a1).await.unwrap()[0].id.clone();
+        // Two results that disagree is what `fragile_rehearsals` selects on.
+        for rank in [Some(1), Some(3)] {
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: pid.clone(),
+                    generation_id: live.id.clone(),
+                    rank,
+                    outranked_by: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            core.store
+                .fragile_rehearsals(&live.id, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the probe is in the fragile half"
+        );
+        let before = core.store.results_of(&pid, 100).await.unwrap().len();
+        rehearse(&core, &live, crate::store::now()).await.unwrap();
+        let after = core.store.results_of(&pid, 100).await.unwrap().len();
+        assert_eq!(after - before, 1, "one pass is one measurement");
+    }
+
+    /// A capture probe whose artifact has not been re-embedded yet is left
+    /// alone, not retired.
+    ///
+    /// The pass right after an embedder changes is exactly when the re-embeds
+    /// are still queued, and `remint` cannot mint a capture probe until the
+    /// artifact its query *is* carries the live model. Retired first and
+    /// re-minted after, that probe was thrown away for the reason it was being
+    /// kept — every reader filters `retired_at IS NULL`, and nothing else ever
+    /// mints one again.
+    #[tokio::test]
+    async fn a_capture_probe_waits_for_its_artifact_to_be_re_embedded_rather_than_being_lost() {
+        let (core, a1, _a2, b) = two_corpora().await;
+        let live = live_generation(&core).await;
+        // The probe and its source are both from the old era, which is the
+        // state a changed embedder leaves behind.
+        let source = core.store.get_artifact(&b).await.unwrap();
+        core.store
+            .mark_embedded(&b, "older-model", source.embed_rev)
+            .await
+            .unwrap();
+        let pid = core
+            .store
+            .record_rehearsal(&NewRehearsal {
+                class: Class::Capture,
+                query: "the image will not mount".into(),
+                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                embed_model: "older-model".into(),
+                artifact_id: a1.clone(),
+                source_id: Some(b.clone()),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        let r = rehearse(&core, &live, crate::store::now()).await.unwrap();
+        assert_eq!(
+            r.retired, 0,
+            "nothing is thrown away while a re-embed is owed"
+        );
+        assert_eq!(r.reminted, 0);
+        assert_eq!(r.rehearsed, 0, "and the old vector is still not replayed");
+        assert!(
+            core.store
+                .rehearsal(&pid)
+                .await
+                .unwrap()
+                .is_some_and(|p| p.retired_at.is_none()),
+            "the probe is still live"
+        );
+
+        // The embed queue drains, and the next pass mints the replacement.
+        core.store
+            .mark_embedded(&b, core.embedder.model(), source.embed_rev)
+            .await
+            .unwrap();
+        let r = rehearse(&core, &live, crate::store::now()).await.unwrap();
+        assert_eq!(r.retired, 1);
+        assert_eq!(r.reminted, 1);
+        let live_probes = core.store.rehearsals_of(&a1).await.unwrap();
+        assert_eq!(live_probes.len(), 1, "the same question, once");
+        assert_eq!(live_probes[0].embed_model, core.embedder.model());
+    }
+
+    /// An outranker the base no longer has costs one skipped id, not the
+    /// sweep.
+    ///
+    /// `outranked_by` is free-form JSON written when the rehearsal ran, and a
+    /// burial or a merge can take the artifact it names away afterwards.
+    /// `artifact_pairs` carries foreign keys on both members and
+    /// `INSERT OR IGNORE` does not suppress a foreign-key violation, so filing
+    /// against a since-deleted id failed the whole retention sweep — every
+    /// rule after this one included.
+    #[tokio::test]
+    async fn an_outranker_the_base_no_longer_has_is_skipped_rather_than_failing_the_sweep() {
+        let (mut core, a1, _a2, b) = two_corpora().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let live = live_generation(&core).await;
+        let pid = core
+            .store
+            .record_rehearsal(&NewRehearsal {
+                class: Class::Cue,
+                query: "q".into(),
+                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: a1.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        // One id the base has, one it never had.
+        for _ in 0..2 {
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: pid.clone(),
+                    generation_id: live.id.clone(),
+                    rank: Some(3),
+                    outranked_by: vec!["a-buried-artifact".into(), b.clone()],
+                })
+                .await
+                .unwrap();
+        }
+        let (filed, _) = interference(&core, &live, crate::store::now())
+            .await
+            .expect("one missing id does not fail the sweep");
+        assert_eq!(filed, 1, "the outranker that is still there is still filed");
+        assert!(core.store.pair_between(&a1, &b).await.unwrap().is_some());
     }
 
     #[tokio::test]

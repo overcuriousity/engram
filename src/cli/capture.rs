@@ -41,6 +41,15 @@ fn addresses_something(target: &str) -> bool {
 /// Joined, they are prose outright and are not put back through the path
 /// heuristic: "dir/file plus a comment" would find `dir` on disk and be refused
 /// as a missing file, which is the failure this is here to remove.
+///
+/// A list that is *partly* paths is neither of those two things, and it is
+/// refused. `engram -c report.pdf notes/typo/q3.pdf` — one real file and one
+/// with a typo in the directory — used to fail `addresses_something` on the
+/// second and so send *both* through as one prose note: the literal string
+/// stored as text, the PDF never read, exit 0. Guessing which half was meant
+/// as a file only moves the silence around, so the arguments that name nothing
+/// are named back and nothing is stored. What was genuinely meant as prose is
+/// one quoted argument away.
 pub async fn run(
     e: &Endpoint,
     targets: &[String],
@@ -51,14 +60,26 @@ pub async fn run(
     let http = client()?;
     let mut ids = Vec::new();
     let joined;
-    let (targets, as_prose) =
-        match targets.len() > 1 && !targets.iter().all(|t| addresses_something(t)) {
-            true => {
-                joined = [targets.join(" ")];
-                (&joined[..], true)
-            }
-            false => (targets, false),
-        };
+    let addressing = targets.iter().filter(|t| addresses_something(t)).count();
+    let (targets, as_prose) = if targets.len() < 2 || addressing == targets.len() {
+        // One argument, or every one of them a path: the ordinary readings.
+        // A single argument that names nothing is `read_target`'s to refuse,
+        // and it says which file it could not open.
+        (targets, false)
+    } else if addressing == 0 {
+        joined = [targets.join(" ")];
+        (&joined[..], true)
+    } else {
+        let strays: Vec<&str> = targets
+            .iter()
+            .filter(|t| !addresses_something(t))
+            .map(String::as_str)
+            .collect();
+        return Err(Error::Validation(format!(
+            "{}: names nothing that can be read, and the other arguments are paths.              Nothing was captured. Correct the path, or quote the whole line to              store it as a note.",
+            strays.join(", ")
+        )));
+    };
     for target in targets {
         let read = if as_prose {
             Read {

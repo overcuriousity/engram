@@ -231,8 +231,10 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     // No count-based cap. `merge_max_roots` was one, left at a default of eight
     // nobody typed, and it settled whole clusters before any call was made.
     let Some(judge) = core.judge.clone() else {
-        // Nothing to ask. The pair stays pending; `run_claimed` closes the unit
-        // before it gets here when there is no synthesize role at all.
+        // Nothing to ask. The pair stays pending, which is where it belongs
+        // until a judge arrives — and `periodic_units` does not arm this stage
+        // at all without one, so reaching here means the role went away
+        // between the arming and the run.
         return Ok(());
     };
     let counter = crate::infer::budget::TokenCounter::default();

@@ -1611,15 +1611,29 @@ impl Store {
     /// onto a merged artifact, whose `corpus_id` is NULL, so the comparison
     /// answered NULL, the guard passed, and reap wiped the text a reminder
     /// still being pushed had been read out of.
+    ///
+    /// The candidate's side of that comparison is a set and not a column, for
+    /// the third turn of the same screw. `artifacts.corpus_id` is NULL for
+    /// every merged row — the schema says so, and says why — so
+    /// `= art.corpus_id` answered NULL for exactly the candidates a merge
+    /// produces, the `NOT EXISTS` was vacuously true, and a superseded merge
+    /// past `min_age_secs` was reaped with a live root still carrying the open
+    /// reminder its text had been read out of. What a merged candidate belongs
+    /// to is its captured roots' corpora, which `artifact_sources` names; a
+    /// captured candidate has only its own, and the join finds nothing to add.
     const REAPABLE: &str = "(art.status != 'active' OR art.superseded_by IS NOT NULL)
                 AND art.reaped_at IS NULL
                 AND art.retired_at IS NOT NULL AND art.retired_at < ?
                 AND NOT EXISTS (SELECT 1 FROM moments m
                                  JOIN artifacts live ON live.id = m.artifact_id
-                                WHERE COALESCE(m.origin_corpus_id, live.corpus_id)
-                                        = art.corpus_id
-                                  AND live.status = 'active'
-                                  AND m.kind = 'due' AND m.done_at IS NULL)
+                                WHERE live.status = 'active'
+                                  AND m.kind = 'due' AND m.done_at IS NULL
+                                  AND COALESCE(m.origin_corpus_id, live.corpus_id) IN (
+                                        SELECT art.corpus_id
+                                         UNION ALL
+                                        SELECT r.corpus_id FROM artifact_sources s
+                                          JOIN artifacts r ON r.id = s.root_id
+                                         WHERE s.child_id = art.id))
                 AND art.id NOT IN (
                   SELECT s.root_id FROM artifact_sources s
                     JOIN artifacts m ON m.id = s.child_id
@@ -3160,6 +3174,73 @@ mod tests {
             "and the burial re-check refuses on the same grounds"
         );
         assert_eq!(s.get_artifact(&made[1].id).await.unwrap().text, "retired");
+    }
+
+    /// And the candidate's side of that comparison is a set, not a column.
+    ///
+    /// `artifacts.corpus_id` is NULL for every merged row — the schema says so
+    /// and says why — so `= art.corpus_id` answered NULL for exactly the
+    /// candidates a merge produces. The `NOT EXISTS` was vacuously true, and a
+    /// superseded merge past `min_age_secs` was nominated and buried with a
+    /// live root still carrying the open reminder its text had been read out
+    /// of. What a merged candidate belongs to is its captured roots' corpora.
+    #[tokio::test]
+    async fn a_superseded_merge_is_held_back_by_the_reminder_on_the_note_it_was_made_from() {
+        let s = Store::memory().await.unwrap();
+        let src = s
+            .insert_corpus("the note behind the reminder", "web", None)
+            .await
+            .unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "folded in"), nc(1, "still standing")])
+            .await
+            .unwrap();
+        // The reminder is on the note, in the ordinary way: an active artifact
+        // of the corpus, nothing merged about it.
+        insert_open_moment(&s, &made[1].id).await;
+
+        let merged = s
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "the merged text".into(),
+                    title: Some("merged".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                std::slice::from_ref(&made[0].id),
+            )
+            .await
+            .unwrap()
+            .id;
+        assert!(
+            s.get_artifact(&merged).await.unwrap().corpus_id.is_none(),
+            "which is the NULL the guard used to compare against"
+        );
+        // The merge is later superseded by something else and ages out.
+        s.set_artifact_status(&merged, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        backdate_retired_at(&s, &merged, 100 * 86_400).await;
+        backdate_retired_at(&s, &made[0].id, 100 * 86_400).await;
+
+        assert!(
+            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            "the merge carries the note's text, and the note is one somebody \
+             is still being reminded about"
+        );
+        assert!(
+            matches!(
+                s.bury(&merged, "{}", 90 * 86_400, None, None, &reap_row(&merged))
+                    .await,
+                Err(Error::NotFound)
+            ),
+            "and the burial re-check refuses on the same grounds"
+        );
+        assert_eq!(
+            s.get_artifact(&merged).await.unwrap().text,
+            "the merged text"
+        );
     }
 
     #[tokio::test]

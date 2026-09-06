@@ -52,7 +52,6 @@ pub async fn apply(
     anchor_id: &str,
     j: &Judgement,
     shown: &[String],
-    window_text: &str,
 ) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     let tz_name = src.metadata["tz"]
@@ -65,48 +64,27 @@ pub async fn apply(
     // the wall-clock back out of what is stored here.
     let tz_name = tz.name().to_string();
 
-    // The note's own weekday, read once for the reminder below. Not for the
-    // events: the weekday witness corrects a date the model computed for the
-    // reminder, and a note reading "Friday I pick up the car; the concert is
-    // 2026-09-12" states that second date outright. Applied to the events it
-    // rewrote every one of them onto the same Friday, past dates included.
-    // See `onto_named_weekday`.
+    // The model's date is the note's date. There was a weekday witness here —
+    // the note's own weekday scanned out of the judged window, and any
+    // reminder inside a week of the capture that fell on another weekday moved
+    // onto the named one. It is gone, and the reason is worth keeping.
     //
-    // Read from the *judged window* and not from `src.raw_text`. This runs once
-    // per window, and the corpus is every window at once: a weekday word in a
-    // lecture's third page corrected the reminder read out of its tenth, which
-    // is a witness to nothing. The window is what the model was shown and what
-    // it answered about, so it is the only text whose weekday says anything
-    // about the date that came back.
-    let named_day = weekday_named(window_text);
-    let created_at = src.created_at;
-    let reconcile = move |at: i64| match named_day {
-        // Far enough out that the weekday word cannot be where the date came
-        // from. The correction exists for "Freitag", captured on a Wednesday
-        // and resolved to a Saturday — one wrong step of calendar arithmetic
-        // over a date the note does not spell out. A note that also states
-        // "Antragsfrist: 2026-11-30" gives the model nothing to compute, and
-        // moving *that* onto the coming Friday is not a correction, it is
-        // three months of the reminder being wrong in the one direction that
-        // fires early and then never again. Past the horizon the model's date
-        // stands, because past the horizon it is the note's date.
-        Some(_) if at > created_at + WITNESS_HORIZON => at,
-        Some(d) => {
-            let moved = onto_named_weekday(at, d, created_at, tz);
-            if moved != at {
-                tracing::warn!(
-                    corpus_id,
-                    from = at,
-                    to = moved,
-                    weekday = ?d,
-                    "the model's date fell on another weekday than the note names; moved"
-                );
-            }
-            moved
-        }
-        None => at,
-    };
-
+    // What it was for was the model's calendar arithmetic: "Freitag" on a
+    // Wednesday coming back as the Saturday. But the JUDGE block already
+    // states the capture's weekday — `build_judge_ask` formats the local time
+    // as `%Y-%m-%d %H:%M (%A)` — so the step the witness corrected is one the
+    // model is handed the answer to. What was left was a heuristic correction
+    // reading a heuristic detector, and it had already produced this exact bug
+    // once: a Portuguese ordinal read as Monday, overriding a date the note
+    // stated outright. Narrowing the word list did not reach the case where
+    // the word really is a weekday — "Mittwoch Zahnarzt; Rechnung fällig
+    // 2026-09-11", captured on a Monday, had its 09-11 reminder silently moved
+    // to 09-09 and never fired on the day it was for.
+    //
+    // The two failures are not the same size. A model that gets a weekday
+    // wrong leaves a reminder a few days off, on the band, with a button that
+    // moves it. The witness getting it wrong rewrote a date nobody misread,
+    // silently, in the one direction that fires early and then never again.
     // Recorded before anything is withdrawn, so a store error here costs
     // nothing: `?` used to abort `apply` with the previous reading already
     // deleted and no replacement written.
@@ -216,11 +194,7 @@ pub async fn apply(
                 core.store.delete_read_due(anchor_id).await?;
                 return Ok(());
             }
-            let at = j
-                .when
-                .as_deref()
-                .and_then(|w| parse_local(w, tz))
-                .map(reconcile);
+            let at = j.when.as_deref().and_then(|w| parse_local(w, tz));
             let valid_rule = j
                 .rule
                 .clone()
@@ -391,16 +365,6 @@ pub async fn apply(
     Ok(())
 }
 
-/// How far past the capture a weekday the note names is still evidence about
-/// the date the model returned.
-///
-/// One week, because that is the reach of the word: "Freitag" said on a
-/// Wednesday means the Friday three days out, and no speaker of any of the ten
-/// prompt languages means the Friday in November by it. A date beyond this is
-/// one the note stated outright or the model read off something it stated, and
-/// the weekday standing beside it is describing a different sentence.
-const WITNESS_HORIZON: i64 = 7 * 86_400;
-
 /// Origins the judgement may file as a journal entry. Not `api` or `mcp`:
 /// a program that wanted an entry says so with `origin`.
 pub const JOURNALABLE: &[&str] = &[
@@ -445,8 +409,8 @@ async fn record_intent(
 /// Only for a judgement whose `when` is null: the rule then carries the only
 /// date in the answer, and the time of day is the one the prompt names for a
 /// note that states none. `next_after` is strict, so a rule naming the
-/// capture's own weekday means the next one — the reading
-/// `onto_named_weekday` already takes.
+/// capture's own weekday means the next one, which is what the word means:
+/// "every Monday", written on a Monday, starts with the Monday to come.
 fn first_occurrence(rule: &str, created_at: i64, tz: chrono_tz::Tz) -> Option<i64> {
     use chrono::TimeZone;
     let day = tz.timestamp_opt(created_at, 0).single()?.date_naive();
@@ -519,102 +483,6 @@ pub(crate) fn parse_local(s: &str, tz: chrono_tz::Tz) -> Option<i64> {
     }
 }
 
-/// The weekday a note names, in any of the ten prompt languages.
-///
-/// `None` when it names none, and `None` when it names two different ones —
-/// "Montag oder Freitag" is a question, not a date. Whole words only: the
-/// text is split on anything that is not a letter, digit or hyphen, so
-/// "sundays" is not "sunday" and "monday-ish" is not a date either. The
-/// hyphen stays a word character for the Portuguese "sexta-feira".
-///
-/// The clipped Portuguese forms — bare `segunda`, `terça`, `quarta`,
-/// `quinta`, `sexta` — are deliberately absent, and so is Turkish `pazar`.
-/// They are ordinary words: the ordinals "second", "third", "fourth",
-/// "fifth", and "market". A note reading "a segunda parte, entregar
-/// 2026-09-10" names no weekday at all, but matched `Mon` here, and
-/// `onto_named_weekday` then overrode the date the note stated outright and
-/// fired the reminder three days early. A word that is only sometimes a
-/// weekday is not a witness, and the only thing that could tell the two
-/// apart is guessing at the surrounding prose. Full `-feira` compounds and
-/// `pazartesi` still carry Portuguese and Turkish.
-pub(crate) fn weekday_named(text: &str) -> Option<chrono::Weekday> {
-    use chrono::Weekday::*;
-    #[rustfmt::skip]
-    const NAMES: &[(&str, chrono::Weekday)] = &[
-        ("monday", Mon), ("montag", Mon), ("lunes", Mon), ("lundi", Mon), ("lunedì", Mon),
-        ("lunedi", Mon), ("maandag", Mon), ("poniedziałek", Mon), ("segunda-feira", Mon),
-        ("понедельник", Mon), ("pazartesi", Mon),
-        ("tuesday", Tue), ("dienstag", Tue), ("martes", Tue), ("mardi", Tue), ("martedì", Tue),
-        ("martedi", Tue), ("dinsdag", Tue), ("wtorek", Tue), ("terça-feira", Tue),
-        ("вторник", Tue), ("salı", Tue),
-        ("wednesday", Wed), ("mittwoch", Wed), ("miércoles", Wed), ("miercoles", Wed),
-        ("mercredi", Wed), ("mercoledì", Wed), ("mercoledi", Wed), ("woensdag", Wed), ("środa", Wed),
-        ("quarta-feira", Wed), ("среда", Wed), ("çarşamba", Wed),
-        ("thursday", Thu), ("donnerstag", Thu), ("jueves", Thu), ("jeudi", Thu), ("giovedì", Thu),
-        ("giovedi", Thu), ("donderdag", Thu), ("czwartek", Thu), ("quinta-feira", Thu),
-        ("четверг", Thu), ("perşembe", Thu),
-        ("friday", Fri), ("freitag", Fri), ("viernes", Fri), ("vendredi", Fri), ("venerdì", Fri),
-        ("venerdi", Fri), ("vrijdag", Fri), ("piątek", Fri), ("sexta-feira", Fri),
-        ("пятница", Fri), ("cuma", Fri),
-        ("saturday", Sat), ("samstag", Sat), ("sonnabend", Sat), ("sábado", Sat), ("sabado", Sat),
-        ("samedi", Sat), ("sabato", Sat), ("zaterdag", Sat), ("sobota", Sat), ("суббота", Sat),
-        ("cumartesi", Sat),
-        ("sunday", Sun), ("sonntag", Sun), ("domingo", Sun), ("dimanche", Sun), ("domenica", Sun),
-        ("zondag", Sun), ("niedziela", Sun), ("воскресенье", Sun),
-    ];
-    let lower = text.to_lowercase();
-    let words: Vec<&str> = lower
-        .split(|c: char| !c.is_alphanumeric() && c != '-')
-        .filter(|w| !w.is_empty())
-        .collect();
-    let mut found: Option<chrono::Weekday> = None;
-    for (name, day) in NAMES {
-        if words.iter().any(|w| w == name) {
-            if found.is_some_and(|f| f != *day) {
-                return None;
-            }
-            found = Some(*day);
-        }
-    }
-    found
-}
-
-/// The instant the model resolved, moved onto the weekday the note names.
-///
-/// The model does the calendar arithmetic and gets it wrong by a day often
-/// enough — "Freitag" on a Wednesday came back as the Saturday. The note
-/// itself is the stronger witness: when it names a weekday and the resolved
-/// instant falls on another, the date becomes the first such weekday after
-/// the capture, at the time of day the model resolved. A weekday that is the
-/// capture's own day means next week. `at` unchanged when the two agree or
-/// the zone cannot place either instant.
-pub(crate) fn onto_named_weekday(
-    at: i64,
-    named: chrono::Weekday,
-    now: i64,
-    tz: chrono_tz::Tz,
-) -> i64 {
-    use chrono::{Datelike, Duration, TimeZone};
-    let Some(local) = tz.timestamp_opt(at, 0).single() else {
-        return at;
-    };
-    if local.weekday() == named {
-        return at;
-    }
-    let Some(today) = tz.timestamp_opt(now, 0).single().map(|d| d.date_naive()) else {
-        return at;
-    };
-    let ahead = (i64::from(named.num_days_from_monday())
-        - i64::from(today.weekday().num_days_from_monday()))
-    .rem_euclid(7);
-    let ahead = if ahead == 0 { 7 } else { ahead };
-    let date = today + Duration::days(ahead);
-    tz.from_local_datetime(&date.and_time(local.time()))
-        .single()
-        .map(|d| d.timestamp())
-        .unwrap_or(at)
-}
-
 /// The wall-clock spellings, with a bare date meaning `DEFAULT_HOUR`.
 ///
 /// Fractional seconds included: `2026-09-04T09:00:00.000Z` is what a model
@@ -657,55 +525,6 @@ mod tests {
     use crate::jobs::test_support::drain;
     use async_trait::async_trait;
 
-    #[test]
-    fn a_weekday_is_read_in_any_of_the_ten_languages_and_only_when_unambiguous() {
-        use chrono::Weekday;
-        assert_eq!(
-            weekday_named("erinnere mich an den Termin, Freitag 13:45 uhr."),
-            Some(Weekday::Fri)
-        );
-        assert_eq!(
-            weekday_named("call the dentist on Tuesday"),
-            Some(Weekday::Tue)
-        );
-        assert_eq!(weekday_named("rappelle-moi jeudi"), Some(Weekday::Thu));
-        assert_eq!(weekday_named("cuma günü toplantı"), Some(Weekday::Fri));
-        assert_eq!(weekday_named("pazartesi sabah"), Some(Weekday::Mon));
-        assert_eq!(
-            weekday_named("lembra-me na sexta-feira"),
-            Some(Weekday::Fri)
-        );
-        // Two different days named: no single answer.
-        assert_eq!(weekday_named("Montag oder Freitag"), None);
-        // No day named.
-        assert_eq!(weekday_named("morgen um 9"), None);
-        // A weekday inside another word is not a weekday.
-        assert_eq!(weekday_named("the monday-ish feeling"), None);
-        assert_eq!(weekday_named("sundays"), None);
-    }
-
-    /// The clipped forms are ordinary words, and reading them as weekdays
-    /// overrode dates the note stated outright. "a segunda parte" is "the
-    /// second part", `pazar` is a market, and neither is a Monday or a
-    /// Sunday. The full compounds still carry the language.
-    #[test]
-    fn a_word_that_is_only_sometimes_a_weekday_is_no_witness_at_all() {
-        use chrono::Weekday;
-        assert_eq!(weekday_named("a segunda parte, entregar 2026-09-10"), None);
-        assert_eq!(weekday_named("a quarta tentativa"), None);
-        assert_eq!(weekday_named("na quinta rua à direita"), None);
-        assert_eq!(weekday_named("a terça parte do total"), None);
-        assert_eq!(weekday_named("pagar a sexta prestação"), None);
-        assert_eq!(weekday_named("pazar yerinde buluşalım"), None);
-        // And what still reads.
-        assert_eq!(
-            weekday_named("entregar na segunda-feira"),
-            Some(Weekday::Mon)
-        );
-        assert_eq!(weekday_named("quarta-feira à tarde"), Some(Weekday::Wed));
-        assert_eq!(weekday_named("pazartesi sabah"), Some(Weekday::Mon));
-    }
-
     /// `2026-09-04T09:00:00.000Z` is a spelling models hand back, and
     /// `split_offset` takes the `Z` off before `naive` ever sees it. Without
     /// the fractional format the remainder parsed as nothing at all and the
@@ -720,71 +539,6 @@ mod tests {
             parse_local("2026-09-04T09:00:00.5+00:00", utc),
             Some(plain),
             "and beside a stated offset, which is the other door into `naive`"
-        );
-    }
-
-    #[test]
-    fn a_resolved_date_is_moved_onto_the_named_weekday() {
-        use chrono::{TimeZone, Weekday};
-        let tz = chrono_tz::Europe::Berlin;
-        let now = tz
-            .with_ymd_and_hms(2026, 9, 2, 14, 43, 0)
-            .unwrap()
-            .timestamp(); // Wednesday
-        let sat = tz
-            .with_ymd_and_hms(2026, 9, 5, 13, 45, 0)
-            .unwrap()
-            .timestamp();
-        let fri = tz
-            .with_ymd_and_hms(2026, 9, 4, 13, 45, 0)
-            .unwrap()
-            .timestamp();
-        assert_eq!(onto_named_weekday(sat, Weekday::Fri, now, tz), fri);
-        // Already right: untouched.
-        assert_eq!(onto_named_weekday(fri, Weekday::Fri, now, tz), fri);
-        // Named the day of capture itself: next week, not a past hour today.
-        let next_wed = tz
-            .with_ymd_and_hms(2026, 9, 9, 13, 45, 0)
-            .unwrap()
-            .timestamp();
-        assert_eq!(onto_named_weekday(sat, Weekday::Wed, now, tz), next_wed);
-    }
-
-    /// The horizon under the witness.
-    ///
-    /// It corrects one wrong step of calendar arithmetic over a date the note
-    /// does not spell out — "Freitag", said on a Wednesday, resolved to a
-    /// Saturday. Left unbounded it also moved a date the note *does* spell out:
-    /// a deadline three months away, judged correctly, dragged onto the coming
-    /// Friday because the same note happened to mention one. Early, and then
-    /// never again.
-    #[test]
-    fn the_witness_reaches_a_week_and_no_further() {
-        use chrono::{TimeZone, Weekday};
-        let tz = chrono_tz::Europe::Berlin;
-        let made = tz
-            .with_ymd_and_hms(2026, 9, 2, 14, 43, 0)
-            .unwrap()
-            .timestamp(); // Wednesday
-        let sat = tz
-            .with_ymd_and_hms(2026, 9, 5, 13, 45, 0)
-            .unwrap()
-            .timestamp();
-        let far = tz
-            .with_ymd_and_hms(2026, 11, 30, 9, 0, 0)
-            .unwrap()
-            .timestamp();
-        assert!(sat <= made + WITNESS_HORIZON, "the near date is inside");
-        assert!(far > made + WITNESS_HORIZON, "the far one is not");
-        // Inside: corrected, as it always was.
-        assert_ne!(onto_named_weekday(sat, Weekday::Fri, made, tz), sat);
-        // Outside: `apply`'s guard is the horizon, and the mover is never
-        // reached — but assert what the mover *would* have done, so the reason
-        // the guard exists is written down beside it.
-        let moved = onto_named_weekday(far, Weekday::Fri, made, tz);
-        assert!(
-            moved < made + WITNESS_HORIZON,
-            "unbounded, the correction pulls a November date into this week"
         );
     }
 
@@ -1019,11 +773,10 @@ mod tests {
             .unwrap();
 
         // The same prose, read a third way.
-        let src = core.store.get_corpus(&out.id).await.unwrap();
         let anchor = rows[0].moment.artifact_id.clone();
         apply(
             &core,
-            &src.id,
+            &out.id,
             &anchor,
             &Judgement {
                 intent: Some("remind".into()),
@@ -1033,7 +786,6 @@ mod tests {
                 links: vec![],
             },
             &[],
-            &src.raw_text,
         )
         .await
         .unwrap();
@@ -1068,10 +820,9 @@ mod tests {
         let (at, anchor) = (rows[0].moment.at, rows[0].moment.artifact_id.clone());
 
         // The same prose, read again as a reminder it cannot date.
-        let src = core.store.get_corpus(&out.id).await.unwrap();
         apply(
             &core,
-            &src.id,
+            &out.id,
             &anchor,
             &Judgement {
                 intent: Some("remind".into()),
@@ -1081,7 +832,6 @@ mod tests {
                 links: vec![],
             },
             &[],
-            &src.raw_text,
         )
         .await
         .unwrap();
@@ -1094,7 +844,7 @@ mod tests {
         // withdraws it — the delete moved, it did not go away.
         apply(
             &core,
-            &src.id,
+            &out.id,
             &anchor,
             &Judgement {
                 intent: Some("none".into()),
@@ -1104,7 +854,6 @@ mod tests {
                 links: vec![],
             },
             &[],
-            &src.raw_text,
         )
         .await
         .unwrap();
@@ -1182,7 +931,6 @@ mod tests {
         // The operator says no; a re-application must not put it back.
         let aid = rows[0].moment.artifact_id.clone();
         core.set_reminder(&aid, false).await.unwrap();
-        let src = core.store.get_corpus(&out.id).await.unwrap();
         let j = Judgement {
             intent: Some("remind".into()),
             when: Some("2099-01-01T09:00".into()),
@@ -1190,13 +938,11 @@ mod tests {
             events: vec![],
             links: vec![],
         };
-        apply(&core, &out.id, &aid, &j, &[], &src.raw_text)
-            .await
-            .unwrap();
+        apply(&core, &out.id, &aid, &j, &[]).await.unwrap();
         assert!(
             core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
             "the refusal outlived the re-read; {:?}",
-            src.metadata
+            core.store.get_corpus(&out.id).await.unwrap().metadata
         );
     }
 
@@ -1254,7 +1000,6 @@ mod tests {
             .set_corpus_metadata(&out.id, &serde_json::json!("a scalar"))
             .await
             .unwrap();
-        let src = core.store.get_corpus(&out.id).await.unwrap();
         let aid = core
             .store
             .artifacts_for_corpus(&out.id)
@@ -1271,7 +1016,7 @@ mod tests {
             events: vec![],
             links: vec![],
         };
-        apply(&core, &out.id, &aid, &j, &[], &src.raw_text)
+        apply(&core, &out.id, &aid, &j, &[])
             .await
             .expect("the reading is filed rather than panicking");
         let meta = core.store.get_corpus(&out.id).await.unwrap().metadata;
@@ -1309,7 +1054,6 @@ mod tests {
         );
 
         // A later reading of the same prose, landing on a different date.
-        let src = core.store.get_corpus(&out.id).await.unwrap();
         let j = Judgement {
             intent: Some("remind".into()),
             when: Some("2099-03-01T09:00".into()),
@@ -1317,9 +1061,7 @@ mod tests {
             events: vec![],
             links: vec![],
         };
-        apply(&core, &out.id, &aid, &j, &[], &src.raw_text)
-            .await
-            .unwrap();
+        apply(&core, &out.id, &aid, &j, &[]).await.unwrap();
         assert_eq!(
             core.store.open_due(0, i64::MAX).await.unwrap().len(),
             1,
@@ -1366,11 +1108,10 @@ mod tests {
             .await
             .unwrap();
 
-        let src = core.store.get_corpus(&out.id).await.unwrap();
         let anchor = rows[0].moment.artifact_id.clone();
         apply(
             &core,
-            &src.id,
+            &out.id,
             &anchor,
             &Judgement {
                 intent: Some("remind".into()),
@@ -1380,7 +1121,6 @@ mod tests {
                 links: vec![],
             },
             &[],
-            &src.raw_text,
         )
         .await
         .unwrap();
@@ -1413,11 +1153,10 @@ mod tests {
         let dated = rows[0].moment.at;
         assert!(dated.is_some());
 
-        let src = core.store.get_corpus(&out.id).await.unwrap();
         let anchor = rows[0].moment.artifact_id.clone();
         apply(
             &core,
-            &src.id,
+            &out.id,
             &anchor,
             &Judgement {
                 intent: Some("remind".into()),
@@ -1427,7 +1166,6 @@ mod tests {
                 links: vec![],
             },
             &[],
-            &src.raw_text,
         )
         .await
         .unwrap();
@@ -1459,11 +1197,10 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].moment.rule, None);
 
-        let src = core.store.get_corpus(&out.id).await.unwrap();
         let anchor = rows[0].moment.artifact_id.clone();
         apply(
             &core,
-            &src.id,
+            &out.id,
             &anchor,
             &Judgement {
                 intent: Some("remind".into()),
@@ -1473,7 +1210,6 @@ mod tests {
                 links: vec![],
             },
             &[],
-            &src.raw_text,
         )
         .await
         .unwrap();
@@ -1541,17 +1277,9 @@ mod tests {
                 },
             ],
         };
-        let src = core.store.get_corpus(&out.id).await.unwrap();
-        apply(
-            &core,
-            &out.id,
-            &anchor,
-            &j,
-            std::slice::from_ref(&neighbor),
-            &src.raw_text,
-        )
-        .await
-        .unwrap();
+        apply(&core, &out.id, &anchor, &j, std::slice::from_ref(&neighbor))
+            .await
+            .unwrap();
 
         let events = core.store.event_moments_between(0, i64::MAX).await.unwrap();
         assert!(

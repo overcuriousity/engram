@@ -240,7 +240,17 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     // verbatim capture searchable and the job retryable. Guarded like
     // promotion is: a window already read, or put back by an operator's undo,
     // is not re-armed by a re-run of capture.
-    if windows.len() == 1
+    //
+    // Counted off the *stored* rows and not off `windows`. `upsert_segments`
+    // leaves the split alone once a window owns artifacts, so a re-run over a
+    // corpus captured under a different `context_tokens` recomputes one window
+    // where the base still holds ten — and everything downstream reads the
+    // stored rows: `window::run` and the judged read both do. Armed on the
+    // fresh count, "the whole capture fits one call" was asserted of a
+    // document that does not, and window 0 was promoted alone with its
+    // passages superseded under it. Half a document promoted, nobody asking.
+    let stored_windows = core.store.segment_progress(corpus_id).await?.1;
+    if stored_windows == 1
         && core.store.segment_state(corpus_id, 0).await? == Some(SegmentState::Verbatim)
         && !core.store.segment_no_promote(corpus_id, 0).await?
     {

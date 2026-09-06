@@ -111,7 +111,17 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
         out.push((Stage::Consolidate, CONSOLIDATE_TARGET));
         // Zero units per tick is the off switch for the calls, not for the
         // sweep that finds the pairs.
-        if core.consolidate.max_dedupe_per_tick > 0 {
+        //
+        // And the judge's existence, the way `Reap` below asks for it. Finding
+        // pairs needs no model and is worth doing without one — they wait on
+        // the pair queue for a person. *Arming* the judging without one is a
+        // treadmill: `dedupe::run` finds no judge, returns `Ok(())`,
+        // `run_claimed` closes the unit as done work, the pair is still
+        // `Pending`, and the next tick arms the same pairs again — for ever,
+        // reporting progress the whole time. `run_claimed` used to catch this
+        // class with a `needs_model` close-out, which went when dedupe stopped
+        // running on the synthesize role.
+        if core.consolidate.max_dedupe_per_tick > 0 && core.judge.is_some() {
             out.push((Stage::ArmDedupe, CONSOLIDATE_TARGET));
         }
     }
@@ -561,6 +571,45 @@ pub const ASSOCIATE_TARGET: &str = "collection";
 
 #[cfg(test)]
 mod tests {
+
+    /// Nothing that needs a judge is armed without one.
+    ///
+    /// Finding the pairs needs no model and is worth doing regardless — they
+    /// wait on the pair queue for a person. Arming the *judging* without one
+    /// is a treadmill: `dedupe::run` finds no judge and returns `Ok(())`,
+    /// `run_claimed` closes the unit as done work, the pair is still
+    /// `Pending`, and the next tick arms the same pairs again — for ever,
+    /// while `did_work` reports progress the whole time.
+    #[tokio::test]
+    async fn dedupe_judging_is_not_armed_on_a_base_with_no_judge() {
+        use crate::store::jobs::Stage;
+        let mut core = crate::core::test_support::test_core().await;
+        core.consolidate.enabled = true;
+        core.consolidate.max_dedupe_per_tick = 5;
+        let armed = |core: &crate::core::Core| {
+            super::periodic_units(core)
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            armed(&core).contains(&Stage::Consolidate),
+            "the sweep that finds pairs runs either way"
+        );
+        assert!(
+            armed(&core).contains(&Stage::ArmDedupe),
+            "and with a judge, so does the judging"
+        );
+        assert!(
+            super::periodic_period(&core, Stage::ArmDedupe).is_some(),
+            "with a period to go with it"
+        );
+
+        core.judge = None;
+        assert!(armed(&core).contains(&Stage::Consolidate));
+        assert!(!armed(&core).contains(&Stage::ArmDedupe));
+        assert!(super::periodic_period(&core, Stage::ArmDedupe).is_none());
+    }
 
     /// The instance-wide half of a repair tick: one control database, one pass,
     /// covering every tenant's stuck work rather than the caller's alone.
