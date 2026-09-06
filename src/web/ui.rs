@@ -381,6 +381,10 @@ pub fn fmt_duration(secs: i64) -> String {
 pub(crate) fn sweep_label(stage: &str) -> &str {
     match stage {
         "synthesize" => "Writing artifacts",
+        // No stage constructs this any more. The arm stays because this
+        // reads the string a row stored, and a queue written by an older
+        // binary can still hold one; `Stage::parse` runs such a row as
+        // `Synthesize`, which is where the variant always sent it.
         "enrich" => "Enriching",
         "segment_window" => "Segmenting",
         "title" => "Naming captures",

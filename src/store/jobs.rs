@@ -15,7 +15,6 @@ pub enum Stage {
     /// Splits a corpus into windows and arms one `SegmentWindow` per window.
     /// Makes no inference call itself.
     Synthesize,
-    Enrich,
     /// One window, one call. The unit the job model is built around.
     SegmentWindow,
     /// Naming one document. One call.
@@ -94,9 +93,8 @@ impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 21] = [
+    pub const ALL: [Stage; 20] = [
         Stage::Synthesize,
-        Stage::Enrich,
         Stage::SegmentWindow,
         Stage::Title,
         Stage::Embed,
@@ -121,7 +119,6 @@ impl Stage {
     pub fn as_str(&self) -> &'static str {
         match self {
             Stage::Synthesize => "synthesize",
-            Stage::Enrich => "enrich",
             Stage::SegmentWindow => "segment_window",
             Stage::Title => "title",
             Stage::Embed => "embed",
@@ -156,10 +153,7 @@ impl Stage {
     /// rather than inherit an answer from a wildcard arm.
     pub fn class(self) -> i64 {
         match self {
-            // `Enrich` shares `synthesize::plan` with `Synthesize` and is
-            // foreground for the same reason: it is a capture in flight.
             Stage::Synthesize
-            | Stage::Enrich
             | Stage::SegmentWindow
             | Stage::Title
             | Stage::Embed
@@ -185,7 +179,6 @@ impl Stage {
     pub fn parse(s: &str) -> Option<Stage> {
         match s {
             "synthesize" => Some(Stage::Synthesize),
-            "enrich" => Some(Stage::Enrich),
             "segment_window" => Some(Stage::SegmentWindow),
             "title" => Some(Stage::Title),
             "embed" => Some(Stage::Embed),

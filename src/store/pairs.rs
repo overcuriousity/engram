@@ -474,17 +474,6 @@ impl Store {
         })
     }
 
-    /// How many pairs sit in a state, for a page that shows only the first few
-    /// of them and has to say how many it is not showing.
-    pub async fn count_pairs_by_state(&self, state: PairState) -> Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_pairs WHERE state = ?")
-                .bind(state.as_str())
-                .fetch_one(&self.pool)
-                .await?,
-        )
-    }
-
     /// The pairs in a state that a person can still act on: both artifacts are
     /// in results.
     ///

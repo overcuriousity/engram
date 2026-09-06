@@ -134,7 +134,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
     // periodic has none.
     let mut did_work = false;
     let result = match (job.stage, job.target_kind.as_str()) {
-        (Stage::Synthesize | Stage::Enrich, _) => synthesize::plan(core, &job.target_id).await,
+        (Stage::Synthesize, _) => synthesize::plan(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
         // for oversize splits, and for isolating a chunk the batch chokes on.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,

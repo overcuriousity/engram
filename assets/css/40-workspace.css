@@ -433,41 +433,6 @@ body { overflow-x: hidden; }
   .refined-tick { animation: none; }
 }
 
-/* ── The rail before anything is asked ───────────────────────────────────
-   The idle state is designed, not left over: the base introduces itself under
-   the heading "This memory" — one measure line, then the last few captures.
-   Everything here is a step quieter than a result, because none of it is one:
-   the box above is what dominates the idle page, and this recedes the moment
-   a query exists. The figures are mono for the reason Insights' are — they
-   are measurements, and a proportional face makes two of them the same width
-   by accident. */
-.idle-held {
-  margin: 0; font-size: var(--text-sm); color: var(--color-fg-secondary);
-}
-.idle-held .mono { color: var(--color-fg-primary); }
-.idle-recent { display: flex; flex-direction: column; gap: 0.125rem; margin-top: 0.5rem; }
-.idle-recent > .label { margin-bottom: 0.125rem; }
-/* Deliberately not `.rail-item`: the card is the shape of a ranked answer,
-   and a recent capture is not an answer to anything. A quiet row — title
-   left, when right — that lights up only under the pointer. */
-/* No negative side margins, however much the hover box wants to bleed to the
-   rail's edge. The rail scrolls vertically, which computes its horizontal
-   overflow from `visible` to `auto`, so a row six pixels wider than its column
-   gave the rail a real horizontal scroll — a bar across the bottom that moved
-   the whole column sideways and cut the first character off every line in it.
-   The hover box lines up with the text instead, which is where the rest of the
-   rail's content already ends. */
-.idle-row {
-  display: flex; gap: 0.75rem; align-items: baseline; justify-content: space-between;
-  text-decoration: none; color: var(--color-fg-secondary);
-  padding: 0.25rem 0.375rem; border-radius: var(--radius-sm);
-}
-.idle-row:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
-.idle-row-title {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.idle-row-when { flex: none; font-size: var(--text-xs); color: var(--color-fg-muted); }
-
 /* Where the ranked list's relevance falls off. The rows past it are still
    ranked — they placed — but they no longer read as answers. */
 .cliff-rule {
@@ -1046,7 +1011,6 @@ body { overflow-x: hidden; }
 .day-line { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline; margin: 0.25rem 0; }
 .day-text { white-space: pre-wrap; flex: 1 1 100%; }
 .inline { display: inline; }
-.idle-row-when[href]:hover { text-decoration: underline; }
 
 /* ── A file, waiting to be sent ──────────────────────────────────────────── */
 

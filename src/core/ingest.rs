@@ -1941,7 +1941,7 @@ impl Core {
     pub async fn reprocess(&self, id: &str, stage: Stage) -> Result<()> {
         let src = self.store.get_corpus(id).await?;
         match stage {
-            Stage::Synthesize | Stage::Enrich => {
+            Stage::Synthesize => {
                 // Re-segmenting starts from `raw_text`, and an image whose read
                 // has not landed has none. Flipping it to `raw` would have
                 // synthesis fail on empty text and the pending read then find

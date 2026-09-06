@@ -465,22 +465,6 @@ impl Store {
         Ok(())
     }
 
-    /// The one write to `origin` outside insert: a capture becoming, or
-    /// ceasing to be, a journal entry. A channel label, never content.
-    pub async fn set_corpus_origin(&self, id: &str, origin: &str) -> Result<()> {
-        let n = sqlx::query("UPDATE corpora SET origin = ?, updated_at = ? WHERE id = ?")
-            .bind(origin)
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-        if n == 0 {
-            return Err(crate::error::Error::NotFound);
-        }
-        Ok(())
-    }
-
     /// The channel label and the metadata in one write.
     ///
     /// `set_entry` depends on both landing: turning an entry off removes
