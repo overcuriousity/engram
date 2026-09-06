@@ -404,6 +404,19 @@ impl Store {
     /// `next_notify_at` all filter on `a.status = 'active'` — so the reminder
     /// left the band with nothing anywhere saying it had gone, which is the
     /// exact failure this method exists to prevent.
+    ///
+    /// `w.rule IS moments.rule` for the other half of the same test. A
+    /// recurrence and a one-shot standing at one instant are two reminders,
+    /// not one written twice: "every Tuesday at nine" and "on Tuesday at nine"
+    /// say different things about every Tuesday after this one. Matching on
+    /// the instant alone dropped the recurring row whenever the winner
+    /// happened to hold a one-shot there — and dropping it is not a no-op,
+    /// because the loser is about to go non-active: the series left the band,
+    /// and `complete_moment` never ran on it to arm a successor, so the
+    /// recurrence ended there with nothing saying so. The rule is what tells
+    /// the two apart; `series_id` deliberately is not, since the winner's own
+    /// copy of a reminder read out of the same note carries an id of its own
+    /// and is exactly the duplicate this guard is for.
     pub async fn carry_moments(&self, loser: &str, winner: &str) -> Result<u64> {
         if loser == winner {
             return Ok(0);
@@ -415,6 +428,7 @@ impl Store {
                                  WHERE w.artifact_id = ?
                                    AND w.kind = moments.kind
                                    AND w.at IS moments.at
+                                   AND w.rule IS moments.rule
                                    AND w.done_at IS NULL)",
         )
         .bind(winner)
@@ -749,14 +763,24 @@ impl Store {
     }
 
     /// Open reminders: undone, on an active artifact, and either undated or
-    /// due before `to` and not snoozed past `now`. Dated first, by time —
-    /// the *effective* time: a row whose snooze has elapsed re-enters the
-    /// band at the instant the operator named, not sorted as most overdue by
-    /// the date they put aside.
+    /// effectively due before `to` and not snoozed past `now`. Dated first, by
+    /// time — the *effective* time: a row whose snooze has elapsed re-enters
+    /// the band at the instant the operator named, not sorted as most overdue
+    /// by the date they put aside.
+    ///
+    /// The horizon reads that same effective instant, which is the one the
+    /// ordering below has always used and the one `uncovered` and
+    /// `next_notify_at` push on. Compared against `at`, a reminder three days
+    /// out and snoozed to an hour from now fell outside a 48-hour horizon on
+    /// the strength of a date the operator had just put aside: the push fired
+    /// at the hour, and the Due page and the search badge had nothing on them
+    /// until the original date drifted into range days later.
     pub async fn open_due(&self, now: i64, to: i64) -> Result<Vec<DueRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{JOINED} WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'
-               AND (m.at IS NULL OR (m.at < ? AND (m.snoozed_until IS NULL OR m.snoozed_until <= ?)))
+               AND (m.at IS NULL
+                    OR (COALESCE(m.snoozed_until, m.at) < ?
+                        AND (m.snoozed_until IS NULL OR m.snoozed_until <= ?)))
              ORDER BY m.at IS NULL, COALESCE(m.snoozed_until, m.at), m.created_at"
         )))
         .bind(to)
@@ -787,8 +811,13 @@ impl Store {
             // to Friday is correctly re-admitted on Friday, and reading `at`
             // here made the badge say "4 days ago" for a reminder due in an
             // hour and gave the search lift the instant the operator put aside.
+            //
+            // The horizon reads it too, for the reason `open_due` gives: a
+            // reminder snoozed *forward* from beyond the horizon to inside it
+            // is due inside it, whatever date it was moved off.
             "SELECT artifact_id, MIN(COALESCE(snoozed_until, at)) AS at FROM moments
-             WHERE kind = 'due' AND done_at IS NULL AND at IS NOT NULL AND at < ?
+             WHERE kind = 'due' AND done_at IS NULL AND at IS NOT NULL
+               AND COALESCE(snoozed_until, at) < ?
                AND (snoozed_until IS NULL OR snoozed_until <= ?) AND artifact_id IN ({marks})
              GROUP BY artifact_id"
         )))
@@ -1505,6 +1534,89 @@ mod tests {
             s.moment(&loser_row).await.unwrap().unwrap().artifact_id,
             aid,
             "not moved, and not doubled on the winner"
+        );
+    }
+
+    /// And the half the instant alone could not tell apart: a recurrence and a
+    /// one-shot standing at the same moment are two reminders. Matching on
+    /// `(kind, at)` dropped the recurring row whenever the winner happened to
+    /// hold a one-shot there — and the loser is about to go non-active, so the
+    /// series left the band with nothing arming a successor.
+    #[tokio::test]
+    async fn a_recurrence_is_carried_past_a_one_shot_standing_at_the_same_instant() {
+        let (s, aid) = store_with_artifact().await;
+        let winner = other_artifact(&s, "the promoted rewrite").await;
+        let at = Some(1_000);
+        let row = |artifact: &str, rule: Option<&str>| NewMoment {
+            artifact_id: artifact.to_string(),
+            kind: Kind::Due,
+            at,
+            tz: "Europe/Berlin".into(),
+            rule: rule.map(str::to_string),
+            source: Source::Classified,
+            span: None,
+            series_id: None,
+        };
+        s.insert_moment(&row(&winner, None)).await.unwrap();
+        let weekly = s
+            .insert_moment(&row(&aid, Some("FREQ=WEEKLY")))
+            .await
+            .unwrap();
+
+        assert_eq!(s.carry_moments(&aid, &winner).await.unwrap(), 1);
+        assert_eq!(
+            s.moment(&weekly).await.unwrap().unwrap().artifact_id,
+            winner,
+            "every Tuesday at nine is not the same reminder as on Tuesday at nine"
+        );
+    }
+
+    /// The horizon reads the *effective* instant, which is what the ordering
+    /// beside it and every push already read. Against `at`, a reminder three
+    /// days out and snoozed to an hour from now sat outside a 48-hour window
+    /// on the strength of a date the operator had just put aside: the push
+    /// fired at the hour and the Due page had nothing on it.
+    #[tokio::test]
+    async fn a_reminder_snoozed_into_the_horizon_from_beyond_it_is_on_the_band() {
+        let (s, aid) = store_with_artifact().await;
+        let now = 1_000_000;
+        let horizon = now + 48 * 3_600;
+        let id = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(now + 3 * 86_400),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            s.open_due(now, horizon).await.unwrap().is_empty(),
+            "three days out is past the horizon, as it should be"
+        );
+
+        s.snooze(&id, now + 3_600).await.unwrap();
+        assert!(
+            s.open_due(now, horizon).await.unwrap().is_empty(),
+            "and a snooze that has not elapsed is still put aside"
+        );
+
+        let after = now + 2 * 3_600;
+        let rows = s.open_due(after, after + 48 * 3_600).await.unwrap();
+        assert_eq!(rows.len(), 1, "the hour passed; it is due now");
+        assert_eq!(rows[0].moment.id, id);
+        let lift = s
+            .due_for(std::slice::from_ref(&aid), after, after + 48 * 3_600)
+            .await
+            .unwrap();
+        assert_eq!(
+            lift.get(&aid).copied(),
+            Some(now + 3_600),
+            "and the badge reads the instant it was snoozed to"
         );
     }
 

@@ -21,7 +21,14 @@
   {% for g in gaps %}
   <li class="gap" id="gap-{{ g.members[0].kind }}-{{ g.members[0].id }}">
     <span class="gap-label">{{ g.label }}</span>
-    <form class="row" hx-post="/ui/capture" hx-target="closest .gap" hx-swap="outerHTML">
+    {# The viewer's zone travels with the text, as it does from the box on the
+       workspace. `/ui/capture` reads dates out of what was written, and
+       without this `viewer_zone(None)` falls back to `time.default_tz` — so
+       *call Anna tomorrow 09:00*, typed here, landed at the server's 09:00
+       rather than the writer's. Read at request time rather than from a hidden
+       field, the way the two other posts on this page read it. #}
+    <form class="row" hx-post="/ui/capture" hx-target="closest .gap" hx-swap="outerHTML"
+          hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}'>
       <textarea class="input" name="text" rows="1" required placeholder="add what you know"></textarea>
       <button class="btn btn-sm">Save</button>
     </form>

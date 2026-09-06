@@ -201,6 +201,12 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Re
 /// under one window — but the questions are the harder loss, being the only
 /// source `--export-eval` has for `questions.json`, so the button and its
 /// confirmation name them rather than leaving them to the word "searches".
+///
+/// The observations go too, and are not named separately because they are not
+/// a separate thing: an observation is what one of these searches left behind,
+/// carrying the same query text and its vector. Nothing cascades to that table
+/// — `event_id` is a bare column — so it has to be reached by name or the
+/// press empties the pages and leaves the log.
 async fn purge_feedback_ui(tenant: Tenant) -> UiResult<Response> {
     // The index first, while the rows still say which points carry a set.
     let cleared = tenant.core.forget_situations().await;

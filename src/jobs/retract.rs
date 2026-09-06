@@ -115,6 +115,14 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
     let mut restored = 0;
     let mut cursor = after.clone();
     let live_model = core.embedder.model().to_string();
+    // Read once for the pass, on the first give-up that gets far enough to
+    // need it. Every observation that reaches the comparison was recorded
+    // under `live_model` — the loop `continue`s on any other — so the argument
+    // was constant and the whole graveyard was fetched and decoded again for
+    // each of up to `OBSERVATION_LIMIT` give-ups, with the idle-pass claim
+    // held throughout. Lazy rather than hoisted outright so a pass with
+    // nothing to compare still costs no query.
+    let mut buried: Option<Vec<(String, Vec<f32>)>> = None;
     for o in core
         .store
         .gave_ups_since(&after, sweep::OBSERVATION_LIMIT)
@@ -184,12 +192,15 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
             }
         }
         // And the graveyard, by cosine over what was buried by the same model.
-        for (id, vec) in core.store.graveyard_vectors(&o.embed_model).await? {
-            let sim = crate::vector::cosine(&o.query_vec, &vec);
+        if buried.is_none() {
+            buried = Some(core.store.graveyard_vectors(&live_model).await?);
+        }
+        for (id, vec) in buried.iter().flatten() {
+            let sim = crate::vector::cosine(&o.query_vec, vec);
             if sim <= best_live || best_hidden.as_ref().is_some_and(|(b, _)| sim <= *b) {
                 continue;
             }
-            if let Some(a) = core.store.open_action_on(&id, Kind::Reap).await? {
+            if let Some(a) = core.store.open_action_on(id, Kind::Reap).await? {
                 best_hidden = Some((sim, a));
             }
         }

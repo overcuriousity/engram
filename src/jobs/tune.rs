@@ -104,6 +104,16 @@ pub async fn run_if_quiet(core: &Core) -> Result<Pass> {
     // inference, and what lets the page say which artifacts nothing has asked
     // for. Under "off" this is the whole of what a quiet base does.
     let started = crate::store::now();
+    // Before anything reads the record. An observation naming an artifact that
+    // has left — with its corpus, usually — is not evidence about ordering any
+    // more, and `lived` counting it as a hit props up the parent a watched
+    // generation is judged against. One statement, and it belongs beside the
+    // rest of the bookkeeping a quiet base does at every stage.
+    match core.store.exclude_orphaned_observations().await {
+        Ok(n) if n > 0 => tracing::info!(excluded = n, "observations whose artifact is gone"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not exclude orphaned observations"),
+    }
     let integrated = crate::jobs::sleep::integrate(core, started).await?;
     let p = if !core.evolve.autonomous.moves_ranking() || integrated.stopped {
         Pass {
@@ -207,6 +217,24 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         });
     }
 
+    // Before anything measures or acts, not just before the adoption at the
+    // end. The generation says one thing and the running parameters another;
+    // boot and the apply button both keep them in step, and where something
+    // has not, every number this pass produces is stamped with `live.id` while
+    // being measured under settings that generation does not describe —
+    // probe results the watch will read back, and corpus actions the rules
+    // take from them. Adopting on top of it would journal a move from settings
+    // that were never measured; measuring on top of it poisons the record the
+    // next pass reads.
+    let current = *core.ranking.read().expect("ranking lock");
+    if GenerationParams::from(current) != live.params {
+        tracing::warn!(
+            generation = %live.id,
+            "the live generation does not describe the running parameters; the pass did nothing"
+        );
+        return Ok(Pass::default());
+    }
+
     // Rehearse before anything reads the record: the corpus rules and the
     // watch below read what this writes. Pure vector reads.
     let started = crate::store::now();
@@ -251,19 +279,6 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         replayed,
         ..Default::default()
     };
-
-    let current = *core.ranking.read().expect("ranking lock");
-    if GenerationParams::from(current) != live.params {
-        // The generation says one thing and the running parameters another.
-        // Boot and the apply button both keep them in step; if something has
-        // not, adopting on top of it would journal a move from settings that
-        // were never measured.
-        tracing::warn!(
-            generation = %live.id,
-            "the live generation does not describe the running parameters; the pass did nothing"
-        );
-        return Ok(out);
-    }
 
     // A live generation with a parent and a prediction is under watch, and
     // the watch comes before any new proposal. One change at a time is what
@@ -384,7 +399,10 @@ async fn propose(
         tracing::info!(
             "somebody came back; the idle pass stopped and will start over next quiet period"
         );
-        return Ok(Pass::default());
+        return Ok(Pass {
+            stopped: "activity",
+            ..Default::default()
+        });
     };
 
     // The ladder first. The rerank flip is scored against a different base —
@@ -393,8 +411,24 @@ async fn propose(
     let mut run = scored.eval_run(&pairs, judged_count(core).await?, skipped);
     let winner = match scored.winner() {
         Some(w) => Some((w, scored.predicted().unwrap_or(0.0))),
+        // `Held` and `Stopped` are opposite instructions and must not be read
+        // as one: the second says a search or a question landed while the
+        // replay ran, and everything below this — the journal row, the spread
+        // rule, the watch — measures against a baseline that person is now
+        // moving. Falling through would rewrite `core.ranking` underneath them.
         None => match sweep::rerank_flip(core, &pairs, current, Some(started)).await? {
-            Some(flip) if !tried.contains(&GenerationParams::from(flip.params)) => {
+            sweep::FlipOffer::Stopped => {
+                tracing::info!(
+                    "somebody came back; the idle pass stopped and will start over next quiet period"
+                );
+                return Ok(Pass {
+                    stopped: "activity",
+                    ..Default::default()
+                });
+            }
+            sweep::FlipOffer::Offered(flip)
+                if !tried.contains(&GenerationParams::from(flip.params)) =>
+            {
                 run.best = flip.params.into();
                 run.base_mrr = flip.served_mrr;
                 run.base_recall = flip.served_recall;
@@ -444,6 +478,13 @@ async fn propose(
                         predicted,
                     )
                     .await?;
+                // The run was journalled before this gate, carrying the
+                // recommendation that got the candidate here. Nothing will
+                // ever stamp it applied — it was refused — so left standing it
+                // is the newest open recommendation, and Insights offers the
+                // refused parameters under an Apply button that writes them
+                // into the file. The numbers stay; the offer goes.
+                core.store.withdraw_eval_run(&run_id).await?;
                 tracing::info!(
                     generation = %id,
                     live = ?l,
@@ -457,6 +498,10 @@ async fn propose(
             }
             (Some(_), Some(_)) => {}
             _ => {
+                // Same reasoning as the refusal above: the candidate was never
+                // measured against the probes, so the run must not stand as
+                // the base's open recommendation.
+                core.store.withdraw_eval_run(&run_id).await?;
                 return Ok(Pass {
                     stopped: "activity",
                     ..Default::default()
@@ -867,6 +912,19 @@ mod tests {
         assert!(p.adopted.is_none());
         let g = core.store.generation(&refused).await.unwrap().unwrap();
         assert_eq!(g.state, "refused");
+        // The run that chose it is journalled — the sweep happened — but it is
+        // not an offer. Nothing stamps a refused run applied, so a run left
+        // recommended would put the refused parameters under Insights' Apply
+        // button, where pressing it writes settings the base has measured and
+        // rejected and `tried_candidates` guarantees are never re-measured.
+        assert!(
+            core.store.open_recommendation().await.unwrap().is_none(),
+            "a refused candidate is not offered under Apply"
+        );
+        assert!(
+            core.store.latest_eval_run().await.unwrap().is_some(),
+            "the run itself stays in the journal"
+        );
         assert!(
             core.store
                 .tried_candidates(&live.embed_recipe, &live.chat_model)

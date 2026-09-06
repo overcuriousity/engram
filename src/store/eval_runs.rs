@@ -115,6 +115,28 @@ impl Store {
             .filter(|r| r.recommended && r.applied_at.is_none()))
     }
 
+    /// Take back a run's recommendation, leaving the run itself alone.
+    ///
+    /// The idle pass writes the run before its last gate: the ladder picks a
+    /// candidate, the run is journalled with the numbers that picked it, and
+    /// only then is the candidate replayed on the base's own probes. A
+    /// candidate refused there is never applied, so nothing stamps
+    /// `applied_at` — and `open_recommendation` would go on offering the
+    /// refused parameters under an Apply button for as long as that run stayed
+    /// the latest. Pressing it wrote settings the base had already measured and
+    /// rejected, and `tried_candidates` then made sure they were never
+    /// re-measured.
+    ///
+    /// The row stays, with its pairs, its diff and its numbers: the sweep
+    /// happened and the journal should say so. Only the offer is withdrawn.
+    pub async fn withdraw_eval_run(&self, id: &str) -> Result<bool> {
+        let res = sqlx::query("UPDATE eval_runs SET recommended = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     pub async fn eval_run(&self, id: &str) -> Result<Option<EvalRun>> {
         let row = sqlx::query("SELECT * FROM eval_runs WHERE id = ?")
             .bind(id)

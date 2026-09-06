@@ -1481,7 +1481,18 @@ impl Transcriber for HttpTranscriber {
         let role = "transcribe";
         let part = reqwest::multipart::Part::bytes(audio.to_vec())
             .file_name(format!("recording.{}", audio_extension(mime)))
-            .mime_str(mime.split(';').next().unwrap_or("application/octet-stream"))
+            // `split` always yields at least one element, so the old
+            // `unwrap_or` here was dead and an empty content-type reached
+            // `mime_str("")` — which errors, failing the whole transcription
+            // on the one case `audio_extension` goes out of its way to accept:
+            // an unrecognised or absent type is still a recording.
+            .mime_str(
+                mime.split(';')
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("application/octet-stream"),
+            )
             .map_err(|e| Error::Inference {
                 role,
                 detail: e.to_string(),

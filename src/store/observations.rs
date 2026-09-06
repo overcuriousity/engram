@@ -250,7 +250,66 @@ impl Store {
         .collect()
     }
 
-    /// Stop reading an observation back without losing it.
+    /// Stamp every observation whose artifact is gone.
+    ///
+    /// `artifact_id` carries no foreign key on purpose — an observation is a
+    /// record of what happened, and a deletion must not erase the fact that a
+    /// search once landed on the thing. But a *positive* observation naming an
+    /// artifact nothing can retrieve any more is not evidence about ordering:
+    /// `eval::lived::lived` goes on counting it as a hit for the generation
+    /// that earned it, so a watched child is measured against a parent whose
+    /// rate is propped up by artifacts that left with a corpus.
+    ///
+    /// A sweep rather than a call beside each delete, because artifacts leave
+    /// by more than one door — `delete_artifact`, `delete_corpus` cascading
+    /// through them, the context path — and a sweep cannot be forgotten at a
+    /// door added later. One statement, run where the rest of the quiet-period
+    /// bookkeeping runs.
+    pub async fn exclude_orphaned_observations(&self) -> Result<u64> {
+        Ok(sqlx::query(
+            "UPDATE observations SET excluded_at = ?
+              WHERE excluded_at IS NULL
+                AND artifact_id IS NOT NULL
+                AND artifact_id NOT IN (SELECT id FROM artifacts)",
+        )
+        .bind(now())
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
+    /// Observations older than `retain_days`. Zero keeps them for ever, as it
+    /// does for the searches and the rehearsal results they share a clock with.
+    ///
+    /// They belong to the window for the same reason the search events do:
+    /// `query` is the person's own words and `query_vec` is those words in
+    /// another form. Nothing here is exempt the way a judged search is — a
+    /// verdict is the operator's considered work, while an observation is the
+    /// base's own note about itself, and the schema has said since it was
+    /// written that the rehearsal results age "with the observations".
+    pub async fn expire_observations(&self, retain_days: i64) -> Result<u64> {
+        if retain_days <= 0 {
+            return Ok(0);
+        }
+        Ok(sqlx::query("DELETE FROM observations WHERE created_at < ?")
+            .bind(now() - retain_days * 86_400)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
+    /// Every observation, gone. What "erase captured feedback" has to reach:
+    /// there is no cascade from `search_events` to here, so the button that
+    /// emptied the searches out from under the UI left a complete log of the
+    /// queries — text and embedding — standing behind it.
+    pub async fn purge_observations(&self) -> Result<u64> {
+        Ok(sqlx::query("DELETE FROM observations")
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
+    /// Stop reading one observation back without losing it.
     pub async fn exclude_observation(&self, id: &str) -> Result<()> {
         sqlx::query("UPDATE observations SET excluded_at = ? WHERE id = ? AND excluded_at IS NULL")
             .bind(now())
@@ -404,5 +463,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1, "excluded is not deleted");
+    }
+
+    /// `artifact_id` carries no foreign key, so a corpus deletion takes the
+    /// artifacts and leaves every observation naming them behind — counted by
+    /// `lived` as a hit for the generation that earned it, on a thing nothing
+    /// can retrieve any more.
+    #[tokio::test]
+    async fn an_observation_whose_artifact_left_stops_being_read_back() {
+        let (store, generation) = base().await;
+        let corpus = store.insert_corpus("raw", "web", None).await.unwrap();
+        let artifact = store
+            .insert_artifacts(
+                &corpus.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "the image will not mount".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        store
+            .record_observation(&obs(&generation, Some(&artifact), Some(1), Source::Cited))
+            .await
+            .unwrap();
+        // One about the retrieval as a whole. It names nothing and must
+        // survive: it is not a claim about an artifact at all.
+        store
+            .record_observation(&obs(&generation, None, None, Source::Unsupported))
+            .await
+            .unwrap();
+
+        assert_eq!(store.exclude_orphaned_observations().await.unwrap(), 0);
+        store.delete_corpus(&corpus.id).await.unwrap();
+        assert_eq!(store.exclude_orphaned_observations().await.unwrap(), 1);
+
+        let back = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(back.len(), 1, "only the one about the whole retrieval");
+        assert_eq!(back[0].artifact_id, None);
+        // Idempotent: a second sweep finds nothing left to stamp.
+        assert_eq!(store.exclude_orphaned_observations().await.unwrap(), 0);
+    }
+
+    /// The query text and its vector live here as well as in `search_events`,
+    /// with nothing cascading between them — so the retention window and the
+    /// erase button both have to reach this table by name.
+    #[tokio::test]
+    async fn the_queries_kept_here_age_and_erase_with_the_searches() {
+        let (store, generation) = base().await;
+        let old = store
+            .record_observation(&obs(&generation, Some("art-1"), Some(1), Source::Cited))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE observations SET created_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 60 * 86_400)
+            .bind(&old)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .record_observation(&obs(&generation, Some("art-2"), Some(1), Source::Cited))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.expire_observations(0).await.unwrap(),
+            0,
+            "0 is for ever"
+        );
+        assert_eq!(store.expire_observations(30).await.unwrap(), 1);
+        assert_eq!(store.purge_observations().await.unwrap(), 1);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

@@ -431,9 +431,20 @@ impl Store {
         let id = match extends {
             Some(id) => {
                 sqlx::query(
+                    // `skips` goes back to zero with everything else the fold
+                    // replaces. The row keeps its id and nothing else: query,
+                    // vector, pool, filters and moment are all this search's,
+                    // so a skip that was a statement about the *earlier* query
+                    // is not a statement about this one. Left standing it was
+                    // permanent — `dealable!` excludes a skipped event, and no
+                    // later typing ever clears the flag — so pressing "not
+                    // sure" and carrying on typing inside `coalesce_secs` made
+                    // a brand-new question invisible to `pending_count` for
+                    // ever. `unjudge` was fixed for exactly this; the fold
+                    // path is the other door into it.
                     "UPDATE search_events
                      SET query = ?, filters = ?, query_vec = ?, vec_dim = ?,
-                         embed_model = ?, created_at = ?, answered = ?
+                         embed_model = ?, created_at = ?, answered = ?, skips = 0
                      WHERE id = ?",
                 )
                 .bind(&ev.query)
@@ -1063,14 +1074,39 @@ impl Store {
         }
         s.judged = s.hits + s.gaps + s.discards;
 
-        // A left join, because an expected artifact that was never returned has
-        // no candidate row to join to — and that absence is precisely what a
-        // miss is.
+        // A correlated subquery rather than a join, because an artifact can sit
+        // in the pool twice — once ranked and once appended to the band — and
+        // two rows for one event would be counted as two searches. It reads
+        // `NULL` where the expected artifact was never returned, and that
+        // absence is precisely what a miss is.
+        //
+        // The band is not excluded. It used to be, which cost the field value
+        // every time the band did its job: an artifact association appended
+        // under the ranked list, opened, and confirmed as the answer joined to
+        // nothing, so a real find was counted in `finds` ("never returned"),
+        // dropped out of recall@10 and scored 0.0 MRR — displayed quality fell
+        // as the feature succeeded.
+        //
+        // The place is the place on screen, over the shown rows in the order
+        // they were drawn: the ranked window first, then the band under it.
+        // Same expression `open_event` stamps on the observation, so the
+        // number here and the number the tuner reads describe one event.
+        // `search_candidates.rank` is the pool's own ordering — for a band row
+        // it counts from after the pool — and is used only where a row was
+        // never shown and has no place on screen to report.
         let ranks: Vec<Option<i64>> = sqlx::query(
-            "SELECT c.rank AS rank FROM search_events e
-             LEFT JOIN search_candidates c
-               ON c.event_id = e.id AND c.artifact_id = e.expect_id AND c.band = 0
-             WHERE e.verdict = 'hit'",
+            "SELECT (SELECT CASE WHEN c.shown = 1
+                                 THEN (SELECT COUNT(*) FROM search_candidates s
+                                        WHERE s.event_id = e.id AND s.shown = 1
+                                          AND (s.band < c.band
+                                               OR (s.band = c.band AND s.rank < c.rank)))
+                                 ELSE c.rank END
+                       FROM search_candidates c
+                      WHERE c.event_id = e.id AND c.artifact_id = e.expect_id
+                      ORDER BY c.shown DESC, c.band ASC, c.rank ASC
+                      LIMIT 1) AS rank
+               FROM search_events e
+              WHERE e.verdict = 'hit'",
         )
         .fetch_all(&self.pool)
         .await?
@@ -1170,9 +1206,15 @@ impl Store {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        // One promise, both tables. A question is the same class of personal
-        // data as a query and ages under the same window.
-        Ok(searches + self.expire_asks(retain_days).await?)
+        // One promise, every table that holds the words somebody typed. A
+        // question is the same class of personal data as a query; so is an
+        // observation, which stores the query verbatim beside its embedding and
+        // has no cascade from `search_events` to age it — the schema has said
+        // since it was written that the rehearsal results expire "with the
+        // observations", and until now nothing expired the observations.
+        Ok(searches
+            + self.expire_asks(retain_days).await?
+            + self.expire_observations(retain_days).await?)
     }
 
     /// Everything captured, gone. Judgements included: they are statements
@@ -1203,11 +1245,17 @@ impl Store {
             .rows_affected();
         // Pursuits and what was opened are the same kind of record — what a
         // person did — and go with one press.
+        // And the observations, which are the same queries in another table.
+        // Nothing cascades to them — `artifact_id` carries no key and
+        // `event_id` is a bare column — so a button that emptied the searches
+        // out from under the page left the query text and its vector behind,
+        // complete, with nothing in the UI left to show them.
         Ok(searches
             + situations
             + profiles
             + self.purge_asks().await?
-            + self.purge_pursuits().await?)
+            + self.purge_pursuits().await?
+            + self.purge_observations().await?)
     }
 
     /// Recorded searches with `from < created_at <= to`, oldest first, with
@@ -1434,6 +1482,40 @@ mod tests {
             Some(11),
             "the first row under a window of ten, not the row after the pool"
         );
+    }
+
+    /// The field value counted a confirmed band hit as a miss.
+    ///
+    /// `feedback_stats` resolved `expect_id` to a rank through a join that
+    /// excluded band rows, so an artifact the association appended, opened,
+    /// and then confirmed as the answer joined to nothing: counted in `finds`
+    /// ("never returned"), dropped out of recall@10, scored 0.0 MRR. Displayed
+    /// quality fell every time the band did what it is for.
+    #[tokio::test]
+    async fn a_confirmed_hit_in_the_band_is_a_find_at_the_place_it_was_on_screen() {
+        let (store, _) = observed_base().await;
+        let mut ev = event_with(&["art-1", "art-2"]);
+        ev.candidates.push(NewCandidate {
+            artifact_id: "recalled".into(),
+            score: 0.4,
+            shown: true,
+            band: true,
+            ..Default::default()
+        });
+        let event = store.record_search(ev, 5).await.unwrap();
+        store
+            .judge_hit(&event, "recalled", Labeller::Deck)
+            .await
+            .unwrap();
+
+        let s = store.feedback_stats(0.0).await.unwrap();
+        assert_eq!(s.hits, 1);
+        assert_eq!(s.finds, 0, "it was returned — under the ranked list");
+        assert_eq!(s.recall_at_10, 1.0);
+        // Third on screen, two ranked rows above it: the same place
+        // `open_event` stamps on the observation, one lower for being counted
+        // from zero here.
+        assert!((s.mrr - 1.0 / 3.0).abs() < 1e-9, "{}", s.mrr);
     }
 
     /// The same read, from the other side: a shown ranked hit's pool position
@@ -1919,6 +2001,35 @@ mod tests {
         // a search that has been spoken for.
         store.judge_hit(&id, "a1", Labeller::Confirm).await.unwrap();
         assert!(!store.open_event(&id, "a1").await.unwrap());
+    }
+
+    /// A skip is a statement about the question that was on screen. The fold
+    /// replaces every part of the row except its id — query, vector, pool,
+    /// filters, moment — so the statement no longer has a subject, and
+    /// `dealable!` excluding skipped events made a brand-new question
+    /// permanently invisible to `pending_count`. Nothing else ever clears the
+    /// flag: `unjudge` was fixed for this; the fold is the other door in.
+    #[tokio::test]
+    async fn a_fold_onto_a_skipped_event_is_a_new_question_and_waits_again() {
+        let (store, _) = observed_base().await;
+        let first = store
+            .record_search(event_with(&["art-1", "art-2"]), 0)
+            .await
+            .unwrap();
+        store.skip_event(&first).await.unwrap();
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 0);
+
+        let mut next = event_with(&["art-3", "art-4"]);
+        next.query = "loop device on a mac".into();
+        next.fold_onto = Some(first.clone());
+        let folded = store.record_search(next, 300).await.unwrap();
+        assert_eq!(folded, first, "the same row, rewritten");
+
+        assert_eq!(
+            store.pending_count(0.0).await.unwrap(),
+            1,
+            "a question nobody has answered, waiting"
+        );
     }
 
     #[tokio::test]

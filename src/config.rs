@@ -2350,6 +2350,26 @@ impl Config {
                     self.pursuit.min_engagement,
                     f64::INFINITY
                 );
+                // And the idle pass, which is the fourth reader and the one
+                // that reads the log hardest. `evolve.autonomous` defaults to
+                // `ranking`, so a base left at that default under `learning`
+                // walked the prime-lift ladder anyway and could adopt a
+                // generation carrying `prime_lift = 1` — the reordering this
+                // mode's whole promise is that it will not do, arrived at from
+                // underneath, with `--print-config` still reporting `0`
+                // because a resolved key is never written back to the file.
+                //
+                // `off` and not `ranking`, because "the mode to run the
+                // harness in before any of this is allowed to move a rank" is
+                // the definition of `learning`, and `Autonomy::Off` still
+                // integrates and writes probes: the evidence keeps
+                // accumulating, and the verdict-paid sweep — which is gated on
+                // `learn.enabled`, not on this — still recommends. What stops
+                // is the base moving itself.
+                if raw.get::<config::Value>("evolve.autonomous").is_err() {
+                    self.evolve.autonomous = Autonomy::Off;
+                    resolved.push(("evolve.autonomous", self.evolve.autonomous.as_str().into()));
+                }
             }
         }
         match self.learn.mode {
@@ -3575,6 +3595,45 @@ mode = "off"
         // generates while it measures is measuring its own inputs.
         assert!(cfg.pursuit.min_engagement.is_infinite());
         assert!(cfg.consolidate.enabled);
+        // And the idle pass does not move the base. `evolve.autonomous`
+        // defaults to `ranking`, so this mode's whole promise — the harness is
+        // run before any of it is allowed to move a rank — was undone by the
+        // default underneath it: the pass walked the prime-lift ladder and
+        // could adopt `prime_lift = 1` while `--print-config` went on
+        // reporting `0`. Integration and the probes still run under `off`, so
+        // the evidence keeps accumulating.
+        assert_eq!(cfg.evolve.autonomous, Autonomy::Off);
+        assert!(
+            cfg.learn
+                .resolved
+                .iter()
+                .any(|(k, v)| *k == "evolve.autonomous" && v == "off"),
+            "{:?}",
+            cfg.learn.resolved
+        );
+    }
+
+    /// The same key, written: a mode fills in what was left unsaid and never
+    /// overrides an operator who asked for the loop by name.
+    #[test]
+    fn a_learning_base_told_to_move_ranking_anyway_still_does() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!(
+                "{MINIMAL}\n[learn]\nmode = \"learning\"\n\
+                 [evolve]\nautonomous = \"full\"\n"
+            ),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.evolve.autonomous, Autonomy::Full);
+        assert!(
+            !cfg.learn
+                .resolved
+                .iter()
+                .any(|(k, _)| *k == "evolve.autonomous")
+        );
     }
 
     #[test]

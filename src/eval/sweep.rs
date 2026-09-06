@@ -691,6 +691,37 @@ pub(crate) struct Flip {
     pub recall: f64,
 }
 
+/// What `rerank_flip` came back with.
+///
+/// Three outcomes, not two. "No flip" and "somebody came back mid-replay" are
+/// opposite instructions to the caller — the first says carry on to the next
+/// rule, the second says stop the pass — and an `Option` that spelled both
+/// `None` had the idle pass adopt a generation and rewrite the running ranking
+/// while a user was searching. `score` returns `None` for exactly the second
+/// case; this says which one it is out loud.
+pub(crate) enum FlipOffer {
+    /// The flip cleared `recommend` against the served ranks.
+    Offered(Flip),
+    /// No reranker, no pair with a served rank, or the flip did not clear the
+    /// gate. The pass carries on.
+    Held,
+    /// A search or a question landed while the replay ran. The pass stops.
+    Stopped,
+}
+
+impl FlipOffer {
+    /// The flip, where one was offered. The pass matches on the variants
+    /// directly, because it has to answer `Stopped` differently; this is for
+    /// the tests, which drive the gate on its own.
+    #[cfg(test)]
+    pub(crate) fn offered(self) -> Option<Flip> {
+        match self {
+            Self::Offered(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
 /// Offer the rerank flip, if a reranker serves search and the flip clears
 /// `recommend` against the ranks that were actually served.
 ///
@@ -704,16 +735,16 @@ pub(crate) async fn rerank_flip(
     pairs: &[Pair],
     current: RankingParams,
     stop_after: Option<i64>,
-) -> Result<Option<Flip>> {
+) -> Result<FlipOffer> {
     if !core.reranks_search() {
-        return Ok(None);
+        return Ok(FlipOffer::Held);
     }
     // Every pair that came from an observation with a rank on it, deep ones
     // included: a place past `LIMIT` is a miss the base has to be charged
     // with, not a row to leave out of the sample.
     let with_served: Vec<&Pair> = pairs.iter().filter(|p| p.served_rank.is_some()).collect();
     if with_served.is_empty() {
-        return Ok(None);
+        return Ok(FlipOffer::Held);
     }
     let served: Vec<Option<usize>> = with_served.iter().map(|p| p.served()).collect();
     let flipped = RankingParams {
@@ -725,11 +756,14 @@ pub(crate) async fn rerank_flip(
         if let Some(since) = stop_after
             && core.store.activity_since(since).await?
         {
-            return Ok(None);
+            return Ok(FlipOffer::Stopped);
         }
         ranks.push(rank_of(core, pair, flipped, flipped.rerank).await?);
     }
-    Ok(recommend(&served, &ranks).then(|| Flip {
+    if !recommend(&served, &ranks) {
+        return Ok(FlipOffer::Held);
+    }
+    Ok(FlipOffer::Offered(Flip {
         params: flipped,
         predicted: mrr(&ranks) - mrr(&served),
         served_mrr: mrr(&served),
@@ -1178,6 +1212,7 @@ mod tests {
         let flip = rerank_flip(&core, &pairs, current, None)
             .await
             .unwrap()
+            .offered()
             .expect("a flip is offered");
         assert!(!flip.params.rerank);
         assert!(flip.predicted > 0.0, "{flip:?}");
@@ -1222,6 +1257,7 @@ mod tests {
         let flip = rerank_flip(&core, &pairs, current, None)
             .await
             .unwrap()
+            .offered()
             .expect("two pairs the reranker buried are two the flip can recover");
         assert_eq!(flip.served_recall, 0.0, "the base found neither of them");
         assert!(flip.recall > 0.0, "and the flip finds them");
@@ -1236,12 +1272,36 @@ mod tests {
         };
         // Served where the vector order already puts them: a tie.
         let pairs = vec![served_pair(&order, 0, 0), served_pair(&order, 1, 1)];
+        assert!(matches!(
+            rerank_flip(&core, &pairs, current, None).await.unwrap(),
+            FlipOffer::Held
+        ));
+    }
+
+    /// "No flip" and "somebody came back" are opposite instructions, and the
+    /// pass that read both as `None` went on to adopt a generation and rewrite
+    /// the running ranking underneath the person who came back.
+    #[tokio::test]
+    async fn a_search_landing_mid_replay_stops_the_flip_rather_than_holding_it() {
+        let (core, order, _) = super::test_support::seeded_with_reranker().await;
+        let current = RankingParams {
+            rerank: true,
+            ..*core.ranking.read().unwrap()
+        };
+        // The same pairs that offer a flip when nothing interrupts.
+        let pairs = vec![served_pair(&order, 0, 5), served_pair(&order, 1, 4)];
+        let started = crate::store::now();
+        judge(&core, &order[0]).await;
         assert!(
-            rerank_flip(&core, &pairs, current, None)
-                .await
-                .unwrap()
-                .is_none()
+            core.store.activity_since(started - 1).await.unwrap(),
+            "the search this test leans on was recorded"
         );
+        assert!(matches!(
+            rerank_flip(&core, &pairs, current, Some(started - 1))
+                .await
+                .unwrap(),
+            FlipOffer::Stopped
+        ));
     }
 
     #[tokio::test]
@@ -1249,12 +1309,10 @@ mod tests {
         let (core, order) = seeded().await;
         let current = *core.ranking.read().unwrap();
         let pairs = vec![served_pair(&order, 0, 5), served_pair(&order, 1, 4)];
-        assert!(
-            rerank_flip(&core, &pairs, current, None)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            rerank_flip(&core, &pairs, current, None).await.unwrap(),
+            FlipOffer::Held
+        ));
     }
 
     #[tokio::test]
