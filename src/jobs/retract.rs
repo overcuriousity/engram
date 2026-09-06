@@ -305,23 +305,46 @@ pub(crate) async fn rule_one(
         // `recommend` shape as the merge case, pointed the same way — the
         // record before is the candidate, the replay after is the base.
         if a.kind == Kind::Condense {
+            // One probe, one place in each list. `recommend` zips the two
+            // positionally and reads index *i* on either side as the same
+            // query replayed, so flattening every probe's results into two
+            // heaps and partitioning them on the clock does not hold: a probe
+            // retired before the condensation contributed only to `before`, a
+            // probe minted after it only to `after`, and the comparison then
+            // put an easy old query's rank 1 against a hard new query's rank 5
+            // and took a condensation back that had lost nothing. The mirror
+            // case hid a real regression.
+            //
+            // So the pairing is per probe — its last result before the
+            // condensation against its last result after — and a probe missing
+            // either side sits the round out, because there is nothing to
+            // compare it with.
             let mut before = Vec::new();
             let mut after = Vec::new();
             for p in core.store.rehearsals_of(&a.subject_id).await? {
-                for r in core
+                let results = core
                     .store
                     .results_of(&p.id, sweep::OBSERVATION_LIMIT)
-                    .await?
-                {
-                    let rank = r.rank.map(|n| (n - 1).max(0) as usize);
-                    if r.at <= a.at {
-                        before.push(rank);
-                    } else {
-                        after.push(rank);
-                    }
+                    .await?;
+                let rank = |r: &crate::store::rehearsals::RehearsalResult| {
+                    r.rank.map(|n| (n - 1).max(0) as usize)
+                };
+                let last_before = results
+                    .iter()
+                    .filter(|r| r.at <= a.at)
+                    .max_by_key(|r| r.at)
+                    .map(&rank);
+                let last_after = results
+                    .iter()
+                    .filter(|r| r.at > a.at)
+                    .max_by_key(|r| r.at)
+                    .map(&rank);
+                if let (Some(b), Some(t)) = (last_before, last_after) {
+                    before.push(b);
+                    after.push(t);
                 }
             }
-            if before.is_empty() || after.is_empty() {
+            if before.is_empty() {
                 continue;
             }
             reconsidered += 1;
@@ -359,7 +382,9 @@ pub(crate) async fn rule_one(
                 satisfies: satisfies.clone(),
                 query_vec: Some(o.query_vec),
                 priming: None,
-                served: o.rank.map(|r| (r - 1).max(0) as usize),
+                // Measured where the replay beside it is measured; see
+                // `sweep::served_at`.
+                served: sweep::served_at(o.rank),
             };
             observed.push(pair.served);
             replayed.push(sweep::rank_of(core, &pair, current, false).await?);
@@ -467,68 +492,21 @@ mod tests {
         let g = generation_for(&core).await;
         let id = order[0].clone();
         let before = core.store.get_artifact(&id).await.unwrap();
-        // Three probes found it at rank 1 before the condensation; three
-        // did not find it after. The clock on the results is set by hand.
-        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
-        let pid = core
-            .store
-            .record_rehearsal(&crate::store::rehearsals::NewRehearsal {
-                class: crate::store::rehearsals::Class::Cue,
-                query: "q".into(),
-                query_vec,
-                embed_model: core.embedder.model().to_string(),
-                artifact_id: id.clone(),
-                source_id: None,
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        let result = |rank: Option<i64>| crate::store::rehearsals::NewResult {
-            rehearsal_id: pid.clone(),
-            generation_id: g.id.clone(),
-            rank,
-            outranked_by: vec![],
-        };
-        let mut early = Vec::new();
-        for _ in 0..3 {
-            early.push(
-                core.store
-                    .record_rehearsal_result(&result(Some(1)))
-                    .await
-                    .unwrap(),
-            );
-        }
+        // Three probes, each found at rank 1 before the condensation and each
+        // missing after. Three probes and not three results of one: `recommend`
+        // counts *pairs*, and three measurements of one query are one pair.
+        let probes = probes_on(&core, &id, &g, 3).await;
         let (action, _) = core
             .store
             .condense_artifact(&id, "shorter", None, &[], serde_json::json!({}))
             .await
             .unwrap();
         let at = core.store.action(&action).await.unwrap().unwrap().at;
-        for rid in &early {
-            sqlx::query("UPDATE rehearsal_results SET at = ? WHERE id = ?")
-                .bind(at - 10)
-                .bind(rid)
-                .execute(&core.store.pool)
-                .await
-                .unwrap();
+        for p in &probes {
+            result_at(&core, p, &g, Some(1), at - 10).await;
+            result_at(&core, p, &g, None, at + 10).await;
         }
-        let mut late = Vec::new();
-        for _ in 0..3 {
-            late.push(
-                core.store
-                    .record_rehearsal_result(&result(None))
-                    .await
-                    .unwrap(),
-            );
-        }
-        for rid in &late {
-            sqlx::query("UPDATE rehearsal_results SET at = ? WHERE id = ?")
-                .bind(at + 10)
-                .bind(rid)
-                .execute(&core.store.pool)
-                .await
-                .unwrap();
-        }
+
         let (reconsidered, undone, _) = rule_one(&core, &g, crate::store::now()).await.unwrap();
         assert_eq!((reconsidered, undone), (1, 1));
         let back = core.store.get_artifact(&id).await.unwrap();
@@ -539,6 +517,105 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    /// `recommend` zips its two lists positionally and reads index *i* on
+    /// either side as the same query replayed. Flattening every probe's
+    /// results into two heaps and splitting them on the clock does not hold
+    /// that: a probe retired before the condensation lands only in `before`,
+    /// one minted after it only in `after`, and the comparison then puts an
+    /// easy old query against a hard new one. Four such places apart was
+    /// enough to revert a condensation that had lost nothing — and the mirror
+    /// case hid a real regression.
+    #[tokio::test]
+    async fn a_condensation_is_judged_on_probes_that_span_it_and_no_others() {
+        let (mut core, order) = seeded().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let g = generation_for(&core).await;
+        let id = order[0].clone();
+        let text = core.store.get_artifact(&id).await.unwrap().text;
+        let old_probes = probes_on(&core, &id, &g, 4).await;
+        let (action, _) = core
+            .store
+            .condense_artifact(&id, "shorter", None, &[], serde_json::json!({}))
+            .await
+            .unwrap();
+        let at = core.store.action(&action).await.unwrap().unwrap().at;
+        // Four easy questions, answered at rank 1, all of them before the
+        // condensation — and then retired, so nothing replays them again.
+        for p in &old_probes {
+            result_at(&core, p, &g, Some(1), at - 10).await;
+            core.store.retire_rehearsal(p, at).await.unwrap();
+        }
+        // Four harder questions minted after it, none of them ever asked
+        // before it, each landing at rank 5.
+        for p in &probes_on(&core, &id, &g, 4).await {
+            result_at(&core, p, &g, Some(5), at + 10).await;
+        }
+
+        let (reconsidered, undone, _) = rule_one(&core, &g, crate::store::now()).await.unwrap();
+        assert_eq!(
+            (reconsidered, undone),
+            (0, 0),
+            "no probe spans the condensation, so there is nothing to compare"
+        );
+        assert_ne!(
+            core.store.get_artifact(&id).await.unwrap().text,
+            text,
+            "the condensation stands"
+        );
+        assert!(
+            !core
+                .store
+                .action_was_undone(&id, Kind::Condense)
+                .await
+                .unwrap()
+        );
+    }
+
+    /// `n` probes on one artifact, each a distinct question. Distinct because
+    /// `idx_rehearsals_live` is keyed on the query, and because a pair is a
+    /// query.
+    async fn probes_on(core: &Core, artifact: &str, g: &Generation, n: usize) -> Vec<String> {
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        let mut out = Vec::new();
+        for i in 0..n {
+            out.push(
+                core.store
+                    .record_rehearsal(&crate::store::rehearsals::NewRehearsal {
+                        class: crate::store::rehearsals::Class::Cue,
+                        query: format!("q{i}-{}", g.id),
+                        query_vec: query_vec.clone(),
+                        embed_model: core.embedder.model().to_string(),
+                        artifact_id: artifact.to_string(),
+                        source_id: None,
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        out
+    }
+
+    /// One result on one probe, with its clock set by hand.
+    async fn result_at(core: &Core, probe: &str, g: &Generation, rank: Option<i64>, at: i64) {
+        let rid = core
+            .store
+            .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                rehearsal_id: probe.to_string(),
+                generation_id: g.id.clone(),
+                rank,
+                outranked_by: vec![],
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE rehearsal_results SET at = ? WHERE id = ?")
+            .bind(at)
+            .bind(&rid)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
     }
 
     /// The seeded base, with the top hit of the second source (`order[3]`)

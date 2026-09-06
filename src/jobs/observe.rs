@@ -18,6 +18,10 @@
 //! considers events after the last stamp and no later than `now - window`,
 //! because an event young enough to still gain a successor has not finished
 //! being what it is.
+//!
+//! And only from the doors where an open is recorded at all — see
+//! `Door::records_opens`. Everywhere else "nobody opened it" is not something
+//! the base learned, it is something it has no way of hearing.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -49,26 +53,55 @@ pub async fn run(core: &Core) -> Result<usize> {
         return Ok(0);
     }
 
-    let rows = sqlx::query(
+    // Only the doors where an open is recorded, and only where the searcher
+    // is named.
+    //
+    // `opened_at` is written in exactly one place — the artifact page, through
+    // `Store::open_event` — so on every other door a search is unopened
+    // because nothing there can say otherwise, not because nobody opened it.
+    // And `scope IS scope` matched NULL to NULL, which is what `Api` and
+    // `Mcp` both carry on purpose: a bearer token is not a person. The two
+    // together meant that on an API- or agent-driven base an agent's three
+    // searches in a minute wrote the first two down as negatives — they could
+    // never be opened, and unscoped they were all "the same person". Those
+    // negatives are not idle either: `eval::lived` sums them into the live
+    // generation's account, and `jobs::retract` replays them as evidence to
+    // exhume buried artifacts.
+    let doors: Vec<&'static str> = crate::store::feedback::Door::ALL
+        .iter()
+        .filter(|d| d.records_opens())
+        .map(|d| d.as_str())
+        .collect();
+    if doors.is_empty() {
+        return Ok(0);
+    }
+    let holes = vec!["?"; doors.len()].join(", ");
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT e.id AS id, e.query AS query, e.query_vec AS query_vec,
                 e.embed_model AS embed_model
            FROM search_events e
           WHERE e.opened_at IS NULL
             AND e.judged_at IS NULL
+            AND e.scope IS NOT NULL
+            AND e.door IN ({holes})
             AND e.created_at > ?
             AND e.created_at <= ?
             AND EXISTS (SELECT 1 FROM search_events later
                          WHERE later.id <> e.id
-                           AND later.scope IS e.scope
+                           AND later.scope = e.scope
                            AND later.created_at > e.created_at
                            AND later.created_at <= e.created_at + ?)
-          ORDER BY e.created_at",
-    )
-    .bind(after)
-    .bind(cutoff)
-    .bind(window)
-    .fetch_all(&core.store.pool)
-    .await?;
+          ORDER BY e.created_at"
+    )));
+    for d in &doors {
+        q = q.bind(*d);
+    }
+    let rows = q
+        .bind(after)
+        .bind(cutoff)
+        .bind(window)
+        .fetch_all(&core.store.pool)
+        .await?;
 
     let mut written = 0;
     for r in &rows {
@@ -255,6 +288,52 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    /// `open_event` is reachable from the web UI and nowhere else, so an API
+    /// or MCP search is unopened by construction. Unscoped as well — a bearer
+    /// token is not a person — it used to match every other unscoped event as
+    /// "the same person", which made a negative out of an agent asking twice.
+    #[tokio::test]
+    async fn a_search_on_a_door_that_cannot_record_an_open_is_never_a_give_up() {
+        let (core, generation) = base().await;
+        for (door, scope) in [
+            (Door::Api, None),
+            (Door::Mcp, None),
+            (Door::Cli, Some("me".to_string())),
+        ] {
+            let id = record_at(&core, "loop device", 4_000).await;
+            sqlx::query("UPDATE search_events SET door = ?, scope = ? WHERE id = ?")
+                .bind(door.as_str())
+                .bind(&scope)
+                .bind(&id)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            let next = record_at(&core, "mount loop image", 3_940).await;
+            sqlx::query("UPDATE search_events SET door = ?, scope = ? WHERE id = ?")
+                .bind(door.as_str())
+                .bind(&scope)
+                .bind(&next)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+
+            core.store.meta_set(EVENTS_AFTER, "0").await.unwrap();
+            assert_eq!(
+                run(&core).await.unwrap(),
+                0,
+                "{} cannot say a list was opened, so it cannot say one was not",
+                door.as_str()
+            );
+        }
+        assert!(
+            core.store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

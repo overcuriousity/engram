@@ -1173,6 +1173,19 @@ mod tests {
         .unwrap();
         assert!(!did_work(&quiet), "{quiet}");
 
+        // And a sleep that only integrated and rehearsed is work. It adopted
+        // no generation and took nothing back — the four numbers the report
+        // used to carry are all zero — so the backoff doubled the interval
+        // away from `sweep_hours` on the very passes that were draining the
+        // integration backlog five hundred artifacts at a time.
+        let slept = serde_json::to_string(&crate::jobs::retention::Report {
+            integrated: 500,
+            rehearsed: 500,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(did_work(&slept), "{slept}");
+
         // Same shape, and worse: `context::run` is a full recompute, so all
         // three of its standing counts are non-zero on every run over unchanged
         // data and the sweep could never report an empty run at all.

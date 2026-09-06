@@ -247,7 +247,30 @@ pub(crate) struct Pair {
     /// Where the artifact was actually served, 0-based, for a pair that came
     /// from an observation. The rerank axis's base: the one row that has the
     /// reranker in it where the reranker is live. `None` for a judged pair.
+    ///
+    /// Measured at `LIMIT`, because that is where everything it is compared
+    /// against is measured. See `served_at`.
     pub(crate) served: Option<usize>,
+}
+
+/// The place an observation was served at, 0-based, as the replay measures it.
+///
+/// `observations.rank` is 1-based and unbounded: `record_search` writes a rank
+/// for every candidate in the pool, which is `feedback.candidates` wide. Every
+/// number it is ever compared against comes from `rank_of`, which searches at
+/// `limit: LIMIT` and answers `None` for anything past it. Carried through
+/// raw, an opened result that sat at pool position fifteen became
+/// `Some(14)` against a replay's `None`, and `recommend` read that as the
+/// candidate having made the pair *worse* — though both are misses at ten —
+/// while `mrr` credited the served side with a fifteenth the replay could not
+/// earn. `rerank_flip` was the loser: its base was inflated on both aggregates
+/// at once, so the flip was systematically under-offered and `Flip::predicted`
+/// biased negative.
+///
+/// So a hit outside the window is a miss here, which is what it is to
+/// everything else in this module.
+pub(crate) fn served_at(rank: Option<i64>) -> Option<usize> {
+    rank.map(|r| (r - 1).max(0) as usize).filter(|r| *r < LIMIT)
 }
 
 /// How many observations one sweep will draw on. A bound rather than a
@@ -414,10 +437,24 @@ async fn pairs_to_replay(core: &Core) -> Result<(Vec<Pair>, i64)> {
 /// The positive observations under one generation, as pairs the ranking can be
 /// scored on, and how many named an artifact that no longer exists.
 ///
-/// Bounded at `OBSERVATION_LIMIT`, and within the bound prioritised by how
-/// wrong the system was: the observations whose artifact sat furthest down the
-/// list are replayed first. Replaying what surprised the system is what keeps a
-/// pass over a well-used base about the cases with room to improve.
+/// Bounded at `OBSERVATION_LIMIT`, and within the bound split in half.
+///
+/// Prioritising by how wrong the system was — worst-placed first — is the
+/// half that reads well and cannot stand alone. Every candidate is scored by
+/// `rank_of` at `LIMIT`, so an observation whose artifact sat below ten is
+/// `None` under the baseline, and on a well-used base the worst five hundred
+/// are all of them: `recommend` compares `None` with `None` five hundred
+/// times, never reaches its net-two, and `score()` answers `best: None` for
+/// the life of the base. The selection was choosing precisely the rows the
+/// scorer cannot tell apart.
+///
+/// So half the budget goes to those — a miss the knobs can lift into the
+/// window is a real recall gain, and nothing else would ever look for one —
+/// and half to observations that placed *inside* the window, where a
+/// candidate moving a hit from six to three is a difference `recommend` can
+/// actually see. Either half takes the other's unused room. It is the same
+/// split `sleep::rehearse` makes between what wobbles and the lap, for the
+/// same reason: one signal spent whole is one signal.
 ///
 /// Each pair carries the vector the query was searched with, so a replay
 /// embeds nothing.
@@ -435,7 +472,21 @@ pub(crate) async fn observation_pairs(
     // Worst-placed first; newest first among equals, which is the order they
     // arrived in.
     observations.sort_by_key(|o| std::cmp::Reverse(o.rank.unwrap_or(i64::MAX)));
-    observations.truncate(OBSERVATION_LIMIT);
+    // `rank` is 1-based, so `> LIMIT` is exactly what `served_at` calls a miss.
+    let (deep, inside): (Vec<_>, Vec<_>) = observations
+        .into_iter()
+        .partition(|o| o.rank.is_none_or(|r| r as usize > LIMIT));
+    let half = OBSERVATION_LIMIT / 2;
+    // Each half takes the other's unused room, so a base with nothing on one
+    // side still fills the budget from the other.
+    let from_deep = half
+        .max(OBSERVATION_LIMIT.saturating_sub(inside.len()))
+        .min(deep.len());
+    let observations: Vec<_> = deep
+        .into_iter()
+        .take(from_deep)
+        .chain(inside.into_iter().take(OBSERVATION_LIMIT - from_deep))
+        .collect();
 
     let mut pairs = Vec::with_capacity(observations.len());
     let mut skipped = 0;
@@ -453,7 +504,7 @@ pub(crate) async fn observation_pairs(
                     satisfies,
                     query_vec: Some(o.query_vec),
                     priming,
-                    served: o.rank.map(|r| (r - 1).max(0) as usize),
+                    served: served_at(o.rank),
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -1013,6 +1064,75 @@ mod tests {
             .as_ref()
             .expect("the pair carries its context");
         assert!(priming.sitting.contains(&order[5]));
+    }
+
+    /// `observations.rank` is 1-based and unbounded — `record_search` writes
+    /// one for every candidate in the pool — while everything it is compared
+    /// against is measured at `LIMIT`. Carried through raw, a hit at pool
+    /// position fifteen was `Some(14)` against a replay's `None`, which
+    /// `recommend` scored as the candidate having made it worse and `mrr`
+    /// credited with a fifteenth no replay could earn.
+    #[test]
+    fn a_served_place_outside_the_window_is_the_miss_it_is_to_everything_else() {
+        assert_eq!(served_at(Some(1)), Some(0));
+        assert_eq!(served_at(Some(LIMIT as i64)), Some(LIMIT - 1));
+        assert_eq!(served_at(Some(LIMIT as i64 + 1)), None);
+        assert_eq!(served_at(Some(15)), None);
+        assert_eq!(served_at(None), None);
+        // A rank of zero should not exist — the column counts from one — and
+        // if one ever does it is the first place, not a negative.
+        assert_eq!(served_at(Some(0)), Some(0));
+    }
+
+    /// Half the budget to what the window can measure. Every candidate is
+    /// scored by `rank_of` at `LIMIT`, so an observation that sat below ten is
+    /// `None` under the baseline and under every candidate alike: selecting
+    /// the worst five hundred selected precisely the rows the scorer cannot
+    /// tell apart, `recommend` never reached its net-two, and `score()`
+    /// answered `best: None` for the life of the base.
+    #[tokio::test]
+    async fn the_observation_budget_is_not_spent_wholly_on_places_the_window_cannot_see() {
+        let (core, order) = seeded().await;
+        let generation = a_generation(&core).await;
+        // More deep observations than the whole budget, and a handful inside
+        // the window behind them.
+        for i in 0..OBSERVATION_LIMIT + 10 {
+            observed_at(
+                &core,
+                &generation,
+                &order[0],
+                LIMIT as i64 + 1 + (i % 5) as i64,
+            )
+            .await;
+        }
+        for _ in 0..5 {
+            observed_at(&core, &generation, &order[1], 2).await;
+        }
+
+        let (pairs, _) = observation_pairs(&core, &generation).await.unwrap();
+        assert_eq!(pairs.len(), OBSERVATION_LIMIT, "the budget is still spent");
+        let inside = pairs.iter().filter(|p| p.served.is_some()).count();
+        assert_eq!(
+            inside, 5,
+            "every observation the window can see is drawn on, deep ones or not"
+        );
+    }
+
+    /// One observation naming `artifact` at `rank`, 1-based.
+    async fn observed_at(core: &crate::core::Core, generation: &str, artifact: &str, rank: i64) {
+        core.store
+            .record_observation(&crate::store::observations::NewObservation {
+                generation_id: generation.to_string(),
+                query: QUERY.into(),
+                query_vec: vec![0.1, 0.2],
+                embed_model: "fake".into(),
+                artifact_id: Some(artifact.to_string()),
+                rank: Some(rank),
+                source: crate::store::observations::Source::Opened,
+                event_id: None,
+            })
+            .await
+            .unwrap();
     }
 
     fn served_pair(order: &[String], i: usize, served: usize) -> Pair {

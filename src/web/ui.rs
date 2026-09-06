@@ -1058,6 +1058,15 @@ struct ForgetForm {
 /// A pair that does not parse is a 400 rather than a skipped member. The
 /// template writes every pair, so a bad one is a bug, and a row that stays
 /// half-forgotten would come back on reload under the same name.
+///
+/// A member that is *gone*, though, is not a bug and must not stop the loop.
+/// The group's members are resolved when the page is rendered, and retention
+/// expires the very rows they name — so a `search_events` row dropped between
+/// the render and the press made `dismiss_gap` answer `NotFound`, aborting
+/// part-way: the members before it were dismissed, the rest were not, htmx saw
+/// a 404 and swapped nothing, and the row came back on reload under the same
+/// label carrying the remainder. A question that no longer exists is already
+/// forgotten, which is what was asked for.
 async fn gap_forget(tenant: Tenant, Form(f): Form<ForgetForm>) -> Result<Response> {
     let mut members = Vec::new();
     for pair in f.members.split(',').filter(|p| !p.is_empty()) {
@@ -1069,7 +1078,10 @@ async fn gap_forget(tenant: Tenant, Form(f): Form<ForgetForm>) -> Result<Respons
         members.push((kind, id.to_string()));
     }
     for (kind, id) in members {
-        tenant.core.store.dismiss_gap(kind, &id).await?;
+        match tenant.core.store.dismiss_gap(kind, &id).await {
+            Ok(()) | Err(Error::NotFound) => {}
+            Err(e) => return Err(e),
+        }
     }
     Ok(().into_response())
 }
@@ -10581,6 +10593,59 @@ mod tests {
         assert!(
             !page.contains("Knowledge gaps"),
             "a forgotten group must leave the page: {page}"
+        );
+    }
+
+    /// The members of a group are resolved when the page is rendered, and
+    /// retention expires the very rows they name. A member that has since gone
+    /// is already forgotten; stopping on it dismissed the earlier members,
+    /// left the later ones, and answered 404 — so htmx swapped nothing and the
+    /// row came back on reload under the same label, half forgotten.
+    #[tokio::test]
+    async fn forgetting_a_group_whose_member_has_since_gone_still_forgets_the_rest() {
+        let (app, cookie, core) = app_session_and_core_with_feedback().await;
+        let mut ids = Vec::new();
+        for q in ["how do I mount an E01", "mounting E01 images read only"] {
+            let id = core
+                .store
+                .record_ask(crate::store::asks::NewAsk {
+                    question: q.into(),
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![1.0; 8],
+                    embed_model: core.embedder.model().to_string(),
+                    answer: "Not in the knowledge base.".into(),
+                    abstained: true,
+                    dropped: 0,
+                    truncated: false,
+                    unsupported: 0,
+                    citations: vec![],
+                })
+                .await
+                .unwrap();
+            core.store
+                .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        crate::jobs::gaps::sweep(&core).await.unwrap();
+
+        // A member named by the rendered row, gone before the press.
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/gaps/forget",
+                &cookie,
+                &format!("members=ask:no-such-ask,ask:{},ask:{}", ids[0], ids[1]),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let page = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(
+            !page.contains("Knowledge gaps"),
+            "the members that were still there are forgotten: {page}"
         );
     }
 

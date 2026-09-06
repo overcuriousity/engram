@@ -112,8 +112,12 @@ fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Rehearsal> {
 }
 
 impl Store {
-    /// `None` when the same (artifact, class, query) already exists: a probe
-    /// is written once, however often the unit that mints it runs.
+    /// `None` when the same (artifact, class, query) is already *live*: a
+    /// probe is written once, however often the unit that mints it runs.
+    ///
+    /// Live, and not ever: a retired row is history and does not stand in the
+    /// way of the question being asked again under a new embedder. See
+    /// `idx_rehearsals_live`.
     pub async fn record_rehearsal(&self, r: &NewRehearsal) -> Result<Option<String>> {
         let id = new_id();
         let res = sqlx::query(
@@ -446,6 +450,48 @@ mod tests {
         );
         assert_eq!(store.retire_rehearsals_of(&o, 6).await.unwrap(), 1);
         assert_eq!(store.live_rehearsal_count().await.unwrap(), 0);
+    }
+
+    /// Retirement is history, not a bar. The uniqueness used to be total, so
+    /// a probe retired for its embedder blocked the fresh one minted at the
+    /// new model, and an artifact that had lost its probes never got them
+    /// back — which is the rehearsal anchor switched off for good on any base
+    /// that changed embedder.
+    #[tokio::test]
+    async fn a_retired_probe_does_not_block_the_same_question_being_asked_again() {
+        let store = Store::memory().await.unwrap();
+        let o = owner(&store).await;
+        let first = store
+            .record_rehearsal(&probe(&o, "why won't it mount"))
+            .await
+            .unwrap()
+            .unwrap();
+        store.retire_rehearsal(&first, 5).await.unwrap();
+
+        let again = store
+            .record_rehearsal(&NewRehearsal {
+                embed_model: "another-embedder".into(),
+                query_vec: vec![0.9, 0.8, 0.7],
+                ..probe(&o, "why won't it mount")
+            })
+            .await
+            .unwrap()
+            .expect("the question can be asked again under a new embedder");
+        assert_ne!(again, first);
+        let live = store.rehearsals_of(&o).await.unwrap();
+        assert_eq!(live.len(), 1, "one live probe, not two");
+        assert_eq!(live[0].id, again);
+        assert_eq!(live[0].embed_model, "another-embedder");
+
+        // And the bar still stands between two live rows.
+        assert!(
+            store
+                .record_rehearsal(&probe(&o, "why won't it mount"))
+                .await
+                .unwrap()
+                .is_none(),
+            "a live probe is still written once"
+        );
     }
 
     pub(crate) async fn generation(store: &Store) -> String {

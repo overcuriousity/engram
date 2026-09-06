@@ -96,16 +96,23 @@ pub(crate) struct EventView {
 /// `undo` is the whole path and not a verb appended to the moment's id: "not a
 /// reminder" deletes the moment, so what takes it back is addressed to the
 /// artifact that is still there.
+///
+/// And it is optional, because on one row there is nothing to address it to.
+/// A merged artifact belongs to no corpus, so nothing can re-read a note to
+/// derive the reminder again — `Core::set_reminder` says as much by answering
+/// `false` to `on` there. The row is still deleted; what is withheld is the
+/// button, because an undo that reported success and restored nothing is
+/// worse than no undo at all.
 pub(crate) struct Just {
     pub verb: &'static str,
-    pub undo: String,
+    pub undo: Option<String>,
 }
 
 impl Just {
     fn moment(id: &str, verb: &'static str, undo: &str) -> Self {
         Just {
             verb,
-            undo: format!("/ui/moments/{id}/{undo}"),
+            undo: Some(format!("/ui/moments/{id}/{undo}")),
         }
     }
 }
@@ -497,13 +504,23 @@ async fn not_a_reminder(
     // `set` row is the one source this never removes, and announcing "Not a
     // reminder — undo" over a row still sitting two lines below is the band
     // telling the reader something they can see is untrue.
+    // The undo only where the artifact can honour it: `is_a_reminder` hands
+    // the note back to the judged read, and an artifact with no corpus — every
+    // merge — has no note to hand back. The deletion still happens; the button
+    // does not appear.
+    let takes_it_back = tenant
+        .core
+        .store
+        .get_artifact(&m.artifact_id)
+        .await
+        .is_ok_and(|a| a.corpus_id.is_some());
     let just = tenant
         .core
         .set_reminder(&m.artifact_id, false)
         .await?
         .then(|| Just {
             verb: "Not a reminder",
-            undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id),
+            undo: takes_it_back.then(|| format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id)),
         });
     // The reading that filed this moment is the one being contradicted.
     tenant
@@ -1000,6 +1017,67 @@ mod tests {
             ),
             "the undo withdraws the refusal"
         );
+    }
+
+    /// `carry_moments` deliberately moves a root's open due row onto the
+    /// merge that folded it in, and a merge belongs to no corpus. Before this,
+    /// `set_reminder` returned at the corpus lookup having done nothing:
+    /// pressing "Not a reminder" gave no banner, no error, deleted nothing and
+    /// recorded no refusal, while the row went on pushing at every rung for
+    /// ever. It deletes now — and offers no undo, because nothing could
+    /// re-read a note that does not exist to derive the row again.
+    #[tokio::test]
+    async fn a_reminder_carried_onto_a_merge_can_still_be_told_it_is_not_one() {
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        let merge = core
+            .store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "the invoice, and everything else about it".into(),
+                    title: Some("Invoices".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                std::slice::from_ref(&aid),
+            )
+            .await
+            .unwrap();
+        assert_eq!(core.store.carry_moments(&aid, &merge.id).await.unwrap(), 1);
+        assert!(
+            core.store
+                .get_artifact(&merge.id)
+                .await
+                .unwrap()
+                .corpus_id
+                .is_none(),
+            "a merge belongs to no corpus, which is the whole of this case"
+        );
+
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let html = body_of(
+            app.clone()
+                .oneshot(form(
+                    &format!("/ui/moments/{id}/not-a-reminder"),
+                    &cookie,
+                    "tz=Europe/Berlin",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("Not a reminder"), "the band says so: {html}");
+        assert!(
+            !html.contains("is-a-reminder"),
+            "and offers no undo it could not honour: {html}"
+        );
+        assert!(
+            core.store.moment(&id).await.unwrap().is_none(),
+            "the row is gone, not merely reported gone"
+        );
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
     }
 
     #[tokio::test]

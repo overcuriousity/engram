@@ -864,7 +864,22 @@ CREATE TABLE IF NOT EXISTS rehearsals (
   -- longer the live embedder. Not replayed, not counted, never deleted.
   retired_at   INTEGER
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rehearsals_once ON rehearsals(artifact_id, class, query);
+-- Once per *live* probe, not once for ever. Without the partial clause a
+-- retired row went on blocking its own replacement: `sleep::rehearse` retires
+-- every probe whose `embed_model` is no longer the live embedder's, and the
+-- fresh row minted at the new model — by `probe::run` after the re-embed, or
+-- by `rehearse` itself — was silently ignored by `INSERT OR IGNORE`. Change
+-- the embedder and that artifact had no probes again, ever; on a base with no
+-- human verdicts the rehearsal anchor then answered `no_evidence` for good,
+-- and the anchor is what refuses a candidate and reverts a generation.
+--
+-- The old name is dropped rather than reused: `CREATE ... IF NOT EXISTS` will
+-- not replace an index that is already there, so a base that has booted before
+-- would have kept the total one. The drop is a no-op on every boot after the
+-- first.
+DROP INDEX IF EXISTS idx_rehearsals_once;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rehearsals_live
+  ON rehearsals(artifact_id, class, query) WHERE retired_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_rehearsals_lap ON rehearsals(created_at, id) WHERE retired_at IS NULL;
 
 -- ── Integration ──────────────────────────────────────────────────────────────

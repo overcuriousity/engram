@@ -34,6 +34,17 @@ pub struct Report {
     pub undone: usize,
     /// Artifacts the pass restored for a search given up on.
     pub restored: usize,
+    /// Artifacts the integrate phase filed against the rest of the base, and
+    /// the capture probes it minted doing so.
+    pub integrated: usize,
+    pub probes: usize,
+    /// Probes the rehearse phase replayed, and the ones it retired on the way.
+    pub rehearsed: usize,
+    pub retired: usize,
+    /// Pairs rule 3 filed for interference.
+    pub interference: usize,
+    /// Condensations the pass armed.
+    pub condensed: usize,
 }
 
 /// What the base holds, as opposed to what this pass did to it.
@@ -92,6 +103,21 @@ pub async fn run(core: &Core) -> Result<Report> {
             report.reverted = usize::from(p.reverted.is_some());
             report.undone = p.undone;
             report.restored = p.restored;
+            // The sleep phases, flat, because `jobs::did_work` reads flat
+            // numbers and nothing else. Without them a pass that integrated
+            // five hundred artifacts and replayed five hundred probes reported
+            // no work at all, and `rearm_periodic_with` doubled the interval
+            // away from `sweep_hours` towards `backoff_max_hours` — on a base
+            // whose integration backlog drains at `OBSERVATION_LIMIT` a pass,
+            // and where nothing in production calls `arm_now` to put it back.
+            // Every one of these is this pass acting, which is the test the
+            // backoff asks.
+            report.integrated = p.integrated.integrated;
+            report.probes = p.integrated.probes;
+            report.rehearsed = p.replayed.rehearsed;
+            report.retired = p.replayed.retired;
+            report.interference = p.interference;
+            report.condensed = p.condensed;
         }
         Err(e) => {
             tracing::warn!(error = %e, "the idle pass failed; the live generation is unchanged");

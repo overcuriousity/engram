@@ -562,6 +562,7 @@ impl<'de> Deserialize<'de> for Autonomy {
 /// is written down about how one turned out, and — once — whether the tuning
 /// sweep is allowed to read it.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
 pub struct EvolveConfig {
     /// A search nobody opened, followed by another search from the same person
     /// inside this many seconds, is a weak negative.
@@ -584,11 +585,13 @@ pub struct EvolveConfig {
     /// How much a quiet base may do on its own: nothing, move its own
     /// ranking, or also act on the corpus. See `Autonomy`.
     ///
-    /// Off, for the reason `feed_sweep` is: a default that changes ranking
-    /// moves only after the harness has been run. Under `"ranking"` the idle
-    /// pass adopts a candidate that clears the sweep's gate as a new
-    /// generation, watches what it earns while serving, and reverts it when
-    /// it does not hold — on observations and on the base's own probes both.
+    /// `"ranking"`, and only the reversible half of the loop is a default:
+    /// every move that stage makes is a row `revert` undoes exactly, while a
+    /// merge, a burial or a condensation is a corpus write and is asked for.
+    /// Under `"ranking"` the idle pass adopts a candidate that clears the
+    /// sweep's gate as a new generation, watches what it earns while serving,
+    /// and reverts it when it does not hold — on observations and on the
+    /// base's own probes both.
     /// Under `"full"` the corpus rules run too, behind `max_actions_per_week`.
     /// The file is never written; the insights page says which generation is
     /// live. `true` and `false` still read, as `"full"` and `"off"`.
@@ -2887,6 +2890,38 @@ mod tests {
         assert_eq!(read(r#"autonomous = "ranking""#), Autonomy::Ranking);
         assert_eq!(read(r#"autonomous = "full""#), Autonomy::Full);
         assert!(parse(r#"autonomous = "sometimes""#).is_err());
+    }
+
+    /// `#[serde(default)]` on the `Config` field covers an absent section and
+    /// nothing else: with it alone, an operator reacting to the `"ranking"`
+    /// default by writing the one key they came to change got
+    /// `missing field give_up_window_secs` and a base that would not boot.
+    /// `ENGRAM__EVOLVE__AUTONOMOUS` is the same shape — the `config` crate
+    /// synthesises a table of one key from it — and it is the likelier way to
+    /// hit this, because nothing about setting an environment variable
+    /// suggests the other four keys come with it.
+    #[test]
+    fn an_evolve_section_naming_one_key_leaves_the_other_four_at_their_defaults() {
+        let parse = |s: &str| {
+            config::Config::builder()
+                .add_source(config::File::from_str(s, config::FileFormat::Toml))
+                .build()
+                .unwrap()
+                .try_deserialize::<EvolveConfig>()
+                .unwrap()
+        };
+        let one = parse(r#"autonomous = "off""#);
+        assert_eq!(one.autonomous, Autonomy::Off);
+        assert_eq!(
+            one.give_up_window_secs,
+            EvolveConfig::default().give_up_window_secs,
+        );
+        assert_eq!(
+            one.max_actions_per_week,
+            EvolveConfig::default().max_actions_per_week,
+        );
+        assert_eq!(one.idle_secs, EvolveConfig::default().idle_secs);
+        assert!(!one.feed_sweep);
     }
 
     #[test]

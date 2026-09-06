@@ -63,6 +63,34 @@ impl Door {
         )
     }
 
+    /// Every door, so a rule about a subset can be written against the enum
+    /// instead of a list of strings somewhere else.
+    pub const ALL: [Door; 7] = [
+        Door::Ui,
+        Door::Api,
+        Door::Mcp,
+        Door::Judge,
+        Door::Extension,
+        Door::Cli,
+        Door::Ask,
+    ];
+
+    /// Whether an open on this door is recorded, and so whether "nobody
+    /// opened it" is a fact about the search or merely the absence of any way
+    /// to say otherwise.
+    ///
+    /// Only the web UI. `Store::open_event` has exactly one caller, the
+    /// artifact page, and it is the only place `search_events.opened_at` is
+    /// ever written — a shell, an agent or the extension can read a result
+    /// list all day and leave the column NULL. That is why `jobs::observe`
+    /// asks this before writing anything down: on the other doors every
+    /// unopened search is unopened by construction, so a second search a
+    /// minute later would have made a weak negative out of a person simply
+    /// asking twice.
+    pub fn records_opens(&self) -> bool {
+        matches!(self, Door::Ui)
+    }
+
     /// The door a client is allowed to claim for itself.
     ///
     /// Only `extension` and `cli`. Everything else falls back to `Api`,
@@ -759,9 +787,31 @@ impl Store {
         // EXISTS below refuses on. An artifact can hold two rows — unshown in
         // the ranked pool and shown in the appended band — and the open came
         // from the one the person saw, so the shown row is the rank.
+        //
+        // `rank` is the position in the recorded pool, and for a shown ranked
+        // hit that is also the position on screen. For a band row it is not:
+        // the band is appended after the whole pool, which is
+        // `feedback.candidates` wide — twenty by default — while the window a
+        // person reads is `limit`, ten. A band hit at screen position eleven
+        // therefore carried `rank = 20`, and `eval::sweep` and `jobs::retract`
+        // both read `served = rank - 1` as the place that was served, so every
+        // band open handed the tuning comparison a baseline ten places too
+        // deep: the served MRR came out low and a replay looked better than it
+        // was for no reason but where the band sits in the pool.
+        //
+        // So the observation gets the position on screen, counted over the
+        // shown rows in the order they were drawn — the ranked window first,
+        // then the band under it. One-based, like `observations.rank` and
+        // `ask_citations.n`. `search_candidates.rank` is untouched: it is the
+        // pool's own ordering and the table's key.
         let before = sqlx::query(
             "SELECT e.opened_at AS opened_at, e.query AS query,
                     e.query_vec AS query_vec, e.embed_model AS embed_model,
+                    (SELECT COUNT(*) FROM search_candidates s
+                      WHERE s.event_id = e.id AND s.shown = 1
+                        AND (s.band < c.band
+                             OR (s.band = c.band AND s.rank < c.rank))) AS shown_rank,
+                    c.shown AS shown,
                     c.rank AS rank
                FROM search_events e
                JOIN search_candidates c
@@ -807,7 +857,17 @@ impl Store {
                     // and `ask_citations.n` both count from one. Converted here
                     // rather than left for whoever compares an opened result with
                     // a cited excerpt and finds them a place apart.
-                    rank: Some(row.get::<i64, _>("rank") + 1),
+                    //
+                    // From the screen position where there is one. A row that
+                    // was never shown has none — it cannot have been opened
+                    // from a list, only reached by a link the pool happens to
+                    // name — and there the pool position is still the only
+                    // honest answer.
+                    rank: Some(if row.get::<i64, _>("shown") == 1 {
+                        row.get::<i64, _>("shown_rank") + 1
+                    } else {
+                        row.get::<i64, _>("rank") + 1
+                    }),
                     source: crate::store::observations::Source::Opened,
                     event_id: Some(event_id.to_string()),
                 },
@@ -1307,6 +1367,71 @@ mod tests {
         let folded = store.record_search(second, 60).await.unwrap();
         assert_eq!(folded, id, "this test needs the fold to happen");
         assert!(store.search_context(&id).await.unwrap().is_none());
+    }
+
+    /// The band is recorded after the whole *pool*, which is
+    /// `feedback.candidates` wide, while the window a person reads is `limit`.
+    /// Reading `search_candidates.rank` straight through gave a band hit at
+    /// screen position eleven an `observations.rank` of twenty-one, and
+    /// `eval::sweep` and `jobs::retract` both take `rank - 1` as the place
+    /// that was served — so every band open pushed the served baseline ten
+    /// places down and made a replay look better than it was.
+    #[tokio::test]
+    async fn an_open_in_the_band_is_recorded_at_the_place_it_was_on_screen() {
+        let (store, generation) = observed_base().await;
+        // Ten shown, ten more in the pool behind them, then the band.
+        let mut ev = event_with(&[]);
+        ev.candidates = (0..20)
+            .map(|i| NewCandidate {
+                artifact_id: format!("art-{i}"),
+                score: 1.0 - i as f32 * 0.01,
+                similarity: Some(0.9),
+                shown: i < 10,
+                band: false,
+            })
+            .chain(std::iter::once(NewCandidate {
+                artifact_id: "recalled".into(),
+                score: 0.4,
+                similarity: None,
+                shown: true,
+                band: true,
+            }))
+            .collect();
+        let event = store.record_search(ev, 5).await.unwrap();
+
+        assert!(store.open_event(&event, "recalled").await.unwrap());
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            obs[0].rank,
+            Some(11),
+            "the first row under a window of ten, not the row after the pool"
+        );
+    }
+
+    /// The same read, from the other side: a shown ranked hit's pool position
+    /// *is* its screen position, and nothing about the band may move it.
+    #[tokio::test]
+    async fn a_ranked_open_keeps_its_place_whatever_is_appended_under_it() {
+        let (store, generation) = observed_base().await;
+        let mut ev = event_with(&["art-1", "art-2", "art-3"]);
+        ev.candidates.push(NewCandidate {
+            artifact_id: "recalled".into(),
+            score: 0.4,
+            similarity: None,
+            shown: true,
+            band: true,
+        });
+        let event = store.record_search(ev, 5).await.unwrap();
+
+        assert!(store.open_event(&event, "art-3").await.unwrap());
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs[0].rank, Some(3));
     }
 
     #[tokio::test]

@@ -187,6 +187,8 @@ pub struct Replayed {
     pub found: usize,
     /// Probes retired on the way: another embedder, or an owner gone.
     pub retired: usize,
+    /// Of those, the ones asked again at the live embedder. See `remint`.
+    pub reminted: usize,
     pub stopped: bool,
 }
 
@@ -270,11 +272,25 @@ pub async fn rehearse(
         // way rule 2 skips give-ups from another embedder; retired, not
         // replayed. An owner nothing answers for any more likewise.
         let pair = pair_of(core, r).await;
-        if r.embed_model != model || !owner_stands(core, &pair.satisfies).await {
+        let stale = r.embed_model != model;
+        let stands = owner_stands(core, &pair.satisfies).await;
+        if stale || !stands {
             core.store
                 .retire_rehearsal(&r.id, crate::store::now())
                 .await?;
             out.retired += 1;
+            // The two retirements are not the same event. An owner that left
+            // results is a question with nothing left to answer it, and it
+            // stays retired. A changed embedder is not: the question is as
+            // good as it ever was, only the vector beside it is from another
+            // era. Nothing else would ever ask it again — `integrate` files
+            // an artifact once and never revisits it, and a cue is minted at
+            // `embed::mark_indexed` — so a base that changed embedder lost
+            // every probe it had, and with them the anchor that refuses a
+            // candidate and reverts a generation.
+            if stale && stands {
+                out.reminted += usize::from(remint(core, r, &model).await?);
+            }
             continue;
         }
         let (rank, above) = crate::eval::sweep::rank_and_above(core, &pair, current).await?;
@@ -297,9 +313,70 @@ pub async fn rehearse(
     Ok(out)
 }
 
+/// The same question again, at the live embedder.
+///
+/// Both classes are re-embedded the way they were minted, which is what keeps
+/// a re-minted probe comparable with the ones around it. A cue is a question
+/// and cost a query embedding; a capture probe's query is another artifact's
+/// text and cost nothing at all — its vector is that artifact's own, read back
+/// out of the index — so it is read back the same way, and only once the
+/// source itself carries the live model. Reading it sooner would write the
+/// very vector this probe is being retired for.
+///
+/// `false` where the source is gone, not yet re-embedded, or already has a
+/// live probe for this question. None of those is a failure: the next lap
+/// comes round.
+async fn remint(core: &Core, r: &crate::store::rehearsals::Rehearsal, model: &str) -> Result<bool> {
+    let query_vec = match r.class {
+        Class::Cue => {
+            let permit = core.gate.background_light().await;
+            let v = core.embedder.embed_query(&r.query).await;
+            permit.finished();
+            v?
+        }
+        Class::Capture => {
+            let Some(source) = r.source_id.as_deref() else {
+                return Ok(false);
+            };
+            let Ok(a) = core.store.get_artifact(source).await else {
+                return Ok(false);
+            };
+            if a.embed_model.as_deref() != Some(model) {
+                return Ok(false);
+            }
+            let Some(v) = core.vectors.dense_of(source).await? else {
+                return Ok(false);
+            };
+            v
+        }
+    };
+    Ok(core
+        .store
+        .record_rehearsal(&NewRehearsal {
+            class: r.class,
+            query: r.query.clone(),
+            query_vec,
+            embed_model: model.to_string(),
+            artifact_id: r.artifact_id.clone(),
+            source_id: r.source_id.clone(),
+        })
+        .await?
+        .is_some())
+}
+
 /// Ids that stood above the owner in **every** retained result — at least
 /// two — and are from another corpus. One result is not a pattern; a
 /// same-corpus neighbour is structure.
+///
+/// Nothing at all where any retained result missed the owner, which is the
+/// same guard `condense_candidates` carries and for a sharper reason here.
+/// `rank_and_above` returns the *entire* top ten as `outranked_by` when the
+/// owner is not in the results, so a probe whose owner is simply not
+/// retrievable — one condensed and awaiting a re-embed, which still passes
+/// `in_results()` — contributed a full slate of ids to the "stood above it in
+/// every one" test and made interference out of consistency. The pairs filed
+/// from that feed dedupe, which could then merge or supersede away the very
+/// artifact that was only briefly unfindable.
 pub fn interferers<F>(
     results: &[crate::store::rehearsals::RehearsalResult],
     own_corpus: Option<&str>,
@@ -308,7 +385,7 @@ pub fn interferers<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    if results.len() < 2 {
+    if results.len() < 2 || results.iter().any(|r| r.rank.is_none()) {
         return vec![];
     }
     let mut out = Vec::new();
@@ -743,6 +820,18 @@ mod tests {
             interferers(&[res(&["twin"]), res(&["twin"])], Some("mine"), corpus).is_empty(),
             "same corpus is structure"
         );
+
+        // A result that missed the owner carries the whole top ten as
+        // `outranked_by`, so it agrees with anything. One is enough to make
+        // the set say nothing.
+        let missed = |above: &[&str]| crate::store::rehearsals::RehearsalResult {
+            rank: None,
+            ..res(above)
+        };
+        assert!(
+            interferers(&[res(&["x"]), missed(&["x", "y"])], Some("mine"), corpus).is_empty(),
+            "a replay that did not find the owner is not evidence about what displaced it"
+        );
     }
 
     #[tokio::test]
@@ -832,8 +921,15 @@ mod tests {
         assert!(core.store.pair_between(&a1, &b).await.unwrap().is_none());
     }
 
+    /// Not replayed — the vector is from another era and is not comparable
+    /// with the live index — and not lost either. The question is as good as
+    /// it ever was, so it is asked again at the live embedder. Nothing else
+    /// would: `integrate` files an artifact once and never revisits it, and a
+    /// cue is minted at `embed::mark_indexed`, so a base that changed
+    /// embedder used to lose every probe it had and with them the anchor that
+    /// refuses a candidate and reverts a generation.
     #[tokio::test]
-    async fn a_probe_under_another_embedder_is_retired_not_replayed() {
+    async fn a_probe_under_another_embedder_is_retired_and_asked_again() {
         let (core, a1, _, _) = two_corpora().await;
         let live = live_generation(&core).await;
         core.store
@@ -849,7 +945,45 @@ mod tests {
             .unwrap();
         let r = rehearse(&core, &live, crate::store::now()).await.unwrap();
         assert_eq!(r.retired, 1);
-        assert_eq!(r.rehearsed, 0);
+        assert_eq!(r.reminted, 1);
+        assert_eq!(r.rehearsed, 0, "the old row is not replayed");
+
+        let live_probes = core.store.rehearsals_of(&a1).await.unwrap();
+        assert_eq!(live_probes.len(), 1, "the same question, once");
+        assert_eq!(live_probes[0].query, "from another era");
+        assert_eq!(live_probes[0].embed_model, core.embedder.model());
+        // And the next lap replays it like any other.
+        let r = rehearse(&core, &live, crate::store::now()).await.unwrap();
+        assert_eq!(r.rehearsed, 1);
+        assert_eq!(r.retired, 0);
+    }
+
+    /// The other retirement, and it is not the same event: an owner that left
+    /// results is a question with nothing left to answer it, and it stays
+    /// retired.
+    #[tokio::test]
+    async fn a_probe_whose_owner_left_results_is_retired_for_good() {
+        let (core, a1, _, _) = two_corpora().await;
+        let live = live_generation(&core).await;
+        core.store
+            .record_rehearsal(&NewRehearsal {
+                class: Class::Cue,
+                query: "nothing answers this any more".into(),
+                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: a1.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap();
+        core.store
+            .set_artifact_status(&a1, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        let r = rehearse(&core, &live, crate::store::now()).await.unwrap();
+        assert_eq!(r.retired, 1);
+        assert_eq!(r.reminted, 0);
         assert_eq!(core.store.live_rehearsal_count().await.unwrap(), 0);
     }
 }

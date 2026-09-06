@@ -390,10 +390,20 @@ impl Store {
     /// Open rows only. A done row is the history of a thing that happened to
     /// the artifact it happened on, and moving it would rewrite that.
     ///
-    /// And never onto an instant the winner already carries, which is the same
-    /// uniqueness every insert on an artifact asks about: a promotion whose
-    /// artifacts were themselves read as the reminder has the row already, and
-    /// the passage's copy stays where it is rather than becoming a second one.
+    /// And never onto an instant the winner already carries *open*, which is
+    /// the same uniqueness every insert on an artifact asks about: a promotion
+    /// whose artifacts were themselves read as the reminder has the row
+    /// already, and the passage's copy stays where it is rather than becoming a
+    /// second one.
+    ///
+    /// `w.done_at IS NULL` on that side too, and for the reason the outer
+    /// filter carries it: a *completed* row on the winner at the same instant
+    /// is the history of something that already happened, not a duplicate of
+    /// the loser's open one. Without it the loser's row was left behind on an
+    /// artifact about to go non-active, and `open_due`, `uncovered` and
+    /// `next_notify_at` all filter on `a.status = 'active'` — so the reminder
+    /// left the band with nothing anywhere saying it had gone, which is the
+    /// exact failure this method exists to prevent.
     pub async fn carry_moments(&self, loser: &str, winner: &str) -> Result<u64> {
         if loser == winner {
             return Ok(0);
@@ -404,7 +414,8 @@ impl Store {
                 AND NOT EXISTS (SELECT 1 FROM moments w
                                  WHERE w.artifact_id = ?
                                    AND w.kind = moments.kind
-                                   AND w.at IS moments.at)",
+                                   AND w.at IS moments.at
+                                   AND w.done_at IS NULL)",
         )
         .bind(winner)
         .bind(loser)
@@ -1448,6 +1459,71 @@ mod tests {
                 .await
                 .unwrap(),
             "three occurrences is three, wherever the rows ended up"
+        );
+    }
+
+    /// A *completed* row on the winner at the same instant is not the winner
+    /// already carrying that reminder — it is the history of something that
+    /// happened. Matching it left the loser's open row behind on an artifact
+    /// about to go non-active, and the band filters on `a.status = 'active'`,
+    /// so the reminder went dark with nothing saying so.
+    #[tokio::test]
+    async fn a_done_row_on_the_winner_at_the_same_instant_does_not_block_the_carry() {
+        let (s, aid) = store_with_artifact().await;
+        let winner = other_artifact(&s, "the promoted rewrite").await;
+        let at = Some(1_000);
+        let row = |artifact: &str| NewMoment {
+            artifact_id: artifact.to_string(),
+            kind: Kind::Due,
+            at,
+            tz: "Europe/Berlin".into(),
+            rule: None,
+            source: Source::Classified,
+            span: None,
+            series_id: None,
+        };
+        let finished = s.insert_moment(&row(&winner)).await.unwrap();
+        s.mark_done(&finished, 1_100).await.unwrap();
+        let open = s.insert_moment(&row(&aid)).await.unwrap();
+
+        assert_eq!(
+            s.carry_moments(&aid, &winner).await.unwrap(),
+            1,
+            "an open row is carried past a done one at the same instant"
+        );
+        assert_eq!(
+            s.moment(&open).await.unwrap().unwrap().artifact_id,
+            winner,
+            "and it is the winner that carries it now"
+        );
+    }
+
+    /// The other half of the same rule: an *open* row the winner already
+    /// carries at that instant is the duplicate the guard is for, and the
+    /// loser's copy stays where it is.
+    #[tokio::test]
+    async fn an_open_row_on_the_winner_at_the_same_instant_still_blocks_the_carry() {
+        let (s, aid) = store_with_artifact().await;
+        let winner = other_artifact(&s, "the promoted rewrite").await;
+        let at = Some(1_000);
+        let row = |artifact: &str| NewMoment {
+            artifact_id: artifact.to_string(),
+            kind: Kind::Due,
+            at,
+            tz: "Europe/Berlin".into(),
+            rule: None,
+            source: Source::Classified,
+            span: None,
+            series_id: None,
+        };
+        s.insert_moment(&row(&winner)).await.unwrap();
+        let loser_row = s.insert_moment(&row(&aid)).await.unwrap();
+
+        assert_eq!(s.carry_moments(&aid, &winner).await.unwrap(), 0);
+        assert_eq!(
+            s.moment(&loser_row).await.unwrap().unwrap().artifact_id,
+            aid,
+            "not moved, and not doubled on the winner"
         );
     }
 

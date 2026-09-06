@@ -32,7 +32,9 @@
 {% if head && (!rows.is_empty() || just.is_some() || !events.is_empty()) %}<h2>Due</h2>{% endif %}
 {% if let Some(j) = just %}
   <p class="due-row due-done muted"><span class="due-title">{{ j.verb }}</span>
-    <button class="btn btn-ghost btn-sm" hx-post="{{ j.undo }}" hx-target="#due" hx-swap="outerHTML">undo</button></p>
+    {%~ if let Some(u) = j.undo %}
+    <button class="btn btn-ghost btn-sm" hx-post="{{ u }}" hx-target="#due" hx-swap="outerHTML">undo</button>
+    {%~ endif %}</p>
 {% endif %}
 {% for r in rows %}
   {# `due-new` is on a row whose moment did not exist when this band last

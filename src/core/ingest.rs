@@ -507,7 +507,15 @@ impl Core {
             id: src.id,
             status: src.status,
             duplicate: false,
-            near_duplicate: near,
+            // What the doors read off this field is "parked", not "resembles
+            // something": `cli/capture.rs` and `mcp/mod.rs` both print *held
+            // for review — nothing is indexed until it is resolved in the web
+            // UI*, and `web/workspace.rs` sets `parked: true`. A forced
+            // reminder was never parked — it went straight to `Synthesize`
+            // above — so reporting the resemblance told the operator their
+            // `engram -r` was waiting for them while it was in fact
+            // synthesized, embedded, armed, and on its way to their phone.
+            near_duplicate: near.filter(|_| !forced_remind),
         })
     }
 
@@ -1774,12 +1782,31 @@ impl Core {
     /// tell the difference between a row that went and a row that stayed.
     pub async fn set_reminder(&self, artifact_id: &str, on: bool) -> Result<bool> {
         let art = self.store.get_artifact(artifact_id).await?;
+        let intent = crate::core::moments::Intent::Remind;
         let Some(cid) = art.corpus_id.as_deref() else {
-            return Ok(false);
+            // A merge belongs to no corpus by construction, and `off` used to
+            // return here having done nothing at all — while `carry_moments`
+            // deliberately moves a root's open due row *onto* the merge. So
+            // the band could show a reminder whose "Not a reminder" answered
+            // `false`: no banner, no error, nothing deleted, and the row went
+            // on pushing at 48 h, 12 h, 3 h, 30 min and zero for ever.
+            //
+            // The row is what pushes, so `off` deletes it. What cannot be
+            // recorded is the durable refusal in the corpus metadata, and
+            // nothing needs it: that refusal exists to survive a re-read, and
+            // a merge is never read from a note again. `on` is the half that
+            // genuinely has nothing to do — there is no window to hand back —
+            // and it keeps saying so, which is what tells the band not to
+            // offer an undo it could not honour.
+            if on {
+                return Ok(false);
+            }
+            let gone = self.store.delete_refused_due(artifact_id).await?;
+            self.store.rearm_remind().await?;
+            return Ok(gone > 0);
         };
         let src = self.store.get_corpus(cid).await?;
         let mut meta = src.metadata.clone();
-        let intent = crate::core::moments::Intent::Remind;
         if on {
             // A capture that splits into windows is read window by window and
             // never judged (`jobs::window`, `judging = all.len() == 1`), the
@@ -3900,15 +3927,32 @@ mod tests {
 
         let again = first.replacen("Schritt 7:", "Schritt sieben:", 1);
         let again = again.as_str();
+        // Read before the capture, or the row this very call stores is the
+        // one that answers.
+        assert!(
+            core.store
+                .find_near_duplicate(
+                    &crate::store::shingle::signature(again),
+                    core.consolidate.near_dupe_min,
+                )
+                .await
+                .unwrap()
+                .is_some(),
+            "the fixture must actually resemble the first capture"
+        );
         let out = core
             .ingest_capture(
                 Capture::new(again, "cli").with_intent(Some(crate::core::moments::Intent::Remind)),
             )
             .await
             .unwrap();
+        // And the receipt says so. Every door reads this field as "parked" and
+        // nothing else — the CLI and MCP both answer *held for review, nothing
+        // is indexed* on it — so reporting the resemblance on a capture that
+        // was queued anyway told the operator the opposite of what happened.
         assert!(
-            out.near_duplicate.is_some(),
-            "the fixture must actually resemble the first capture"
+            out.near_duplicate.is_none(),
+            "nothing was parked, so nothing is reported as parked"
         );
         assert_ne!(
             core.store.get_corpus(&out.id).await.unwrap().status,

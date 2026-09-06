@@ -4300,10 +4300,18 @@ mod tests {
             .unwrap();
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].artifact_id.as_deref(), Some(b.as_str()));
+        // The place on screen, not the place in the pool. `limit` is one here
+        // and the pool holds three rows, so the band hit is the second thing
+        // the person read — while `search_candidates.rank` calls it the third.
+        // The distance is `feedback.candidates - limit` and it is ten by
+        // default: `eval::sweep` and `jobs::retract` both read `rank - 1` as
+        // the place that was served, so recording the pool position handed
+        // every band open a baseline ten places too deep and made replays look
+        // better than they were.
         assert_eq!(
             obs[0].rank,
-            Some(rows.len() as i64),
-            "the rank it was shown at, after the ranked pool: {rows:?}"
+            Some(2),
+            "the place it was shown at, under the one ranked hit: {rows:?}"
         );
     }
 
