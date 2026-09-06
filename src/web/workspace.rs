@@ -351,6 +351,15 @@ struct CaptureForm {
     /// 09:00 UTC and the band underneath said 11:00.
     #[serde(default)]
     tz: Option<String>,
+    /// The search the box was in the middle of when Capture was pressed — the
+    /// id `#fold-of` already carries so a typing burst folds into one event.
+    ///
+    /// The box searches while it is typed, so that search *is* this capture's
+    /// first draft, and it found nothing because nothing was there yet. Carried
+    /// so the hole it would otherwise become closes against the text that
+    /// answers it. Empty for a door that was not typed into.
+    #[serde(default)]
+    from_search: Option<String>,
 }
 
 #[derive(Template)]
@@ -402,6 +411,31 @@ async fn capture_submit(
             }
         },
         None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
+    };
+    // The id came off the page, so it is whatever the caller sent: a search
+    // that is not this person's is not this person's first draft, and stamping
+    // the link would close a hole in somebody else's base — see
+    // `Store::event_is_mine`. Dropped rather than refused, for the reason the
+    // lost ask above is: nothing about the text depends on it, and a capture
+    // must not fail over a piece of provenance.
+    let capture = match f.from_search.as_deref().filter(|s| !s.is_empty()) {
+        Some(ev)
+            if tenant
+                .core
+                .store
+                .event_is_mine(ev, &tenant.user.subject)
+                .await? =>
+        {
+            capture.with_search(ev)
+        }
+        Some(ev) => {
+            tracing::warn!(
+                event_id = ev,
+                "a capture named a search that is not the capturer's; keeping it as an ordinary paste"
+            );
+            capture
+        }
+        None => capture,
     };
     let out = tenant
         .core
@@ -1320,6 +1354,111 @@ mod tests {
             html.trim().is_empty(),
             "an ordinary capture still writes into the bar the box lives in: {html}"
         );
+    }
+
+    /// The box searches while it is typed, so the sentence on its way into the
+    /// base is already a recorded query that found nothing — and `unmatched`
+    /// reads a search with nothing near it as a hole in the base. Left alone,
+    /// the capture page filled with the operator's own half-written captures
+    /// asked back at them. The press carries the id the results fragment
+    /// already put on the page, and the capture answers its own first draft.
+    #[tokio::test]
+    async fn a_capture_names_the_search_it_was_typed_from() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let event = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: "Termin Foto Dienstausweis Mittwoch 0900".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some(crate::store::TEST_SUBJECT.into()),
+                    filters: "{}".into(),
+                    query_vec: vec![1.0, 0.0, 0.0, 0.0],
+                    embed_model: core.embedder.model().to_string(),
+                    candidates: vec![],
+                    answered: false,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/capture")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "text=Termin+Foto+Dienstausweis+Mittwoch+0900&from_search={event}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(
+            crate::core::ingest::typed_from(&stored.metadata),
+            Some(event.as_str()),
+            "the capture does not say which query it was typed from"
+        );
+    }
+
+    /// An id off a page is not a capability. Another person's search is not
+    /// this person's first draft, and a capture that could stamp one would
+    /// close a hole in a base its writer cannot even read.
+    #[tokio::test]
+    async fn a_capture_cannot_name_somebody_elses_search() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let theirs = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: "their own private query".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some("somebody-else".into()),
+                    filters: "{}".into(),
+                    query_vec: vec![1.0, 0.0, 0.0, 0.0],
+                    embed_model: core.embedder.model().to_string(),
+                    candidates: vec![],
+                    answered: false,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ui/capture")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "text=something+of+my+own&from_search={theirs}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Stored, because the text was never in doubt — and stored as the
+        // ordinary paste it is.
+        assert_eq!(res.status(), StatusCode::OK);
+        let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
+        assert_eq!(crate::core::ingest::typed_from(&stored.metadata), None);
     }
 
     /// The two things that are not receipts still answer.

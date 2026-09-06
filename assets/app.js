@@ -2053,6 +2053,14 @@
       var text = box.value.trim();
       if (!text) return Promise.resolve();
       var fromAsk = document.querySelector('input[name="from_ask"]');
+      // The search this text was typed into, which the results fragment fills
+      // out of band on every answer (see `_results.html`). The box searches
+      // while it is typed, so that event is this capture's first draft — and
+      // it found nothing, because nothing was there yet. Sent so the hole it
+      // would otherwise become closes against the text that answers it.
+      // Absent before the first answer comes back, and then this is an
+      // ordinary capture: the coverage check still has its own say.
+      var fromSearch = document.querySelector('#fold-of input[name="fold"]');
       // htmx settles this promise for every answer the server gives, a 500
       // among them — it rejects only for a request that never completed at
       // all — so the promise on its own says nothing about whether anything
@@ -2081,6 +2089,7 @@
         values: {
           text: text,
           from_ask: fromAsk ? fromAsk.value : '',
+          from_search: fromSearch ? fromSearch.value : '',
           tz: (document.getElementById('box-tz') || {}).value || ''
         }
       // A transport failure rejects, and nothing catching it was an unhandled

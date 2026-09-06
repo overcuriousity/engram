@@ -623,9 +623,18 @@ impl Labeller {
 /// Insights with questions that had already been answered as far as anyone was
 /// ever going to answer them. The column is still written, and is still what
 /// tells a skipped search from one nobody has seen.
+/// A search a capture answered is not waiting for anybody either. The box
+/// searches while it is typed, so the sentence on its way into the base is
+/// recorded as a search of its own; asking whether *that* was answered is
+/// asking the writer about their own words, and counting it as waiting is a
+/// queue that fills itself every time somebody writes something down.
 macro_rules! dealable {
     () => {
         "judged_at IS NULL AND skips = 0 AND length(query) >= 3
+         AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                          WHERE kind IN ('search', 'unmatched')
+                            AND gap_id = search_events.id
+                            AND covered_by = 'capture')
          AND EXISTS (SELECT 1 FROM search_candidates WHERE event_id = search_events.id)
          AND COALESCE((SELECT max(COALESCE(similarity, 1.0)) FROM search_candidates
                         WHERE event_id = search_events.id AND band = 0), 0) >= ?"
@@ -2144,6 +2153,85 @@ mod tests {
 
         // Opening a result from it is not a verdict; it stays a question.
         store.open_event(&id, "a1").await.unwrap();
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
+    }
+
+    /// A stored capture and something of it to point a coverage row at.
+    /// `gap_coverage` carries foreign keys onto both.
+    async fn answering_capture(store: &Store) -> (String, String) {
+        let src = store
+            .insert_corpus("The ID photo is on Wednesday at 09:00.", "web", None)
+            .await
+            .unwrap();
+        let made = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "The ID photo is on Wednesday at 09:00.".into(),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        (src.id, made[0].id.clone())
+    }
+
+    #[tokio::test]
+    async fn a_search_a_capture_answered_stops_waiting() {
+        // The box searches while it is typed, so a sentence on its way into the
+        // base is a recorded query of its own — one that can perfectly well
+        // have found something, and so be counted as waiting for a verdict.
+        // Asking the writer whether their own half-written capture was answered
+        // is a queue that fills itself every time somebody writes something
+        // down.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "when is the ID photo", &["a1"]).await;
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
+
+        let (corpus, artifact) = answering_capture(&store).await;
+        store
+            .cover_gap(
+                crate::store::gaps::GapKind::Unmatched,
+                &id,
+                &corpus,
+                &artifact,
+                0.0,
+                crate::store::gaps::CoveredBy::Capture,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_search_the_coverage_check_closed_is_still_waiting() {
+        // The other coverage is a measurement about the *base* — something
+        // stored later happens to sit near this query — and it says nothing
+        // about whether the search in front of the person was answered. Only
+        // the capture typed from the query answers the query.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "when is the ID photo", &["a1"]).await;
+
+        let (corpus, artifact) = answering_capture(&store).await;
+        store
+            .cover_gap(
+                crate::store::gaps::GapKind::Unmatched,
+                &id,
+                &corpus,
+                &artifact,
+                0.8,
+                crate::store::gaps::CoveredBy::Distance,
+            )
+            .await
+            .unwrap();
+
         assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
     }
 

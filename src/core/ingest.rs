@@ -269,6 +269,37 @@ impl Capture {
         });
         self
     }
+
+    /// The search this capture was typed from: the box searches while it is
+    /// typed, so the sentence on its way into the base was already recorded as
+    /// a query, and the page knows which one.
+    ///
+    /// Which is the whole point of storing it. That query found nothing —
+    /// nothing was there yet, which is why somebody is writing it down — and
+    /// `unmatched` reads a search with nothing near it as a hole in the base,
+    /// so the capture page filled up with the operator's own half-written
+    /// captures asked back at them. `jobs::gaps::cover` is supposed to catch
+    /// that when the capture settles, but it can only measure a distance, and
+    /// what gets stored is a synthesized artifact rather than the sentence. The
+    /// link is not a measurement: this text was written in answer to that
+    /// query, and the box is the only thing that can say so.
+    ///
+    /// An id off a page, so nothing here trusts it: the door checks that the
+    /// search belongs to the person capturing (see `Store::event_is_mine`), and
+    /// `cover` only ever matches it against that subject's own open gaps.
+    pub fn with_search(mut self, event_id: &str) -> Self {
+        self.metadata["search"] = serde_json::json!({ "event_id": event_id });
+        self
+    }
+}
+
+/// The search a capture was typed from, where its door recorded one.
+pub fn typed_from(metadata: &serde_json::Value) -> Option<&str> {
+    metadata
+        .get("search")?
+        .get("event_id")?
+        .as_str()
+        .filter(|s| !s.is_empty())
 }
 
 /// The last path segment of a URL, when it reads as a file name. `plan.pdf`

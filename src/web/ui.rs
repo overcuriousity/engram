@@ -10715,7 +10715,14 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .cover_gap(crate::store::gaps::GapKind::Search, &gap, &src.id, &a, 0.71)
+            .cover_gap(
+                crate::store::gaps::GapKind::Search,
+                &gap,
+                &src.id,
+                &a,
+                0.71,
+                crate::store::gaps::CoveredBy::Distance,
+            )
             .await
             .unwrap();
 
@@ -11022,6 +11029,7 @@ mod tests {
                 &src.id,
                 &art,
                 0.8,
+                crate::store::gaps::CoveredBy::Distance,
             )
             .await
             .unwrap();

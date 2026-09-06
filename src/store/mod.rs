@@ -154,7 +154,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 15] = [
+        const ADDITIVE: [(&str, &str, &str); 16] = [
             (
                 "artifacts",
                 "updated_at",
@@ -258,6 +258,15 @@ impl Store {
                 "graveyard",
                 "embed_model",
                 "ALTER TABLE graveyard ADD COLUMN embed_model TEXT",
+            ),
+            // Nullable, no default, and NULL says what is true of every
+            // coverage written before it: the coverage check measured it. A
+            // capture answering the query it was typed from is the kind that
+            // did not exist yet, so no old row can be one.
+            (
+                "gap_coverage",
+                "covered_by",
+                "ALTER TABLE gap_coverage ADD COLUMN covered_by TEXT",
             ),
         ];
         for (table, column, ddl) in ADDITIVE {

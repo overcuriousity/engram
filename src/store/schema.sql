@@ -502,6 +502,13 @@ CREATE TABLE IF NOT EXISTS gap_coverage (
   -- Similarity of the best new hit. Kept so the page can say how strong a
   -- claim this was; a hit at exactly `weak_below` is a weak one.
   score       REAL NOT NULL,
+  -- How the hole came to be closed: 'distance' for the coverage check's own
+  -- measurement, 'capture' for a capture typed into the box the query was
+  -- typed into. The two are not the same claim and are not collected the same
+  -- way — `trim_gap_coverage` drops a measurement that has fallen under the
+  -- line, and a capture never scored against one. NULL on every row written
+  -- before the column, all of which were measurements.
+  covered_by  TEXT,
   covered_at  INTEGER NOT NULL,
   PRIMARY KEY (kind, gap_id)
 );
