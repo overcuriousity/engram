@@ -147,12 +147,7 @@ mod tests {
                     .map(|(i, t)| crate::store::artifacts::NewArtifact {
                         ordinal: i as i64,
                         text: t.clone(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     })
                     .collect::<Vec<_>>(),
             )

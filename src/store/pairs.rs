@@ -1498,12 +1498,7 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i as i64,
                 text: format!("artifact {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         s.insert_artifacts(&src.id, &new)
@@ -1521,24 +1516,13 @@ mod tests {
                 &src.id,
                 &[
                     NewArtifact {
-                        ordinal: 0,
                         text: "one".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     NewArtifact {
                         ordinal: 1,
                         text: "two".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
             )
@@ -1813,12 +1797,7 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i,
                 text: format!("artifact {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         s.insert_artifacts(&src.id, &new)
@@ -2127,12 +2106,7 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i,
                 text: format!("artifact {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = s.insert_artifacts(&src.id, &new).await.unwrap();

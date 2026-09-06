@@ -424,18 +424,14 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "a".into(),
                     corpus_span: Some(CorpusSpan {
                         start_line: 1,
                         end_line: 2,
                         source: crate::store::artifacts::SpanSource::Located,
                     }),
-                    caveats: vec![],
                     title: Some("t".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
+                    ..Default::default()
                 }],
             )
             .await

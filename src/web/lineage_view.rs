@@ -375,10 +375,7 @@ mod tests {
                     source: crate::store::artifacts::SpanSource::Located,
                 }),
                 title: Some(format!("captured {i}")),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         s.insert_artifacts(&src.id, &new)
@@ -393,9 +390,7 @@ mod tests {
         NewMerged {
             text: text.into(),
             title: Some(text.into()),
-            category: None,
-            tags: vec![],
-            caveats: vec![],
+            ..Default::default()
         }
     }
 

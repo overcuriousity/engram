@@ -526,14 +526,7 @@ mod tests {
                 title: Some(id.into()),
                 category: Some(cat.into()),
                 tags: tags.iter().map(|s| s.to_string()).collect(),
-                created_at: 0,
-                last_seen_at: None,
-                hit_count: None,
-                status: None,
-                last_verified_at: None,
-                superseded_by: None,
-                origin_corpora: vec![],
-                provenance: None,
+                ..Default::default()
             },
         }
     }

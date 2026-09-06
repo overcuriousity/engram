@@ -738,7 +738,7 @@ mod tests {
                 params: params.into(),
                 embed_recipe: "recipe-a".into(),
                 chat_model: "qwen".into(),
-                parent_id: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1066,14 +1066,13 @@ mod tests {
                 score: 1.0,
                 similarity: Some(0.9),
                 shown: true,
-                band: false,
+                ..Default::default()
             })
             .chain(band.iter().map(|a| NewCandidate {
                 artifact_id: (*a).to_string(),
-                score: 0.0,
-                similarity: None,
                 shown: true,
                 band: true,
+                ..Default::default()
             }))
             .collect();
         let id = core
@@ -1238,24 +1237,13 @@ mod tests {
                     &src.id,
                     &[
                         crate::store::artifacts::NewArtifact {
-                            ordinal: 0,
                             text: format!("one {score}"),
-                            corpus_span: None,
-                            title: None,
-                            category: None,
-                            tags: vec![],
-                            segment_idx: None,
-                            caveats: vec![],
+                            ..Default::default()
                         },
                         crate::store::artifacts::NewArtifact {
                             ordinal: 1,
                             text: format!("two {score}"),
-                            corpus_span: None,
-                            title: None,
-                            category: None,
-                            tags: vec![],
-                            segment_idx: None,
-                            caveats: vec![],
+                            ..Default::default()
                         },
                     ],
                 )

@@ -153,14 +153,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "long text with 1.21.4 in it".into(),
-                    corpus_span: None,
                     title: Some("Long".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
                     caveats: vec!["only on ext4".into()],
+                    ..Default::default()
                 }],
             )
             .await

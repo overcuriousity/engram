@@ -711,12 +711,8 @@ mod tests {
         let na = |o: i64, t: &str| NewArtifact {
             ordinal: o,
             text: t.into(),
-            corpus_span: None,
             title: Some(format!("S{o}")),
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         };
         core.store
             .insert_artifacts(
@@ -1069,7 +1065,7 @@ mod tests {
                             score: 1.0 - i as f32 * 0.1,
                             similarity: Some(0.9),
                             shown: true,
-                            band: false,
+                            ..Default::default()
                         })
                         .collect(),
                     answered: false,
@@ -1288,9 +1284,6 @@ mod tests {
                 embed_model: "fake".into(),
                 answer: "an answer".into(),
                 abstained,
-                dropped: 0,
-                truncated: false,
-                unsupported: 0,
                 citations: cited
                     .iter()
                     .map(|(a, used)| crate::store::asks::NewAskCitation {
@@ -1299,6 +1292,7 @@ mod tests {
                         used: *used,
                     })
                     .collect(),
+                ..Default::default()
             })
             .await
             .unwrap();

@@ -639,6 +639,25 @@ struct ResultsTemplate {
     q: String,
 }
 
+/// Test-only, for the reason `NewArtifact`'s is: a field added to a template
+/// must break every place that renders it until somebody decides what it says
+/// there. Seven tests in this file were spelling all nine out.
+#[cfg(test)]
+impl Default for ResultsTemplate {
+    fn default() -> Self {
+        Self {
+            results: vec![],
+            associated: vec![],
+            all_weak: false,
+            terms: String::new(),
+            reranked: false,
+            event_id: None,
+            echo: String::new(),
+            q: String::new(),
+        }
+    }
+}
+
 impl ResultsTemplate {
     /// How many of the ranked results are loose. Said in the heading when
     /// the list is mixed; when every one is loose the flag above the list
@@ -5093,24 +5112,15 @@ mod tests {
                 &src.id,
                 &[
                     crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: "The reindex job holds a file descriptor on the old mount.".into(),
-                        corpus_span: None,
                         title: Some("reindex holds an fd".into()),
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
                         text: "The reindex job holds an fd on the old mount.".into(),
-                        corpus_span: None,
                         title: Some("reindex holds an fd (again)".into()),
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
             )
@@ -5910,24 +5920,15 @@ mod tests {
                 &src.id,
                 &[
                     crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: "the first one".into(),
-                        corpus_span: None,
                         title: Some("first".into()),
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
                         text: "the second one".into(),
-                        corpus_span: None,
                         title: Some("second".into()),
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
             )
@@ -6171,14 +6172,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "when the recycling centre is open".into(),
-                    corpus_span: None,
                     title: Some("recycling centre".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -6193,16 +6189,7 @@ mod tests {
                     corpus_id: src.id.clone(),
                     text: a.text.clone(),
                     title: Some("recycling centre".into()),
-                    category: None,
-                    tags: vec![],
-                    created_at: 0,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             }])
             .await
@@ -6240,14 +6227,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "when the recycling centre is open".into(),
-                    corpus_span: None,
                     title: Some("recycling centre".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -6263,16 +6245,7 @@ mod tests {
                     corpus_id: src.id.clone(),
                     text: "when the recycling centre is open".into(),
                     title: Some("recycling centre".into()),
-                    category: None,
-                    tags: vec![],
-                    created_at: 0,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             }])
             .await
@@ -6673,14 +6646,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "opening hours".into(),
-                    corpus_span: None,
                     title: Some("hours".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -6726,14 +6694,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "opening hours".into(),
-                    corpus_span: None,
                     title: Some("hours".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -6842,7 +6805,7 @@ mod tests {
                             score: 0.9,
                             similarity: Some(0.8),
                             shown: true,
-                            band: false,
+                            ..Default::default()
                         }],
                         answered: false,
                         context: None,
@@ -7330,14 +7293,9 @@ mod tests {
             .insert_artifacts(
                 &other_corpus.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "body of other document".to_string(),
-                    corpus_span: None,
                     title: Some("other document".to_string()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -7562,27 +7520,9 @@ mod tests {
             corpus_id: "s".into(),
             title: Some("t".into()),
             text: "body".into(),
-            category: None,
-            tags: vec![],
             score: 0.5,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
             weak,
-            primed: false,
-            due_at: None,
-            due_in: None,
-            in_sitting: false,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
 
         let loose = render_hit(0, result(true), &Default::default(), false);
@@ -7595,13 +7535,8 @@ mod tests {
 
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![loose],
-            associated: vec![],
             all_weak: true,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         })
         .unwrap();
         assert!(html.contains("Nothing matches closely"), "{html}");
@@ -7616,13 +7551,7 @@ mod tests {
                 render_hit(1, result(false), &Default::default(), false),
                 render_hit(2, result(true), &Default::default(), false),
             ],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         })
         .unwrap();
         assert!(mixed.contains("3 results · 1 loose"), "{mixed}");
@@ -7636,14 +7565,9 @@ mod tests {
             .await
             .unwrap();
         let na = |t: &str| crate::store::artifacts::NewArtifact {
-            ordinal: 0,
             text: t.into(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let p = core
             .store
@@ -7723,13 +7647,7 @@ mod tests {
 
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![named, offered],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         })
         .unwrap();
 
@@ -7749,13 +7667,7 @@ mod tests {
     fn a_row_that_continues_nowhere_prints_no_marker() {
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![row("a", "#1")],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         })
         .unwrap();
 
@@ -7830,27 +7742,9 @@ mod tests {
             corpus_id: "s".into(),
             title: title.map(str::to_string),
             text: "body".into(),
-            category: None,
-            tags: vec![],
             score: 0.5,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            due_at: None,
-            due_in: None,
-            in_sitting: false,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
             via: via.map(str::to_string),
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         let titles = super::ranked_titles(&[hit(None, None)]);
         assert!(
@@ -7862,12 +7756,7 @@ mod tests {
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![r],
             associated: vec![render_hit(0, hit(None, Some("a")), &titles, false)],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         })
         .unwrap();
         assert!(!html.contains("Untitled"), "{html}");
@@ -7915,13 +7804,7 @@ mod tests {
         also_past.rank = "#4".into();
         let body = ResultsTemplate {
             results: vec![above.clone(), above.clone(), past, also_past],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         }
         .render()
         .unwrap();
@@ -7940,13 +7823,7 @@ mod tests {
         // No cliff, no rule.
         let flat = ResultsTemplate {
             results: vec![above.clone(), above.clone(), above],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         }
         .render()
         .unwrap();
@@ -7962,13 +7839,7 @@ mod tests {
         borrowed.titled_by_corpus = true;
         let body = ResultsTemplate {
             results: vec![own, borrowed],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         }
         .render()
         .unwrap();
@@ -7995,14 +7866,8 @@ mod tests {
         // this task changed is the split and the copy, and that is what this
         // pins.
         let template = ResultsTemplate {
-            results: vec![],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         };
         let body = template.render().unwrap();
         assert!(body.contains("Recalled by association"), "{body}");
@@ -8011,17 +7876,11 @@ mod tests {
 
         // A judged link says what the relation is instead of what was asked.
         let judged = ResultsTemplate {
-            results: vec![],
             associated: vec![rendered(
                 Some("Mounting E01 images"),
                 Some("the tool and its errors"),
             )],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         };
         let body = judged.render().unwrap();
         assert!(body.contains("the tool and its errors"), "{body}");
@@ -8036,13 +7895,8 @@ mod tests {
         // the reranker never confirmed.
         let refined = ResultsTemplate {
             results: vec![rendered(Some("Mounting E01 images"), None)],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
             reranked: true,
-            q: String::new(),
+            ..Default::default()
         }
         .render()
         .unwrap();
@@ -8050,13 +7904,7 @@ mod tests {
 
         let fast = ResultsTemplate {
             results: vec![rendered(Some("Mounting E01 images"), None)],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         }
         .render()
         .unwrap();
@@ -8133,11 +7981,7 @@ mod tests {
             results: vec![ranked(true)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             all_weak: true,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         };
         let body = weak_with_association.render().unwrap();
         assert!(
@@ -8148,12 +7992,7 @@ mod tests {
         let good_with_association = ResultsTemplate {
             results: vec![ranked(false)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         };
         let body = good_with_association.render().unwrap();
         assert!(
@@ -8444,13 +8283,7 @@ mod tests {
         r.primed = true;
         let body = ResultsTemplate {
             results: vec![r],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         }
         .render()
         .unwrap();
@@ -8494,13 +8327,7 @@ mod tests {
         // that makes the lines worth reading harder to see.
         let body = ResultsTemplate {
             results: vec![ranked(false)],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         }
         .render()
         .unwrap();
@@ -8516,13 +8343,7 @@ mod tests {
         r.primed = true;
         let body = ResultsTemplate {
             results: vec![r],
-            associated: vec![],
-            all_weak: false,
-            event_id: None,
-            echo: String::new(),
-            terms: String::new(),
-            reranked: false,
-            q: String::new(),
+            ..Default::default()
         }
         .render()
         .unwrap();
@@ -9298,12 +9119,8 @@ mod tests {
             .map(|(i, t)| crate::store::artifacts::NewArtifact {
                 ordinal: i as i64,
                 text: format!("body of {t}"),
-                corpus_span: None,
                 title: Some((*t).to_string()),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         core.store
@@ -10544,16 +10361,12 @@ mod tests {
                 .store
                 .record_ask(crate::store::asks::NewAsk {
                     question: q.into(),
-                    scope: None,
                     filters: "{}".into(),
                     query_vec: vec![1.0; 8],
                     embed_model: core.embedder.model().to_string(),
                     answer: "Not in the knowledge base.".into(),
                     abstained: true,
-                    dropped: 0,
-                    truncated: false,
-                    unsupported: 0,
-                    citations: vec![],
+                    ..Default::default()
                 })
                 .await
                 .unwrap();
@@ -10614,16 +10427,12 @@ mod tests {
                 .store
                 .record_ask(crate::store::asks::NewAsk {
                     question: q.into(),
-                    scope: None,
                     filters: "{}".into(),
                     query_vec: vec![1.0; 8],
                     embed_model: core.embedder.model().to_string(),
                     answer: "Not in the knowledge base.".into(),
                     abstained: true,
-                    dropped: 0,
-                    truncated: false,
-                    unsupported: 0,
-                    citations: vec![],
+                    ..Default::default()
                 })
                 .await
                 .unwrap();
@@ -10677,14 +10486,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "mounting an E01".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -10785,12 +10589,8 @@ mod tests {
                     .map(|(i, t)| crate::store::artifacts::NewArtifact {
                         ordinal: i as i64,
                         text: (*t).into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
                         segment_idx: Some(0),
-                        caveats: vec![],
+                        ..Default::default()
                     })
                     .collect::<Vec<_>>(),
             )
@@ -10838,14 +10638,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "mounting an E01".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -10932,7 +10727,7 @@ mod tests {
                         score: 0.01,
                         similarity: Some(0.01),
                         shown: true,
-                        band: false,
+                        ..Default::default()
                     }],
                     answered: false,
                     context: None,
@@ -10986,14 +10781,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "how to mount an E01".into(),
-                    corpus_span: None,
                     title: Some("Mounting an E01".into()),
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -11142,10 +10933,7 @@ mod tests {
                 source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some(format!("artifact {ord}")),
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         };
         core.store
             .insert_artifacts(&out.id, &[claim(0, 1, 1), claim(1, 4, total)])
@@ -11293,14 +11081,9 @@ mod tests {
             .insert_artifacts(
                 &out.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "what the vector store still had".into(),
-                    corpus_span: None,
                     title: Some("recovered".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -11474,10 +11257,7 @@ mod tests {
                 source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some(format!("artifact {ord}")),
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         };
         // Wide, and one inside it: three bands, and the wide one claims all
         // three.
@@ -12438,11 +12218,8 @@ mod tests {
                 end_line: 2,
                 source: crate::store::artifacts::SpanSource::Located,
             }),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let p = core
             .store
@@ -12495,18 +12272,14 @@ mod tests {
         let c1 = core.store.insert_corpus("one", "web", None).await.unwrap();
         let c2 = core.store.insert_corpus("two", "web", None).await.unwrap();
         let na = |t: &str| crate::store::artifacts::NewArtifact {
-            ordinal: 0,
             text: t.into(),
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: 1,
                 end_line: 1,
                 source: crate::store::artifacts::SpanSource::Located,
             }),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let r1 = core
             .store
@@ -12528,9 +12301,7 @@ mod tests {
                 &crate::store::artifacts::NewMerged {
                     text: "the merge of one and two".into(),
                     title: Some("Merged title".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[r1, r2],
             )
@@ -12564,24 +12335,15 @@ mod tests {
                 &src.id,
                 &[
                     crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: "a".into(),
-                        corpus_span: None,
                         title: Some("A".into()),
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
                         text: "b".into(),
-                        corpus_span: None,
                         title: Some("B".into()),
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
             )
@@ -12620,14 +12382,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "source text".into(),
-                    corpus_span: None,
                     title: Some("S".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -12701,14 +12458,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "a".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -12767,14 +12518,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "mounting the image".into(),
-                    corpus_span: None,
                     title: Some("mount".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -12797,7 +12543,7 @@ mod tests {
                         score: 1.0,
                         similarity: Some(0.5),
                         shown: true,
-                        band: false,
+                        ..Default::default()
                     }],
                     answered: false,
                     context: None,
@@ -12927,14 +12673,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "a".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -13167,7 +12907,7 @@ mod tests {
                         score: 1.0,
                         similarity: Some(0.5),
                         shown: true,
-                        band: false,
+                        ..Default::default()
                     }],
                     answered: false,
                     context: None,

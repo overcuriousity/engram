@@ -132,12 +132,7 @@ mod tests {
             .map(|i| crate::store::artifacts::NewArtifact {
                 ordinal: i,
                 text: format!("text {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let ids: Vec<String> = store

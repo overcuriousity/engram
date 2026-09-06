@@ -47,6 +47,28 @@ pub struct NewAsk {
     pub citations: Vec<NewAskCitation>,
 }
 
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for NewAsk {
+    fn default() -> Self {
+        Self {
+            question: String::new(),
+            scope: None,
+            filters: String::new(),
+            query_vec: vec![],
+            embed_model: String::new(),
+            answer: String::new(),
+            abstained: false,
+            dropped: 0,
+            truncated: false,
+            unsupported: 0,
+            citations: vec![],
+        }
+    }
+}
+
 /// One recorded question as the pursuit sweep reads it.
 #[derive(Debug, Clone)]
 pub struct RecordedAsk {
@@ -419,10 +441,6 @@ mod tests {
             query_vec: vec![0.1, 0.2, 0.3],
             embed_model: "fake".into(),
             answer: "an answer".into(),
-            abstained: false,
-            dropped: 0,
-            truncated: false,
-            unsupported: 0,
             citations: (0..citations)
                 .map(|i| NewAskCitation {
                     artifact_id: format!("art-{i}"),
@@ -430,6 +448,7 @@ mod tests {
                     used: true,
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 

@@ -56,6 +56,31 @@ pub struct VectorPayload {
     pub provenance: Option<String>,
 }
 
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for VectorPayload {
+    fn default() -> Self {
+        Self {
+            artifact_id: String::new(),
+            corpus_id: String::new(),
+            text: String::new(),
+            title: None,
+            category: None,
+            tags: vec![],
+            created_at: 0,
+            last_seen_at: None,
+            hit_count: None,
+            status: None,
+            last_verified_at: None,
+            superseded_by: None,
+            origin_corpora: vec![],
+            provenance: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VectorPoint {
     pub vector: Vec<f32>,
@@ -63,6 +88,20 @@ pub struct VectorPoint {
     /// retrieval, which is why it is a plain value rather than an option.
     pub sparse: sparse::SparseVector,
     pub payload: VectorPayload,
+}
+
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for VectorPoint {
+    fn default() -> Self {
+        Self {
+            vector: vec![],
+            sparse: Default::default(),
+            payload: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

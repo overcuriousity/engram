@@ -1759,14 +1759,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "an old note nobody needs".into(),
-                    corpus_span: None,
                     title: Some("Old note".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1830,7 +1825,7 @@ mod tests {
                 params: params.into(),
                 embed_recipe: "recipe-a".into(),
                 chat_model: "qwen".into(),
-                parent_id: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1851,7 +1846,7 @@ mod tests {
                 params: params.into(),
                 embed_recipe: "recipe-a".into(),
                 chat_model: "qwen".into(),
-                parent_id: None,
+                ..Default::default()
             })
             .await
             .unwrap();

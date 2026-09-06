@@ -81,6 +81,21 @@ pub struct NewGeneration {
     pub parent_id: Option<String>,
 }
 
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for NewGeneration {
+    fn default() -> Self {
+        Self {
+            params: Default::default(),
+            embed_recipe: String::new(),
+            chat_model: String::new(),
+            parent_id: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Generation {
     pub id: String,

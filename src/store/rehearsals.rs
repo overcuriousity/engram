@@ -374,14 +374,8 @@ mod tests {
     pub(crate) async fn owner(store: &Store) -> String {
         let src = store.insert_corpus("raw", "web", None).await.unwrap();
         let new = vec![crate::store::artifacts::NewArtifact {
-            ordinal: 0,
             text: "the image will not mount".into(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         }];
         store.insert_artifacts(&src.id, &new).await.unwrap()[0]
             .id
@@ -500,7 +494,7 @@ mod tests {
                 params: crate::core::ranking::RankingParams::default().into(),
                 embed_recipe: "fake".into(),
                 chat_model: "fake".into(),
-                parent_id: None,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -591,12 +585,8 @@ mod tests {
             .map(|(i, t)| crate::store::artifacts::NewArtifact {
                 ordinal: i as i64,
                 text: t.to_string(),
-                corpus_span: None,
                 title: Some(t.to_string()),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let ids: Vec<String> = store

@@ -174,7 +174,7 @@ mod tests {
                         score: 0.9,
                         similarity: Some(0.9),
                         shown: true,
-                        band: false,
+                        ..Default::default()
                     }],
                     answered: false,
                     fold_onto: None,

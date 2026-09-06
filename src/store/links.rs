@@ -996,12 +996,8 @@ mod tests {
             .map(|(i, t)| NewArtifact {
                 ordinal: i as i64,
                 text: (*t).into(),
-                corpus_span: None,
                 title: Some((*t).into()),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -1144,14 +1140,9 @@ mod tests {
                 .insert_artifacts(
                     &src.id,
                     &[NewArtifact {
-                        ordinal: 0,
                         text: text.into(),
-                        corpus_span: None,
                         title: Some(text.into()),
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     }],
                 )
                 .await
@@ -1590,14 +1581,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "the artifact".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1695,12 +1680,7 @@ mod tests {
         let na = |o: i64, t: &str| NewArtifact {
             ordinal: o,
             text: t.into(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         };
         let made = store
             .insert_artifacts(&src.id, &[na(0, "a"), na(1, "b"), na(2, "c")])
@@ -1710,10 +1690,7 @@ mod tests {
             .insert_merged_artifact(
                 &crate::store::artifacts::NewMerged {
                     text: "a and b".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[made[0].id.clone(), made[1].id.clone()],
             )

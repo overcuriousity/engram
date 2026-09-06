@@ -421,16 +421,12 @@ mod tests {
             .store
             .record_ask(NewAsk {
                 question: q.into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec,
                 embed_model: core.embedder.model().to_string(),
                 answer: "Not in the knowledge base.".into(),
                 abstained: true,
-                dropped: 0,
-                truncated: false,
-                unsupported: 0,
-                citations: vec![],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -739,17 +735,8 @@ mod tests {
                     artifact_id: "no-such-artifact".into(),
                     corpus_id: corpus.clone(),
                     text: "a torn write".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     created_at: crate::store::now(),
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             }])
             .await

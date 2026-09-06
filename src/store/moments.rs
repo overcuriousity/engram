@@ -1135,14 +1135,9 @@ mod tests {
             .insert_artifacts(
                 &c.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "Remind me friday to send the invoice".into(),
-                    corpus_span: None,
                     title: Some("Invoice".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1170,9 +1165,7 @@ mod tests {
                 &crate::store::artifacts::NewMerged {
                     text: "both halves".into(),
                     title: Some("merged".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[made[0].id.clone(), made[1].id.clone()],
             )
@@ -1205,9 +1198,7 @@ mod tests {
                 &crate::store::artifacts::NewMerged {
                     text: "both notes".into(),
                     title: Some("merged".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[one[0].id.clone(), two[0].id.clone()],
             )
@@ -1223,12 +1214,8 @@ mod tests {
         NewArtifact {
             ordinal,
             text: text.into(),
-            corpus_span: None,
             title: Some(text.into()),
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         }
     }
 
@@ -1253,14 +1240,8 @@ mod tests {
             .insert_artifacts(
                 &c.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: text.into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await

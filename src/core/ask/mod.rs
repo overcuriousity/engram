@@ -1486,12 +1486,9 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i,
                 text: format!("{} topic {i} filler filler", topics[i as usize / 3]),
-                corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some("reference".into()),
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -1652,12 +1649,9 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i as i64,
                 text: format!("chunk {i} ") + &"filler ".repeat(size),
-                corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some("reference".into()),
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -1751,14 +1745,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "Format the device with mkfs.".into(),
-                    corpus_span: None,
                     title: Some("Format a device".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
                     caveats: vec!["Destroys every existing file on the device.".into()],
+                    ..Default::default()
                 }],
             )
             .await
@@ -2192,14 +2182,10 @@ mod tests {
             .insert_artifacts(
                 &other.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "Reconciling the quarterly ledger against the register.".into(),
-                    corpus_span: None,
                     title: Some("ledger".into()),
                     category: Some("reference".into()),
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -2796,10 +2782,8 @@ mod tests {
                 source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some("Recovery".into()),
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let made = core
             .store
@@ -2886,10 +2870,8 @@ mod tests {
                 source: crate::store::artifacts::SpanSource::Located,
             }),
             title: Some(title.into()),
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let made = core
             .store
@@ -2912,27 +2894,8 @@ mod tests {
                 corpus_id: c.corpus_id.clone().unwrap_or_default(),
                 title: c.title.clone(),
                 text: c.text.clone(),
-                category: None,
-                tags: vec![],
                 score,
-                status: None,
-                superseded_by: None,
-                last_verified_at: None,
-                weak: false,
-                primed: false,
-                due_at: None,
-                due_in: None,
-                in_sitting: false,
-                past_cliff: false,
-                retired: false,
-                similarity: None,
-                titled_by_corpus: false,
-                via: None,
-                reason: None,
-                explanation: None,
-                model_written: false,
-                synthesized: false,
-                origin_count: 0,
+                ..Default::default()
             };
         let hits = vec![hit(&made[1], 0.9), hit(&made[0], 0.5)];
         let mut blocks = vec![

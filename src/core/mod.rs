@@ -697,6 +697,79 @@ pub mod test_support {
 
     pub const TEST_DIM: usize = 8;
 
+    /// A core with the recommender and the learning layer on, and a clock
+    /// that does not move.
+    ///
+    /// `core::recommend` and `jobs::context` both need one and each had grown
+    /// its own — `core_at` and `recommending_core`, the same five lines under
+    /// two names.
+    pub async fn recommending_core(now: i64) -> Core {
+        let mut core = test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        core.clock = crate::core::context::Clock::Fixed(now);
+        core
+    }
+
+    /// The client bundle of a phone, for the two modules that profile one.
+    pub fn phone_bundle() -> crate::core::context::Bundle {
+        crate::core::context::Bundle {
+            tz: Some("Europe/Berlin".into()),
+            platform: Some("Android".into()),
+            ua_family: Some("Chrome".into()),
+            screen_w: Some(390.0),
+            screen_h: Some(844.0),
+            viewport_w: Some(390.0),
+            viewport_h: Some(844.0),
+            dpr: Some(3.0),
+            cores: Some(8.0),
+            memory_gb: Some(4.0),
+            language: Some("de-DE".into()),
+            color_scheme: Some("dark".into()),
+            touch: Some(true),
+            orientation: Some("portrait".into()),
+            network: Some("cellular".into()),
+            ..Default::default()
+        }
+    }
+
+    /// One artifact with a vector point behind it.
+    ///
+    /// The point is not optional in either caller: `context_query` renders
+    /// from the payload, and `resurface` needs a `created_at` of 0 with
+    /// nothing shown against it.
+    pub async fn seed_artifact(core: &Core, title: &str) -> String {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: format!("text of {title}"),
+                    title: Some(title.into()),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        core.vectors
+            .upsert(vec![crate::vector::VectorPoint {
+                vector: vec![1.0; TEST_DIM],
+                sparse: Default::default(),
+                payload: crate::vector::VectorPayload {
+                    artifact_id: a.id.clone(),
+                    corpus_id: src.id.clone(),
+                    text: a.text.clone(),
+                    title: Some(title.into()),
+                    ..Default::default()
+                },
+            }])
+            .await
+            .unwrap();
+        a.id
+    }
+
     pub async fn test_core() -> Core {
         build(Arc::new(FakeSynthesizer::default()), None).await
     }

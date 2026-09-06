@@ -165,18 +165,9 @@ mod tests {
         crate::vector::VectorPayload {
             artifact_id: "a".into(),
             corpus_id: "c".into(),
-            text: String::new(),
-            title: None,
-            category: None,
             tags: tags.iter().map(|t| t.to_string()).collect(),
-            created_at: 0,
-            last_seen_at: None,
-            hit_count: None,
-            status: None,
             last_verified_at,
-            superseded_by: None,
-            origin_corpora: vec![],
-            provenance: None,
+            ..Default::default()
         }
     }
 

@@ -789,14 +789,9 @@ mod tests {
             .insert_artifacts_with_provenance(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "Spuren sind materielle Veraenderungen.".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
                 Provenance::Passage,
             )
@@ -1584,10 +1579,7 @@ mod tests {
             .insert_merged_artifact(
                 &crate::store::artifacts::NewMerged {
                     text: "a paraphrase".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[ids[0].clone()],
             )

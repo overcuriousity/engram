@@ -168,14 +168,8 @@ mod tests {
 
     fn chunk(text: &str) -> NewArtifact {
         NewArtifact {
-            ordinal: 0,
             text: text.into(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         }
     }
 

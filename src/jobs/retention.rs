@@ -335,16 +335,12 @@ mod tests {
                 .store
                 .record_ask(crate::store::asks::NewAsk {
                     question: q.into(),
-                    scope: None,
                     filters: "{}".into(),
                     query_vec: vec![1.0; 4],
                     embed_model: core.embedder.model().to_string(),
                     answer: "Not in the knowledge base.".into(),
                     abstained: true,
-                    dropped: 0,
-                    truncated: false,
-                    unsupported: 0,
-                    citations: vec![],
+                    ..Default::default()
                 })
                 .await
                 .unwrap();

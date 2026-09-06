@@ -443,7 +443,7 @@ mod tests {
                 params: params.into(),
                 embed_recipe: recipe.into(),
                 chat_model: "qwen".into(),
-                parent_id: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -906,14 +906,8 @@ mod tests {
         for (raw, text) in [("answer", QUERY), ("other", "unrelated words")] {
             let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
             let new = vec![crate::store::artifacts::NewArtifact {
-                ordinal: 0,
                 text: text.to_string(),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             }];
             for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
                 crate::jobs::embed::run(&core, &c.id).await.unwrap();

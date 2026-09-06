@@ -304,6 +304,22 @@ pub struct NewMerged {
     pub caveats: Vec<String>,
 }
 
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for NewMerged {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            title: None,
+            category: None,
+            tags: vec![],
+            caveats: vec![],
+        }
+    }
+}
+
 /// What `insert_sourced_artifact` writes, borrowed from whichever `New*` the
 /// caller holds.
 ///
@@ -332,6 +348,32 @@ pub struct NewSynthesized {
     pub caveats: Vec<String>,
     /// The pursuit's queries: why this was written, shown on its page.
     pub cues: Vec<String>,
+}
+
+/// Test-only, and deliberately not a `derive`.
+///
+/// In production every field here is a decision: a field added to this struct
+/// must break every call site until somebody answers for it, which is the same
+/// rule `Stage::class` states about its match arms. A blanket `Default` is the
+/// struct-literal form of a wildcard arm and would take that check away.
+///
+/// A fixture has no such duty. It says the one or two fields the test is
+/// about and lets the rest be nothing, which is what a hundred and thirty
+/// call sites in this crate were spelling out in full.
+#[cfg(test)]
+impl Default for NewArtifact {
+    fn default() -> Self {
+        Self {
+            ordinal: 0,
+            text: String::new(),
+            corpus_span: None,
+            title: None,
+            category: None,
+            tags: vec![],
+            segment_idx: None,
+            caveats: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2033,11 +2075,10 @@ mod tests {
                 end_line: 4,
                 source: crate::store::artifacts::SpanSource::Located,
             }),
-            caveats: vec![],
             title: Some(format!("title {ord}")),
             category: Some("procedure".into()),
             tags: vec!["forensics".into(), "windows".into()],
-            segment_idx: None,
+            ..Default::default()
         }
     }
 
@@ -2093,9 +2134,7 @@ mod tests {
                 &NewMerged {
                     title: Some("merged".into()),
                     text: "rewritten".into(),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[root],
             )
@@ -2430,14 +2469,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "loser".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -2647,9 +2680,7 @@ mod tests {
                 &NewMerged {
                     text: "a and b".into(),
                     title: Some("both".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[made[0].id.clone(), made[1].id.clone()],
             )
@@ -2812,9 +2843,7 @@ mod tests {
                 &NewMerged {
                     text: "merged".into(),
                     title: Some("m".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[],
             )
@@ -3136,9 +3165,7 @@ mod tests {
                 &NewMerged {
                     text: "the merged text".into(),
                     title: Some("merged".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 std::slice::from_ref(&made[0].id),
             )
@@ -3219,9 +3246,7 @@ mod tests {
                 &NewMerged {
                     text: "the merged text".into(),
                     title: Some("merged".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 std::slice::from_ref(&made[0].id),
             )

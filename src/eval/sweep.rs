@@ -1060,7 +1060,7 @@ mod tests {
                         score: 0.5,
                         similarity: Some(0.5),
                         shown: true,
-                        band: false,
+                        ..Default::default()
                     }],
                     answered: false,
                     context: Some(Priming {

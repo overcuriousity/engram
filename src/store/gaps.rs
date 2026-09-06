@@ -1099,16 +1099,12 @@ mod tests {
         let id = store
             .record_ask(NewAsk {
                 question: q.into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec,
                 embed_model: "fake".into(),
                 answer: "Not in the knowledge base.".into(),
                 abstained: true,
-                dropped: 0,
-                truncated: false,
-                unsupported: 0,
-                citations: vec![],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1121,16 +1117,11 @@ mod tests {
         let ask = store
             .record_ask(NewAsk {
                 question: q.into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec![1.0, 0.0],
                 embed_model: "fake".into(),
                 answer: "here is what I found".into(),
-                abstained: false,
-                dropped: 0,
-                truncated: false,
-                unsupported: 0,
-                citations: vec![],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1174,14 +1165,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "job priority is a column".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1220,14 +1205,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "job priority is a column".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1280,14 +1259,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "job priority is a column".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1381,7 +1354,7 @@ mod tests {
                             score: *s,
                             similarity: Some(*s),
                             shown: true,
-                            band: false,
+                            ..Default::default()
                         })
                         .collect(),
                     answered: false,
@@ -1479,9 +1452,8 @@ mod tests {
                     candidates: vec![crate::store::feedback::NewCandidate {
                         artifact_id: "a-0".into(),
                         score: 0.9,
-                        similarity: None,
                         shown: true,
-                        band: false,
+                        ..Default::default()
                     }],
                     answered: false,
                     context: None,
@@ -1905,16 +1877,11 @@ mod tests {
         let right = store
             .record_ask(NewAsk {
                 question: "ok".into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec![1.0, 1.0],
                 embed_model: "fake".into(),
                 answer: "yes".into(),
-                abstained: false,
-                dropped: 0,
-                truncated: false,
-                unsupported: 0,
-                citations: vec![],
+                ..Default::default()
             })
             .await
             .unwrap();

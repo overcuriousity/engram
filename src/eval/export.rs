@@ -142,14 +142,11 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "a deleted entry keeps its name but loses its start cluster".into(),
-                    corpus_span: None,
                     title: Some("deleted entries".into()),
                     category: Some("concept".into()),
                     tags: vec!["fat".into()],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -173,7 +170,7 @@ mod tests {
                         score: 0.9,
                         similarity: Some(0.7),
                         shown: true,
-                        band: false,
+                        ..Default::default()
                     }],
                     answered: false,
                     context: None,
@@ -302,15 +299,10 @@ mod tests {
         store
             .record_ask(crate::store::asks::NewAsk {
                 question: q.into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec![0.0; 4],
                 embed_model: "fake".into(),
                 answer: "a".into(),
-                abstained: false,
-                dropped: 0,
-                truncated: false,
-                unsupported: 0,
                 citations: cited
                     .iter()
                     .map(|id| crate::store::asks::NewAskCitation {
@@ -321,6 +313,7 @@ mod tests {
                         used: true,
                     })
                     .collect(),
+                ..Default::default()
             })
             .await
             .unwrap()

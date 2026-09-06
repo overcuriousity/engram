@@ -587,14 +587,9 @@ mod tests {
                 .insert_artifacts(
                     &src.id,
                     &[NewArtifact {
-                        ordinal: 0,
                         text: format!("artifact {i}"),
-                        corpus_span: None,
                         title: Some(format!("t{i}")),
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     }],
                 )
                 .await
@@ -613,14 +608,13 @@ mod tests {
                 score: 1.0,
                 similarity: Some(0.9),
                 shown: true,
-                band: false,
+                ..Default::default()
             })
             .chain(unshown.iter().map(|id| NewCandidate {
                 artifact_id: (*id).clone(),
                 score: 0.1,
                 similarity: Some(0.2),
-                shown: false,
-                band: false,
+                ..Default::default()
             }))
             .collect();
         core.store
@@ -1382,14 +1376,10 @@ mod tests {
                 .insert_artifacts_with_provenance(
                     &src.id,
                     &[NewArtifact {
-                        ordinal: 0,
                         text: format!("Spuren sind materielle Veraenderungen {i}"),
-                        corpus_span: None,
                         title: Some(format!("t{i}")),
-                        category: None,
-                        tags: vec![],
                         segment_idx: Some(0),
-                        caveats: vec![],
+                        ..Default::default()
                     }],
                     crate::store::artifacts::Provenance::Passage,
                 )

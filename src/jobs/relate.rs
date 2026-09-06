@@ -526,14 +526,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "never embedded".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -556,14 +550,9 @@ mod tests {
             .insert_artifacts_with_provenance(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: text.to_string(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
                 Provenance::Passage,
             )
@@ -745,25 +734,16 @@ mod tests {
                 &src.id,
                 &[
                     crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: "Spuren sind materielle Veraenderungen an Personen oder Sachen."
                             .into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
                         segment_idx: Some(0),
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
                         text: "Spuren sind materielle Veraenderungen".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
                         segment_idx: Some(1),
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
                 Provenance::Passage,
@@ -911,12 +891,9 @@ mod tests {
         let na = |o: i64, t: &str, seg: i64| crate::store::artifacts::NewArtifact {
             ordinal: o,
             text: t.into(),
-            corpus_span: None,
             title: Some("same heading".into()),
-            category: None,
-            tags: vec![],
             segment_idx: Some(seg),
-            caveats: vec![],
+            ..Default::default()
         };
         // One written row and the verbatim passage beside it, in one window.
         let written = core
@@ -985,12 +962,9 @@ mod tests {
         let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
             ordinal: o,
             text: t.into(),
-            corpus_span: None,
             title: Some("same heading".into()),
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let rows = core
             .store

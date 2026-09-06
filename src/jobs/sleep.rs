@@ -732,12 +732,7 @@ mod tests {
             .map(|(i, t)| crate::store::artifacts::NewArtifact {
                 ordinal: i as i64,
                 text: t.to_string(),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let mut ids = Vec::new();
@@ -819,14 +814,8 @@ mod tests {
                 .insert_artifacts(
                     &src.id,
                     &[crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: text.into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     }],
                 )
                 .await
@@ -859,7 +848,7 @@ mod tests {
                 params: params.into(),
                 embed_recipe: "fake".into(),
                 chat_model: "fake".into(),
-                parent_id: None,
+                ..Default::default()
             })
             .await
             .unwrap();

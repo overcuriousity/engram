@@ -194,6 +194,22 @@ pub struct NewCandidate {
     pub band: bool,
 }
 
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for NewCandidate {
+    fn default() -> Self {
+        Self {
+            artifact_id: String::new(),
+            score: 0.0,
+            similarity: None,
+            shown: false,
+            band: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewEvent {
     pub query: String,
@@ -1325,7 +1341,7 @@ mod tests {
                     score: 1.0 - i as f32 * 0.1,
                     similarity: Some(0.9 - i as f32 * 0.1),
                     shown: true,
-                    band: false,
+                    ..Default::default()
                 })
                 .collect(),
             answered: false,
@@ -1396,14 +1412,14 @@ mod tests {
                 score: 1.0 - i as f32 * 0.01,
                 similarity: Some(0.9),
                 shown: i < 10,
-                band: false,
+                ..Default::default()
             })
             .chain(std::iter::once(NewCandidate {
                 artifact_id: "recalled".into(),
                 score: 0.4,
-                similarity: None,
                 shown: true,
                 band: true,
+                ..Default::default()
             }))
             .collect();
         let event = store.record_search(ev, 5).await.unwrap();
@@ -1429,9 +1445,9 @@ mod tests {
         ev.candidates.push(NewCandidate {
             artifact_id: "recalled".into(),
             score: 0.4,
-            similarity: None,
             shown: true,
             band: true,
+            ..Default::default()
         });
         let event = store.record_search(ev, 5).await.unwrap();
 
@@ -1538,14 +1554,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "x".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1650,7 +1660,7 @@ mod tests {
                 score: 0.9,
                 similarity: Some(0.8),
                 shown: true,
-                band: false,
+                ..Default::default()
             }],
             answered: false,
             context: None,
@@ -2167,14 +2177,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "The ID photo is on Wednesday at 09:00.".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -2433,7 +2437,7 @@ mod tests {
                 score: 1.0 - i as f32 / 100.0,
                 similarity: Some(0.5),
                 shown: i < 10,
-                band: false,
+                ..Default::default()
             })
             .collect();
         // No folding: these are separate searches, not one being typed.
@@ -2514,14 +2518,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "opening hours".into(),
-                    corpus_span: None,
                     title: Some("hours".into()),
-                    category: None,
-                    tags: Vec::new(),
-                    segment_idx: None,
-                    caveats: Vec::new(),
+                    ..Default::default()
                 }],
             )
             .await

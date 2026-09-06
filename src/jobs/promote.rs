@@ -825,11 +825,8 @@ mod tests {
             ordinal: o,
             text: t.into(),
             corpus_span: Some(sp(a, b)),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let passages = core
             .store
@@ -1137,14 +1134,9 @@ mod tests {
             &corpus,
             0,
             vec![crate::store::artifacts::NewArtifact {
-                ordinal: 0,
                 text: "dup".into(),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
                 segment_idx: Some(0),
-                caveats: vec![],
+                ..Default::default()
             }],
         )
         .await
@@ -1174,18 +1166,7 @@ mod tests {
                 payload: crate::vector::VectorPayload {
                     artifact_id: id.into(),
                     corpus_id: corpus.into(),
-                    text: String::new(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    created_at: 0,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             }])
             .await
@@ -1211,11 +1192,8 @@ mod tests {
                     ordinal: 9,
                     text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
                     corpus_span: Some(sp(3, 4)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1272,11 +1250,8 @@ mod tests {
                     ordinal: 9,
                     text: "an entirely different sentence about nothing here".into(),
                     corpus_span: Some(claimed(3, 4)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1315,11 +1290,8 @@ mod tests {
                     ordinal: 9,
                     text: "A rewrite of the whole note, in the model's own words.".into(),
                     corpus_span: Some(unplaced(1, 6)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1373,11 +1345,8 @@ mod tests {
                     ordinal: 9,
                     text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
                     corpus_span: Some(sp(3, 4)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1420,11 +1389,8 @@ mod tests {
                     ordinal: 9,
                     text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
                     corpus_span: Some(sp(3, 4)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1451,11 +1417,8 @@ mod tests {
             ordinal: o,
             text: t.into(),
             corpus_span: Some(sp(a, b)),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let paraphrase = core
             .store

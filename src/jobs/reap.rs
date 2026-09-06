@@ -618,12 +618,8 @@ mod tests {
             .map(|(i, t)| NewArtifact {
                 ordinal: i as i64,
                 text: (*t).into(),
-                corpus_span: None,
                 title: Some(format!("S{i}")),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         core.store
@@ -720,9 +716,7 @@ mod tests {
                 &NewMerged {
                     text: "the fact, once".into(),
                     title: Some("M".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &ids,
             )
@@ -1145,9 +1139,7 @@ mod tests {
                 &NewMerged {
                     text: "a paraphrase of both".into(),
                     title: Some("M".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &ids,
             )

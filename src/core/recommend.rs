@@ -434,41 +434,12 @@ fn first_line(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::context::{Clock, encoder_version};
-    use crate::core::test_support::test_core;
+    use crate::core::test_support::{phone_bundle, recommending_core, seed_artifact};
 
     /// 2026-08-21T13:52:00Z — a Friday, 15:52 in Berlin.
     const FRIDAY: i64 = 1_787_320_320;
 
-    async fn core_at(now: i64) -> Core {
-        let mut core = test_core().await;
-        core.recommend.enabled = true;
-        core.learn.enabled = true;
-        core.clock = Clock::Fixed(now);
-        core
-    }
-
-    fn phone() -> Bundle {
-        Bundle {
-            tz: Some("Europe/Berlin".into()),
-            platform: Some("Android".into()),
-            ua_family: Some("Chrome".into()),
-            screen_w: Some(390.0),
-            screen_h: Some(844.0),
-            viewport_w: Some(390.0),
-            viewport_h: Some(844.0),
-            dpr: Some(3.0),
-            cores: Some(8.0),
-            memory_gb: Some(4.0),
-            language: Some("de-DE".into()),
-            color_scheme: Some("dark".into()),
-            touch: Some(true),
-            orientation: Some("portrait".into()),
-            network: Some("cellular".into()),
-            ..Default::default()
-        }
-    }
-
-    /// A desktop, agreeing with `phone()` about nothing.
+    /// A desktop, agreeing with `phone_bundle()` about nothing.
     fn desk() -> Bundle {
         Bundle {
             tz: Some("Europe/Berlin".into()),
@@ -565,55 +536,6 @@ mod tests {
             .unwrap();
     }
 
-    /// One artifact with a vector point behind it. `created_at` is 0 and
-    /// nothing has been shown, so `resurface` will also return it — which is
-    /// what the bottom rung needs.
-    async fn seed_artifact(core: &Core, title: &str) -> String {
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let a = core
-            .store
-            .insert_artifacts(
-                &src.id,
-                &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
-                    text: format!("text of {title}"),
-                    corpus_span: None,
-                    title: Some(title.into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
-                }],
-            )
-            .await
-            .unwrap()
-            .remove(0);
-        core.vectors
-            .upsert(vec![crate::vector::VectorPoint {
-                vector: vec![1.0; 8],
-                sparse: Default::default(),
-                payload: crate::vector::VectorPayload {
-                    artifact_id: a.id.clone(),
-                    corpus_id: src.id.clone(),
-                    text: a.text.clone(),
-                    title: Some(title.into()),
-                    category: None,
-                    tags: vec![],
-                    created_at: 0,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
-                },
-            }])
-            .await
-            .unwrap();
-        a.id
-    }
-
     #[tokio::test]
     async fn six_fridays_and_the_seventh_offers_it_before_it_is_asked_for() {
         // The whole feature in one test, and the example it was asked for:
@@ -622,14 +544,14 @@ mod tests {
         // weekday, hour and device named. Nothing here calls a model or an
         // embedder — every step is the production path with a fixed clock in
         // it, and the sweep is the real one.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre opening hours").await;
         let noise = seed_artifact(&core, "invoice template").await;
 
         // Six Fridays at 15:00 on the phone, opening the recycling centre.
         for w in 1..=6 {
             let at = FRIDAY - w * 7 * 86_400;
-            seen_and_opened(&core, &aid, at, &phone()).await;
+            seen_and_opened(&core, &aid, at, &phone_bundle()).await;
         }
         // And six Tuesday mornings at a desk, opening something else — so the
         // answer is a choice rather than the only candidate.
@@ -647,7 +569,7 @@ mod tests {
         seventh.clock = Clock::Fixed(FRIDAY - 8 * 60);
 
         let offer = seventh
-            .offer(Some("alice"), &phone())
+            .offer(Some("alice"), &phone_bundle())
             .await
             .unwrap()
             .unwrap();
@@ -696,10 +618,10 @@ mod tests {
         // If the local recomputation and the store disagree, the line explains a
         // different artifact than the one shown — which is the one dishonesty
         // this feature must not commit.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let near = seed_artifact(&core, "recycling centre").await;
         let far = seed_artifact(&core, "invoice template").await;
-        learn(&core, &near, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &near, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
         learn(
             &core,
             &far,
@@ -709,14 +631,14 @@ mod tests {
         )
         .await;
 
-        let now = encode(FRIDAY, &phone(), &core.recommend.weights);
+        let now = encode(FRIDAY, &phone_bundle(), &core.recommend.weights);
         let from_store = core
             .vectors
             .context_query(&now, CANDIDATES, &Default::default())
             .await
             .unwrap();
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
         assert_eq!(
             offer.artifact_id, from_store[0].payload.artifact_id,
             "the local argmax reproduces the store's"
@@ -726,11 +648,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_recurring_situation_is_called_a_pattern_and_names_its_blocks() {
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
         assert_eq!(offer.rung, Rung::Pattern);
         assert_eq!(offer.slot, Some(0));
         assert_eq!(offer.title, "recycling centre");
@@ -743,15 +665,15 @@ mod tests {
     async fn a_resemblance_is_not_called_a_pattern() {
         // The wording says what it rests on. The distance between "Fridays
         // around 15:00" and "similar to" is the whole honesty of the feature.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         // Same Friday and same phone, four hours off, on wifi and in landscape.
-        let mut other = phone();
+        let mut other = phone_bundle();
         other.network = Some("wifi".into());
         other.orientation = Some("landscape".into());
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400 - 4 * 3600, &other).await;
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
         assert_eq!(offer.rung, Rung::Similar, "blocks: {:?}", offer.blocks);
     }
 
@@ -759,9 +681,9 @@ mod tests {
     async fn one_persons_situations_are_never_offered_to_another() {
         // Until per-user collections exist, the `scope` block is the whole of
         // the isolation, and it needs a test that says so.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
 
         // Twenty other names, not one. The first version of the `scope` block
         // was one-hot over eight buckets, so any two people had a one-in-eight
@@ -771,7 +693,7 @@ mod tests {
         // it like one.
         for n in 0..20 {
             let who = format!("person-{n}");
-            let offer = core.offer(Some(&who), &phone()).await.unwrap();
+            let offer = core.offer(Some(&who), &phone_bundle()).await.unwrap();
             assert!(
                 offer
                     .as_ref()
@@ -794,11 +716,11 @@ mod tests {
         // So: bob has learned nothing, and alice's cluster is the *only* thing
         // in the index. The store therefore returns it however anyone scores,
         // and bob must still not be offered it as a pattern.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
 
-        let now = encode(FRIDAY, &phone(), &core.recommend.weights);
+        let now = encode(FRIDAY, &phone_bundle(), &core.recommend.weights);
         let from_store = core
             .vectors
             .context_query(&now, CANDIDATES, &Default::default())
@@ -810,7 +732,7 @@ mod tests {
             "the store has nothing else to return, so it returns alice's"
         );
 
-        let offer = core.offer(Some("bob"), &phone()).await.unwrap();
+        let offer = core.offer(Some("bob"), &phone_bundle()).await.unwrap();
         assert!(
             offer.as_ref().is_none_or(|o| o.slot.is_none()),
             "and the read path cut it anyway: {offer:?}"
@@ -822,13 +744,13 @@ mod tests {
         // The middle ground. Two occurrences are a real thing that happened and
         // worth offering, and calling them a pattern would be a claim the
         // evidence does not carry. The line says the number instead.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         // Weight below `firm_at`, which at the default half-life is what two
         // weekly repetitions come to.
-        learn_n(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone(), 1.9, 2).await;
+        learn_n(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle(), 1.9, 2).await;
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
         assert_eq!(offer.rung, Rung::Tentative);
         assert_eq!(offer.events, 2, "and it knows how many");
         assert_eq!(offer.slot, Some(0), "still a real cluster");
@@ -840,10 +762,10 @@ mod tests {
         // With less behind it, the situation has to match *better* before
         // anything is said at all. Otherwise one accident on a Tuesday would be
         // offered every Tuesday after it.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         // A middling match — the kind that earns `Similar` when established.
-        let mut other = phone();
+        let mut other = phone_bundle();
         other.network = Some("wifi".into());
         other.orientation = Some("landscape".into());
         learn_n(
@@ -857,7 +779,7 @@ mod tests {
         )
         .await;
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
         assert_eq!(
             offer.rung,
             Rung::Random,
@@ -870,10 +792,10 @@ mod tests {
         // The floor. Something to look at while the base has nothing to say
         // about the situation — and nothing printed beside it, because nothing
         // about the situation produced it.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
         assert_eq!(offer.rung, Rung::Random);
         assert_eq!(offer.artifact_id, aid);
         assert!(!offer.rung.is_explained(), "no line is printed beside it");
@@ -889,27 +811,22 @@ mod tests {
         // than thirty days and unshown for thirty days", which on a base
         // somebody started this morning is nothing at all — empty in exactly
         // the moment this rung exists for.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "captured five minutes ago".into(),
-                    corpus_span: None,
                     title: Some("brand new".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
             .unwrap();
 
         let offer = core
-            .offer(Some("alice"), &phone())
+            .offer(Some("alice"), &phone_bundle())
             .await
             .unwrap()
             .expect("a fresh base still has something to show");
@@ -923,10 +840,10 @@ mod tests {
         // asked for and wrong for something that fires on every page view: it
         // would drain the pool the search page's own resurfacing lives on, one
         // page view at a time.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         for _ in 0..5 {
-            core.offer(Some("alice"), &phone()).await.unwrap();
+            core.offer(Some("alice"), &phone_bundle()).await.unwrap();
         }
         core.background.wait_idle().await;
 
@@ -943,18 +860,18 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_base_is_offered_nothing_rather_than_a_lie() {
-        let core = core_at(FRIDAY).await;
-        assert!(core.offer(Some("alice"), &phone()).await.unwrap().is_none());
+        let core = recommending_core(FRIDAY).await;
+        assert!(core.offer(Some("alice"), &phone_bundle()).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn nothing_is_offered_when_the_faculty_is_off() {
-        let mut core = core_at(FRIDAY).await;
+        let mut core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
         core.recommend.enabled = false;
 
-        assert!(core.offer(Some("alice"), &phone()).await.unwrap().is_none());
+        assert!(core.offer(Some("alice"), &phone_bundle()).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -962,9 +879,9 @@ mod tests {
         // Its centroid may still be in the index — a rebuild copies a set whose
         // width matches — but the blocks it was built from are not the blocks
         // this reader knows. Skipped, rather than described with the wrong ones.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
         let mut rows = core
             .store
             .context_clusters_of(std::slice::from_ref(&aid))
@@ -977,7 +894,7 @@ mod tests {
             .await
             .unwrap();
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap();
         assert!(
             offer.as_ref().is_none_or(|o| o.slot.is_none()),
             "got {offer:?}"
@@ -995,12 +912,12 @@ mod tests {
         // computed across two different encodings. Which is exactly the
         // recommendation nobody can account for that `BlockWeights::of` refuses
         // a typo to avoid.
-        let mut core = core_at(FRIDAY).await;
+        let mut core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         for w in 1..=6 {
-            learn(&core, &aid, "alice", FRIDAY - w * 7 * 86_400, &phone()).await;
+            learn(&core, &aid, "alice", FRIDAY - w * 7 * 86_400, &phone_bundle()).await;
         }
-        let offered = core.offer(Some("alice"), &phone()).await.unwrap();
+        let offered = core.offer(Some("alice"), &phone_bundle()).await.unwrap();
         assert!(
             offered.as_ref().is_some_and(|o| o.slot.is_some()),
             "this test needs a learned offer to invalidate: {offered:?}"
@@ -1009,7 +926,7 @@ mod tests {
         // One weight moved, nothing else touched. The stored centroids are now
         // a geometry this reader does not know.
         core.recommend.weights.network += 0.5;
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap();
         assert!(
             offer.as_ref().is_none_or(|o| o.slot.is_none()),
             "a centroid from the old geometry was still explained: {offer:?}"
@@ -1023,7 +940,7 @@ mod tests {
         // contribution. Taking the top three unconditionally printed
         // "Pattern · weekday, hour, battery" on a pair where neither side ever
         // sent a battery reading.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         let bare = Bundle {
             tz: Some("Europe/Berlin".into()),
@@ -1048,9 +965,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_hidden_artifact_is_never_the_offer() {
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
         core.vectors
             .set_lifecycle(
                 &aid,
@@ -1060,7 +977,7 @@ mod tests {
             .await
             .unwrap();
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap();
         assert!(
             offer.as_ref().is_none_or(|o| o.rung != Rung::Pattern),
             "got {offer:?}"
@@ -1072,11 +989,11 @@ mod tests {
         // "The parameters must be visible" — whoever wants to know exactly,
         // expands it. It is also the answer to what is being collected:
         // inspectable rather than promised.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
 
-        let offer = core.offer(Some("alice"), &phone()).await.unwrap().unwrap();
+        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
         let d: serde_json::Value = serde_json::from_str(&offer.detail).unwrap();
         assert_eq!(d["bundle"]["tz"], "Europe/Berlin");
         assert!(d["contributions"].is_object());
@@ -1096,10 +1013,10 @@ mod tests {
         core.learn.enabled = true;
         core.clock = Clock::Fixed(FRIDAY);
         let aid = seed_artifact(&core, "recycling centre").await;
-        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone()).await;
+        learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
         let before = embedder.calls();
 
-        core.offer(Some("alice"), &phone()).await.unwrap();
+        core.offer(Some("alice"), &phone_bundle()).await.unwrap();
         assert_eq!(embedder.calls(), before, "not one embedding call");
     }
 
@@ -1116,7 +1033,7 @@ mod tests {
         // fell to the random card — with an established situation sitting
         // second that would have passed. A pattern replaced by a card claiming
         // nothing is the worst rung the ladder can produce.
-        let core = core_at(FRIDAY).await;
+        let core = recommending_core(FRIDAY).await;
         let now = encode(FRIDAY, &Bundle::default(), &core.recommend.weights);
 
         // A direction the present situation has nothing in, so a candidate can

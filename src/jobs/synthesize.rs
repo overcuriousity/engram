@@ -1528,14 +1528,8 @@ Then run sync.";
             .await
             .unwrap();
         let new = |text: &str| crate::store::artifacts::NewArtifact {
-            ordinal: 0,
             text: text.to_string(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         };
         core.store
             .insert_artifacts_with_provenance(

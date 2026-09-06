@@ -247,6 +247,42 @@ pub struct SearchResult {
     pub explanation: Option<crate::core::explain::HitExplanation>,
 }
 
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for SearchResult {
+    fn default() -> Self {
+        Self {
+            artifact_id: String::new(),
+            corpus_id: String::new(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score: 0.0,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+            primed: false,
+            in_sitting: false,
+            due_at: None,
+            due_in: None,
+            past_cliff: false,
+            retired: false,
+            similarity: None,
+            titled_by_corpus: false,
+            via: None,
+            reason: None,
+            explanation: None,
+        }
+    }
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }
@@ -1916,12 +1952,10 @@ mod tests {
             .map(|(i, (text, cat, tags))| NewArtifact {
                 ordinal: i as i64,
                 text: text.to_string(),
-                corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some(cat.to_string()),
                 tags: tags.iter().map(|s| s.to_string()).collect(),
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -2850,18 +2884,7 @@ mod tests {
             payload: crate::vector::VectorPayload {
                 artifact_id: chunk.into(),
                 corpus_id: src.into(),
-                text: String::new(),
-                title: None,
-                category: None,
-                tags: vec![],
-                created_at: 0,
-                last_seen_at: None,
-                hit_count: None,
-                status: None,
-                last_verified_at: None,
-                superseded_by: None,
-                origin_corpora: vec![],
-                provenance: None,
+                ..Default::default()
             },
             score,
             similarity: Some(score),
@@ -3366,29 +3389,8 @@ mod tests {
             .map(|id| SearchResult {
                 artifact_id: (*id).into(),
                 corpus_id: "c".into(),
-                title: None,
-                text: String::new(),
-                category: None,
-                tags: vec![],
                 score: 0.5,
-                status: None,
-                superseded_by: None,
-                last_verified_at: None,
-                weak: false,
-                primed: false,
-                in_sitting: false,
-                due_at: None,
-                due_in: None,
-                past_cliff: false,
-                retired: false,
-                similarity: None,
-                titled_by_corpus: false,
-                via: None,
-                reason: None,
-                explanation: None,
-                model_written: false,
-                synthesized: false,
-                origin_count: 0,
+                ..Default::default()
             })
             .collect()
     }
@@ -4016,12 +4018,7 @@ mod tests {
                 .map(|i| NewArtifact {
                     ordinal: i,
                     text: text.to_string(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 })
                 .collect();
             for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
@@ -4065,14 +4062,8 @@ mod tests {
             (&unnamed, "words"),
         ] {
             let new = vec![NewArtifact {
-                ordinal: 0,
                 text: text.to_string(),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             }];
             for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
                 crate::jobs::embed::run(&core, &c.id).await.unwrap();
@@ -4263,7 +4254,7 @@ mod tests {
                 params: params.into(),
                 embed_recipe: "recipe-a".into(),
                 chat_model: "qwen".into(),
-                parent_id: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -4628,30 +4619,8 @@ mod tests {
 
         let dummy = |id: String| SearchResult {
             artifact_id: id,
-            corpus_id: String::new(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
             score: 1.0,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         let results = vec![dummy(a.clone()), dummy(b.clone()), dummy(c.clone())];
 
@@ -4750,29 +4719,8 @@ mod tests {
         let dummy = |id: &str, score: f32| SearchResult {
             artifact_id: id.into(),
             corpus_id: "c".into(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
             score,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         let mut results = vec![
             dummy("a", 0.95),
@@ -4813,29 +4761,9 @@ mod tests {
         let dummy = |id: &str, score: f32, retired: bool| SearchResult {
             artifact_id: id.into(),
             corpus_id: "c".into(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
             score,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
             retired,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         // The retired row scores highest of all, and is first in the ranking.
         let mut results = vec![
@@ -4875,29 +4803,9 @@ mod tests {
         let dummy = |id: &str, score: f32, similarity: Option<f32>| SearchResult {
             artifact_id: id.into(),
             corpus_id: "c".into(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
             score,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
-            retired: false,
             similarity,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         let fused = [1.050, 0.633, 0.383, 0.250, 0.217];
         // Sanity: on the fused scores alone the rule draws its line after #1.
@@ -5024,14 +4932,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "captured text".into(),
-                    corpus_span: None,
                     title: Some("c".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -5096,14 +4999,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "a".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await

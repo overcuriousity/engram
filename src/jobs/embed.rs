@@ -1089,12 +1089,8 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i as i64,
                 text: format!("chunk {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
                 segment_idx: Some(i as i64),
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -1127,9 +1123,7 @@ mod tests {
                 &crate::store::artifacts::NewMerged {
                     title: Some("merged".into()),
                     text: "both wordings".into(),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 roots,
             )
@@ -1250,14 +1244,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "a stale instruction".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1301,14 +1290,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: body,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1354,14 +1338,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: body,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1398,14 +1377,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: text.clone(),
-                    corpus_span: None,
                     title: Some(title),
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1468,14 +1443,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: text.clone(),
-                    corpus_span: None,
                     title: Some(title),
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1530,14 +1501,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: text.clone(),
-                    corpus_span: None,
                     title: Some(title),
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1577,14 +1544,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1630,14 +1592,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: body,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1709,12 +1666,9 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i as i64,
                 text: format!("chunk number {i}"),
-                corpus_span: None,
                 title: Some(format!("t{i}")),
-                category: None,
-                tags: vec![],
-                caveats: vec![],
                 segment_idx: Some(0),
+                ..Default::default()
             })
             .collect();
         core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -1954,12 +1908,10 @@ mod tests {
             .map(|(i, t)| NewArtifact {
                 ordinal: i as i64,
                 text: t.to_string(),
-                corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some("reference".into()),
                 tags: vec!["x".into()],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();

@@ -3035,14 +3035,8 @@ mod tests {
             .insert_artifacts(
                 &out.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "t".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -3055,17 +3049,7 @@ mod tests {
                     artifact_id: chunks[0].id.clone(),
                     corpus_id: out.id.clone(),
                     text: "t".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    created_at: 0,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             }])
             .await
@@ -3160,17 +3144,7 @@ mod tests {
                 artifact_id: artifact_id.to_string(),
                 corpus_id: corpus_id.to_string(),
                 text: "t".into(),
-                title: None,
-                category: None,
-                tags: vec![],
-                created_at: 0,
-                last_seen_at: None,
-                hit_count: None,
-                status: None,
-                last_verified_at: None,
-                superseded_by: None,
-                origin_corpora: vec![],
-                provenance: None,
+                ..Default::default()
             },
         }
     }
@@ -3183,14 +3157,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "t".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -3212,24 +3180,13 @@ mod tests {
                 &src.id,
                 &[
                     crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: "loser".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
                         text: "winner".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
             )
@@ -3517,11 +3474,8 @@ mod tests {
                 end_line: 2,
                 source: crate::store::artifacts::SpanSource::Located,
             }),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let p = core
             .store
@@ -3900,9 +3854,7 @@ mod tests {
                 &NewMerged {
                     text: "the merged account of the gutters".into(),
                     title: Some("gutters".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 std::slice::from_ref(&root),
             )

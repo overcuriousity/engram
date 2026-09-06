@@ -1037,9 +1037,7 @@ mod tests {
                 &crate::store::artifacts::NewMerged {
                     text: "the invoice, and everything else about it".into(),
                     title: Some("Invoices".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 std::slice::from_ref(&aid),
             )

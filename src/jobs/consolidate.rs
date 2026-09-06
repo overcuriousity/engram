@@ -583,12 +583,8 @@ pub(crate) mod tests {
             .map(|(i, (title, text, _))| NewArtifact {
                 ordinal: i as i64,
                 text: (*text).to_string(),
-                corpus_span: None,
                 title: title.map(str::to_string),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -603,16 +599,8 @@ pub(crate) mod tests {
                     corpus_id: c.corpus_id.clone().unwrap_or_default(),
                     text: (*text).to_string(),
                     title: title.map(str::to_string),
-                    category: None,
-                    tags: vec![],
                     created_at: c.created_at,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             })
             .collect();
@@ -2228,10 +2216,7 @@ pub(crate) mod tests {
             .insert_merged_artifact(
                 &NewMerged {
                     text: "both".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[ids[0].clone(), ids[1].clone()],
             )
@@ -2294,10 +2279,7 @@ pub(crate) mod tests {
             .insert_merged_artifact(
                 &NewMerged {
                     text: "x".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[ids[0].clone(), ids[1].clone()],
             )

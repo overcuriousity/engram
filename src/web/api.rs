@@ -4587,14 +4587,11 @@ mod patch_tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "the body".into(),
-                    corpus_span: None,
                     title: Some("a title".into()),
                     category: Some("concept".into()),
                     tags: vec!["old".into()],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -4845,14 +4842,8 @@ mod patch_tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "the older copy".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
