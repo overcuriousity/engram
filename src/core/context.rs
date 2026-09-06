@@ -298,7 +298,6 @@ pub struct Bundle {
     pub audio_outputs: Option<u32>,
 }
 
-
 /// A bundle from whatever the browser posted.
 ///
 /// Lenient on purpose: nothing a browser sends may take a page view down, and

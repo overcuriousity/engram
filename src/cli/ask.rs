@@ -1,7 +1,7 @@
 //! `-a`: one question, streamed to the terminal as it is written.
 
-use crate::cli::endpoint::client;
 use crate::cli::endpoint::Endpoint;
+use crate::cli::endpoint::client;
 use crate::error::{Error, Result};
 
 /// Take every complete SSE frame out of `buf`, leaving a partial one behind.

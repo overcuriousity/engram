@@ -21,13 +21,13 @@ use axum::routing::{get, post};
 
 use crate::core::ingest::{ORIGIN_ASK, ORIGIN_WEB};
 use crate::error::{Error, Result};
+use crate::web::artifact::link_citations;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
 use crate::web::ui::{
     FACET_LIMIT, RenderedResult, UiSearchParams, ensure_facet, render_hit, search_results,
 };
-use crate::web::artifact::link_citations;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

@@ -452,11 +452,7 @@ impl Store {
     /// `cues` is written for both, empty for a merge. The column is
     /// `NOT NULL DEFAULT '[]'`, so naming it changes no stored byte; it saves
     /// the two callers a statement each that differed in one column.
-    async fn insert_sourced_artifact(
-        &self,
-        new: Sourced<'_>,
-        sources: &[String],
-    ) -> Result<Chunk> {
+    async fn insert_sourced_artifact(&self, new: Sourced<'_>, sources: &[String]) -> Result<Chunk> {
         let Sourced {
             provenance,
             text,

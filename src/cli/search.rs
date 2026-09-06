@@ -1,9 +1,9 @@
 //! `-s`: a ranked list in a terminal, saying everything the rail says.
 
 use crate::cli::args::CliArgs;
-use crate::cli::endpoint::client;
 use crate::cli::encode;
 use crate::cli::endpoint::Endpoint;
+use crate::cli::endpoint::client;
 use crate::core::search::SearchResult;
 use crate::error::{Error, Result};
 

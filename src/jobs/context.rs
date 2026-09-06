@@ -556,7 +556,14 @@ mod tests {
 
         // Six more Fridays, every one of them an open of the offer.
         for w in 1..=6 {
-            seen_and_opened(&core, &aid, friday(w) + 60, &phone_bundle(), "recommended_open").await;
+            seen_and_opened(
+                &core,
+                &aid,
+                friday(w) + 60,
+                &phone_bundle(),
+                "recommended_open",
+            )
+            .await;
         }
 
         let after = run(&core).await.unwrap();

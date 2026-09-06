@@ -11,11 +11,11 @@
 //! it for the same reason it imports the rest of the pane's vocabulary.
 
 use crate::error::{Error, Result};
+use crate::fmt::{ago, ago_or_ahead};
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
-use crate::web::state::AppState;
-use crate::fmt::{ago, ago_or_ahead};
 use crate::web::markdown;
+use crate::web::state::AppState;
 use crate::web::ui::{
     ArtifactView, artifact_html, artifact_title, artifact_view, ends_mid_sentence, title_of,
 };
@@ -28,7 +28,6 @@ use axum::routing::{get, post};
 /// Neighbours shown beside an artifact. A short list, because this is a way
 /// out of the pane rather than a second result rail.
 const RELATED_LIMIT: usize = 5;
-
 
 /// A chunk beside the source lines it claims.
 pub struct ArtifactDetail {
@@ -767,8 +766,8 @@ mod tests {
     use super::*;
     use crate::web::test_support::{
         app_recommending, app_session_and_core, app_with_cookie, app_with_embedded_corpus,
-        app_with_session, artifacts, ask_over_sse, body_of, done_html, drain, flat, form,
-        get_body, hold_something, pulled, put_form, rail_html, searched_app, urlencoding_of,
+        app_with_session, artifacts, ask_over_sse, body_of, done_html, drain, flat, form, get_body,
+        hold_something, pulled, put_form, rail_html, searched_app, urlencoding_of,
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};

@@ -638,7 +638,11 @@ mod tests {
             .await
             .unwrap();
 
-        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
+        let offer = core
+            .offer(Some("alice"), &phone_bundle())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             offer.artifact_id, from_store[0].payload.artifact_id,
             "the local argmax reproduces the store's"
@@ -652,7 +656,11 @@ mod tests {
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
 
-        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
+        let offer = core
+            .offer(Some("alice"), &phone_bundle())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(offer.rung, Rung::Pattern);
         assert_eq!(offer.slot, Some(0));
         assert_eq!(offer.title, "recycling centre");
@@ -673,7 +681,11 @@ mod tests {
         other.orientation = Some("landscape".into());
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400 - 4 * 3600, &other).await;
 
-        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
+        let offer = core
+            .offer(Some("alice"), &phone_bundle())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(offer.rung, Rung::Similar, "blocks: {:?}", offer.blocks);
     }
 
@@ -748,9 +760,22 @@ mod tests {
         let aid = seed_artifact(&core, "recycling centre").await;
         // Weight below `firm_at`, which at the default half-life is what two
         // weekly repetitions come to.
-        learn_n(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle(), 1.9, 2).await;
+        learn_n(
+            &core,
+            &aid,
+            "alice",
+            FRIDAY - 7 * 86_400,
+            &phone_bundle(),
+            1.9,
+            2,
+        )
+        .await;
 
-        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
+        let offer = core
+            .offer(Some("alice"), &phone_bundle())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(offer.rung, Rung::Tentative);
         assert_eq!(offer.events, 2, "and it knows how many");
         assert_eq!(offer.slot, Some(0), "still a real cluster");
@@ -779,7 +804,11 @@ mod tests {
         )
         .await;
 
-        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
+        let offer = core
+            .offer(Some("alice"), &phone_bundle())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             offer.rung,
             Rung::Random,
@@ -795,7 +824,11 @@ mod tests {
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
 
-        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
+        let offer = core
+            .offer(Some("alice"), &phone_bundle())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(offer.rung, Rung::Random);
         assert_eq!(offer.artifact_id, aid);
         assert!(!offer.rung.is_explained(), "no line is printed beside it");
@@ -861,7 +894,12 @@ mod tests {
     #[tokio::test]
     async fn an_empty_base_is_offered_nothing_rather_than_a_lie() {
         let core = recommending_core(FRIDAY).await;
-        assert!(core.offer(Some("alice"), &phone_bundle()).await.unwrap().is_none());
+        assert!(
+            core.offer(Some("alice"), &phone_bundle())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -871,7 +909,12 @@ mod tests {
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
         core.recommend.enabled = false;
 
-        assert!(core.offer(Some("alice"), &phone_bundle()).await.unwrap().is_none());
+        assert!(
+            core.offer(Some("alice"), &phone_bundle())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -915,7 +958,14 @@ mod tests {
         let mut core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         for w in 1..=6 {
-            learn(&core, &aid, "alice", FRIDAY - w * 7 * 86_400, &phone_bundle()).await;
+            learn(
+                &core,
+                &aid,
+                "alice",
+                FRIDAY - w * 7 * 86_400,
+                &phone_bundle(),
+            )
+            .await;
         }
         let offered = core.offer(Some("alice"), &phone_bundle()).await.unwrap();
         assert!(
@@ -993,7 +1043,11 @@ mod tests {
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
 
-        let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap().unwrap();
+        let offer = core
+            .offer(Some("alice"), &phone_bundle())
+            .await
+            .unwrap()
+            .unwrap();
         let d: serde_json::Value = serde_json::from_str(&offer.detail).unwrap();
         assert_eq!(d["bundle"]["tz"], "Europe/Berlin");
         assert!(d["contributions"].is_object());

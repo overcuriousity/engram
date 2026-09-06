@@ -6,10 +6,10 @@
 //! they are read by the same code; what differs is only the answer, which is a
 //! page for a person rather than JSON for a client.
 
+use crate::core::fetch::only_a_url;
 use crate::core::ingest::ORIGIN_SHARE;
 use crate::error::{Error, Result};
 use crate::tenants::Tenant;
-use crate::core::fetch::only_a_url;
 use crate::web::api::read_capture_parts;
 use crate::web::state::AppState;
 use axum::Router;

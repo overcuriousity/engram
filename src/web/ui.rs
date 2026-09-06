@@ -1,6 +1,6 @@
-use crate::fmt::{ago, fmt_time};
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
+use crate::fmt::{ago, fmt_time};
 use crate::store::corpora::CorpusStatus;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
@@ -143,7 +143,6 @@ pub struct ArtifactView {
     pub embed_state: String,
     pub embed_badge: &'static str,
 }
-
 
 pub fn status_badge(status: &crate::store::corpora::CorpusStatus) -> &'static str {
     use crate::store::corpora::CorpusStatus::*;
@@ -1442,7 +1441,6 @@ pub(crate) fn ends_mid_sentence(text: &str) -> bool {
     }
 }
 
-
 #[derive(Template)]
 #[template(path = "not_found.html")]
 struct NotFoundTemplate {}
@@ -1628,7 +1626,6 @@ mod tests {
         assert!(html.contains("Fachbereich Angewandte"), "{html}");
     }
 
-
     #[test]
     fn a_gap_row_offers_a_box_to_fill_it_and_a_word_to_forget_it() {
         // One row per hole, whether the sweep named it or not, and nothing on
@@ -1674,7 +1671,6 @@ mod tests {
             "a group is its name, not its members: {html}"
         );
     }
-
 
     #[test]
     fn a_sweep_stage_reads_as_words_and_keeps_its_identifier() {
@@ -1841,9 +1837,8 @@ mod tests {
     use crate::web::test_support::{
         app_holding_something, app_recommending, app_session_and_core,
         app_session_and_core_with_feedback, app_with_cookie, app_with_embedded_corpus,
-        app_with_session, artifacts, ask_over_sse, body_of, done_html, drain, flat, form,
-        get_body, get_stream, hold_something, post_ask, pulled, searched_app,
-        searched_app_tuned, trigger_of,
+        app_with_session, artifacts, ask_over_sse, body_of, done_html, drain, flat, form, get_body,
+        get_stream, hold_something, post_ask, pulled, searched_app, searched_app_tuned, trigger_of,
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -2820,8 +2815,6 @@ mod tests {
             "the row has no title to click: {html}"
         );
     }
-
-
 
     /// The same base, plus one established situation matching the bundle the
     /// tests post — so the reason line actually renders.
@@ -6677,5 +6670,4 @@ mod tests {
         let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.gaps, s.hits, s.judged), (1, 0, 1), "{s:?}");
     }
-
 }

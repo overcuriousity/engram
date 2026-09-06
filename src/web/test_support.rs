@@ -387,7 +387,8 @@ pub(crate) async fn app_holding_something() -> (axum::Router, String) {
 /// features are gated on. `app_session_and_core` cannot be reused: the
 /// router owns its own clone of the core, so flipping a flag afterwards
 /// changes the handle and not the app.
-pub(crate) async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core) {
+pub(crate) async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core)
+{
     let mut core = crate::core::test_support::test_core().await;
     core.learn.enabled = true;
     let handle = core.clone();
@@ -599,7 +600,8 @@ pub(crate) fn pulled(html: &str, open: &str, end: char) -> Vec<String> {
 }
 
 /// One live artifact on a fresh session.
-pub(crate) async fn session_with_an_artifact() -> (axum::Router, String, crate::core::Core, String) {
+pub(crate) async fn session_with_an_artifact() -> (axum::Router, String, crate::core::Core, String)
+{
     let (app, cookie, core) = app_session_and_core().await;
     let out = core
         .ingest_capture(crate::core::ingest::Capture::new(
