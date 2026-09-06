@@ -345,3 +345,17 @@ pub(crate) async fn searched_app_tuned(
         .unwrap();
     (app, cookie, handle, a, event)
 }
+
+/// A captured photograph whose vision read has not landed.
+pub(crate) async fn an_unread_image(core: &crate::core::Core) -> String {
+    core.ingest_image(crate::core::ingest::ImageCapture {
+        bytes: a_png(),
+        filename: Some("p.png".into()),
+        title_hint: None,
+        note: None,
+        lang: crate::infer::lang::Lang::default(),
+    })
+    .await
+    .unwrap()
+    .id
+}

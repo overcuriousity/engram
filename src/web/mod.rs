@@ -1,6 +1,7 @@
 pub mod api;
 pub mod assets;
 pub mod auth_routes;
+pub mod corpus;
 pub mod corpus_view;
 pub mod day;
 pub mod due;
@@ -138,6 +139,7 @@ pub fn router(state: AppState) -> Router {
         .merge(workspace::routes())
         .merge(ui::ui_router())
         .merge(settings::routes())
+        .merge(corpus::routes())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
         .merge(share::share_router(
