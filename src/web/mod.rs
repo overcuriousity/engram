@@ -9,6 +9,7 @@ pub mod insights;
 pub mod lineage_view;
 pub mod markdown;
 pub mod pair;
+pub mod settings;
 pub mod share;
 pub mod state;
 pub mod tenant;
@@ -136,6 +137,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes::auth_router())
         .merge(workspace::routes())
         .merge(ui::ui_router())
+        .merge(settings::routes())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
         .merge(share::share_router(

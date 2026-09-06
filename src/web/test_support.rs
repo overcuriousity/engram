@@ -2,8 +2,9 @@
 
 use crate::core::Core;
 use axum::body::Body;
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
 use axum::response::Response;
+use tower::ServiceExt as _;
 
 /// The real router over `core`, in local auth mode with no password
 /// configured (`local`); pass `Some(cfg)` to test the login form itself.
@@ -232,4 +233,115 @@ pub fn a_png() -> Vec<u8> {
         .write_to(&mut out, image::ImageFormat::Png)
         .unwrap();
     out.into_inner()
+}
+
+// ── A signed-in app, and the shapes a page test asks for ────────────────────
+//
+// These grew inside `web::ui`'s test module and were reachable only from it,
+// which is part of why that module became the place every page's tests
+// lived. Here they belong to every `web/` module, and a page split out of
+// `ui.rs` keeps its tests instead of leaving them behind.
+
+pub(crate) async fn app_with_session() -> (axum::Router, String) {
+    let (app, cookie, _core) = app_session_and_core().await;
+    (app, cookie)
+}
+
+pub(crate) async fn app_session_and_core() -> (axum::Router, String, crate::core::Core) {
+    let core = crate::core::test_support::test_core().await;
+    let handle = core.clone();
+    let (app, cookie) = app_with_cookie(core).await;
+    (app, cookie, handle)
+}
+
+pub(crate) async fn get_body(app: &axum::Router, cookie: &str, uri: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
+    body_of(res).await
+}
+
+pub(crate) fn form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("POST")
+        .header("cookie", cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// A recording session, one artifact, and one captured search of this
+/// user's whose pool holds it.
+pub(crate) async fn searched_app() -> (axum::Router, String, crate::core::Core, String, String) {
+    searched_app_tuned(None).await
+}
+
+/// `searched_app`, with the judgement floor low enough that a verdict on
+/// the bar can cross it — the bar is the labeller now, so the bar is what
+/// pays for a sweep.
+pub(crate) async fn searched_app_tuned(
+    floor: Option<i64>,
+) -> (axum::Router, String, crate::core::Core, String, String) {
+    let mut core = crate::core::test_support::test_core().await;
+    core.learn.enabled = true;
+    if let Some(n) = floor {
+        core.feedback.tune.min_judgements = n;
+    }
+    let handle = core.clone();
+    let (app, cookie) = app_with_cookie(core).await;
+    let src = handle
+        .store
+        .insert_corpus("raw", "web", None)
+        .await
+        .unwrap();
+    let a = handle
+        .store
+        .insert_artifacts(
+            &src.id,
+            &[crate::store::artifacts::NewArtifact {
+                text: "mounting the image".into(),
+                title: Some("mount".into()),
+                ..Default::default()
+            }],
+        )
+        .await
+        .unwrap()[0]
+        .id
+        .clone();
+    let event = handle
+        .store
+        .record_search(
+            crate::store::feedback::NewEvent {
+                fold_onto: None,
+                query: "image will not mount".into(),
+                door: crate::store::feedback::Door::Ui,
+                scope: Some(crate::store::TEST_SUBJECT.into()),
+                filters: "{}".into(),
+                query_vec: vec![0.1, 0.2],
+                embed_model: "fake".into(),
+                candidates: vec![crate::store::feedback::NewCandidate {
+                    artifact_id: a.clone(),
+                    score: 1.0,
+                    similarity: Some(0.5),
+                    shown: true,
+                    ..Default::default()
+                }],
+                answered: false,
+                context: None,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    (app, cookie, handle, a, event)
 }
