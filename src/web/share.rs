@@ -8,10 +8,11 @@
 
 use crate::core::fetch::only_a_url;
 use crate::core::ingest::ORIGIN_SHARE;
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::tenants::Tenant;
 use crate::web::api::read_capture_parts;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use axum::Router;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::post;
@@ -35,7 +36,7 @@ async fn share(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     multipart: axum::extract::Multipart,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let (mut fields, files) = read_capture_parts(multipart).await?;
     let title = fields.remove("title");
@@ -107,9 +108,7 @@ async fn share(
 
     match first_file.or(landing) {
         Some(id) => Ok(Redirect::to(&format!("/ui/corpora/{id}")).into_response()),
-        None => Err(Error::Validation(
-            "that share carried nothing to capture".into(),
-        )),
+        None => Err(Error::Validation("that share carried nothing to capture".into()).into()),
     }
 }
 

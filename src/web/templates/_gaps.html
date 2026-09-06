@@ -23,11 +23,11 @@
     <span class="gap-label">{{ g.label }}</span>
     <form class="row" hx-post="/ui/capture" hx-target="closest .gap" hx-swap="outerHTML">
       <textarea class="input" name="text" rows="1" required placeholder="add what you know"></textarea>
-      <button class="btn btn-sm">save</button>
+      <button class="btn btn-sm">Save</button>
     </form>
     <button class="btn btn-ghost btn-sm" hx-post="/ui/gaps/forget"
             hx-vals='{"members": "{% for m in g.members %}{{ m.kind }}:{{ m.id }}{% if !loop.last %},{% endif %}{% endfor %}"}'
-            hx-target="closest .gap" hx-swap="outerHTML">forget</button>
+            hx-target="closest .gap" hx-swap="outerHTML">Forget</button>
   </li>
   {% endfor %}
 </ul>

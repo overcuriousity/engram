@@ -28,6 +28,7 @@ use crate::web::state::AppState;
 use crate::web::ui::{
     FACET_LIMIT, RenderedResult, UiSearchParams, ensure_facet, render_hit, search_results,
 };
+use crate::web::ui_error::UiResult;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -174,11 +175,27 @@ struct WorkspaceTemplate {
     /// what the page teaches and what the base recognises cannot drift apart.
     example_remind: &'static str,
     example_journal: &'static str,
+    /// The language those two are in, for `lang` on the chips. The page is
+    /// English and they may not be; see `moments::examples_lang_for`.
+    example_lang: &'static str,
     /// Always false here: the shared partials this page renders inline —
     /// `_ask_verb.html`, `_keyhint.html`, `_box_hint.html`, `_pane_idle.html`
     /// — mark themselves `hx-swap-oob` for the other caller, `HeldTemplate`,
     /// which swaps the same four regions into a page already on screen.
     oob: bool,
+}
+
+impl WorkspaceTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    ///
+    /// The box is the Search destination; there is no separate page for it.
+    fn section(&self) -> &'static str {
+        "search"
+    }
 }
 
 /// The four regions that read differently once the base stops being empty,
@@ -200,6 +217,8 @@ struct HeldTemplate {
     /// swaps, and it reads these two.
     example_remind: &'static str,
     example_journal: &'static str,
+    /// See `WorkspaceTemplate`.
+    example_lang: &'static str,
     /// True by definition: this fragment exists only for the transition into
     /// it. The field is here because the partials branch on it.
     held: bool,
@@ -210,16 +229,17 @@ struct HeldTemplate {
 /// Serves `HeldTemplate`, and only where something really is held: a page that
 /// asked for this before its capture stored would swap in an Ask verb over a
 /// base that still cannot answer.
-async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Response> {
+async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Response> {
     let (corpora, _) = tenant.core.store.held_brief().await?;
     if corpora == 0 {
-        return Err(crate::error::Error::NotFound);
+        return Err(crate::error::Error::NotFound.into());
     }
-    let (example_remind, example_journal) = examples(&headers);
+    let (example_remind, example_journal, example_lang) = examples(&headers);
     Ok(HtmlTemplate(HeldTemplate {
         ask_enabled: crate::web::state::ask_enabled(&tenant),
         example_remind,
         example_journal,
+        example_lang,
         held: true,
         oob: true,
     })
@@ -234,11 +254,17 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<
 /// The reader's language, off the request. A header that is absent, empty or
 /// unreadable is a reader we know nothing about, and English is what the page
 /// says then.
-fn examples(headers: &axum::http::HeaderMap) -> (&'static str, &'static str) {
+fn examples(headers: &axum::http::HeaderMap) -> (&'static str, &'static str, &'static str) {
     let raw = headers
         .get(axum::http::header::ACCEPT_LANGUAGE)
-        .and_then(|v| v.to_str().ok());
-    crate::core::moments::examples_for(raw.unwrap_or(""))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (remind, journal) = crate::core::moments::examples_for(raw);
+    (
+        remind,
+        journal,
+        crate::core::moments::examples_lang_for(raw),
+    )
 }
 
 async fn base_template(
@@ -284,7 +310,7 @@ async fn base_template(
     // still has to know: a search URL against an empty base is a page that
     // must not offer Ask either.
     let (corpora, _) = tenant.core.store.held_brief().await?;
-    let (example_remind, example_journal) = examples(headers);
+    let (example_remind, example_journal, example_lang) = examples(headers);
     Ok(WorkspaceTemplate {
         ask_enabled: crate::web::state::ask_enabled(tenant),
         q,
@@ -304,6 +330,7 @@ async fn base_template(
         idle_state,
         example_remind,
         example_journal,
+        example_lang,
         held: corpora > 0,
         oob: false,
     })
@@ -313,7 +340,7 @@ async fn page(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Query(p): Query<UiSearchParams>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let explain = p.explain.unwrap_or(false);
     let mut t = base_template(&tenant, &headers, p.q, p.category.unwrap_or_default(), "").await?;
     t.explain = explain;
@@ -378,7 +405,7 @@ async fn capture_submit(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Form(f): Form<CaptureForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // Which of the ten the reading of this text is instructed in: the account
     // setting, or this browser's `Accept-Language` where it is on automatic.
     let lang = crate::web::state::capture_lang(&tenant, &headers).await;
@@ -485,7 +512,7 @@ async fn capture_door(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Query(p): Query<CapturePrefill>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let prefilled = match &p.from_ask {
         Some(id) => tenant.core.store.ask_event(id).await?,
         None => None,
@@ -599,9 +626,9 @@ struct AskForm {
 /// the button is not rendered where no speech model is configured. The answer
 /// is `text/plain` rather than a fragment because the destination is a
 /// textarea's value, not the DOM.
-async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> Result<Response> {
+async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> UiResult<Response> {
     let Some(model) = tenant.core.transcriber.clone() else {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     };
 
     let mut audio: Option<(Vec<u8>, String)> = None;
@@ -626,7 +653,7 @@ async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> 
         break;
     }
     let Some((bytes, mime)) = audio else {
-        return Err(Error::Validation("no audio part".into()));
+        return Err(Error::Validation("no audio part".into()).into());
     };
     // A recording of nothing is a press and a release, which happens by
     // accident on every touch screen. Answered as the empty transcript it is,
@@ -657,15 +684,15 @@ async fn ask_submit(
     State(st): State<AppState>,
     tenant: Tenant,
     Form(f): Form<AskForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     // Refused before anything is parked, so an empty box costs no entry in the
     // map and no second round trip to find out.
     if f.q.trim().is_empty() {
-        return Err(Error::Validation("question is empty".into()));
+        return Err(Error::Validation("question is empty".into()).into());
     }
     let handoff = st.ask_handoff_park(
         crate::core::ask::AskRequest {
@@ -692,10 +719,10 @@ async fn ask_stream(
     State(st): State<AppState>,
     tenant: Tenant,
     Path(handoff): Path<String>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     use tokio_stream::StreamExt as _;
 
@@ -871,10 +898,10 @@ async fn ask_verdict(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<VerdictForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     match f.verdict.as_str() {
         "none" => tenant.core.store.unjudge_ask(&id).await?,
@@ -920,16 +947,16 @@ async fn search_verdict(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<SearchVerdictForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     if !tenant.core.learn.enabled {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     use crate::store::feedback::Labeller;
     let store = &tenant.core.store;
     // The id comes off the page, so it is whatever the caller sent. One check
     // for all four answers below — see `Store::event_is_mine`.
     if !store.event_is_mine(&id, &tenant.user.subject).await? {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     let state = match f.verdict.as_str() {
         "hit" => {
@@ -942,7 +969,8 @@ async fn search_verdict(
             if !store.get_artifact(&f.artifact_id).await?.in_results() {
                 return Err(Error::Validation(
                     "that one is deprecated or superseded, so the benchmark can't hold it".into(),
-                ));
+                )
+                .into());
             }
             // `NotFound` here is the store's guard, not a missing route:
             // another tab can answer this search while the one holding this
@@ -955,7 +983,7 @@ async fn search_verdict(
             {
                 Ok(()) => "hit",
                 Err(Error::NotFound) => return Ok(already_judged()),
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
         }
         "no" => {
@@ -986,7 +1014,7 @@ async fn search_verdict(
             match store.skip_event(&id).await {
                 Ok(()) => "skip",
                 Err(Error::NotFound) => return Ok(already_judged()),
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
         }
         "none" => {
@@ -998,10 +1026,10 @@ async fn search_verdict(
             match store.unjudge(&id, Labeller::Confirm).await {
                 Ok(()) => "",
                 Err(Error::NotFound) => return Ok(already_judged()),
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
             }
         }
-        v => return Err(Error::Validation(format!("unknown verdict {v}"))),
+        v => return Err(Error::Validation(format!("unknown verdict {v}")).into()),
     };
     // A verdict is what buys the next measurement. The deck used to spawn the
     // sweep after each of its verdicts; the bar and the rail are the labellers
@@ -1033,9 +1061,9 @@ async fn search_gap(
     tenant: Tenant,
     Path(id): Path<String>,
     axum::extract::Query(p): axum::extract::Query<GapParams>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     if !tenant.core.learn.enabled {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     // Only against the caller's own search — see `Store::event_is_mine`.
     if !tenant
@@ -1044,7 +1072,7 @@ async fn search_gap(
         .event_is_mine(&id, &tenant.user.subject)
         .await?
     {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     let line = match tenant.core.store.gap_event(&id, p.q.trim()).await? {
         true => "recorded as a gap: your base doesn't know this yet.",
@@ -1059,10 +1087,10 @@ async fn ask_carried(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<CarriedForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     let carried = tenant.core.store.toggle_carried(&id, f.n).await?;
     let bar = ask_verdict_bar(&tenant, &id, true).await?;
@@ -1087,10 +1115,10 @@ async fn ask_carried(
 /// The answer as the model wrote it, not as the operator retyped it: an
 /// operator who wants to edit first has `edit first` beside this, which is the
 /// old path unchanged.
-async fn ask_keep(tenant: Tenant, Path(id): Path<String>) -> Result<Response> {
+async fn ask_keep(tenant: Tenant, Path(id): Path<String>) -> UiResult<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     }
     // Unlike the capture door, there is no text to fall back to here: the row
     // is where the answer lives. A question that retention has already taken
@@ -1152,9 +1180,9 @@ async fn ask_door(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Query(p): Query<AskPrefill>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     if !tenant.core.asks() {
-        return Err(crate::error::Error::NotFound);
+        return Err(crate::error::Error::NotFound.into());
     }
     // Nothing held, no Ask button — `base_template` sets `held = false` and the
     // template renders no `[data-verb="ask"]`, so this door used to answer 200
@@ -1310,8 +1338,8 @@ mod tests {
              their own notes onto someone else's server"
         );
         assert!(
-            !html.contains("Search to see an artifact here"),
-            "an instruction that cannot be followed on an empty base"
+            !html.contains("An artifact opens here"),
+            "the held pane's line, on a base that holds nothing"
         );
         assert!(
             html.contains("kept exactly as you wrote it"),
@@ -1644,7 +1672,7 @@ mod tests {
             "the two controls an empty base withholds: {held}"
         );
         assert!(
-            held.contains("Search to see an artifact here"),
+            held.contains("An artifact opens here"),
             "and the hints for the state it is now in: {held}"
         );
     }

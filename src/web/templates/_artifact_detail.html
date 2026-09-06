@@ -181,7 +181,7 @@
           <button class="btn btn-ghost btn-sm" type="button"
                   onclick="var f=document.getElementById('edit-{{ d.id }}');
                            f.style.display='block';this.style.display='none';
-                           f.querySelector('textarea').focus()">edit</button>
+                           f.querySelector('textarea').focus()">Edit</button>
         </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
         {# Under the text, once it has been read: was it the one? Only where
@@ -225,7 +225,7 @@
           </ul>
           {% if let Some(aid) = d.condensed %}
           <form method="post" action="/ui/ops/condensations/{{ aid }}/undo">
-            <button type="submit" class="quiet-link">restore the last version</button>
+            <button type="submit" class="quiet-link">Restore the last version</button>
           </form>
           {% endif %}
         </details>
@@ -269,7 +269,7 @@
             <button class="btn btn-ghost btn-sm" type="button"
                     onclick="var f=this.closest('form');f.style.display='none';
                              f.parentElement.querySelector('.card-head button').style.display=''">
-              cancel
+              Cancel
             </button>
           </div>
         </form>

@@ -270,6 +270,13 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
 
 /// A corpus title with no model: the first heading, else the first non-empty
 /// line, cut to `TITLE_MAX` characters. `None` for whitespace.
+///
+/// Cut at a word, through the same `truncate_at_word` every other shortened
+/// label goes through. This used to be `chars().take(TITLE_MAX)`, which is the
+/// hard cut that function exists to replace — and because a derived title is
+/// stored as `title_hint` and then displayed verbatim, it is the one that
+/// reached the screen: the Recent list and the day page carried names ending
+/// "the registrar does not au" with nothing to say they had been shortened.
 pub fn derive_title(raw_text: &str) -> Option<String> {
     let line = raw_text
         .lines()
@@ -285,7 +292,7 @@ pub fn derive_title(raw_text: &str) -> Option<String> {
     if line.is_empty() {
         return None;
     }
-    Some(line.chars().take(TITLE_MAX).collect())
+    Some(crate::web::markdown::truncate_at_word(&line, TITLE_MAX))
 }
 
 #[cfg(test)]
@@ -400,8 +407,21 @@ mod tests {
             derive_title("plain first line\nsecond").as_deref(),
             Some("plain first line")
         );
+        // One unbroken token has no word to break at, so it takes the hard cut
+        // — plus the ellipsis, which is what says it was cut at all.
         let long = "x".repeat(200);
-        assert_eq!(derive_title(&long).unwrap().chars().count(), TITLE_MAX);
+        let cut = derive_title(&long).unwrap();
+        assert_eq!(cut.chars().count(), TITLE_MAX + 1);
+        assert!(cut.ends_with('…'), "{cut}");
+        // Ordinary prose breaks at a space instead. This is the case the old
+        // `chars().take` got wrong, and the one that reached the screen.
+        let prose = "Remind me to renew the domain before 14 November 2026. \
+                     The registrar does not auto-renew because the card expired.";
+        let cut = derive_title(prose).unwrap();
+        assert_eq!(
+            cut,
+            "Remind me to renew the domain before 14 November 2026. The registrar does not…"
+        );
         assert_eq!(derive_title("   \n\t\n"), None);
         assert_eq!(heading_title("###   Deep heading  "), "Deep heading");
         // A link is its words, an empty one is nothing, and runs of spaces are

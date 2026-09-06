@@ -3,11 +3,11 @@
 //! button. No model call anywhere on this page.
 
 use crate::core::moments::{DEFAULT_HOUR, zone};
-use crate::error::Result;
 use crate::store::moments::DueRow;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path};
@@ -285,7 +285,7 @@ async fn render(
     since: i64,
     all: bool,
     head: bool,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let tz = zone(Some(tz_name));
     // The zone as the zone table spells it, never as the form spelled it. It
     // is echoed back into the fragment's `hx-vals` JSON, and Askama's escaping
@@ -381,11 +381,11 @@ async fn render(
     .into_response())
 }
 
-async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
+async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> UiResult<Response> {
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
-async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> UiResult<Response> {
     // Only where something was finished. A press that changed nothing — a
     // second click, a button on a page open since a re-read replaced the row —
     // reported "Done" and offered to undo a completion that never happened.
@@ -397,7 +397,11 @@ async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> 
     render(&tenant, &f.tz, just, f.since, f.all == "1", f.head == "1").await
 }
 
-async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn undone(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<TzForm>,
+) -> UiResult<Response> {
     tenant.core.uncomplete_moment(&id).await?;
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
@@ -438,7 +442,11 @@ fn local(at: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
     crate::core::moments::resolve_local(at, tz)
 }
 
-async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn snooze(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<TzForm>,
+) -> UiResult<Response> {
     let mut just = None;
     if let Some(until) = snooze_until(&f.until, tenant.core.clock.now(), zone(Some(&f.tz)))
         && tenant.core.store.snooze(&id, until).await?
@@ -453,7 +461,7 @@ async fn unsnooze(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.store.unsnooze(&id).await?;
     tenant.core.store.rearm_remind().await?;
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
@@ -470,7 +478,7 @@ async fn set_date(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let tz = zone(Some(&f.tz));
     let at = chrono::NaiveDateTime::parse_from_str(&f.when, "%Y-%m-%dT%H:%M")
         .ok()
@@ -496,7 +504,7 @@ async fn not_a_reminder(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let Some(m) = tenant.core.store.moment(&id).await? else {
         return render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await;
     };
@@ -540,7 +548,7 @@ async fn is_a_reminder(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.set_reminder(&id, true).await?;
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
@@ -952,7 +960,7 @@ mod tests {
         )
         .await;
         assert!(
-            band.contains("not a reminder"),
+            band.contains("Not a reminder"),
             "the band offers it on a row it read: {band}"
         );
 
@@ -1105,7 +1113,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(!band.contains("not a reminder"), "{band}");
+        assert!(!band.contains("Not a reminder"), "{band}");
     }
 
     #[tokio::test]
@@ -1579,7 +1587,7 @@ mod tests {
             BAND_ROWS + 4,
             "everything, once asked: {html}"
         );
-        assert!(html.contains("show less"));
+        assert!(html.contains("Show less"));
         assert!(
             html.contains(r#""all": "1""#),
             "the poll asks the same question again: {html}"
@@ -1601,7 +1609,7 @@ mod tests {
             !html.contains("show all"),
             "nothing is being held back: {html}"
         );
-        assert!(!html.contains("show less"));
+        assert!(!html.contains("Show less"));
     }
 
     #[tokio::test]
@@ -1620,7 +1628,7 @@ mod tests {
             "snooze and move are behind a disclosure: {html}"
         );
         assert!(html.contains("<summary>later</summary>"));
-        assert!(html.contains(">done<"), "and done is the one visible verb");
+        assert!(html.contains(">Done<"), "and Done is the one visible verb");
     }
 
     #[tokio::test]
@@ -1638,7 +1646,7 @@ mod tests {
             !html.contains("due-later"),
             "asking for the date is the whole point of the row"
         );
-        assert!(html.contains("set date"));
+        assert!(html.contains("Set date"));
     }
 
     #[tokio::test]

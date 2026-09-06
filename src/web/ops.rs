@@ -17,6 +17,7 @@ use crate::web::artifact::{ArtifactDetailFragment, ArtifactViewParams, build_art
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
 use crate::web::ui::title_of;
+use crate::web::ui_error::UiResult;
 use axum::Router;
 use axum::extract::{Form, Path, Query};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -55,7 +56,7 @@ async fn resolve_near_dupe_ui(
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(form): Form<ResolveForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant
         .core
         .resolve_near_duplicate(&cid, form.action)
@@ -106,7 +107,7 @@ async fn artifact_changed(
     aid: &str,
     terms: &str,
     back: &ReturnTo,
-) -> Result<Response> {
+) -> UiResult<Response> {
     if headers.contains_key("hx-request") {
         // As above: an action on the artifact redraws the pane at its opening
         // length rather than reconstructing a run nobody passed along.
@@ -122,7 +123,7 @@ async fn unsupersede_ui(
     Path(aid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.unsupersede(&aid).await?;
     tenant
         .core
@@ -141,7 +142,7 @@ async fn dismiss_pair_ui(
     tenant: Tenant,
     Path(pid): Path<i64>,
     Form(back): Form<ReturnTo>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant
         .core
         .store
@@ -173,7 +174,7 @@ async fn discard_pair_ui(
     tenant: Tenant,
     Path(pid): Path<i64>,
     Form(back): Form<ReturnTo>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let pair = tenant.core.store.get_pair(pid).await?;
     let detail = pair.detail.clone();
     crate::jobs::dedupe::discard_both(
@@ -215,7 +216,7 @@ async fn apply_pair_supersede_ui(
     tenant: Tenant,
     Path(pid): Path<i64>,
     Form(f): Form<KeepForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let pair = tenant.core.store.get_pair(pid).await?;
     // The winner has to be one of this pair's own artifacts. A form field is
     // user input, and superseding an arbitrary id because it arrived in a POST
@@ -227,7 +228,8 @@ async fn apply_pair_supersede_ui(
         Some(_) => {
             return Err(crate::error::Error::Validation(
                 "the artifact to keep is not part of this pair".into(),
-            ));
+            )
+            .into());
         }
         None => pair
             .obsolete_id
@@ -262,7 +264,7 @@ async fn deprecate_ui(
     Path(aid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.deprecate(&aid).await?;
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
@@ -273,7 +275,7 @@ async fn reactivate_ui(
     Path(aid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.reactivate(&aid).await?;
     // Whichever of the two hid it stamps; the other stamps nothing.
     for kind in [
@@ -300,12 +302,12 @@ async fn verify_ui(
     Path(aid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.verify(&aid).await?;
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
-async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> Result<Response> {
+async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Response> {
     use crate::store::actions::UndoneBy;
     crate::jobs::merge::undo(&tenant.core, &aid, crate::store::pairs::DecidedBy::Operator).await?;
     tenant
@@ -321,7 +323,7 @@ async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> Result<Respon
 /// Put the version a condensation retired back. One button per open
 /// condensation on the artifact's page; the base's own undo is the same
 /// method with `UndoneBy::Evidence`.
-async fn uncondense_ui(tenant: Tenant, Path(aid): Path<String>) -> Result<Response> {
+async fn uncondense_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Response> {
     tenant
         .core
         .uncondense(&aid, crate::store::actions::UndoneBy::Operator)

@@ -19,6 +19,7 @@ use crate::web::state::AppState;
 use crate::web::ui::{
     ArtifactView, artifact_html, artifact_title, artifact_view, ends_mid_sentence, title_of,
 };
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query};
@@ -171,6 +172,19 @@ pub(crate) struct ArtifactDetailFragment {
 #[template(path = "artifact_detail.html")]
 struct ArtifactDetailPage {
     d: ArtifactDetail,
+}
+
+impl ArtifactDetailPage {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    ///
+    /// One result, opened out of the rail — still the search half of the app.
+    fn section(&self) -> &'static str {
+        "search"
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -495,7 +509,7 @@ async fn artifact_detail(
     headers: axum::http::HeaderMap,
     Path(cid): Path<String>,
     Query(p): Query<ArtifactViewParams>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let mut d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
     // Opened from the rail, which named the search that listed it. Stamped
     // here rather than looked up: the id is on the link, so this open is
@@ -572,9 +586,9 @@ async fn put_artifact(
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(f): Form<ArtifactEditForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     if f.text.trim().is_empty() {
-        return Err(Error::Validation("chunk text is empty".into()));
+        return Err(Error::Validation("chunk text is empty".into()).into());
     }
     tenant
         .core
@@ -622,7 +636,7 @@ async fn delete_artifact_ui(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let corpus_id = tenant.core.store.get_artifact(&aid).await?.corpus_id;
     tenant.core.delete_artifact(&aid).await?;
     if headers.contains_key("hx-request") {
@@ -651,7 +665,7 @@ async fn artifact_dwell(
     tenant: Tenant,
     Path(aid): Path<String>,
     Form(f): Form<DwellForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant
         .core
         .record_dwell(&aid, f.secs, Some(&tenant.user.subject));
@@ -666,7 +680,7 @@ async fn artifact_dwell(
 async fn dismiss_link(
     tenant: Tenant,
     Path((artifact_id, other_id)): Path<(String, String)>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant
         .core
         .store
@@ -679,7 +693,7 @@ async fn dismiss_link(
 
 /// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
 /// beside its source lines and decided the warning was noise.
-async fn mark_artifact_reviewed(tenant: Tenant, Path(cid): Path<String>) -> Result<Response> {
+async fn mark_artifact_reviewed(tenant: Tenant, Path(cid): Path<String>) -> UiResult<Response> {
     // For an orphaned merge, "reviewed" means accepted as a merge of what
     // remains — recorded on source_count, or the next sweep re-flags it and
     // the operator's judgement lasts one tick.
@@ -2204,12 +2218,13 @@ mod tests {
         assert!(detail.contains("why was this asked"), "{detail}");
 
         let ops = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(ops.contains("Generated"), "{ops}");
+        // One queue now, and the row says what put it there. See `QueueRow`.
+        assert!(ops.contains(">generated<"), "{ops}");
         assert!(
             ops.contains(&format!("/ui/ops/artifacts/{}/deprecate", g.id)),
             "{ops}"
         );
-        assert!(ops.contains("Pursuits"), "{ops}");
+        assert!(ops.contains("of searches went quiet"), "{ops}");
 
         let rail = get_body(
             &app,
@@ -2397,7 +2412,7 @@ mod tests {
         let res = app.clone().oneshot(verdict("hit")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let bar = body_of(res).await;
-        assert!(bar.contains("undo"), "{bar}");
+        assert!(bar.contains("Undo"), "{bar}");
         let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.hits, s.pending), (1, 0), "{s:?}");
 

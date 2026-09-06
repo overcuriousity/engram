@@ -26,6 +26,50 @@
 .regions-table table.grid > thead,
 .regions-table table.grid > tbody { display: table; width: 100%; }
 
+/* ── Set aside for you ───────────────────────────────────────────────────── */
+
+/* One table where seven were, so the columns are now shared by rows that mean
+   quite different things. Two things make that readable: the reason column is
+   wide enough for a sentence, and the buttons stack rather than forcing the
+   row's height onto the three-button park decision. */
+.regions-table table.set-aside td:nth-child(2) { width: 34%; }
+.regions-table table.set-aside td { vertical-align: top; }
+.set-aside .badge { margin-bottom: 0.25rem; }
+.set-aside-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+
+/* On a phone, rows rather than a table. Four columns across 390px gave the
+   first one about sixty pixels and broke every title one word to a line —
+   which is what `.qrow` two sections down already exists to avoid, for the
+   same reason. No column headings once it stacks: the badge on each row is
+   the heading, which is the whole point of having folded the seven tables
+   into one. 40rem is the same breakpoint the phone sheet uses. */
+@media (width <= 40rem) {
+  .regions-table table.set-aside > thead { display: none; }
+  .regions-table table.set-aside > tbody { display: block; width: 100%; }
+  .regions-table table.set-aside tr {
+    display: block; padding: 0.75rem 0;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+  .regions-table table.set-aside tr:last-child { border-bottom: none; }
+  /* Beats `table.grid td:last-child { width: 1%; white-space: nowrap }`, which
+     is what holds a control column to its button on a wide screen. */
+  .regions-table table.set-aside td,
+  .regions-table table.set-aside td:first-child,
+  .regions-table table.set-aside td:nth-child(2),
+  .regions-table table.set-aside td:last-child {
+    display: block; width: auto; white-space: normal; padding: 0.125rem 0;
+    border: none;
+  }
+  .regions-table table.set-aside td:last-child { padding-top: 0.5rem; }
+  /* An empty cell is a blank line once the row is a stack. */
+  .regions-table table.set-aside td:empty { display: none; }
+}
+
+/* A heading with one link after it, on the same line and at the size of the
+   text rather than the heading. */
+.head-aside { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+.head-aside .quiet-link { font-size: var(--text-sm); font-weight: 400; }
+
 /* Capture: what is queued, and what is waiting on a person. */
 
 /* ── The capture queue ───────────────────────────────────────────────────── */
@@ -203,10 +247,25 @@
 @container shell (width <= 60rem) {
   .decide-sides { grid-template-columns: 1fr; }
 }
-/* The holes, grouped and named by the sweep. */
-.gaps details { margin: 0.25rem 0; }
-.gaps summary { cursor: pointer; }
-.gap li { gap: 0.5rem; align-items: baseline; margin: 0.25rem 0; flex-wrap: wrap; }
+/* The holes, grouped and named by the sweep: a label, the box that fills one,
+   and the word that drops it.
+
+   The selector was `.gap li`, which matches an `li` *inside* something with
+   class `gap` — and the `li` *is* the `.gap`. Nothing here applied, so the row
+   rendered as a plain bulleted list item with the textarea stretched across
+   the whole column and `Forget` pushed onto a line of its own. Two rules for
+   `details`/`summary` sat above it, left from the per-member list the fragment
+   stopped rendering. */
+.gaps { list-style: none; padding: 0; margin: 0.5rem 0 0; }
+li.gap {
+  display: flex; flex-wrap: wrap; gap: 0.5rem;
+  align-items: baseline; margin: 0.5rem 0;
+}
+/* The question keeps its own width; the box beside it takes what is left, up
+   to a measure — a one-line answer does not want the whole column. */
+li.gap .gap-label { flex: 0 0 auto; }
+li.gap .row { flex: 1 1 20rem; max-width: 34rem; }
+li.gap .row .input { min-width: 0; }
 
 /* ── What this memory is like ─────────────────────────────────────────────── */
 

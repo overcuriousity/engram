@@ -410,6 +410,28 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
 /// `accept_language` is the raw header. Only the primary subtag of the first
 /// entry is read: `de-DE,de;q=0.9,en;q=0.8` is a reader who wants German, and
 /// weighing the rest to discover that is arithmetic for nothing.
+/// Which language the examples above came back in.
+///
+/// The pair is the classifier's own prototypes in the reader's language, and
+/// the page around them is English — so a German browser reads an English
+/// interface with two German sentences quoted in it. That is correct, because
+/// those are the words that base would actually be written in; what was wrong
+/// is that nothing in the markup said the language had changed, which is what
+/// a screen reader needs in order not to read German aloud in an English
+/// voice. Returned separately rather than folded into `examples_for`, whose
+/// two-element shape several tests are written against.
+///
+/// The answer is the language actually used, so a subtag with no prototypes
+/// reports the `en` it fell back to rather than the one that was asked for.
+pub fn examples_lang_for(accept_language: &str) -> &'static str {
+    let want = crate::infer::lang::primary_subtag(accept_language);
+    PROTOTYPES
+        .iter()
+        .find(|(i, l, _)| *i == Intent::Remind && *l == want)
+        .map(|(_, l, _)| *l)
+        .unwrap_or("en")
+}
+
 pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
     // The same reading `infer::lang` gives the header, and deliberately the
     // same one: the examples this table teaches and the language the

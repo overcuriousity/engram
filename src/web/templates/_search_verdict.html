@@ -24,6 +24,6 @@
   {% else %}
     <span class="muted">{% if state == "hit" %}yes, this was it{% else %}not this one{% endif %}</span>
     <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
-            hx-vals='{"verdict":"none","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">undo</button>
+            hx-vals='{"verdict":"none","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">Undo</button>
   {% endif %}
 </div>

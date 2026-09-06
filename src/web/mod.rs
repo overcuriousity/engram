@@ -19,6 +19,7 @@ pub mod tenant;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ui;
+pub mod ui_error;
 pub mod vbg;
 pub mod workspace;
 

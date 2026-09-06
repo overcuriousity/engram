@@ -198,7 +198,6 @@ body { overflow-x: hidden; }
 }
 .flag b { color: var(--color-warning); }
 
-.crumb { font-size: var(--text-sm); color: var(--color-fg-muted); margin-bottom: 0.75rem; }
 
 
 /* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
@@ -359,15 +358,26 @@ body { overflow-x: hidden; }
    has a dismiss button to place. */
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
 .rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
+/* A passage has no title by design, so this row's head is a badge and nothing
+   else — and at the head's full height it spent a whole line on one chip
+   before the snippet started, which made an untitled card a different shape
+   from a titled one down the same list. Marked by the template rather than
+   guessed at with `:has()`, because the template is what knows. */
+.rail-head-bare { margin-bottom: -0.125rem; }
 .rail-rank { font-size: var(--text-xs); color: var(--color-fg-muted); }
 .rail-title { font-weight: 600; font-size: var(--text-base); }
 /* A passage with no heading of its own is shown under its note's title. The
-   name is borrowed, not earned, so it is said quietly and marked: a `·` in
-   front of it, and the weight of the surrounding text rather than a title's.
-   Without this the borrowed name rendered identical to a real heading and the
-   distinction lived only in the tooltip, where nobody scanning a list looks. */
+   name is borrowed, not earned, so it is said quietly and marked, and the
+   weight is the surrounding text's rather than a title's. Without this the
+   borrowed name rendered identical to a real heading and the distinction lived
+   only in the tooltip, where nobody scanning a list looks.
+
+   The mark used to be a bare `·`. On the row it read as a separator with its
+   left-hand side missing, and the only thing that said otherwise was that
+   tooltip — which is to say nothing at all on the phone this is mostly read
+   on. A word does the marking now and needs no explaining. */
 .rail-title-corpus { font-weight: 400; color: var(--color-fg-secondary); }
-.rail-title-corpus::before { content: "· "; color: var(--color-fg-muted); }
+.rail-title-corpus::before { content: "from "; color: var(--color-fg-muted); }
 /* Two lines at most, and a floor under it: an artifact whose excerpt came back
    empty collapsed to a bare title, so card heights swung between one line and
    four down a list that is read by scanning. */
@@ -1133,6 +1143,15 @@ body { overflow-x: hidden; }
    column rather than as four bands across the page. */
 #idle { max-width: 46rem; }
 
+/* And the box itself, while it is idle. `#idle` above is one measure because
+   short lines under a full-bleed box read as bands rather than as a column —
+   but the box was the widest band of all: at 1440px the workspace opened on a
+   1408px textarea above a 736px column, with 670px of nothing to the right of
+   everything the page had to say. It takes the same measure while there is
+   nothing beside it to line up with, and takes the width back on the first
+   keystroke, when the rail and the pane arrive under it and need it. */
+html:not(.typing) .regions-rail-focus-source .region-bar { max-width: 46rem; }
+
 /* The closing line, and the only place an idle page says what the base holds.
    It replaced a block of counts and a list of five captures in the rail — the
    same five the middle column was already rendering in another shape. */
@@ -1155,6 +1174,24 @@ body { overflow-x: hidden; }
 .kind-row[hidden] { display: none; }
 
 /* ── The guidance line, and what the box says back ───────────────────────── */
+
+/* The row reads "All · concept · procedure": the first is written into the
+   template and the rest come off the artifacts' own `category`, which is
+   stored lower-case. One capitalised chip beside three that are not is the
+   sort of thing that reads as a bug in the data. Presentation, so nothing is
+   guessed at in Rust and the stored value is untouched. */
+#kind-chips .chip > span { text-transform: capitalize; }
+
+/* The hint is what an idle box says for itself: two example phrasings and a
+   sentence about pasting. It goes with the first keystroke, like the rest of
+   the idle column — the template calls it "the only guidance an idle page
+   carries", and a page with a query typed and ten results under it is not an
+   idle page.
+
+   This rule lived in the phone stylesheet, so only a phone did it. On every
+   other screen "Try 'remind me to send the invoice on friday'" stood above the
+   results for as long as the search did. */
+html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
 
 /* An example reads as a quotation you can press, not as a button. Three
    buttons in a sentence would make the sentence a toolbar. */

@@ -1,5 +1,5 @@
 <div class="card" id="artifact-{{ c.id }}">
-  <div class="card-head">
+  <div class="card-head{% if c.title.is_empty() %} card-head-bare{% endif %}">
     {# A passage card has no title: its first line is its body, and printed as
        both the card said everything twice. See `artifact_view`. #}
     {% if !c.title.is_empty() %}<span class="card-title">{{ c.title }}</span>{% endif %}
@@ -9,7 +9,7 @@
   <div class="chips">
     <button class="btn btn-ghost btn-sm"
             onclick="document.getElementById('edit-{{ c.id }}').style.display='block';this.style.display='none'">
-      edit
+      Edit
     </button>
     {# This page could delete the whole source but not one artifact out of it.
        Swaps its own card away and leaves the rest of the list alone. #}

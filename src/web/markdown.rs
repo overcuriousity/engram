@@ -70,7 +70,7 @@ pub fn snippet(markdown: &str, max_chars: usize) -> String {
 /// is no space to fall back to — one unbroken 200-character token is still
 /// better shortened than shown whole — and refuses a break so early that a
 /// single word would stand for a whole passage.
-fn truncate_at_word(text: &str, max_chars: usize) -> String {
+pub fn truncate_at_word(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }

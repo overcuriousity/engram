@@ -6,9 +6,9 @@
    an entry *into this day*, whenever it is written: `metadata.day` says which
    day, `created_at` says when. #}
 <nav class="day-nav">
-  <a href="/ui/day/{{ prev }}?tz={{ tz }}">‹ {{ prev }}</a>
+  <a href="/ui/day/{{ prev }}?tz={{ tz }}">‹ {{ prev_label }}</a>
   <h1>{{ heading }}</h1>
-  <a href="/ui/day/{{ next }}?tz={{ tz }}">{{ next }} ›</a>
+  <a href="/ui/day/{{ next }}?tz={{ tz }}">{{ next_label }} ›</a>
 </nav>
 <form class="day-entry" method="post" action="/ui/day/{{ date }}/entry">
   <input type="hidden" name="tz" value="{{ tz }}">
@@ -24,7 +24,7 @@
 <article class="day-line">
   <span class="mono muted">{{ e.when }}</span>
   <form method="post" action="/ui/corpora/{{ e.id }}/entry" class="inline"><input type="hidden" name="on" value="0">
-    <button class="btn btn-ghost btn-sm" type="submit" title="File it with the day's captures instead">not an entry</button></form>
+    <button class="btn btn-ghost btn-sm" type="submit" title="File it with the day's captures instead">Not an entry</button></form>
   <div class="day-text">{{ e.detail }}</div>
 </article>
 {% endfor %}
@@ -37,7 +37,7 @@
    it. `.day-line` is `display: flex` and says nothing about the tag. #}
 <div class="day-line"><span class="mono muted">{{ c.when }}</span> <a href="{{ c.href }}">{{ c.label }}</a>
   <form method="post" action="/ui/corpora/{{ c.id }}/entry" class="inline"><input type="hidden" name="on" value="1">
-    <button class="btn btn-ghost btn-sm" type="submit">make it an entry</button></form></div>
+    <button class="btn btn-ghost btn-sm" type="submit">Make it an entry</button></form></div>
 {% endfor %}
 {% endif %}
 {% if !was_due.is_empty() %}

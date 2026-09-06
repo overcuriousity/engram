@@ -43,7 +43,7 @@
   <div class="chips">
     <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ id }}/keep"
             hx-target="closest .chips" hx-swap="outerHTML"
-            title="Store this answer as a source, with the question and the artifacts it was written from">keep this answer</button>
+            title="Store this answer as a source, with the question and the artifacts it was written from">Keep this answer</button>
     <a class="btn btn-ghost btn-sm" href="/ui/capture?from_ask={{ id }}"
        title="Open this answer in the capture box instead, to edit before it is stored">edit first</a>
   </div>
@@ -61,7 +61,7 @@
     {% if let Some(id) = event_id %}
     <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ id }}/carried"
             hx-vals='{"n":{{ loop.index }}}' hx-swap="outerHTML"
-            title="This excerpt carried the answer">carried the answer</button>
+            title="This excerpt carried the answer">Carried the answer</button>
     {% endif %}
     <a class="btn btn-ghost btn-sm" href="/ui/corpora/{{ r.corpus_id }}">source</a>
   </div>

@@ -4,11 +4,12 @@
 
 use crate::core::ingest::{Capture, ORIGIN_JOURNAL};
 use crate::core::moments::zone;
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::store::moments::Kind;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query};
@@ -65,6 +66,12 @@ pub(crate) struct DayTemplate {
     pub date: String,
     pub prev: String,
     pub next: String,
+    /// What the two arrows say out loud. The heading beside them is
+    /// "Sunday, 6 September 2026" and the arrows were `2026-09-05` and
+    /// `2026-09-07` — three dates in one row, written two ways. Short, because
+    /// they sit either side of the heading and are a step rather than a date.
+    pub prev_label: String,
+    pub next_label: String,
     pub tz: String,
     pub heading: String,
     pub entries: Vec<Line>,
@@ -72,6 +79,17 @@ pub(crate) struct DayTemplate {
     pub was_due: Vec<Line>,
     pub refers: Vec<Line>,
     pub sittings: Vec<Sitting>,
+}
+
+impl DayTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    fn section(&self) -> &'static str {
+        ""
+    }
 }
 
 impl DayTemplate {
@@ -114,7 +132,7 @@ fn hm(at: i64, tz: Tz) -> String {
         .unwrap_or_default()
 }
 
-async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> Result<Response> {
+async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> UiResult<Response> {
     let tz = zone(Some(&q.tz));
     let d = tz
         .timestamp_opt(tenant.core.clock.now(), 0)
@@ -133,9 +151,9 @@ async fn page(
     tenant: Tenant,
     Path(date): Path<String>,
     Query(q): Query<TzQuery>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     };
     // Round-tripped through the parse, the way `entry` does it and for the
     // same reason: chrono reads `%Y-%m-%d` leniently, so `/ui/day/2026-8-30`
@@ -151,7 +169,7 @@ async fn page(
     // hidden field, and `due.rs::render` normalises for the same reason.
     let tz_name = tz.name().to_string();
     let Some((from, to)) = bounds(day, tz) else {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     };
     let store = &tenant.core.store;
 
@@ -237,6 +255,16 @@ async fn page(
             .unwrap_or(day)
             .format("%Y-%m-%d")
             .to_string(),
+        prev_label: day
+            .checked_sub_signed(chrono::Duration::days(1))
+            .unwrap_or(day)
+            .format("%a %-d %b")
+            .to_string(),
+        next_label: day
+            .checked_add_signed(chrono::Duration::days(1))
+            .unwrap_or(day)
+            .format("%a %-d %b")
+            .to_string(),
         heading: day.format("%A, %-d %B %Y").to_string(),
         date,
         tz: tz_name,
@@ -254,7 +282,7 @@ async fn entry(
     Path(date): Path<String>,
     headers: HeaderMap,
     Form(f): Form<EntryForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // The date is a date, exactly as `page` demands — and for both of the
     // reasons `page` has plus one of its own. Unchecked, `POST
     // /ui/day/garbage/entry` stored a capture carrying `metadata.day =
@@ -264,7 +292,7 @@ async fn entry(
     // written — which is the failure the comment just below says was fixed for
     // the zone, arriving through the other half of the same URL.
     let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     };
     // Round-tripped through the parse, so what goes into the header and into
     // `metadata.day` is the canonical spelling and not whatever spelled it.
@@ -296,7 +324,7 @@ async fn set_entry(
     Path(id): Path<String>,
     headers: HeaderMap,
     Form(f): Form<OnForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.set_entry(&id, f.on == "1").await?;
     let back = headers
         .get("referer")

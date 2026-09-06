@@ -1,6 +1,11 @@
 {% extends "layout.html" %}
-{% block title %}Source — engram{% endblock %}
+{% block title %}{{ title }} — engram{% endblock %}
 {% block content %}
+{# The page said nothing about which capture it was: a status chip, two
+   buttons, and a browser tab reading "Source" for every source there is.
+   The same label Recent and the day page use, so one capture has one
+   name wherever it is named. #}
+<h1>{{ title }}</h1>
 <div class="row" style="margin-bottom:1rem">
   <span class="badge {{ badge }}">{{ status }}</span>
   <span class="spacer"></span>
@@ -151,7 +156,7 @@
 {# The lines below are the model's reading of the photo, and the page has to
    keep saying so: banded beside the artifacts drawn from them they would
    otherwise read as captured source. #}
-<h3>Transcription</h3>
+<h2>Transcription</h2>
 <p class="muted">The model's reading of the photo, not the source itself.</p>
 {% endif %}
 {% if !promoted.is_empty() %}
@@ -165,7 +170,7 @@
   {% for w in promoted %}
   <form method="post" action="/ui/corpora/{{ id }}/segments/{{ w.idx }}/unpromote" style="display:inline">
     lines {{ w.from }}–{{ w.to }}
-    <button class="btn btn-ghost btn-sm" type="submit">undo</button>
+    <button class="btn btn-ghost btn-sm" type="submit">Undo</button>
   </form>
   {% endfor %}
 </div>
@@ -177,7 +182,7 @@
 {# Artifacts that name no lines of this capture. Banding has nowhere to put
    them, and rendering bands alone dropped them off the page entirely — off the
    only page that can edit or delete them. #}
-<h3>Not placed in the source</h3>
+<h2>Not placed in the source</h2>
 <p class="muted">
   {% if restored %}
   Restored from the vector store, so they name no lines of the text above —
@@ -198,7 +203,7 @@
 {# A merged or synthesized artifact belongs to every corpus it drew from — its
    origins are its roots' corpora, derived from lineage, never stored — and
    this capture is one of them. #}
-<h3>Written from this source</h3>
+<h2>Written from this source</h2>
 <p class="muted">
   Model-written artifacts with a source here. Each lists what it was written
   from on its own page.

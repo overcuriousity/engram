@@ -152,8 +152,14 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
    is not prose and has no measure — it is as wide as its columns need.
 
    Both start at the shell's left edge, and so does the rail. That is the whole
-   anchor: the inner grid is never centred, only the shell is. */
-.regions-focus { grid-template-columns: minmax(0, 68rem); }
+   anchor: the inner grid is never centred, only the shell is.
+
+   68rem was the number here, and it is a layout width rather than a measure:
+   at 1088px a 14px paragraph runs to about 155 characters a line, and the
+   settings and extension pages were both read at that. 46rem is the measure —
+   around 75 characters, the top of the comfortable range — so the region is
+   now as wide as the thing it is named for. */
+.regions-focus { grid-template-columns: minmax(0, 46rem); }
 .regions-focus > * { grid-column: 1 / -1; }
 .regions-table { grid-template-columns: minmax(0, 1fr); }
 /* One column, centred in the window rather than anchored to its left edge.

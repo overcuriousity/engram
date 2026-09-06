@@ -19,10 +19,17 @@
    before pasting their own notes onto a server is whose base this is. #}
 <p id="box-hint" class="muted hint"{% if oob %} hx-swap-oob="true"{% endif %}>
   {%- if held -%}
+  {# `lang` on each, because these two are the only part of the page that is
+     not English. On a browser asking for German the interface stays English
+     and these come back in German — correctly, since they are the words that
+     base would be written in — and without the attribute a screen reader read
+     them aloud in the page's voice. See `moments::examples_lang_for`. #}
   Try
-  <button type="button" class="chip-example" data-example="{{ example_remind }}">&ldquo;{{ example_remind }}&rdquo;</button>
+  <button type="button" class="chip-example" lang="{{ example_lang }}"
+          data-example="{{ example_remind }}">&ldquo;{{ example_remind }}&rdquo;</button>
   or
-  <button type="button" class="chip-example" data-example="{{ example_journal }}">&ldquo;{{ example_journal }}&rdquo;</button>
+  <button type="button" class="chip-example" lang="{{ example_lang }}"
+          data-example="{{ example_journal }}">&ldquo;{{ example_journal }}&rdquo;</button>
   &mdash; or paste a whole paragraph; a sentence finds more than keywords do.
   {%- else -%}
   Paste anything worth keeping &mdash; a note, an article, a chunk of a chat.

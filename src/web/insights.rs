@@ -26,6 +26,7 @@ use crate::web::markdown;
 use crate::web::state::AppState;
 use crate::web::tenant::CanJudge;
 use crate::web::ui::{SourceRow, row_subtitle, source_rows, sweep_label, tally_sweep, title_of};
+use crate::web::ui_error::UiResult;
 
 /// The retrieval measure, flattened for the template.
 ///
@@ -188,35 +189,17 @@ struct InsightsTemplate {
     artifact_count: i64,
     vector_count: u64,
     retrying: Vec<RetryingRow>,
-    parked: Vec<ParkedRow>,
-    superseded: Vec<SupersededRow>,
-    /// Artifacts the dedupe pass wrote out of several others, with what they
-    /// were written from and an undo.
-    merged: Vec<MergedRow>,
-    /// The list is capped; there are rows this page is not showing. Said out
-    /// loud, because a table that stops without saying so reads as a table of
-    /// everything there is.
-    more_merged: bool,
-    more_superseded: bool,
-    more_deprecated: bool,
-    more_reaped: bool,
-    reaped: Vec<GraveRow>,
-    /// `TABLE_CAP`, so the line that says how many rows are showing says the
-    /// number the code actually truncated to. Written out twice in the
-    /// template, it drifted from the constant the first time either moved.
-    table_cap: i64,
-    /// `DEPRECATED_CAP`, for the same reason and for the one table that does
-    /// not share `TABLE_CAP`.
-    deprecated_cap: i64,
-    deprecated: Vec<DeprecatedRow>,
-    stale: Vec<StaleRow>,
+    /// Everything the base has set aside, in one list. See [`QueueRow`] for
+    /// what this replaced and why.
+    queue: Vec<QueueRow>,
+    /// Any of the reads behind the queue hit its cap, so there are rows this
+    /// page is not showing. Said out loud, because a list that stops without
+    /// saying so reads as a list of everything there is.
+    queue_capped: bool,
     /// `None` when nothing is being learned, which renders nothing at all: a
     /// count of links on a base that records no searches is a line about a
     /// feature that is switched off.
     links: Option<crate::store::links::LinkCounts>,
-    /// Artifacts written from pursuits, newest first, each one click from
-    /// deprecated.
-    generated: Vec<GeneratedRow>,
     /// Recent pursuits, only when the feature is on. A count and not a table:
     /// a pursuit that ended unsatisfied is a hole in the base and belongs on
     /// the one list of those, not on a second list of its own; one that ended
@@ -243,6 +226,17 @@ struct InsightsTemplate {
     offer_rates: Vec<crate::store::pursuits::OfferRate>,
 }
 
+impl InsightsTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    fn section(&self) -> &'static str {
+        "insights"
+    }
+}
+
 /// One generated artifact on Ops.
 pub(crate) struct GeneratedRow {
     id: String,
@@ -264,7 +258,63 @@ pub(crate) struct MergedRow {
     orphaned: bool,
 }
 
-async fn page(tenant: Tenant) -> Result<Response> {
+/// One thing the base has set aside for a person.
+///
+/// Seven tables stood here — Merged, Generated, Hidden as stale, Reaped, Worth
+/// a second look, Hidden as near-identical, and Captures waiting on a decision
+/// — each with a heading, a paragraph explaining its mechanism, and its own
+/// column layout. They were the same shape: a thing, why the base touched it,
+/// what it put beside it, and the button that takes it back. Seven paragraphs
+/// of that is a page about the machine's internal categories; one table with a
+/// reason on each row is a page about what is waiting.
+///
+/// The reads are unchanged — each source still runs its own query with its own
+/// cap — and this is the fold. `kind` is what the row is called; `why` is the
+/// sentence that used to be the section's paragraph, said per row because it
+/// differs per row.
+pub(crate) struct QueueRow {
+    href: String,
+    title: String,
+    /// What tells two rows with one title apart. Empty where nothing does.
+    subtitle: String,
+    /// The one-word name for what put this row here, as a badge.
+    kind: &'static str,
+    /// The sentence. Never a mechanism the reader has to already know: "written
+    /// from 3 others" rather than "the dedupe pass wrote this".
+    why: String,
+    /// What the base put beside it: the sources a merge came from, the artifact
+    /// a near-duplicate lost to, the capture a park collided with.
+    beside: Vec<crate::web::ui::SourceRow>,
+    /// A note under the row for the one thing that is not simply reversible.
+    caveat: Option<String>,
+    actions: Vec<QueueAction>,
+}
+
+/// One button on a queue row.
+pub(crate) struct QueueAction {
+    action: String,
+    label: &'static str,
+    /// The name/value pair the three-way park decision posts. Empty for every
+    /// other row, whose action is the whole of what it says.
+    field: Option<(&'static str, &'static str)>,
+    /// Why the button is there, for a pointer and for a screen reader. The
+    /// icons these replaced carried it in a `title`, which is nowhere on a
+    /// phone; the labels carry it now and this is the long form.
+    hint: &'static str,
+}
+
+impl QueueAction {
+    fn new(action: String, label: &'static str, hint: &'static str) -> Self {
+        Self {
+            action,
+            label,
+            field: None,
+            hint,
+        }
+    }
+}
+
+async fn page(tenant: Tenant) -> UiResult<Response> {
     use sqlx::Row;
 
     let (pairs, more_pairs) = crate::web::ops::pair_rows(&tenant).await?;
@@ -533,7 +583,7 @@ async fn page(tenant: Tenant) -> Result<Response> {
     reaped.truncate(DEPRECATED_CAP as usize);
 
     // Read-only candidates: nothing here has been changed, only listed.
-    let stale = tenant
+    let stale: Vec<StaleRow> = tenant
         .core
         .stale_candidates(50)
         .await
@@ -551,6 +601,187 @@ async fn page(tenant: Tenant) -> Result<Response> {
                 .unwrap_or_else(|| "never".to_string()),
         })
         .collect();
+
+    // Seven lists into one. Order is by how much the row wants a person:
+    // a parked capture is blocked until it is answered, an unverified artifact
+    // is a question, and the rest are the base's own work with the undo left
+    // where it can be found.
+    let queue_capped = more_merged || more_superseded || more_deprecated || more_reaped;
+    let mut queue: Vec<QueueRow> = Vec::new();
+    for p_ in parked {
+        queue.push(QueueRow {
+            href: format!("/ui/corpora/{}", p_.id),
+            title: p_.title,
+            subtitle: format!("{} B", p_.bytes),
+            kind: "parked",
+            why: format!("{}% the same as the capture beside it, so nothing has been spent on reading it yet", p_.percent),
+            beside: vec![crate::web::ui::SourceRow {
+                id: String::new(),
+                title: p_.other_title,
+                subtitle: String::new(),
+                corpus_id: p_.other_id,
+            }],
+            caveat: None,
+            actions: vec![
+                QueueAction {
+                    action: format!("/ui/ops/corpora/{}/resolve", p_.id),
+                    label: "Replace the old one",
+                    field: Some(("action", "replace")),
+                    hint: "Keep this capture and retire the one beside it",
+                },
+                QueueAction {
+                    action: format!("/ui/ops/corpora/{}/resolve", p_.id),
+                    label: "Keep both",
+                    field: Some(("action", "keep_both")),
+                    hint: "Read this one too; both stay in the base",
+                },
+                QueueAction {
+                    action: format!("/ui/ops/corpora/{}/resolve", p_.id),
+                    label: "Discard this",
+                    field: Some(("action", "discard")),
+                    hint: "Drop this capture and keep the one beside it",
+                },
+            ],
+        });
+    }
+    for s in stale {
+        queue.push(QueueRow {
+            href: format!("/ui/artifacts/{}", s.id),
+            title: s.title,
+            subtitle: String::new(),
+            kind: "unverified",
+            why: format!(
+                "last confirmed {}, and rarely reached since — nothing has been changed, and this never moves search",
+                s.last_verified
+            ),
+            beside: Vec::new(),
+            caveat: None,
+            actions: vec![
+                QueueAction::new(
+                    format!("/ui/ops/artifacts/{}/verify", s.id),
+                    "Still accurate",
+                    "Confirm this is still accurate — it resets the artifact's age, which search reads",
+                ),
+                QueueAction::new(
+                    format!("/ui/ops/artifacts/{}/deprecate", s.id),
+                    "Hide",
+                    "Hide from results — the artifact is kept, and this can be undone",
+                ),
+            ],
+        });
+    }
+    for m in merged {
+        let n = m.sources.len();
+        queue.push(QueueRow {
+            href: format!("/ui/artifacts/{}", m.id),
+            title: m.title,
+            subtitle: m.subtitle,
+            kind: "merged",
+            why: format!(
+                "written from {n} artifact{}, which are still stored — undoing brings them back and retires this",
+                if n == 1 { "" } else { "s" }
+            ),
+            beside: m.sources,
+            // Not data loss: the text still says what the deleted source said.
+            // It is a claim of provenance the artifact can no longer support.
+            caveat: m
+                .orphaned
+                .then(|| "a source has since been deleted".to_string()),
+            actions: vec![QueueAction::new(
+                format!("/ui/ops/merges/{}/undo", m.id),
+                "Undo",
+                "Put the sources back in results and retire this merge",
+            )],
+        });
+    }
+    for g in generated {
+        queue.push(QueueRow {
+            href: format!("/ui/artifacts/{}", g.id),
+            title: g.title,
+            subtitle: g.subtitle,
+            kind: "generated",
+            why: match g.cues.is_empty() {
+                true => "written after a run of searches the base could not answer".to_string(),
+                false => format!(
+                    "written after you asked {} — what it was written from stays in results beside it",
+                    g.cues
+                        .iter()
+                        .map(|c| format!("\u{201c}{c}\u{201d}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+            beside: g.sources,
+            caveat: None,
+            actions: vec![QueueAction::new(
+                format!("/ui/ops/artifacts/{}/deprecate", g.id),
+                "Hide",
+                "Take it out of results and keep it",
+            )],
+        });
+    }
+    for s in superseded {
+        queue.push(QueueRow {
+            href: format!("/ui/artifacts/{}", s.id),
+            title: s.title,
+            subtitle: s.subtitle,
+            kind: "hidden",
+            why: "near-identical to the one beside it, so it is kept out of results — still stored, still readable".to_string(),
+            beside: vec![crate::web::ui::SourceRow {
+                id: s.winner_id,
+                title: s.winner_title,
+                subtitle: String::new(),
+                corpus_id: String::new(),
+            }],
+            caveat: None,
+            actions: vec![QueueAction::new(
+                format!("/ui/ops/artifacts/{}/unsupersede", s.id),
+                "Undo",
+                "Return it to results",
+            )],
+        });
+    }
+    for d in deprecated {
+        queue.push(QueueRow {
+            href: format!("/ui/artifacts/{}", d.id),
+            title: d.title,
+            subtitle: String::new(),
+            kind: "hidden",
+            why: "flagged stale with no replacement named — search skips it and Ask does not read it, and it is still at its own link".to_string(),
+            beside: Vec::new(),
+            caveat: None,
+            actions: vec![QueueAction::new(
+                format!("/ui/ops/artifacts/{}/reactivate", d.id),
+                "Reactivate",
+                "Return it to results",
+            )],
+        });
+    }
+    for g in reaped {
+        queue.push(QueueRow {
+            href: format!("/ui/artifacts/{}", g.id),
+            title: g.title,
+            subtitle: String::new(),
+            kind: "buried",
+            why: match g.reason {
+                Some(r) => format!(
+                    "buried {} · {r} — out of search and out of the index, text kept",
+                    g.ago
+                ),
+                None => format!(
+                    "buried {} — out of search and out of the index, text kept",
+                    g.ago
+                ),
+            },
+            beside: Vec::new(),
+            caveat: None,
+            actions: vec![QueueAction::new(
+                format!("/ui/ops/artifacts/{}/reactivate", g.id),
+                "Restore",
+                "Return it to results and embed it again",
+            )],
+        });
+    }
 
     // The column, read live rather than off the tenant snapshot, for the
     // reason `web::tenant::CanJudge` gives at length: an open tenant outlives
@@ -594,18 +825,8 @@ async fn page(tenant: Tenant) -> Result<Response> {
         more_pairs,
         gaps,
         retrying,
-        parked,
-        superseded,
-        merged,
-        more_merged,
-        more_superseded,
-        more_deprecated,
-        more_reaped,
-        reaped,
-        table_cap: TABLE_CAP,
-        deprecated_cap: DEPRECATED_CAP,
-        deprecated,
-        stale,
+        queue,
+        queue_capped,
         job_counts: tenant.core.store.job_counts().await?,
         oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,
         artifact_count,
@@ -616,7 +837,6 @@ async fn page(tenant: Tenant) -> Result<Response> {
             true => Some(tenant.core.store.link_counts().await?),
             false => None,
         },
-        generated,
         pursuit_enabled,
         pursuit_recent,
         pursuit_unsatisfied,
@@ -864,8 +1084,17 @@ async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
 struct EvolveView {
     /// Why the loop is not moving, when it is not. Said before anything else.
     suspended: Option<String>,
-    /// The generation in force and its parameters.
+    /// The generation in force, and how long it has been.
     live: String,
+    /// Its parameters, as one line of `name value` pairs.
+    ///
+    /// It used to be the middle of `live`, which made that line
+    /// "live generation 247c9618 · recency 0.05, cap 3, pool ×3, half-life
+    /// 180d, lift 0, spread 3, rerank off, review 0.88 · since today" — a
+    /// parameter dump at body size, under no heading, between two sentences.
+    /// The identity and the age are what the line is for; the numbers are for
+    /// whoever came to read numbers, and they are folded.
+    params: String,
     /// Whether it is under watch and what it promised, or that autonomy is off,
     /// or that the base is free to propose.
     standing: String,
@@ -1051,11 +1280,11 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
         rules,
         suspended,
         live: format!(
-            "live generation {} · {} · since {}",
+            "Live generation {} · since {}",
             short(&live.id),
-            params_str(&live.params),
             ago(live.created_at)
         ),
+        params: params_str(&live.params),
         standing,
         rehearsed,
         history,
@@ -1065,7 +1294,7 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
 // ── Taking a recommendation live ────────────────────────────────────────────
 
 /// The tuning block, redrawn, with a line about what just happened.
-async fn tune_fragment(tenant: &Tenant, line: &str) -> Result<Response> {
+async fn tune_fragment(tenant: &Tenant, line: &str) -> UiResult<Response> {
     Ok(HtmlTemplate(TuneTemplate {
         tune: Some(tune_view(tenant, line).await?),
     })
@@ -1083,9 +1312,9 @@ async fn tune_apply(
     State(st): State<AppState>,
     CanJudge(tenant): CanJudge,
     Path(run_id): Path<String>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let Some(run) = tenant.core.store.eval_run(&run_id).await? else {
-        return Err(crate::error::Error::NotFound);
+        return Err(crate::error::Error::NotFound.into());
     };
     // A recommendation that was already taken, a run that never was one, or
     // one a later sweep has since spoken over: all three arrive from a page
@@ -1375,7 +1604,7 @@ mod tests {
             .await
             .unwrap();
         let html = insights(core).await;
-        assert!(html.contains("Nothing judged yet"), "{html}");
+        assert!(html.contains("nothing judged yet"), "{html}");
         assert!(
             !html.contains(">0.00<"),
             "an unmeasured base reports a score: {html}"
@@ -1624,7 +1853,7 @@ mod tests {
         let live = core.store.live_generation().await.unwrap().unwrap();
         let body = insights(core).await;
         assert!(body.contains("under watch"), "{body}");
-        assert!(body.contains("live generation"), "{body}");
+        assert!(body.contains("Live generation"), "{body}");
         assert!(
             body.contains(super::short(&live.id)),
             "the generation in force is named: {body}"
@@ -1788,7 +2017,8 @@ mod tests {
             .unwrap();
 
         let body = insights(core).await;
-        assert!(body.contains("Reaped"), "{body}");
+        // The section heading became the row's own word. See `QueueRow`.
+        assert!(body.contains(">buried<"), "{body}");
         assert!(body.contains("Old note"), "{body}");
         assert!(body.contains("nothing new in it"), "{body}");
         assert!(

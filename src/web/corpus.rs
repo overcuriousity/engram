@@ -7,12 +7,13 @@
 //! the four buttons that act on the document: re-read a range, re-process the
 //! whole of it, take a promotion back, delete it.
 
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::store::corpora::CorpusStatus;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
 use crate::web::ui::{ArtifactView, artifact_title, artifact_view, status_badge};
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query};
@@ -80,6 +81,28 @@ struct CorpusTemplate {
     /// Stated whether or not a band is red, because the two measures answer
     /// different questions and can disagree.
     coverage: Option<String>,
+    /// What this capture is called — the same label Recent, the idle foot and
+    /// the day page use, so one source has one name wherever it is named.
+    ///
+    /// The page had none. It opened on a status chip and two buttons, and the
+    /// only thing that said which capture you were looking at was the browser
+    /// tab, which said "Source" for every one of them.
+    title: String,
+}
+
+impl CorpusTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    ///
+    /// A source belongs to no section: it is reached from Recent, from the idle
+    /// foot and from a result. Nothing in the row is current, which is the
+    /// honest answer rather than lighting one at random.
+    fn section(&self) -> &'static str {
+        ""
+    }
 }
 
 /// Which lines to highlight, when the page was opened from an artifact that
@@ -141,7 +164,7 @@ async fn reread_uncovered_ui(
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(f): Form<RereadForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // Back to the band the button was in. On a nine-hundred-line document,
     // returning to the top after pressing something two thirds of the way down
     // loses the reader's place for no reason.
@@ -216,7 +239,7 @@ async fn reread_uncovered_ui(
 
 /// Undo a promotion: the window's passages back in results, what the
 /// promotion wrote retired, the window `verbatim` again.
-async fn unpromote_ui(tenant: Tenant, Path((cid, idx)): Path<(String, i64)>) -> Result<Response> {
+async fn unpromote_ui(tenant: Tenant, Path((cid, idx)): Path<(String, i64)>) -> UiResult<Response> {
     tenant.core.undo_promotion(&cid, idx).await?;
     tenant
         .core
@@ -235,7 +258,7 @@ async fn corpus_detail(
     tenant: Tenant,
     Path(cid): Path<String>,
     Query(range): Query<LineRange>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let s = tenant.core.store.get_corpus(&cid).await?;
     let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
     let restored = s.restored_at.is_some();
@@ -416,6 +439,7 @@ async fn corpus_detail(
         lines_empty: s.raw_text.trim().is_empty(),
         raw_text: s.raw_text.clone(),
         coverage,
+        title: crate::web::ui::corpus_label(s.title_hint.clone(), &s.raw_text, &s.origin),
     })
     .into_response())
 }
@@ -466,7 +490,7 @@ fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
     rows
 }
 
-async fn delete_corpus_ui(tenant: Tenant, Path(cid): Path<String>) -> Result<Response> {
+async fn delete_corpus_ui(tenant: Tenant, Path(cid): Path<String>) -> UiResult<Response> {
     tenant.core.delete_corpus(&cid).await?;
     Ok(Redirect::to("/ui/capture").into_response())
 }
@@ -483,7 +507,7 @@ async fn reprocess_ui(
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(form): Form<ReprocessForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let stage = match form.stage {
         None => crate::store::jobs::Stage::Synthesize,
         Some(s) => crate::store::jobs::Stage::parse(&s)

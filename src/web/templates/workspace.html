@@ -2,6 +2,11 @@
 {% block title %}engram{% endblock %}
 {% block regions %}regions-rail-focus-source{% endblock %}
 {% block content %}
+{# The one page with no visible heading: the box names itself, and a title
+   over it would be a label on a label. The document still needs a top level —
+   every other page has one, and without it this one's outline started at
+   whatever the first fragment happened to render. #}
+<h1 class="sr-only">Search, ask, or capture</h1>
 <div class="region-bar">
 {# One form around the box and the chips, so a chip carries the query with it
    and the query carries the chips. `change` fires for the chips, `input` only

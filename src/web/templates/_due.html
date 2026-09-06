@@ -33,7 +33,7 @@
 {% if let Some(j) = just %}
   <p class="due-row due-done muted"><span class="due-title">{{ j.verb }}</span>
     {%~ if let Some(u) = j.undo %}
-    <button class="btn btn-ghost btn-sm" hx-post="{{ u }}" hx-target="#due" hx-swap="outerHTML">undo</button>
+    <button class="btn btn-ghost btn-sm" hx-post="{{ u }}" hx-target="#due" hx-swap="outerHTML">Undo</button>
     {%~ endif %}</p>
 {% endif %}
 {% for r in rows %}
@@ -54,20 +54,20 @@
     <span class="due-when"{% if !r.undated %} title="{{ r.full }}"{% endif %}><span class="due-count">{{ r.when }}</span>{% if r.recurring %} <span title="repeats">↻</span>{% endif %}</span>
     {% if r.source != "set" %}<span class="muted due-source" title="read from the note, not set by you">read</span>{% endif %}
     <span class="due-acts">
-      <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/done" hx-target="#due" hx-swap="outerHTML">done</button>
+      <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/done" hx-target="#due" hx-swap="outerHTML">Done</button>
       {% if r.undated %}
       {# No disclosure here: a row with no date is asking for one, and the
          field is the whole of what the row is for. Behind a "later" it would
          be the one thing hidden on the one row that exists to collect it. #}
       <form class="due-date" hx-post="/ui/moments/{{ r.id }}/date" hx-target="#due" hx-swap="outerHTML">
         <input type="datetime-local" name="when" class="input" required>
-        <button class="btn btn-ghost btn-sm" type="submit">set date</button>
+        <button class="btn btn-ghost btn-sm" type="submit">Set date</button>
       </form>
       {# The row most likely to be a misreading is the one asking for a date it
          never had, so this sits beside the field rather than behind a fold. #}
       {% if r.source != "set" %}
       <button class="btn btn-ghost btn-sm due-notmine" hx-post="/ui/moments/{{ r.id }}/not-a-reminder"
-              hx-target="#due" hx-swap="outerHTML" title="I never asked to be reminded of this">not a reminder</button>
+              hx-target="#due" hx-swap="outerHTML" title="I never asked to be reminded of this">Not a reminder</button>
       {% endif %}
       {% else %}
       {# Seven controls on one line was the front page's own clutter problem
@@ -79,19 +79,19 @@
         <summary>later</summary>
         <span class="due-snooze">snooze
           <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/snooze" hx-vals='{"until":"hour"}' hx-target="#due" hx-swap="outerHTML">1h</button>
-          <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/snooze" hx-vals='{"until":"tomorrow"}' hx-target="#due" hx-swap="outerHTML">tomorrow</button>
+          <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/snooze" hx-vals='{"until":"tomorrow"}' hx-target="#due" hx-swap="outerHTML">Tomorrow</button>
           <button class="btn btn-ghost btn-sm" hx-post="/ui/moments/{{ r.id }}/snooze" hx-vals='{"until":"monday"}' hx-target="#due" hx-swap="outerHTML">Monday</button>
         </span>
         <form class="due-date" hx-post="/ui/moments/{{ r.id }}/date" hx-target="#due" hx-swap="outerHTML">
           <input type="datetime-local" name="when" class="input" required>
-          <button class="btn btn-ghost btn-sm" type="submit">move</button>
+          <button class="btn btn-ghost btn-sm" type="submit">Move</button>
         </form>
         {# Only on a row the stage put here. A reminder somebody set themselves
            is not a misreading, and offering to un-read it would be offering to
            undo their own typing. #}
         {% if r.source != "set" %}
         <button class="btn btn-ghost btn-sm due-notmine" hx-post="/ui/moments/{{ r.id }}/not-a-reminder"
-                hx-target="#due" hx-swap="outerHTML" title="I never asked to be reminded of this">not a reminder</button>
+                hx-target="#due" hx-swap="outerHTML" title="I never asked to be reminded of this">Not a reminder</button>
         {% endif %}
       </details>
       {% endif %}
@@ -108,7 +108,7 @@
        hx-target="#due" hx-swap="outerHTML">{{ hidden }} more · show all</button></p>
 {% else if all %}
   <p class="due-fold"><button class="btn btn-ghost btn-sm" hx-post="/ui/due" hx-vals='{"all": "0"}'
-       hx-target="#due" hx-swap="outerHTML">show less</button></p>
+       hx-target="#due" hx-swap="outerHTML">Show less</button></p>
 {% endif %}
 {% if !events.is_empty() %}
   <p class="muted due-coming">Coming up:

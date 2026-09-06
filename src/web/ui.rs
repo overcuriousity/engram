@@ -6,6 +6,7 @@ use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query};
@@ -660,7 +661,7 @@ struct ForgetForm {
 /// a 404 and swapped nothing, and the row came back on reload under the same
 /// label carrying the remainder. A question that no longer exists is already
 /// forgotten, which is what was asked for.
-async fn gap_forget(tenant: Tenant, Form(f): Form<ForgetForm>) -> Result<Response> {
+async fn gap_forget(tenant: Tenant, Form(f): Form<ForgetForm>) -> UiResult<Response> {
     let mut members = Vec::new();
     for pair in f.members.split(',').filter(|p| !p.is_empty()) {
         let (kind, id) = pair
@@ -673,13 +674,16 @@ async fn gap_forget(tenant: Tenant, Form(f): Form<ForgetForm>) -> Result<Respons
     for (kind, id) in members {
         match tenant.core.store.dismiss_gap(kind, &id).await {
             Ok(()) | Err(Error::NotFound) => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
     }
     Ok(().into_response())
 }
 
-async fn gap_dismiss(tenant: Tenant, Path((kind, id)): Path<(String, String)>) -> Result<Response> {
+async fn gap_dismiss(
+    tenant: Tenant,
+    Path((kind, id)): Path<(String, String)>,
+) -> UiResult<Response> {
     let kind = crate::store::gaps::GapKind::parse(&kind)
         .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
     tenant.core.store.dismiss_gap(kind, &id).await?;
@@ -745,7 +749,7 @@ struct ContextForm {
 /// fragment. Recording happens even when nothing is recommended — a base that
 /// has learned nothing yet is exactly the one that most needs its situations
 /// written down.
-async fn context_offer(tenant: Tenant, Form(f): Form<ContextForm>) -> Result<Response> {
+async fn context_offer(tenant: Tenant, Form(f): Form<ContextForm>) -> UiResult<Response> {
     if !tenant.core.recommends() {
         return Ok(HtmlTemplate(ContextTemplate::default()).into_response());
     }
@@ -811,7 +815,7 @@ struct SeenForm {
 /// word would appear on Ops as a fifth rung of a four-rung ladder. The
 /// artifact must exist. Neither failure is worth a status code, because
 /// nothing is waiting on the answer.
-async fn context_seen(tenant: Tenant, Form(f): Form<SeenForm>) -> Result<Response> {
+async fn context_seen(tenant: Tenant, Form(f): Form<SeenForm>) -> UiResult<Response> {
     use crate::core::recommend::Rung;
     let Some(rung) = Rung::parse(&f.rung) else {
         return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
@@ -991,7 +995,7 @@ pub(crate) async fn search_results(
     identity: crate::auth::Identity,
     headers: axum::http::HeaderMap,
     Query(p): Query<UiSearchParams>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // Resolved once, at the top: the fate echo needs it on both roads out of
     // here, and by the time the second one renders the subject has been moved
     // into the recall.
@@ -1327,7 +1331,7 @@ fn disambiguate_labels(rows: &mut [QueueRow]) {
     }
 }
 
-async fn queue_fragment(tenant: Tenant) -> Result<Response> {
+async fn queue_fragment(tenant: Tenant) -> UiResult<Response> {
     let mut rows = Vec::new();
     let corpora = tenant.core.store.list_corpora(10, 0).await?;
     // Asked once for the page rather than once per row: this fragment is polled
@@ -1445,6 +1449,17 @@ pub(crate) fn ends_mid_sentence(text: &str) -> bool {
 #[template(path = "not_found.html")]
 struct NotFoundTemplate {}
 
+impl NotFoundTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    fn section(&self) -> &'static str {
+        ""
+    }
+}
+
 /// The app's own answer to a path it does not have.
 ///
 /// Only for the pages: an agent asking `/api/v1` for a route that does not
@@ -1480,14 +1495,19 @@ pub async fn not_found(
     let Some(_tenant) = tenant else {
         return crate::error::Error::Unauthorized.into_response();
     };
-    let page = NotFoundTemplate {};
-    match askama::Template::render(&page) {
-        Ok(html) => (
-            axum::http::StatusCode::NOT_FOUND,
-            axum::response::Html(html),
-        )
-            .into_response(),
-        Err(_) => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
+    not_found_page(axum::http::StatusCode::NOT_FOUND)
+}
+
+/// The page itself, so a handler that says `Error::NotFound` answers with the
+/// same document an unrouted path does.
+///
+/// Without this the app had two 404s: this one, with the nav and a link back,
+/// and `{"error":"not found"}` in `application/json` from every handler that
+/// looked up an id and did not find it. See `web::ui_error`.
+pub(crate) fn not_found_page(status: axum::http::StatusCode) -> Response {
+    match askama::Template::render(&NotFoundTemplate {}) {
+        Ok(html) => (status, axum::response::Html(html)).into_response(),
+        Err(_) => (status, "not found").into_response(),
     }
 }
 
@@ -2588,7 +2608,17 @@ mod tests {
             !corpus.contains("Corpus — engram"),
             "the page a person reads does not say corpus"
         );
-        assert!(corpus.contains("Source — engram"), "it says source");
+        // The tab used to read "Source — engram" for every source there is.
+        // It carries the capture's own name now — the same label Recent and
+        // the day page use — and the heading on the page says it too.
+        assert!(
+            corpus.contains("<title>LevelDB tombstones"),
+            "the tab names this capture rather than its kind"
+        );
+        assert!(
+            corpus.contains("<h1>LevelDB tombstones"),
+            "and so does the page"
+        );
         assert!(
             !corpus.contains("Raw corpus"),
             "nor in the card over the text itself"
@@ -4837,7 +4867,7 @@ mod tests {
         // is where they are asserted now.
         // An empty base says so once, instead of answering five headings with
         // "None."
-        assert!(html.contains("Nothing hidden"));
+        assert!(html.contains("Nothing set aside"));
         assert!(!html.contains("<h3>Hidden as stale</h3>"));
     }
 
@@ -5307,7 +5337,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let bar = body_of(res).await;
-        assert!(bar.contains("wrong") && bar.contains("undo"), "{bar}");
+        assert!(bar.contains("wrong") && bar.contains("Undo"), "{bar}");
         assert_eq!(
             core.store.ask_event(&id).await.unwrap().unwrap().verdict,
             Some(crate::store::asks::AskVerdict::Wrong)
@@ -5754,7 +5784,10 @@ mod tests {
 
         let one = get_body(&app, &cookie, "/ui/insights").await;
         assert!(one.contains("1 went unanswered"), "{one}");
-        assert!(one.contains("is\n  <a href=\"#gaps\""), "{one}");
+        // Singular, and no anchor: the sentence sits directly under the list it
+        // used to link to, so "on the list above" is a direction rather than a
+        // jump to somewhere else on the page.
+        assert!(one.contains("is on the list above"), "{one}");
     }
 
     #[tokio::test]

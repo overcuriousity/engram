@@ -14,6 +14,7 @@ use crate::fmt::fmt_time;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path};
@@ -63,6 +64,17 @@ struct SettingsTemplate {
     /// What the browser would choose, named beside the automatic row: "follow
     /// this browser" says nothing about what that would mean today.
     browser_lang: &'static str,
+}
+
+impl SettingsTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    fn section(&self) -> &'static str {
+        "settings"
+    }
 }
 
 /// One row of the language control.
@@ -115,7 +127,7 @@ async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
 /// from the same quiet line under Capture, and no more advertised than
 /// Housekeeping is: neither belongs in a top row that is three destinations
 /// wide on purpose.
-async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Response> {
+async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Response> {
     let chosen = tenant.core.store.control.lang(&tenant.user.subject).await?;
     let browser = headers
         .get(axum::http::header::ACCEPT_LANGUAGE)
@@ -189,7 +201,7 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Resp
 /// under one window — but the questions are the harder loss, being the only
 /// source `--export-eval` has for `questions.json`, so the button and its
 /// confirmation name them rather than leaving them to the word "searches".
-async fn purge_feedback_ui(tenant: Tenant) -> Result<Response> {
+async fn purge_feedback_ui(tenant: Tenant) -> UiResult<Response> {
     // The index first, while the rows still say which points carry a set.
     let cleared = tenant.core.forget_situations().await;
     let n = tenant.core.store.purge_feedback().await?;
@@ -300,7 +312,7 @@ struct LangForm {
 /// captured in, and re-reading old documents under a new setting would rewrite
 /// artifacts nobody asked to have rewritten. What it changes is the next
 /// capture.
-async fn save_lang(tenant: Tenant, Form(f): Form<LangForm>) -> Result<Response> {
+async fn save_lang(tenant: Tenant, Form(f): Form<LangForm>) -> UiResult<Response> {
     let chosen = match f.lang.trim() {
         "" => None,
         tag => Some(crate::infer::lang::Lang::parse(tag).ok_or_else(|| {
@@ -316,7 +328,7 @@ async fn save_lang(tenant: Tenant, Form(f): Form<LangForm>) -> Result<Response> 
     Ok(Redirect::to("/ui/settings").into_response())
 }
 
-async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> Result<Response> {
+async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> UiResult<Response> {
     let control = &tenant.core.store.control;
     let stored = control.notify(&tenant.user.subject).await?;
     let mut notify = serde_json::json!({});
@@ -348,7 +360,7 @@ struct NotifyTestForm {
 }
 
 /// One test message down the named channel, answered as a fragment.
-async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> Result<Response> {
+async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<Response> {
     let notify = tenant
         .core
         .store
@@ -398,7 +410,7 @@ async fn mint_token(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Form(f): Form<MintForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let name = if f.name.trim().is_empty() {
         "unnamed"
     } else {
@@ -415,7 +427,7 @@ async fn mint_token(
     Ok(HtmlTemplate(TokenCreatedTemplate { token: plaintext }).into_response())
 }
 
-async fn revoke_token_ui(tenant: Tenant, Path(tid): Path<String>) -> Result<Response> {
+async fn revoke_token_ui(tenant: Tenant, Path(tid): Path<String>) -> UiResult<Response> {
     // Scoped to the caller. An id-only revoke is a button that kills anyone
     // else's extension pairing, and an unknown id and someone else's id have to
     // answer alike or the 404 becomes an oracle.
