@@ -359,3 +359,241 @@ pub(crate) async fn an_unread_image(core: &crate::core::Core) -> String {
     .unwrap()
     .id
 }
+
+/// One source, so the base is not empty.
+///
+/// The ask door only opens over a held base — with nothing stored it
+/// redirects to the plain page, because the workspace renders no Ask verb
+/// there and the door would be a question in a box with no way to send it.
+/// Every test below that wants the ask *page* wants a base with something
+/// in it first.
+pub(crate) async fn hold_something(core: &crate::core::Core) {
+    core.ingest_capture(crate::core::ingest::Capture::new(
+        "LevelDB tombstones survive compaction longer than the manual admits.",
+        "ui",
+    ))
+    .await
+    .unwrap();
+}
+
+/// A session over a base holding one source. See `hold_something`.
+pub(crate) async fn app_holding_something() -> (axum::Router, String) {
+    let (app, cookie, core) = app_session_and_core().await;
+    hold_something(&core).await;
+    (app, cookie)
+}
+
+/// A session whose core records searches, which is what the association
+/// features are gated on. `app_session_and_core` cannot be reused: the
+/// router owns its own clone of the core, so flipping a flag afterwards
+/// changes the handle and not the app.
+pub(crate) async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core) {
+    let mut core = crate::core::test_support::test_core().await;
+    core.learn.enabled = true;
+    let handle = core.clone();
+    let (app, cookie) = app_with_cookie(core).await;
+    (app, cookie, handle)
+}
+
+/// The same, for the one route that takes a `PUT`: editing an artifact.
+pub(crate) fn put_form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("PUT")
+        .header("cookie", cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// The first half of the two-request ask: park the question, take the id.
+/// `q` is form-encoded, as it is in the body it goes into.
+pub(crate) async fn post_ask(app: &axum::Router, cookie: &str, q: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(form("/ui/ask", cookie, &format!("q={q}")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "the question was not parked");
+    crate::web::test_support::json_of(res).await["id"]
+        .as_str()
+        .expect("parking hands back an id")
+        .to_string()
+}
+
+/// The second half: spend the id and stream.
+pub(crate) async fn get_stream(app: &axum::Router, cookie: &str, id: &str) -> Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/ui/ask/{id}/stream"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// One whole ask over the wire, as the page performs it.
+pub(crate) async fn ask_over_sse(app: &axum::Router, cookie: &str, q: &str) -> String {
+    let id = post_ask(app, cookie, q).await;
+    let res = get_stream(app, cookie, &id).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    body_of(res).await
+}
+
+/// The HTML the page swaps in, pulled out of the `done` frame the way the
+/// browser reads it: the payload is JSON, so the fragment survives the
+/// blank lines its markdown carries.
+pub(crate) fn done_html(body: &str) -> String {
+    let data = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+        .find(|v| v.get("html").is_some())
+        .unwrap_or_else(|| panic!("no done event in {body}"));
+    data["html"].as_str().unwrap().to_string()
+}
+
+/// A session plus a corpus that has been through synthesis and embedding,
+/// which is the only state in which there is anything to facet or to find a
+/// neighbour among.
+pub(crate) async fn app_with_embedded_corpus() -> (axum::Router, String) {
+    let core = crate::core::test_support::test_core().await;
+    let out = core
+        .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+        .await
+        .unwrap();
+    crate::jobs::synthesize::segment_all(&core, &out.id).await;
+    crate::jobs::embed::run_corpus(&core, &out.id)
+        .await
+        .unwrap();
+
+    app_with_cookie(core).await
+}
+
+/// Markup with every run of whitespace collapsed, so an assertion about an
+/// attribute pair does not also assert where the template wrapped a line.
+pub(crate) fn flat(html: &str) -> String {
+    html.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The box form's `hx-trigger`, on its own. `html.contains("load")` is
+/// not the same question: the context offer carries `hx-trigger="load"`
+/// too, and so does the word inside half the prose on the page.
+pub(crate) fn trigger_of(html: &str) -> String {
+    let form = html.split(r#"id="box-form""#).nth(1).expect("the box form");
+    let trigger = form.split(r#"hx-trigger=""#).nth(1).expect("its trigger");
+    trigger.split('"').next().unwrap().to_string()
+}
+
+/// A session with the recommender on, plus one artifact old enough and
+/// unseen enough that `resurface` returns it.
+pub(crate) async fn app_recommending() -> (axum::Router, String, crate::store::Store, String) {
+    let mut core = crate::core::test_support::test_core().await;
+    core.recommend.enabled = true;
+    core.learn.enabled = true;
+    let store = core.store.clone();
+    let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+    let a = core
+        .store
+        .insert_artifacts(
+            &src.id,
+            &[crate::store::artifacts::NewArtifact {
+                text: "when the recycling centre is open".into(),
+                title: Some("recycling centre".into()),
+                ..Default::default()
+            }],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    core.vectors
+        .upsert(vec![crate::vector::VectorPoint {
+            vector: vec![1.0; 8],
+            sparse: Default::default(),
+            payload: crate::vector::VectorPayload {
+                artifact_id: a.id.clone(),
+                corpus_id: src.id.clone(),
+                text: a.text.clone(),
+                title: Some("recycling centre".into()),
+                ..Default::default()
+            },
+        }])
+        .await
+        .unwrap();
+    let background = core.background.clone();
+    let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+    // Held so a test can drain the recording writes rather than sleep.
+    BACKGROUND.with(|b| *b.borrow_mut() = Some(background));
+    (app, cookie, store, a.id)
+}
+
+// Where `app_recommending` parks the background handle for `drain` to find.
+thread_local! {
+    static BACKGROUND: std::cell::RefCell<Option<std::sync::Arc<crate::core::background::Background>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The recording writes run off the request path. Drain them rather than
+/// sleeping and hoping.
+pub(crate) async fn drain() {
+    let b = BACKGROUND.with(|b| b.borrow().clone());
+    if let Some(b) = b {
+        b.wait_idle().await;
+    }
+}
+
+/// Percent-encoding for the handful of characters these test bodies carry.
+pub(crate) fn urlencoding_of(s: &str) -> String {
+    s.replace(':', "%3A").replace('/', "%2F")
+}
+
+/// One corpus with `n` artifacts, titled so the ops page can be searched
+/// for them.
+pub(crate) async fn artifacts(core: &crate::core::Core, titles: &[&str]) -> Vec<String> {
+    let src = core.store.insert_corpus("x", "web", None).await.unwrap();
+    let new: Vec<crate::store::artifacts::NewArtifact> = titles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| crate::store::artifacts::NewArtifact {
+            ordinal: i as i64,
+            text: format!("body of {t}"),
+            title: Some((*t).to_string()),
+            ..Default::default()
+        })
+        .collect();
+    core.store
+        .insert_artifacts(&src.id, &new)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.id)
+        .collect()
+}
+
+/// The excerpt list, out of the `citations` frame, the way the page reads
+/// it. Keyed apart from the answer's `html` so `done_html` above cannot pick
+/// this frame up by mistake.
+pub(crate) fn rail_html(body: &str) -> String {
+    let data = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+        .find(|v| v.get("rail").is_some())
+        .unwrap_or_else(|| panic!("no citations event in {body}"));
+    data["rail"].as_str().unwrap().to_string()
+}
+
+/// Every run that follows `open`, up to the next `end`, in document order.
+pub(crate) fn pulled(html: &str, open: &str, end: char) -> Vec<String> {
+    html.match_indices(open)
+        .map(|(at, m)| {
+            html[at + m.len()..]
+                .chars()
+                .take_while(|c| *c != end)
+                .collect()
+        })
+        .collect()
+}

@@ -537,7 +537,7 @@ mod tests {
     use crate::web::test_support::{
         an_unread_image, app_session_and_core, app_with_cookie, body_of, form, get_body,
     };
-    use crate::web::ui::build_artifact_detail;
+    use crate::web::artifact::build_artifact_detail;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;

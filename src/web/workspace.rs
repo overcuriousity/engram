@@ -25,9 +25,9 @@ use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
 use crate::web::ui::{
-    FACET_LIMIT, RenderedResult, UiSearchParams, ensure_facet, link_citations, render_hit,
-    search_results,
+    FACET_LIMIT, RenderedResult, UiSearchParams, ensure_facet, render_hit, search_results,
 };
+use crate::web::artifact::link_citations;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
