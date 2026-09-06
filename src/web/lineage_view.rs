@@ -302,7 +302,7 @@ impl Walk<'_> {
                 crate::store::artifacts::Provenance::Captured => "captured",
                 crate::store::artifacts::Provenance::Note => "note",
             },
-            when: crate::web::ui::fmt_time(c.created_at),
+            when: crate::fmt::fmt_time(c.created_at),
             created_at: c.created_at,
             source_href,
             source_label,

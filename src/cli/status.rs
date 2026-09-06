@@ -64,7 +64,7 @@ pub(crate) fn render_due(face: &Face, rows: &serde_json::Value) -> String {
         let line = match r["moment"]["at"].as_i64() {
             None => format!("    (undated)  {title}"),
             Some(at) if at < now => format!("    {}  {title}", face.ink_dim("overdue")),
-            Some(at) => format!("    {}  {title}", crate::web::ui::ago_or_ahead(at)),
+            Some(at) => format!("    {}  {title}", crate::fmt::ago_or_ahead(at)),
         };
         out.push_str(&line);
         out.push('\n');

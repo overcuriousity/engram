@@ -9,7 +9,8 @@
 use crate::core::ingest::ORIGIN_SHARE;
 use crate::error::{Error, Result};
 use crate::tenants::Tenant;
-use crate::web::api::{only_a_url, read_capture_parts};
+use crate::core::fetch::only_a_url;
+use crate::web::api::read_capture_parts;
 use crate::web::state::AppState;
 use axum::Router;
 use axum::response::{IntoResponse, Redirect, Response};

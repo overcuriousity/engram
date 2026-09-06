@@ -1,3 +1,4 @@
+use crate::core::fetch::only_a_url;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::jobs::{FailedJob, Stage};
@@ -410,22 +411,6 @@ pub(crate) fn refuse_time_fields(
          and its origin and any date in it come from what it turns out to be",
         named.join(", ")
     )))
-}
-
-/// Whether a body is one link and nothing else.
-///
-/// The single guess this endpoint makes, and it is made because every share
-/// sheet on both platforms hands a shared link over as `text/plain`. Narrow on
-/// purpose: one whitespace-separated token, parsing as a URL, over http or
-/// https. A line of prose that opens with a link is prose, and a caller who
-/// wants the other reading has `POST /corpora`, which asks in as many words.
-pub(crate) fn only_a_url(body: &str) -> Option<url::Url> {
-    let trimmed = body.trim();
-    if trimmed.split_whitespace().count() != 1 {
-        return None;
-    }
-    let u = url::Url::parse(trimmed).ok()?;
-    matches!(u.scheme(), "http" | "https").then_some(u)
 }
 
 /// The code a stored capture answers with, in the one place the doors that now

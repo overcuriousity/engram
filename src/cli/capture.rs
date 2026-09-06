@@ -202,7 +202,7 @@ fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
     }
     let is_a_link = std::str::from_utf8(bytes)
         .ok()
-        .is_some_and(|t| crate::web::api::only_a_url(t).is_some());
+        .is_some_and(|t| crate::core::fetch::only_a_url(t).is_some());
     if is_a_link {
         return None;
     }
@@ -226,7 +226,7 @@ pub async fn run_text(
     intent: Option<&str>,
     face: &crate::cli::face::Face,
 ) -> Result<String> {
-    if crate::web::api::only_a_url(&text).is_some() {
+    if crate::core::fetch::only_a_url(&text).is_some() {
         let what = if intent == Some("remind") {
             "a reminder"
         } else {

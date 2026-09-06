@@ -37,6 +37,25 @@ pub fn parse_readable(raw: &str) -> Result<url::Url> {
     Ok(url)
 }
 
+/// Whether a body is one link and nothing else.
+///
+/// The single guess the capture doors make, and it is made because every share
+/// sheet on both platforms hands a shared link over as `text/plain`. Narrow on
+/// purpose: one whitespace-separated token, parsing as a URL, over http or
+/// https. A line of prose that opens with a link is prose, and a caller who
+/// wants the other reading has `POST /corpora`, which asks in as many words.
+pub fn only_a_url(body: &str) -> Option<url::Url> {
+    let trimmed = body.trim();
+    if trimmed.split_whitespace().count() != 1 {
+        return None;
+    }
+    let u = url::Url::parse(trimmed).ok()?;
+    // The same rule `ensure_readable` states, asked as a question rather than
+    // enforced as a refusal: a lone `javascript:` word is text somebody typed,
+    // not a link they meant.
+    ensure_readable(&u).is_ok().then_some(u)
+}
+
 /// Retrieve a page for the paste-a-link door.
 ///
 /// The page-only face of `fetch`: a PDF or an image where HTML was expected

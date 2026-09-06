@@ -24,10 +24,8 @@ use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
 use crate::web::tenant::CanJudge;
-use crate::web::ui::{
-    SourceRow, ago, fmt_duration, fmt_elapsed, fmt_time, row_subtitle, source_rows, sweep_label,
-    tally_sweep, title_of,
-};
+use crate::fmt::{ago, fmt_duration, fmt_elapsed, fmt_time};
+use crate::web::ui::{SourceRow, row_subtitle, source_rows, sweep_label, tally_sweep, title_of};
 
 /// The retrieval measure, flattened for the template.
 ///
