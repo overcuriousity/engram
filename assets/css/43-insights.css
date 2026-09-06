@@ -137,6 +137,17 @@
 .decide-head { font-size: var(--text-base); }
 .decide-finding { font-size: var(--text-base); margin: 0.375rem 0 0.625rem; }
 .decide .row { flex-wrap: wrap; gap: 0.375rem; }
+/* A Keep button carries a whole title, and a title is often longer than the
+   card it sits in. Left to size itself the button ran past the card and took
+   the page with it, so Insights scrolled sideways — the one direction nothing
+   here is meant to move. The form is the flex item, so the cap belongs on it;
+   `min-width: 0` is what lets it shrink at all, since a flex item refuses to
+   go below its content by default. The label ellipsizes inside the button
+   rather than on it: `.btn` is a flex container, and `text-overflow` has
+   nothing to act on there. */
+.decide .row form { min-width: 0; max-width: 100%; }
+.decide-keep { max-width: 100%; }
+.decide-keep span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Links keep the weight of the sentence around them rather than turning it
    into a row of blue. */
 .decide a {
