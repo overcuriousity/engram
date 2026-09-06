@@ -157,7 +157,7 @@ struct InsightsTemplate {
     /// It used to sit on Capture, "where the work arrives". Capture is a verb
     /// now and not a page, and this was never work *with* the base anyway —
     /// it is work on it, which is what this page is.
-    pairs: Vec<crate::web::ui::PairCluster>,
+    pairs: Vec<crate::web::ops::PairCluster>,
     /// How many more are behind the ones shown. Said once under the list, so a
     /// short list does not read as an empty queue when it is a capped one.
     more_pairs: i64,
@@ -267,8 +267,8 @@ pub(crate) struct MergedRow {
 async fn page(tenant: Tenant) -> Result<Response> {
     use sqlx::Row;
 
-    let (pairs, more_pairs) = crate::web::ui::pair_rows(&tenant).await?;
-    let pairs = crate::web::ui::group_pairs(pairs);
+    let (pairs, more_pairs) = crate::web::ops::pair_rows(&tenant).await?;
+    let pairs = crate::web::ops::group_pairs(pairs);
 
     // Read, never computed: the page shows what the sweep grouped and named,
     // and whatever has been judged since sits under itself until the next

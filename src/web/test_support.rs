@@ -597,3 +597,41 @@ pub(crate) fn pulled(html: &str, open: &str, end: char) -> Vec<String> {
         })
         .collect()
 }
+
+/// One live artifact on a fresh session.
+pub(crate) async fn session_with_an_artifact() -> (axum::Router, String, crate::core::Core, String) {
+    let (app, cookie, core) = app_session_and_core().await;
+    let out = core
+        .ingest_capture(crate::core::ingest::Capture::new(
+            "The pool holds sixteen connections.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+    crate::jobs::test_support::drain(&core).await;
+    let aid = core
+        .store
+        .artifacts_for_corpus(&out.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.in_results())
+        .expect("a live artifact")
+        .id;
+    (app, cookie, core, aid)
+}
+
+pub(crate) fn row_on(
+    subject: &str,
+    kind: crate::store::actions::Kind,
+) -> crate::store::actions::NewAction {
+    crate::store::actions::NewAction {
+        job: crate::store::actions::Job::Dedupe,
+        kind,
+        subject_id: subject.to_string(),
+        survivor_id: None,
+        detail: None,
+        evidence: serde_json::json!({}),
+        pair_score: None,
+    }
+}
