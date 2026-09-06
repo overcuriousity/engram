@@ -51,19 +51,10 @@ async fn share(
     }
 
     // Read before anything is stored, so a bad scheme costs nothing.
-    let shared_url = match shared_url {
-        Some(raw) => {
-            let u = url::Url::parse(&raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
-            if !matches!(u.scheme(), "http" | "https") {
-                return Err(Error::Validation(format!(
-                    "url: `{}` is not a scheme a page is read over",
-                    u.scheme()
-                )));
-            }
-            Some(u)
-        }
-        None => None,
-    };
+    let shared_url = shared_url
+        .as_deref()
+        .map(crate::core::fetch::parse_readable)
+        .transpose()?;
 
     // Text standing alone is a capture; text alongside files is their caption.
     let text = fields.remove("text");

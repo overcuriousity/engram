@@ -1,7 +1,7 @@
 //! `-s`: a ranked list in a terminal, saying everything the rail says.
 
 use crate::cli::args::CliArgs;
-use crate::cli::capture::USER_AGENT;
+use crate::cli::endpoint::client;
 use crate::cli::encode;
 use crate::cli::endpoint::Endpoint;
 use crate::core::search::SearchResult;
@@ -108,10 +108,7 @@ async fn streaming(
     face: &crate::cli::face::Face,
 ) -> Result<Option<(Vec<SearchResult>, u128)>> {
     use tokio_stream::StreamExt as _;
-    let http = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let http = client()?;
     let began = std::time::Instant::now();
     let res = http
         .get(stream_url(e, limit, query, cli))
@@ -192,10 +189,7 @@ async fn plain(
     query: &str,
     cli: &CliArgs,
 ) -> Result<(Vec<SearchResult>, u128, String)> {
-    let http = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let http = client()?;
     let began = std::time::Instant::now();
     let res = http
         .get(query_url(e, limit, query, cli))

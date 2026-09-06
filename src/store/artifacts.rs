@@ -304,6 +304,23 @@ pub struct NewMerged {
     pub caveats: Vec<String>,
 }
 
+/// What `insert_sourced_artifact` writes, borrowed from whichever `New*` the
+/// caller holds.
+///
+/// A struct and not seven parameters: the two callers differ in two of the
+/// seven, and a positional list that long is one a reader has to count against
+/// the signature to check.
+struct Sourced<'a> {
+    provenance: Provenance,
+    text: &'a str,
+    title: Option<&'a String>,
+    category: Option<&'a String>,
+    tags: &'a [String],
+    caveats: &'a [String],
+    /// Empty for a merge, which is asked nothing and so cites no question.
+    cues: &'a [String],
+}
+
 /// An artifact written from a pursuit: what was asked, and what was engaged
 /// with. Inserted through `insert_synthesized_artifact`.
 #[derive(Debug, Clone)]
@@ -372,23 +389,41 @@ pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
 }
 
 impl Store {
-    /// Write a merged artifact and its lineage in one transaction.
+    /// The write both `insert_merged_artifact` and `insert_synthesized_artifact`
+    /// make, which is the same write twice over: an artifact belonging to no
+    /// corpus, its roots resolved through `roots_of`, and its lineage rows, all
+    /// inside one transaction.
     ///
-    /// One transaction, not two writes. A merged artifact with no lineage rows
-    /// is one whose detail pane can render nothing and whose sources nobody can
-    /// recover — and the re-merge rule reads exactly those rows to avoid ever
-    /// rewriting from text a model produced. Splitting the writes makes that
-    /// state reachable by a crash, and nothing afterwards could tell it from an
-    /// artifact whose sources were all deleted.
+    /// One transaction, not two writes. An artifact of either kind with no
+    /// lineage rows is one whose detail pane can render nothing and whose
+    /// sources nobody can recover — and the re-merge rule reads exactly those
+    /// rows to avoid ever rewriting from text a model produced. Splitting the
+    /// writes makes that state reachable by a crash, and nothing afterwards
+    /// could tell it from an artifact whose sources were all deleted.
     ///
-    /// `sources` may name merged artifacts. They are flattened to their own
-    /// captured roots here, so `artifact_sources.root_id` only ever names a
-    /// `captured` artifact — the invariant the whole anti-drift rule rests on.
-    pub async fn insert_merged_artifact(
+    /// `sources` may name artifacts that are themselves merged or generated.
+    /// They are flattened to their own captured roots here, so
+    /// `artifact_sources.root_id` only ever names a `captured` artifact — the
+    /// invariant the whole anti-drift rule rests on — and `via_id` keeps the
+    /// chain reconstructible at any depth.
+    ///
+    /// `cues` is written for both, empty for a merge. The column is
+    /// `NOT NULL DEFAULT '[]'`, so naming it changes no stored byte; it saves
+    /// the two callers a statement each that differed in one column.
+    async fn insert_sourced_artifact(
         &self,
-        new: &NewMerged,
+        new: Sourced<'_>,
         sources: &[String],
     ) -> Result<Chunk> {
+        let Sourced {
+            provenance,
+            text,
+            title,
+            category,
+            tags,
+            caveats,
+            cues,
+        } = new;
         // Resolved before the transaction opens: this is a read, and holding a
         // write transaction across it buys nothing.
         let resolved = self.roots_of(sources).await?;
@@ -404,28 +439,36 @@ impl Store {
         // precisely the case the counter was added for.
         let root_ids: std::collections::BTreeSet<&String> = resolved.values().flatten().collect();
 
-        // The invariant stated above, checked rather than assumed. A merge over
-        // passages rewrites the verbatim substrate into text that belongs to no
-        // corpus and carries no span, and hides the wording someone captured
-        // behind it. On the base this was written for, every one of the merge
-        // path's root rows named a passage, silently, for as long as it ran.
+        // A merge's roots must all be captured artifacts, and this is the one
+        // place that can check it off the resolution it is about to write.
+        //
+        // Checked rather than assumed. A merge over passages rewrites the
+        // verbatim substrate into text that belongs to no corpus and carries no
+        // span, and hides the wording someone captured behind it. On the base
+        // this was written for, every one of the merge path's root rows named a
+        // passage, silently, for as long as it ran.
         //
         // Here and not as a constraint on `artifact_sources`: the same table
         // carries a synthesis's passage sources, where naming a passage is
-        // correct and intended.
+        // correct and intended — which is why the rule reads the provenance
+        // being written rather than applying to every caller.
+        //
+        // Before the transaction opens, so a refused merge starts none.
         //
         // `Validation` and not `Internal` (`src/error.rs`): the caller sent a
         // root it may not merge, which is a refused request and not a broken
         // server.
-        for root in &root_ids {
-            let p: String = sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
-                .bind(root.as_str())
-                .fetch_one(&self.pool)
-                .await?;
-            if Provenance::parse(&p) != Provenance::Captured {
-                return Err(crate::error::Error::Validation(format!(
-                    "a merge root must be a captured artifact; {root} is {p}"
-                )));
+        if provenance == Provenance::Merged {
+            for root in &root_ids {
+                let p: String = sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
+                    .bind(root.as_str())
+                    .fetch_one(&self.pool)
+                    .await?;
+                if Provenance::parse(&p) != Provenance::Captured {
+                    return Err(crate::error::Error::Validation(format!(
+                        "a merge root must be a captured artifact; {root} is {p}"
+                    )));
+                }
             }
         }
 
@@ -434,14 +477,14 @@ impl Store {
         let c = Chunk {
             id: new_id(),
             corpus_id: None,
-            provenance: Provenance::Merged,
+            provenance,
             source_count: root_ids.len() as i64,
             ordinal: 0,
-            text: new.text.clone(),
+            text: text.to_string(),
             corpus_span: None,
-            title: new.title.clone(),
-            category: new.category.clone(),
-            tags: new.tags.clone(),
+            title: title.cloned(),
+            category: category.cloned(),
+            tags: tags.to_vec(),
             embed_state: EmbedState::Pending,
             embed_model: None,
             created_at,
@@ -450,18 +493,19 @@ impl Store {
             flags: vec![],
             flag_detail: None,
             superseded_by: None,
-            caveats: new.caveats.clone(),
+            caveats: caveats.to_vec(),
             status: ArtifactStatus::Active,
             last_verified_at: Some(created_at),
-            cues: vec![],
+            cues: cues.to_vec(),
             retired_at: None,
             reaped_at: None,
         };
         sqlx::query(
-            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
-             VALUES (?, NULL, 'merged', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?)",
+            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, cues)
+             VALUES (?, NULL, ?, ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?, ?)",
         )
         .bind(&c.id)
+        .bind(c.provenance.as_str())
         .bind(c.source_count)
         .bind(&c.text)
         .bind(&c.title)
@@ -473,6 +517,7 @@ impl Store {
         .bind(c.status.as_str())
         .bind(c.last_verified_at)
         .bind(c.created_at)
+        .bind(serde_json::to_string(&c.cues).unwrap_or_else(|_| "[]".into()))
         .execute(&mut *tx)
         .await?;
 
@@ -497,82 +542,52 @@ impl Store {
         Ok(c)
     }
 
+    /// Write a merged artifact and its lineage in one transaction.
+    ///
+    /// Every root must be a captured artifact — refused, not assumed, by
+    /// `insert_sourced_artifact`, which is also where the write itself is.
+    pub async fn insert_merged_artifact(
+        &self,
+        new: &NewMerged,
+        sources: &[String],
+    ) -> Result<Chunk> {
+        self.insert_sourced_artifact(
+            Sourced {
+                provenance: Provenance::Merged,
+                text: &new.text,
+                title: new.title.as_ref(),
+                category: new.category.as_ref(),
+                tags: &new.tags,
+                caveats: &new.caveats,
+                cues: &[],
+            },
+            sources,
+        )
+        .await
+    }
+
     /// Write an artifact generated from a pursuit. Like a merge it has no
     /// corpus of its own and names its sources through `artifact_sources`;
     /// unlike a merge it supersedes nothing — its sources stay active and
-    /// keep ranking. `root_id` resolves through `roots_of`, so a generation
-    /// written from another generation still names source text, and `via_id`
-    /// keeps the chain reconstructible at any depth.
+    /// keep ranking, and its roots need not be captured artifacts.
     pub async fn insert_synthesized_artifact(
         &self,
         new: &NewSynthesized,
         sources: &[String],
     ) -> Result<Chunk> {
-        let resolved = self.roots_of(sources).await?;
-        let root_ids: std::collections::BTreeSet<&String> = resolved.values().flatten().collect();
-        let mut tx = self.pool.begin().await?;
-        let created_at = now();
-        let c = Chunk {
-            id: new_id(),
-            corpus_id: None,
-            provenance: Provenance::Synthesized,
-            source_count: root_ids.len() as i64,
-            ordinal: 0,
-            text: new.text.clone(),
-            corpus_span: None,
-            title: new.title.clone(),
-            category: new.category.clone(),
-            tags: new.tags.clone(),
-            embed_state: EmbedState::Pending,
-            embed_model: None,
-            created_at,
-            embed_rev: 0,
-            segment_idx: None,
-            flags: vec![],
-            flag_detail: None,
-            superseded_by: None,
-            caveats: new.caveats.clone(),
-            status: ArtifactStatus::Active,
-            last_verified_at: Some(created_at),
-            cues: new.cues.clone(),
-            retired_at: None,
-            reaped_at: None,
-        };
-        sqlx::query(
-            "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, cues)
-             VALUES (?, NULL, 'synthesized', ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?, ?)",
+        self.insert_sourced_artifact(
+            Sourced {
+                provenance: Provenance::Synthesized,
+                text: &new.text,
+                title: new.title.as_ref(),
+                category: new.category.as_ref(),
+                tags: &new.tags,
+                caveats: &new.caveats,
+                cues: &new.cues,
+            },
+            sources,
         )
-        .bind(&c.id)
-        .bind(c.source_count)
-        .bind(&c.text)
-        .bind(&c.title)
-        .bind(&c.category)
-        .bind(serde_json::to_string(&c.tags).unwrap())
-        .bind(c.embed_state.as_str())
-        .bind(c.created_at)
-        .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
-        .bind(c.status.as_str())
-        .bind(c.last_verified_at)
-        .bind(c.created_at)
-        .bind(serde_json::to_string(&c.cues).unwrap_or_else(|_| "[]".into()))
-        .execute(&mut *tx)
-        .await?;
-        for (via, roots) in &resolved {
-            for root in roots {
-                sqlx::query(
-                    "INSERT OR IGNORE INTO artifact_sources (child_id, root_id, via_id, created_at)
-                     VALUES (?, ?, ?, ?)",
-                )
-                .bind(&c.id)
-                .bind(root)
-                .bind(via)
-                .bind(created_at)
-                .execute(&mut *tx)
-                .await?;
-            }
-        }
-        tx.commit().await?;
-        Ok(c)
+        .await
     }
 
     /// Generated artifacts still in results, newest first. What Ops lists.

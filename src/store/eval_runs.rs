@@ -10,64 +10,15 @@ use super::{Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
 
-/// The runtime-tunable knobs, as stored. Mirrors
-/// `core::ranking::RankingParams`; separate because what is written to a
-/// database outlives the shape a running program happens to hold it in.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct RunParams {
-    pub recency_weight: f32,
-    pub per_source_cap: Option<usize>,
-    /// Absent in rows written before the retrieval knobs existed, which ran
-    /// under the shipped value.
-    #[serde(default = "crate::config::default_candidate_multiplier")]
-    pub candidate_multiplier: usize,
-    #[serde(default = "crate::config::default_recency_half_life_days")]
-    pub recency_half_life_days: u32,
-    #[serde(default = "crate::config::default_prime_lift")]
-    pub prime_lift: usize,
-    #[serde(default = "crate::config::default_spread_max")]
-    pub spread_max: usize,
-    #[serde(default = "crate::config::default_rerank_knob")]
-    pub rerank: bool,
-    #[serde(default = "crate::config::default_review_min")]
-    pub review_min: f32,
-}
-
-impl Default for RunParams {
-    fn default() -> Self {
-        crate::core::ranking::RankingParams::default().into()
-    }
-}
-
-impl From<crate::core::ranking::RankingParams> for RunParams {
-    fn from(p: crate::core::ranking::RankingParams) -> Self {
-        Self {
-            recency_weight: p.recency_weight,
-            per_source_cap: p.per_source_cap,
-            candidate_multiplier: p.candidate_multiplier,
-            recency_half_life_days: p.recency_half_life_days,
-            prime_lift: p.prime_lift,
-            spread_max: p.spread_max,
-            rerank: p.rerank,
-            review_min: p.review_min,
-        }
-    }
-}
-
-impl From<RunParams> for crate::core::ranking::RankingParams {
-    fn from(p: RunParams) -> Self {
-        Self {
-            recency_weight: p.recency_weight,
-            per_source_cap: p.per_source_cap,
-            candidate_multiplier: p.candidate_multiplier,
-            recency_half_life_days: p.recency_half_life_days,
-            prime_lift: p.prime_lift,
-            spread_max: p.spread_max,
-            rerank: p.rerank,
-            review_min: p.review_min,
-        }
-    }
-}
+/// The knobs a sweep ran under, as stored.
+///
+/// The same eight values a generation holds, serialised the same way, so it is
+/// the same type and not a copy of it: a knob added to one is a knob the other
+/// has to store or the two records stop being comparable, which is the whole
+/// point of writing them down beside a recall figure. Named here because a
+/// sweep is what this module is about, and `run.base_params` reads better than
+/// `run.base_generation_params` at every call site.
+pub type RunParams = super::generations::GenerationParams;
 
 /// One pair that moved, named by the leading characters of its own query.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

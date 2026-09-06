@@ -97,10 +97,7 @@ pub async fn run(
 /// asserting, and it cannot be asserted through a function whose only output
 /// is stdout and an exit code.
 pub async fn fetch(e: &Endpoint, id: &str) -> Result<Option<Detail>> {
-    let http = reqwest::Client::builder()
-        .user_agent(crate::cli::capture::USER_AGENT)
-        .build()
-        .map_err(|err| crate::error::Error::Internal(format!("http client: {err}")))?;
+    let http = crate::cli::endpoint::client()?;
     let res = http
         .get(e.api(&format!("/artifacts/{}", crate::cli::encode(id))))
         .bearer_auth(&e.token)

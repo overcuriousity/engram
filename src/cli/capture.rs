@@ -1,12 +1,8 @@
 //! `-c`: put a path, a link or a pipe into the base.
 
 use crate::cli::encode;
-use crate::cli::endpoint::Endpoint;
+use crate::cli::endpoint::{Endpoint, client};
 use crate::error::{Error, Result};
-
-/// The client's user agent, so a token's row says what asked for it and a log
-/// line says what called.
-pub(crate) const USER_AGENT: &str = concat!("engram-cli/", env!("CARGO_PKG_VERSION"));
 
 /// Does this argument address something, or is it a word somebody typed?
 ///
@@ -145,13 +141,6 @@ pub async fn run_piped(
     )
     .await?;
     Ok(vec![id])
-}
-
-fn client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))
 }
 
 /// What a door knows about a capture beyond its bytes.
@@ -395,10 +384,7 @@ fn tracked_body(bytes: Vec<u8>, face: &crate::cli::face::Face) -> reqwest::Body 
 /// be right half the time.
 pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Result<()> {
     use crate::store::corpora::CorpusStatus;
-    let http = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let http = client()?;
     // The three background stages, redrawn in place from each poll. The
     // generic strand that used to sit here said only "something is happening";
     // these say which of the three it is, which is the whole reason `--watch`

@@ -11,10 +11,7 @@ use crate::error::{Error, Result};
 
 /// Ask the server what it is doing, and say it.
 pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
-    let http = reqwest::Client::builder()
-        .user_agent(crate::cli::capture::USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let http = crate::cli::endpoint::client()?;
     let res = http
         .get(e.api("/status"))
         .bearer_auth(&e.token)

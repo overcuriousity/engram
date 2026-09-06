@@ -871,6 +871,36 @@ impl QdrantVectors {
         Ok(facet_counts(res))
     }
 
+    /// One page of a scroll, with the cursor spliced in.
+    ///
+    /// Three callers page through a collection — `reindex`, `all_artifact_ids`
+    /// and `stale_candidates` — and each had written out the same three steps:
+    /// build the body, add `offset` only when there is one, post to
+    /// `points/scroll`. Qdrant rejects an explicit `"offset": null`, which is
+    /// why it is spliced rather than always present, and that is exactly the
+    /// kind of detail that should be true in one place.
+    ///
+    /// The loop itself stays with each caller: what they do with a page and
+    /// when they stop differ, and a shared loop would have to take an async
+    /// closure to hide a difference worth seeing.
+    async fn scroll_page(
+        &self,
+        collection: &str,
+        body: &Value,
+        offset: &Value,
+    ) -> Result<ScrollResult> {
+        let mut body = body.clone();
+        if !offset.is_null() {
+            body["offset"] = offset.clone();
+        }
+        self.call(
+            Method::POST,
+            &format!("/collections/{collection}/points/scroll"),
+            Some(body),
+        )
+        .await
+    }
+
     async fn put_points(&self, collection: &str, points: Vec<Value>) -> Result<()> {
         let _: Value = self
             .call(
@@ -913,20 +943,15 @@ impl QdrantVectors {
         let mut offset = Value::Null;
         let mut copied = 0usize;
         loop {
-            let mut body = json!({
-                "limit": REINDEX_BATCH,
-                "with_payload": true,
-                "with_vector": true,
-            });
-            if !offset.is_null() {
-                body["offset"] = offset.clone();
-            }
-
-            let page: ScrollResult = self
-                .call(
-                    Method::POST,
-                    &format!("/collections/{source}/points/scroll"),
-                    Some(body),
+            let page = self
+                .scroll_page(
+                    &source,
+                    &json!({
+                        "limit": REINDEX_BATCH,
+                        "with_payload": true,
+                        "with_vector": true,
+                    }),
+                    &offset,
                 )
                 .await?;
 
@@ -1446,19 +1471,15 @@ impl VectorStore for QdrantVectors {
         let mut out = Vec::new();
         let mut offset = Value::Null;
         loop {
-            let mut body = json!({
-                "limit": PAGE,
-                "with_payload": ["artifact_id"],
-                "with_vector": false,
-            });
-            if !offset.is_null() {
-                body["offset"] = offset.clone();
-            }
-            let page: ScrollResult = self
-                .call(
-                    Method::POST,
-                    &format!("/collections/{}/points/scroll", self.alias),
-                    Some(body),
+            let page = self
+                .scroll_page(
+                    &self.alias,
+                    &json!({
+                        "limit": PAGE,
+                        "with_payload": ["artifact_id"],
+                        "with_vector": false,
+                    }),
+                    &offset,
                 )
                 .await?;
             if page.points.is_empty() {
@@ -1526,20 +1547,16 @@ impl VectorStore for QdrantVectors {
         let mut found: Vec<VectorPayload> = Vec::new();
         let mut offset = Value::Null;
         while found.len() < STALE_SCAN {
-            let mut body = json!({
-                "filter": filter,
-                "limit": PAGE.min(STALE_SCAN - found.len()),
-                "with_payload": true,
-                "with_vector": false,
-            });
-            if !offset.is_null() {
-                body["offset"] = offset.clone();
-            }
-            let page: ScrollResult = self
-                .call(
-                    Method::POST,
-                    &format!("/collections/{}/points/scroll", self.alias),
-                    Some(body),
+            let page = self
+                .scroll_page(
+                    &self.alias,
+                    &json!({
+                        "filter": filter,
+                        "limit": PAGE.min(STALE_SCAN - found.len()),
+                        "with_payload": true,
+                        "with_vector": false,
+                    }),
+                    &offset,
                 )
                 .await?;
             if page.points.is_empty() {
@@ -2069,11 +2086,10 @@ impl VectorStore for QdrantVectors {
         // One scroll page: Qdrant's scroll has no random start, and a slowly
         // changing first page is fine for a picture that refreshes every few
         // hours.
-        let page: ScrollResult = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points/scroll", self.alias),
-                Some(json!({
+        let page = self
+            .scroll_page(
+                &self.alias,
+                &json!({
                     "limit": limit,
                     // Only `artifact_id` is read below; a full payload would
                     // haul every point's chunk text along for nothing.
@@ -2084,7 +2100,8 @@ impl VectorStore for QdrantVectors {
                     // dropped on the next line. `dense_of` already reads the
                     // object form.
                     "with_vector": [DENSE],
-                })),
+                }),
+                &Value::Null,
             )
             .await?;
         Ok(page

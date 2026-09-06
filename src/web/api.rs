@@ -237,23 +237,14 @@ async fn ingest(
         ));
     }
 
-    let parsed_url = match &req.url {
-        Some(raw) => {
-            let u = url::Url::parse(raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
-            // `Url::parse` accepts `javascript:` and `data:` happily, and the
-            // scheme allowlist lives in `fetch_html` — which the `html` plus
-            // `url` path never calls. This value is stored and rendered as a
-            // link on the corpus page, so the check belongs here too.
-            if !matches!(u.scheme(), "http" | "https") {
-                return Err(Error::Validation(format!(
-                    "url: `{}` is not a scheme a page is read over",
-                    u.scheme()
-                )));
-            }
-            Some(u)
-        }
-        None => None,
-    };
+    // Checked here and not only in `fetch_html`, which the `html` plus `url`
+    // path never calls: this value is stored and rendered as a link on the
+    // corpus page. See `core::fetch::parse_readable`.
+    let parsed_url = req
+        .url
+        .as_deref()
+        .map(crate::core::fetch::parse_readable)
+        .transpose()?;
 
     // A highlighted fragment is exempt from the floor. See `floor_exempt`.
     let floor = if floor_exempt(&req) {

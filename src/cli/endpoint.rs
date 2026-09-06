@@ -2,6 +2,23 @@
 
 use crate::error::{Error, Result};
 
+/// What this client calls itself. Version-stamped, so a server log says which
+/// build asked.
+pub(crate) const USER_AGENT: &str = concat!("engram-cli/", env!("CARGO_PKG_VERSION"));
+
+/// The one HTTP client every verb uses.
+///
+/// It was six copies of these four lines — `capture` had it as a function and
+/// then re-inlined it in `watch`, and `ask`, `show`, `status` and both of
+/// `search`'s paths each wrote it out again. Here beside the address and the
+/// credential, which is the rest of what a request needs.
+pub(crate) fn client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|err| Error::Internal(format!("http client: {err}")))
+}
+
 pub struct Endpoint {
     /// No trailing slash, so joining is concatenation and never guesswork.
     pub url: String,

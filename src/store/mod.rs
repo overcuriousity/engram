@@ -115,30 +115,7 @@ impl Store {
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("schema.sql");
 
-        let mut missing = Vec::new();
-        for (table, columns) in schema_columns(SCHEMA) {
-            // The table-valued form of `PRAGMA table_info`, which takes a bind
-            // parameter where the pragma statement would need the name spliced
-            // into the SQL.
-            let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
-                .bind(&table)
-                .fetch_all(&self.pool)
-                .await?
-                .iter()
-                .map(|r| r.get::<String, _>("name"))
-                .collect();
-            // No columns at all means no such table — a fresh base, or a table
-            // this schema adds. That is not a base that is behind; it is one
-            // the statement below is about to create.
-            if have.is_empty() {
-                continue;
-            }
-            for c in columns {
-                if !have.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
-                    missing.push(format!("{table}.{c}"));
-                }
-            }
-        }
+        let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // One exception to "recreate it", and deliberately a list rather than
         // a rule.
         //
@@ -269,18 +246,7 @@ impl Store {
                 "ALTER TABLE gap_coverage ADD COLUMN covered_by TEXT",
             ),
         ];
-        for (table, column, ddl) in ADDITIVE {
-            let key = format!("{table}.{column}");
-            let Some(i) = missing.iter().position(|m| *m == key) else {
-                continue;
-            };
-            sqlx::raw_sql(ddl)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
-            tracing::info!(column = %key, "added a column this schema expects");
-            missing.remove(i);
-        }
+        apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;
 
         if !missing.is_empty() {
             return Err(crate::error::Error::Store(format!(
@@ -338,6 +304,67 @@ impl Store {
 /// column per line, which is what makes this much parsing enough: a line inside
 /// a `CREATE TABLE` block starts with the column's name, unless it starts with a
 /// comment or a table constraint.
+/// The columns a schema names that a database does not have, as `table.column`.
+///
+/// A table with no columns at all is no such table — a fresh base, or one this
+/// schema is about to create — and contributes nothing. Written once and
+/// called twice: the tenant schema and the control schema ask the same
+/// question, and had the same twenty lines each to ask it with.
+pub(crate) async fn missing_columns(pool: &sqlx::SqlitePool, schema: &str) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    for (table, columns) in schema_columns(schema) {
+        // The table-valued form of `PRAGMA table_info`, which takes a bind
+        // parameter where the pragma statement would need the name spliced
+        // into the SQL.
+        let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
+            .bind(&table)
+            .fetch_all(pool)
+            .await?
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        if have.is_empty() {
+            continue;
+        }
+        for c in columns {
+            if !have.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
+                missing.push(format!("{table}.{c}"));
+            }
+        }
+    }
+    Ok(missing)
+}
+
+/// Add the columns a caller has decided are safe to add, striking each off
+/// `missing` as it lands.
+///
+/// What stays in `missing` afterwards is what the caller refuses over, which
+/// is why this takes the list by reference rather than returning a verdict:
+/// the two callers word that refusal differently, and the wording is the
+/// useful part of it.
+/// `'static` on the DDL is sqlx's requirement, not a stylistic one: it refuses
+/// a SQL string whose lifetime does not prove it was written here rather than
+/// assembled from input.
+pub(crate) async fn apply_additive(
+    pool: &sqlx::SqlitePool,
+    additive: &[(&'static str, &'static str, &'static str)],
+    missing: &mut Vec<String>,
+) -> Result<()> {
+    for &(table, column, ddl) in additive {
+        let key = format!("{table}.{column}");
+        let Some(i) = missing.iter().position(|m| *m == key) else {
+            continue;
+        };
+        sqlx::raw_sql(ddl)
+            .execute(pool)
+            .await
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        tracing::info!(column = %key, "added a column the schema expects");
+        missing.remove(i);
+    }
+    Ok(())
+}
+
 fn schema_columns(sql: &str) -> Vec<(String, Vec<String>)> {
     const CONSTRAINTS: [&str; 5] = ["PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"];
     let mut tables: Vec<(String, Vec<String>)> = Vec::new();
