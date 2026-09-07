@@ -1818,6 +1818,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_recorded_sitting_moves_a_rank_when_only_the_flip_changes() {
+        // The counterfactual the axis rests on, with the lift held constant so
+        // the flip is the only thing that moved. Honest as a counterfactual
+        // precisely because the searcher saw the unprimed order: the evidence
+        // was recorded while the knob was off, so the sitting influenced
+        // nothing about the list this replays.
+        use crate::core::search::Priming;
+        let (core, order) = seeded().await;
+        let buried = order[5].clone();
+        let pair = Pair {
+            query: QUERY.into(),
+            satisfies: vec![buried.clone()],
+            query_vec: None,
+            priming: Some(Priming {
+                activation: Default::default(),
+                sitting: [buried].into_iter().collect(),
+                due: Default::default(),
+            }),
+            served_rank: None,
+        };
+        let off = RankingParams {
+            prime_lift: 2,
+            sitting_prime: false,
+            ..*core.ranking.read().unwrap()
+        };
+        let on = RankingParams {
+            sitting_prime: true,
+            ..off
+        };
+        let before = rank_of(&core, &pair, off, false).await.unwrap();
+        let after = rank_of(&core, &pair, on, false).await.unwrap();
+        assert_eq!(before, Some(5), "the knob off is the served order");
+        assert_eq!(
+            after,
+            Some(3),
+            "and on, the sitting lifts it by the bounded step"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sitting_flip_ties_at_a_zero_lift() {
+        // Why the chooser does not offer the axis there: there is nothing to
+        // measure, and a tie keeps the current value forever.
+        use crate::core::search::Priming;
+        let (core, order) = seeded().await;
+        let buried = order[5].clone();
+        let pair = Pair {
+            query: QUERY.into(),
+            satisfies: vec![buried.clone()],
+            query_vec: None,
+            priming: Some(Priming {
+                activation: Default::default(),
+                sitting: [buried].into_iter().collect(),
+                due: Default::default(),
+            }),
+            served_rank: None,
+        };
+        let off = RankingParams {
+            prime_lift: 0,
+            sitting_prime: false,
+            ..*core.ranking.read().unwrap()
+        };
+        let on = RankingParams {
+            sitting_prime: true,
+            ..off
+        };
+        assert_eq!(
+            rank_of(&core, &pair, off, false).await.unwrap(),
+            rank_of(&core, &pair, on, false).await.unwrap(),
+            "the flip cannot move anything while the lift is zero"
+        );
+    }
+
     #[test]
     fn a_reverted_pool_depth_is_not_offered_again() {
         use crate::store::generations::GenerationParams;
