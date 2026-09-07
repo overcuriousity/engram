@@ -9,6 +9,12 @@
 //! whatever documents the operator actually wants to search. What lives here is
 //! the shape of the files and the arithmetic over ranks.
 //!
+//! The offline half — `export`, `claims`, and the shapes above — is deprecated:
+//! it ranks a frozen corpus nobody has opened, so every knob that reads
+//! engagement is a no-op there, priming included. It is kept because its
+//! numbers are the only ones comparable across months. The live instruments are
+//! `sweep`, `lived`, `rehearsed` and `anchor`, which read what use left behind.
+//!
 //! `docs/evaluation.md` is the whole of it in prose: what each harness
 //! measures, which knob to sweep for which metric, and — the part worth
 //! reading before trusting a number — what neither of them can measure.

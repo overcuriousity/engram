@@ -951,10 +951,12 @@ give_up_window_secs = 300
 #
 # This is the whole point of recording any of it, and it ships off — not as an
 # opinion about whether it works, but because widening the sweep's evidence
-# changes which settings it recommends, a recommendation changes ranking, and a
-# default that changes ranking moves only after the harness has been run. Turn
-# it on deliberately, and run `cargo test --test eval` on either side of it if
-# you want to know what it did.
+# changes which settings it recommends, and a recommendation changes ranking.
+# Turn it on deliberately. What tells you what it did is the base itself:
+# /ui/insights journals every sweep with the settings that produced it, and the
+# probe anchor and the lived watch will take a move back that does not hold up.
+# (The cargo harness is deprecated and would not see this anyway — it ranks a
+# frozen corpus nobody has opened. See docs/evaluation.md.)
 #
 # Positive observations only. A weak negative is never enough to bring a change
 # about.
@@ -967,8 +969,9 @@ feed_sweep = false
 #               which artifacts nothing has ever asked for; it replays nothing.
 #   "ranking" — it may move its own ranking parameters — the recency weight,
 #               the per-source cap, the candidate pool depth, the recency
-#               half-life, the prime lift, whether the configured reranker
-#               runs, the width of the associated band, the review threshold —
+#               half-life, the prime lift, whether the sitting takes part in
+#               it, whether the configured reranker runs, the width of the
+#               associated band, the review threshold —
 #               on what use left behind, and take a move back on the same
 #               evidence. Every move is a row `revert` undoes exactly, and no
 #               move is made where there is nothing to measure it against.
