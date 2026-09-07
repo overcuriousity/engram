@@ -73,7 +73,7 @@ pub fn candidates(
     tried: &[crate::store::generations::GenerationParams],
     budget: usize,
 ) -> Vec<RankingParams> {
-    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS, PRIME_LIFTS};
+    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS, PRIME_LIFTS, SITTING_PRIMES};
     let recency = outward(
         &RECENCY,
         |v| *v < current.recency_weight,
@@ -100,6 +100,21 @@ pub fn candidates(
         |v| *v < current.prime_lift,
         |v| *v == current.prime_lift,
     );
+    // The sitting shares the lift's budget, so below a non-zero lift the flip
+    // is a guaranteed tie and offering it would burn a rank per pair every
+    // quiet period, forever, on a question the arithmetic already answers. Not
+    // offered where it can do nothing, the way `rerank` is not offered where no
+    // reranker is configured. The practical effect is an order: the lift ladder
+    // is walked first, and the sitting is asked about only once there is a
+    // budget for it to share.
+    let sittings: Vec<bool> = match current.prime_lift > 0 {
+        true => SITTING_PRIMES
+            .iter()
+            .copied()
+            .filter(|s| *s != current.sitting_prime)
+            .collect(),
+        false => vec![],
+    };
 
     let mut out = vec![current];
     let longest = [
@@ -108,6 +123,7 @@ pub fn candidates(
         multipliers.len(),
         half_lives.len(),
         lifts.len(),
+        sittings.len(),
     ]
     .into_iter()
     .max()
@@ -140,6 +156,12 @@ pub fn candidates(
         if let Some(prime_lift) = lifts.get(i) {
             out.push(RankingParams {
                 prime_lift: *prime_lift,
+                ..current
+            });
+        }
+        if let Some(sitting_prime) = sittings.get(i) {
+            out.push(RankingParams {
+                sitting_prime: *sitting_prime,
                 ..current
             });
         }
@@ -230,6 +252,7 @@ fn moved(cand: RankingParams, current: RankingParams) -> usize {
         + usize::from(cand.spread_max != current.spread_max)
         + usize::from(cand.rerank != current.rerank)
         + usize::from(cand.review_min != current.review_min)
+        + usize::from(cand.sitting_prime != current.sitting_prime)
 }
 
 /// One pair to replay: a query, every id that satisfies it already resolved,
@@ -1656,6 +1679,15 @@ mod tests {
         for c in &all {
             assert!(moved(*c, current) <= 1, "{c:?}");
         }
+        // And from a baseline that has the sitting axis available, so the flip
+        // is counted rather than merely absent.
+        let lifted_base = RankingParams {
+            prime_lift: 2,
+            ..current
+        };
+        for c in &candidates(lifted_base, &[], 64) {
+            assert!(moved(*c, lifted_base) <= 1, "{c:?}");
+        }
         assert_eq!(
             all.len(),
             1 + (RECENCY.len() - 1)
@@ -1671,12 +1703,26 @@ mod tests {
     fn the_pass_budget_covers_every_rung_on_every_axis() {
         // A tie keeps the current value, so an improvement two rungs out
         // behind a rung that ties would never be reached by a pass that only
-        // tried the nearest step. The budget has to reach the whole ladder.
-        let current = RankingParams::default();
-        let all = candidates(current, &[], usize::MAX);
-        assert_eq!(all.len(), crate::jobs::tune::BUDGET, "{all:?}");
-        for c in &all {
-            assert!(moved(*c, current) <= 1, "{c:?}");
+        // tried the nearest step. The budget has to reach the whole ladder —
+        // including the sitting flip, which only exists above a zero lift, so
+        // the widest grid is the one the budget has to cover.
+        let at_zero = candidates(RankingParams::default(), &[], usize::MAX);
+        assert_eq!(at_zero.len(), crate::jobs::tune::BUDGET - 1, "{at_zero:?}");
+        let lifted_base = RankingParams {
+            prime_lift: 2,
+            ..RankingParams::default()
+        };
+        let lifted = candidates(lifted_base, &[], usize::MAX);
+        assert_eq!(lifted.len(), crate::jobs::tune::BUDGET, "{lifted:?}");
+        // Not re-asserted against one shared baseline: a lifted candidate
+        // differs from the shipped parameters on two knobs by construction, so
+        // that comparison would be either wrong or vacuous. Each grid is
+        // checked against its own baseline in the test above.
+        for c in &at_zero {
+            assert!(moved(*c, RankingParams::default()) <= 1, "{c:?}");
+        }
+        for c in &lifted {
+            assert!(moved(*c, lifted_base) <= 1, "{c:?}");
         }
     }
 
@@ -1690,6 +1736,42 @@ mod tests {
             .filter(|l| *l != current.prime_lift)
             .collect();
         assert_eq!(lifts, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn the_sitting_flip_is_not_offered_where_it_can_do_nothing() {
+        // At a lift of zero the flip is a guaranteed tie — `prime` returns
+        // early — and a tie is never adopted, never becomes a generation, and
+        // so never reaches `tried_candidates`, which holds only the reverted
+        // and the refused. Offered here it would be re-measured every quiet
+        // period forever, at one rank per pair, to settle something the
+        // arithmetic settles for free.
+        let current = RankingParams::default();
+        assert_eq!(current.prime_lift, 0, "the shipped rung");
+        let grid = candidates(current, &[], crate::jobs::tune::BUDGET);
+        assert!(
+            grid.iter().all(|c| !c.sitting_prime),
+            "no sitting flip at a lift of zero"
+        );
+    }
+
+    #[test]
+    fn the_sitting_flip_is_offered_once_a_lift_has_been_adopted() {
+        let current = RankingParams {
+            prime_lift: 2,
+            ..RankingParams::default()
+        };
+        let grid = candidates(current, &[], crate::jobs::tune::BUDGET);
+        let flips: Vec<bool> = grid
+            .iter()
+            .map(|c| c.sitting_prime)
+            .filter(|s| *s != current.sitting_prime)
+            .collect();
+        assert_eq!(
+            flips,
+            vec![true],
+            "exactly one flip, and it is the other rung"
+        );
     }
 
     #[tokio::test]
