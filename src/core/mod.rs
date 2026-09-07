@@ -564,6 +564,7 @@ impl Core {
                     &cfg.vector,
                     &cfg.associate,
                     &cfg.consolidate,
+                    &cfg.sitting,
                     cfg.infer.rerank.is_some(),
                 ),
             )),

@@ -1050,6 +1050,11 @@ pub(crate) fn default_prime_lift() -> usize {
 pub(crate) fn default_spread_max() -> usize {
     3
 }
+/// The shipped `sitting.prime`: off. Read by the generation shapes so a row
+/// written before the knob was on the ladder decodes as what it ran under.
+pub(crate) fn default_sitting_prime() -> bool {
+    false
+}
 /// A generation written before the rerank knob existed ran with whatever
 /// reranker the file named, which is "on" wherever one was configured.
 pub(crate) fn default_rerank_knob() -> bool {
@@ -2094,6 +2099,7 @@ pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> st
     doc["vector"]["recency_half_life_days"] = toml_edit::value(i64::from(p.recency_half_life_days));
     doc["associate"]["prime_lift"] = toml_edit::value(p.prime_lift as i64);
     doc["associate"]["spread_max"] = toml_edit::value(p.spread_max as i64);
+    doc["sitting"]["prime"] = toml_edit::value(p.sitting_prime);
     let review = (f64::from(p.review_min) * 1000.0).round() / 1000.0;
     doc["consolidate"]["review_min"] = toml_edit::value(review);
     // `rerank` has no key of its own: the file says "on" by naming a reranker
@@ -2126,6 +2132,7 @@ pub fn ranking_keys_in_env() -> Vec<String> {
                     | "ENGRAM__VECTOR__RECENCY_HALF_LIFE_DAYS"
                     | "ENGRAM__ASSOCIATE__PRIME_LIFT"
                     | "ENGRAM__ASSOCIATE__SPREAD_MAX"
+                    | "ENGRAM__SITTING__PRIME"
                     | "ENGRAM__CONSOLIDATE__REVIEW_MIN"
             )
         })
@@ -3253,6 +3260,26 @@ mod tests {
     }
 
     #[test]
+    fn applying_names_the_sitting_key() {
+        // Its own test rather than a line in the one below: the sitting is the
+        // only swept knob whose key lives outside the three tables that one
+        // writes, and a file that never mentioned it must come back naming it.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        write_ranking(
+            &p,
+            &crate::core::ranking::RankingParams {
+                sitting_prime: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("prime = true"), "{out}");
+        assert!(Config::load(Some(&p)).unwrap().sitting.prime);
+    }
+
+    #[test]
     fn applying_writes_all_four_knobs_and_eats_no_comment() {
         let dir = tempfile::tempdir().unwrap();
         let p = write(
@@ -3270,6 +3297,7 @@ mod tests {
                 spread_max: 5,
                 rerank: true,
                 review_min: 0.84,
+                sitting_prime: false,
             },
         )
         .unwrap();

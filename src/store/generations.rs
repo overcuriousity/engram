@@ -12,9 +12,10 @@ use sqlx::Row;
 /// does, and a deferred transaction takes its snapshot before the upgrade.
 const IMMEDIATE: &str = "BEGIN IMMEDIATE";
 
-/// The knobs a generation holds: the seven the idle pass may move. Stored as
-/// JSON so the set can widen without a migration — the two retrieval knobs
-/// arrived after the first rows were written, and those rows still read.
+/// The knobs a generation holds: everything the idle pass may move. Stored as
+/// JSON so the set can widen without a migration — the retrieval knobs and the
+/// sitting flip all arrived after the first rows were written, and those rows
+/// still read.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GenerationParams {
     pub recency_weight: f32,
@@ -35,6 +36,10 @@ pub struct GenerationParams {
     pub rerank: bool,
     #[serde(default = "crate::config::default_review_min")]
     pub review_min: f32,
+    /// On the ladder later than the rest, so a row from before it decodes as
+    /// the shipped `false`.
+    #[serde(default = "crate::config::default_sitting_prime")]
+    pub sitting_prime: bool,
 }
 
 impl Default for GenerationParams {
@@ -54,6 +59,7 @@ impl From<crate::core::ranking::RankingParams> for GenerationParams {
             spread_max: p.spread_max,
             rerank: p.rerank,
             review_min: p.review_min,
+            sitting_prime: p.sitting_prime,
         }
     }
 }
@@ -69,6 +75,7 @@ impl From<GenerationParams> for crate::core::ranking::RankingParams {
             spread_max: p.spread_max,
             rerank: p.rerank,
             review_min: p.review_min,
+            sitting_prime: p.sitting_prime,
         }
     }
 }
@@ -483,6 +490,10 @@ mod tests {
         assert_eq!(p.prime_lift, crate::config::default_prime_lift());
         assert_eq!(p.spread_max, crate::config::default_spread_max());
         assert!(p.rerank);
+        // The sitting flip joined the ladder later still, and a row from
+        // before it ran with the shipped value the same way.
+        assert_eq!(p.sitting_prime, crate::config::default_sitting_prime());
+        assert!(!p.sitting_prime, "and the shipped value is off");
     }
 
     #[tokio::test]
@@ -824,6 +835,7 @@ mod tests {
             spread_max: 5,
             rerank: false,
             review_min: 0.84,
+            sitting_prime: true,
         };
         let back: crate::core::ranking::RankingParams = GenerationParams::from(r).into();
         assert_eq!(back, r);

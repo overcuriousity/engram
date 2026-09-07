@@ -46,6 +46,10 @@ pub struct RankingParams {
     pub recency_half_life_days: u32,
     /// How many places priming may lift a hit. Zero is off.
     pub prime_lift: usize,
+    /// Whether what this sitting has already touched may take part in the
+    /// lift. It shares `prime_lift`'s budget rather than holding one of its
+    /// own, so at a lift of zero this changes nothing.
+    pub sitting_prime: bool,
     /// How many associated artifacts are appended under the ranked list.
     pub spread_max: usize,
     /// Whether the configured reranker runs. Meaningless where none is
@@ -67,6 +71,7 @@ impl Default for RankingParams {
             candidate_multiplier: crate::config::default_candidate_multiplier(),
             recency_half_life_days: crate::config::default_recency_half_life_days(),
             prime_lift: crate::config::default_prime_lift(),
+            sitting_prime: crate::config::default_sitting_prime(),
             spread_max: crate::config::default_spread_max(),
             rerank: crate::config::default_rerank_knob(),
             review_min: crate::config::default_review_min(),
@@ -82,6 +87,7 @@ impl RankingParams {
         cfg: &VectorConfig,
         associate: &crate::config::AssociateConfig,
         consolidate: &crate::config::ConsolidateConfig,
+        sitting: &crate::config::SittingConfig,
         reranker_configured: bool,
     ) -> Self {
         Self {
@@ -96,6 +102,7 @@ impl RankingParams {
             candidate_multiplier: cfg.candidate_multiplier.max(1),
             recency_half_life_days: cfg.recency_half_life_days.max(1),
             prime_lift: associate.prime_lift,
+            sitting_prime: sitting.prime,
             spread_max: associate.spread_max,
             rerank: reranker_configured,
             review_min: consolidate.review_min,
@@ -131,6 +138,7 @@ mod tests {
             },
             &Default::default(),
             &Default::default(),
+            &Default::default(),
             false,
         );
         assert_eq!(p.candidate_multiplier, 5);
@@ -144,16 +152,43 @@ mod tests {
             spread_max: 5,
             ..Default::default()
         };
-        let p =
-            RankingParams::from_config(&vector_config(3), &associate, &Default::default(), true);
+        let p = RankingParams::from_config(
+            &vector_config(3),
+            &associate,
+            &Default::default(),
+            &Default::default(),
+            true,
+        );
         assert_eq!(p.prime_lift, 2);
         assert_eq!(p.spread_max, 5);
         assert!(p.rerank);
-        let p =
-            RankingParams::from_config(&vector_config(3), &associate, &Default::default(), false);
+        let p = RankingParams::from_config(
+            &vector_config(3),
+            &associate,
+            &Default::default(),
+            &Default::default(),
+            false,
+        );
         assert!(
             !p.rerank,
             "no reranker configured means the knob starts off"
+        );
+    }
+
+    #[test]
+    fn the_sitting_flag_is_read_from_the_file_and_ships_off() {
+        let sitting = crate::config::SittingConfig { prime: true };
+        let p = RankingParams::from_config(
+            &vector_config(3),
+            &Default::default(),
+            &Default::default(),
+            &sitting,
+            false,
+        );
+        assert!(p.sitting_prime, "the file's value is the starting rung");
+        assert!(
+            !RankingParams::default().sitting_prime,
+            "and the shipped rung is off"
         );
     }
 
@@ -175,8 +210,13 @@ mod tests {
             review_min: 0.84,
             ..Default::default()
         };
-        let p =
-            RankingParams::from_config(&vector_config(3), &Default::default(), &consolidate, false);
+        let p = RankingParams::from_config(
+            &vector_config(3),
+            &Default::default(),
+            &consolidate,
+            &Default::default(),
+            false,
+        );
         assert_eq!(p.review_min, 0.84);
         let d = RankingParams::default();
         assert!(REVIEW_MINS.contains(&d.review_min));
@@ -201,6 +241,7 @@ mod tests {
                 &vector_config(0),
                 &Default::default(),
                 &Default::default(),
+                &Default::default(),
                 false
             )
             .per_source_cap,
@@ -209,6 +250,7 @@ mod tests {
         assert_eq!(
             RankingParams::from_config(
                 &vector_config(3),
+                &Default::default(),
                 &Default::default(),
                 &Default::default(),
                 false
