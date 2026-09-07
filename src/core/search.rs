@@ -688,8 +688,19 @@ fn prime(
     margin: f64,
     lift: usize,
     sitting: &std::collections::HashSet<String>,
+    sitting_prime: bool,
     due: &std::collections::HashSet<String>,
 ) -> Vec<SearchResult> {
+    // The knob gates the *use* of the sitting, never its collection: the
+    // `Priming` this search records names what the session touched either way,
+    // which is the whole of what lets the idle pass replay the search with the
+    // sitting on and find out whether it should be. Held to the badge as well
+    // as the lift, so serving is unchanged until the loop adopts it.
+    let empty = std::collections::HashSet::new();
+    let sitting = match sitting_prime {
+        true => sitting,
+        false => &empty,
+    };
     // Marked before anything can return. `in_sitting` is a fact about the row —
     // this sitting has been in it — and not a consequence of the reordering. A
     // list of two is a list nothing can move in, not a list where the badge
@@ -1700,26 +1711,24 @@ impl Core {
         if primes || origin.replay.is_some() {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            // Off by default and empty when off: this is the only part of the
-            // sitting that moves an order, and the same query ranking
-            // differently in two sittings is what is disorienting about it.
-            // Held off the doors priming is already held off, for the same
-            // reasons, and off every door with no session for the reason in
+            // Collected whatever the knob says, and used only where it says
+            // so — see `prime`. Recording this is what makes the knob
+            // measurable at all: gated on itself, it produced no evidence
+            // about itself, so the idle pass could never move it. Held off the
+            // doors priming is already held off, for the same reasons, and
+            // empty on every door with no session for the reason in
             // `Origin::session`.
-            let sitting: std::collections::HashSet<String> = match self.sitting.prime {
-                true => origin
-                    .session
-                    .as_deref()
-                    .map(|s| {
-                        self.sittings
-                            .read(s, now_secs(), self.pursuit.idle_secs as i64)
-                            .touched
-                            .into_iter()
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                false => Default::default(),
-            };
+            let sitting: std::collections::HashSet<String> = origin
+                .session
+                .as_deref()
+                .map(|s| {
+                    self.sittings
+                        .read(s, now_secs(), self.pursuit.idle_secs as i64)
+                        .touched
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default();
             // A replay is primed with what the recorded search read, not with
             // the base as it stands now: the activation has decayed since and
             // the sitting is long over.
@@ -1737,6 +1746,7 @@ impl Core {
                 self.associate.prime_margin,
                 params.prime_lift,
                 &priming.sitting,
+                params.sitting_prime,
                 &priming.due,
             );
             note_reorder(&mut results, &before, |e| &mut e.prime);
@@ -3400,6 +3410,45 @@ mod tests {
     }
 
     #[test]
+    fn the_sitting_moves_nothing_and_badges_nothing_while_the_knob_is_off() {
+        // The whole promise of collecting the sitting unconditionally: what
+        // serving does must not change until the loop adopts the knob. Held to
+        // the badge as well as the order, because the badge is what a person
+        // would notice appearing.
+        let sitting = std::collections::HashSet::from(["d".to_string()]);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+            false,
+            &Default::default(),
+        );
+        assert_eq!(order(&out), vec!["a", "b", "c", "d"], "nothing moved");
+        assert!(
+            out.iter().all(|r| !r.in_sitting),
+            "and nothing is badged either"
+        );
+    }
+
+    #[test]
+    fn the_sitting_lifts_and_badges_once_the_knob_is_on() {
+        let sitting = std::collections::HashSet::from(["d".to_string()]);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+            true,
+            &Default::default(),
+        );
+        assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
+        assert!(out[1].primed && out[1].in_sitting);
+    }
+
+    #[test]
     fn a_hit_climbs_at_most_two_places_and_never_past_the_first() {
         // Rank-based rather than score-based on purpose: hybrid scores are
         // fused ranks and mean nothing across queries, while "moved up two
@@ -3411,6 +3460,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
@@ -3427,6 +3477,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "c"]);
@@ -3442,6 +3493,7 @@ mod tests {
             0.5,
             2,
             &sitting,
+            true,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
@@ -3458,6 +3510,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &due,
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
@@ -3474,6 +3527,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &due,
         );
         assert_eq!(
@@ -3495,6 +3549,7 @@ mod tests {
             0.5,
             2,
             &sitting,
+            true,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b"], "nothing can move on two rows");
@@ -3516,6 +3571,7 @@ mod tests {
             0.5,
             2,
             &sitting,
+            true,
             &Default::default(),
         );
         assert_eq!(
@@ -3535,6 +3591,7 @@ mod tests {
             0.5,
             2,
             &sitting,
+            true,
             &Default::default(),
         );
         assert_eq!(order(&out)[0], "a");
@@ -3549,6 +3606,7 @@ mod tests {
             0.5,
             0,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "c", "d"]);
@@ -3565,6 +3623,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(
@@ -3607,6 +3666,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert!(
@@ -3663,6 +3723,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "e", "c", "d"]);
@@ -3682,6 +3743,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         let moved = order(&out).iter().position(|id| *id == "g").unwrap();
@@ -3762,6 +3824,80 @@ mod tests {
         assert_eq!(
             after, before,
             "a marked search raised activation with `[learn]` off"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_records_the_sitting_even_though_the_knob_is_off() {
+        // The defect this change exists to fix: the sitting used to be
+        // collected only when the knob was already on, so no evidence about it
+        // ever accumulated, so the idle pass could never measure it, so it
+        // stayed off forever. The knob gates the *use* of the sitting, never
+        // its collection.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(&core, &[("alpha text about it", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text about it").await;
+
+        assert!(
+            !core.ranking.read().unwrap().sitting_prime,
+            "the fixture must run with the knob off, or this proves nothing"
+        );
+        core.sittings
+            .touched("sess", &a, now_secs(), core.pursuit.idle_secs as i64);
+
+        let (_, outcome) = core
+            .search_with(
+                &q("alpha text about it"),
+                None,
+                crate::store::feedback::Origin::from(Door::Ui).in_sitting(Some("sess".to_string())),
+            )
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+
+        let event = outcome.event.expect("the UI door waits for its capture");
+        let ctx = core
+            .store
+            .search_context(&event)
+            .await
+            .unwrap()
+            .expect("a priming search records what priming read");
+        assert!(
+            ctx.sitting.contains(&a),
+            "the touched artifact must be in the recorded sitting: {:?}",
+            ctx.sitting
+        );
+    }
+
+    #[tokio::test]
+    async fn a_door_with_no_session_records_an_empty_sitting() {
+        // An access token is not a conversation. `Origin::session` is `None`
+        // everywhere but the web door, and collecting the sitting
+        // unconditionally must not change that.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(&core, &[("alpha text about it", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text about it").await;
+        core.sittings
+            .touched("sess", &a, now_secs(), core.pursuit.idle_secs as i64);
+
+        // The same live sitting exists; this search simply does not belong to
+        // it, because the door cannot name one.
+        let (_, outcome) = core
+            .search_with(&q("alpha text about it"), None, Door::Ui)
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+
+        let event = outcome.event.expect("the UI door waits for its capture");
+        let ctx = core.store.search_context(&event).await.unwrap().unwrap();
+        assert!(
+            ctx.sitting.is_empty(),
+            "a search with no session names no sitting: {:?}",
+            ctx.sitting
         );
     }
 

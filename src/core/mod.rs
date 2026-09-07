@@ -250,8 +250,6 @@ pub struct Core {
     /// What the queue does with work nobody is waiting on. Read by the repair
     /// pass, which is where ageing happens.
     pub schedule: crate::config::ScheduleConfig,
-    /// Whether the sitting may move a result. Carrying needs no setting.
-    pub sitting: crate::config::SittingConfig,
     pub time: crate::config::TimeConfig,
     pub reap: crate::config::ReapConfig,
     /// Whether and how the area under the search box is filled. Read by the
@@ -583,7 +581,6 @@ impl Core {
             promote: cfg.promote.clone(),
             pursuit: cfg.pursuit.clone(),
             schedule: cfg.schedule.clone(),
-            sitting: cfg.sitting.clone(),
             time: cfg.time.clone(),
             reap: cfg.reap.clone(),
             recommend: cfg.recommend.clone(),
@@ -902,7 +899,6 @@ pub mod test_support {
             promote: crate::config::PromoteConfig::default(),
             pursuit: crate::config::PursuitConfig::default(),
             schedule: crate::config::ScheduleConfig::default(),
-            sitting: crate::config::SittingConfig::default(),
             // The fake embedder hashes text into eight dimensions, where two
             // unrelated strings clear 0.80 by chance and the classifier fires on
             // noise. Tests of the classifier hand it vectors directly.

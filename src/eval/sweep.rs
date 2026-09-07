@@ -1696,8 +1696,9 @@ mod tests {
     async fn a_pair_with_a_sitting_ranks_differently_at_lift_two_and_the_same_without_one() {
         use crate::core::search::Priming;
         let (core, order) = seeded().await;
-        // The last-ranked hit was read in this sitting: at lift 2 it climbs
-        // two places on the Judge door, where priming is otherwise off.
+        // The last-ranked hit was read in this sitting: at lift 2, and with the
+        // sitting flag on, it climbs two places on the Judge door, where
+        // priming is otherwise off.
         let with = Pair {
             query: QUERY.into(),
             satisfies: vec![order[5].clone()],
@@ -1716,6 +1717,7 @@ mod tests {
         let current = *core.ranking.read().unwrap();
         let lifted = RankingParams {
             prime_lift: 2,
+            sitting_prime: true,
             ..current
         };
         assert_eq!(

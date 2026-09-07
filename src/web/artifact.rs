@@ -1819,7 +1819,10 @@ mod tests {
         // the part that does, and it waits for the harness.
         let mut c = crate::core::test_support::test_core().await;
         c.learn.enabled = true;
-        assert!(!c.sitting.prime, "priming must ship off");
+        assert!(
+            !c.ranking.read().unwrap().sitting_prime,
+            "priming must ship off"
+        );
         let core = c.clone();
         let (app, cookie) = app_with_cookie(c).await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
