@@ -1271,8 +1271,8 @@ Reply with JSON only, no commentary, in exactly this shape:
 ///
 /// Nothing is lost by leaving it out. The prior decided nothing; the model sees
 /// both artifacts whole and has every verdict available either way. The rule it
-/// also justified — a value in the list must survive into merged text — is
-/// enforced by `merge::losses` calling `fact_tokens` directly, and is untouched.
+/// also justified — a value in the list must survive into merged text — went
+/// with `infer::facts` itself: `merge::losses` now checks machine literals only.
 ///
 /// `attempt` is how many times this group has already been asked about, and it
 /// is in the prompt for one reason: the endpoint caches by exact prompt text and

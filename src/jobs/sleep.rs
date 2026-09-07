@@ -10,7 +10,6 @@ use crate::error::Result;
 use crate::eval::sweep::OBSERVATION_LIMIT;
 use crate::store::integrations::{Integration, Tag};
 use crate::store::rehearsals::{Class, NewRehearsal};
-use std::collections::BTreeSet;
 
 #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct Integrated {
@@ -26,38 +25,20 @@ pub struct Integrated {
 
 /// The tag, from the best surviving hit. Pure, so the rule is one function.
 ///
-/// Below `review_min` nothing near: novel. At or above it: known — unless the
-/// two are at or above `auto_supersede`, where they claim to be the same
-/// statement, and carry different values while claiming it. That is the
-/// narrow case, on purpose: below `auto_supersede` a value difference is two
-/// notes about two things. Both sides need values to disagree.
-pub fn tag_for(
-    review_min: f32,
-    auto_supersede: f32,
-    mine: &BTreeSet<String>,
-    nearest: Option<(f32, &BTreeSet<String>)>,
-) -> (Tag, Option<String>) {
-    let Some((score, theirs)) = nearest else {
-        return (Tag::Novel, None);
-    };
-    if score < review_min {
-        return (Tag::Novel, None);
+/// Below `review_min` nothing near: novel. At or above it: known. There is no
+/// third answer here. There used to be — two artifacts at or above
+/// `auto_supersede` whose value-shaped tokens differed were tagged a conflict
+/// and filed as a contradiction, without a model ever reading either one. In a
+/// base of lecture slides the tokens that differed were the footer dates and
+/// the section numbers, so 130 pairs of near-identical passages settled into a
+/// terminal state no sweep reopens and no person could clear. Whether two
+/// artifacts disagree is a question about what they say, and nothing that
+/// splits on whitespace can be asked it.
+pub fn tag_for(review_min: f32, nearest: Option<f32>) -> Tag {
+    match nearest {
+        Some(score) if score >= review_min => Tag::Known,
+        _ => Tag::Novel,
     }
-    if score >= auto_supersede && !mine.is_empty() && !theirs.is_empty() && mine != theirs {
-        let list = |set: BTreeSet<&String>| {
-            set.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let detail = format!(
-            "same statement, different values: this one says {}; the other says {}",
-            list(mine.difference(theirs).collect()),
-            list(theirs.difference(mine).collect())
-        );
-        return (Tag::Conflict, Some(detail));
-    }
-    (Tag::Known, None)
 }
 
 /// Every new artifact, run once against the rest of the base.
@@ -71,7 +52,6 @@ pub fn tag_for(
 pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
     let mut out = Integrated::default();
     let review_min = core.ranking.read().expect("ranking lock").review_min;
-    let auto = core.consolidate.auto_supersede;
     let model = core.embedder.model().to_string();
     for a in core.store.artifacts_to_integrate(OBSERVATION_LIMIT).await? {
         if core.store.activity_since(started).await? {
@@ -102,15 +82,8 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
         }
         surviving.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let mine = crate::infer::facts::fact_tokens(&a.text);
         let nearest = surviving.first();
-        let theirs = nearest.map(|(_, o)| crate::infer::facts::fact_tokens(&o.text));
-        let (tag, detail) = tag_for(
-            review_min,
-            auto,
-            &mine,
-            nearest.map(|(s, _)| *s).zip(theirs.as_ref()),
-        );
+        let tag = tag_for(review_min, nearest.map(|(s, _)| *s));
         let written = core
             .store
             .record_integration(&Integration {
@@ -119,7 +92,7 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
                 tag,
                 nearest_id: nearest.map(|(_, o)| o.id.clone()),
                 nearest_score: nearest.map(|(s, _)| *s),
-                detail: detail.clone(),
+                detail: None,
             })
             .await?;
         if !written {
@@ -129,26 +102,11 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
         match tag {
             Tag::Novel => out.novel += 1,
             Tag::Known => out.known += 1,
-            Tag::Conflict => {
-                out.conflicts += 1;
-                let (score, other) = nearest.expect("a conflict has a nearest");
-                let detail = detail.as_deref().unwrap_or("");
-                if core
-                    .store
-                    .record_pair_with_detail(&a.id, &other.id, *score, detail)
-                    .await?
-                    && let Some(pair) = core.store.pair_between(&a.id, &other.id).await?
-                {
-                    core.store
-                        .set_pair_state(
-                            pair.id,
-                            crate::store::pairs::PairState::Contradiction,
-                            Some(detail),
-                            crate::store::pairs::DecidedBy::Evidence,
-                        )
-                        .await?;
-                }
-            }
+            // Nothing here writes this any more, and `Integrated::conflicts`
+            // stays at zero for the same reason. The variant and the column
+            // survive so the integrations and sleep runs recorded before the
+            // evidence heuristic was retired still read back as what they were.
+            Tag::Conflict => {}
         }
         // The vector is the artifact's own, read back from the index so
         // nothing is embedded.
@@ -684,40 +642,12 @@ pub async fn condense_candidates(
 mod tests {
     use super::*;
 
-    fn toks(v: &[&str]) -> BTreeSet<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
-    fn the_tag_is_novel_below_review_known_above_and_conflict_only_at_the_same_statement_with_different_values()
-     {
-        let mine = toks(&["8080", "1.21.4"]);
-        assert_eq!(tag_for(0.80, 0.94, &mine, None).0, Tag::Novel);
-        assert_eq!(
-            tag_for(0.80, 0.94, &mine, Some((0.79, &toks(&["9090"])))).0,
-            Tag::Novel
-        );
-        assert_eq!(
-            tag_for(0.80, 0.94, &mine, Some((0.85, &toks(&["9090"])))).0,
-            Tag::Known,
-            "below auto_supersede a different value is two notes about two things"
-        );
-        assert_eq!(
-            tag_for(0.80, 0.94, &mine, Some((0.95, &mine))).0,
-            Tag::Known
-        );
-        assert_eq!(
-            tag_for(0.80, 0.94, &mine, Some((0.95, &toks(&[])))).0,
-            Tag::Known,
-            "a side with no values cannot disagree"
-        );
-        let (tag, detail) = tag_for(0.80, 0.94, &mine, Some((0.95, &toks(&["9090", "1.21.4"]))));
-        assert_eq!(tag, Tag::Conflict);
-        let d = detail.unwrap();
-        assert!(
-            d.contains("8080") && d.contains("9090") && !d.contains("1.21.4"),
-            "{d}"
-        );
+    fn the_tag_is_novel_below_review_and_known_at_or_above_it() {
+        assert_eq!(tag_for(0.80, None), Tag::Novel);
+        assert_eq!(tag_for(0.80, Some(0.79)), Tag::Novel);
+        assert_eq!(tag_for(0.80, Some(0.80)), Tag::Known);
+        assert_eq!(tag_for(0.80, Some(0.99)), Tag::Known);
     }
 
     pub(crate) async fn corpus_of(
@@ -794,16 +724,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_conflict_files_a_contradiction_pair_for_a_person() {
+    async fn two_artifacts_differing_only_in_a_value_are_known_and_file_nothing() {
         // The fake embedder hashes text; two texts that differ only in a value
-        // do not land at 0.94, and may land below zero. Set the thresholds so
-        // that any neighbour is "the same statement" and let the tokens decide.
+        // do not land at 0.94, and may land below zero. Set the threshold so
+        // that any neighbour counts as the same statement.
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.auto_supersede = -1.0;
         core.ranking.write().unwrap().review_min = -1.0;
         let mut ids = Vec::new();
-        // Versions, not bare ports: `fact_tokens` refuses a bare run of
-        // digits on purpose (see `infer::facts::is_fact`).
         for (raw, text) in [
             ("first", "requires 1.21.4 or later"),
             ("second", "requires 1.22.0 or later"),
@@ -825,17 +753,20 @@ mod tests {
             ids.push(c.id);
         }
         let r = integrate(&core, crate::store::now()).await.unwrap();
-        // Both arrived in one sleep, so each is tagged against the other;
-        // the pair between them is filed once.
-        assert_eq!(r.conflicts, 2, "{r:?}");
-        let pair = core
-            .store
-            .pair_between(&ids[0], &ids[1])
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(pair.state, crate::store::pairs::PairState::Contradiction);
-        assert!(pair.detail.unwrap_or_default().contains("1.22.0"));
+        // Two artifacts stating one thing with different values is the cleanest
+        // thing there is to merge, and which of them is current is the judge's
+        // question. Reading the answer off the digits in the text is what filed
+        // a lecture archive's slide dates as contradictions nobody could clear.
+        assert_eq!(r.conflicts, 0, "{r:?}");
+        assert_eq!(r.known, 2, "{r:?}");
+        assert!(
+            core.store
+                .pair_between(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_none(),
+            "no pair is filed without a model having looked at one"
+        );
     }
 
     pub(crate) async fn live_generation(

@@ -296,16 +296,23 @@ pub async fn flag_orphans(core: &Core) -> Result<usize> {
     Ok(n)
 }
 
-/// Every value and literal in `roots` that `draft` does not carry.
+/// Every machine literal in `roots` that `draft` does not carry.
 ///
 /// Empty means the merge may be written. Anything else is a merge that would
 /// have lost something, and the caller escalates rather than retrying: the text
 /// is what was wrong, and a person can read what it would have cost.
 ///
-/// Both halves search the draft's text *and* its caveats. A caveat is stored,
-/// rendered and recoverable, so a value demoted there has not been lost — this
-/// checks for loss, not for prominence. Deciding that a value belongs in the
-/// caveats rather than the body is exactly the judgement a merge is for.
+/// The search covers the draft's text *and* its caveats. A caveat is stored,
+/// rendered and recoverable, so a literal demoted there has not been lost —
+/// this checks for loss, not for prominence. Deciding that something belongs
+/// in the caveats rather than the body is exactly the judgement a merge is for.
+///
+/// It used to check values as well — every version, date and port `fact_tokens`
+/// could pick out of a root had to reappear in the draft. That half went with
+/// `infer::facts`: the question it asked was whether two spellings of a number
+/// matched, which is a question about punctuation, and it refused correct
+/// merges for renumbering a list. A literal is quoted from a source and can be
+/// searched for honestly; a value has to be understood first.
 pub fn losses(roots: &[Chunk], draft: &MergedDraft) -> Vec<String> {
     let mut haystack = draft.text.clone();
     for c in &draft.caveats {
@@ -313,19 +320,10 @@ pub fn losses(roots: &[Chunk], draft: &MergedDraft) -> Vec<String> {
         haystack.push_str(c);
     }
 
-    let have = crate::infer::facts::fact_tokens(&haystack);
     let mut out: Vec<String> = Vec::new();
 
     for r in roots {
-        // Values: a version, a timeout, a port. The failure this catches is a
-        // model answering "duplicate" and then quietly picking a side while
-        // writing, which is a conflict resolved by deletion.
-        for tok in crate::infer::facts::fact_tokens(&r.text) {
-            if !have.contains(&tok) {
-                out.push(tok);
-            }
-        }
-        // Literals: commands, paths, flags, error strings. `verify`'s module
+        // Commands, paths, flags, error strings. `verify`'s module
         // header states the stake — a paraphrased command is a command that
         // later gets pasted into a root shell.
         //
@@ -436,27 +434,38 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_that_drops_a_value_is_refused() {
+    fn a_merge_that_drops_a_literal_is_refused() {
         // The one way this feature can destroy knowledge without anyone
         // noticing: the model answers "duplicate" and quietly picks a side while
-        // writing. The result reads well, ranks well, and the missing number is
+        // writing. The result reads well, ranks well, and the missing command is
         // gone from the base — a conflict resolved by deletion.
+        let roots = [
+            root("Mount it read-only with `mount -o ro /dev/sdb1 /mnt/case`."),
+            root("Unmount it again with `umount /mnt/case`."),
+        ];
+        let d = draft("Unmount it again with `umount /mnt/case`.");
+        assert!(
+            losses(&roots, &d).contains(&"mount -o ro /dev/sdb1 /mnt/case".to_string()),
+            "{:?}",
+            losses(&roots, &d)
+        );
+    }
+
+    #[test]
+    fn a_dropped_value_is_no_longer_caught_and_that_is_the_trade() {
+        // The cost of retiring `infer::facts`, written down rather than left to
+        // be rediscovered. A merge that keeps one side's timeout and drops the
+        // other's passes this check now. The half that caught it asked whether
+        // two spellings of a number matched — `Win7/8/10` against `Windows 7, 8
+        // und 10` — and answered a question about punctuation, refusing correct
+        // merges for renumbering a list. What guards the merge instead is the
+        // judge: a model that cannot write text keeping both values is told to
+        // answer "conflict" rather than "duplicate" (see `dedupe_prompt`).
         let roots = [
             root("The request timeout is 30s."),
             root("The request timeout is 90s."),
         ];
-        let d = draft("The request timeout is 90s.");
-        assert_eq!(losses(&roots, &d), vec!["30s".to_string()]);
-
-        // Written without its unit, the same drop goes uncaught. `30` alone is
-        // not distinguishable from the third item of a numbered list, and
-        // demanding every bare number survive refused three correct merges —
-        // see `infer::facts::a_port_written_bare_is_the_cost_of_that_rule`.
-        let bare = [
-            root("The request timeout is 30 seconds."),
-            root("The request timeout is 90 seconds."),
-        ];
-        assert!(losses(&bare, &draft("The request timeout is 90 seconds.")).is_empty());
+        assert!(losses(&roots, &draft("The request timeout is 90s.")).is_empty());
     }
 
     #[test]
@@ -1189,12 +1198,15 @@ mod tests {
         // than two roots behind it. A check that only read the first two would
         // pass a merge that dropped everything the third said.
         let roots = [
-            root("Port 8080/tcp is the default."),
-            root("The timeout is 30s."),
-            root("Retries back off for 5m."),
+            root("The config lives at /etc/engram/config.toml."),
+            root("Pass --dry-run first."),
+            root("The socket is at /run/engram/engram.sock."),
         ];
-        let d = draft("Port 8080/tcp is the default and the timeout is 30s.");
-        assert_eq!(losses(&roots, &d), vec!["5m".to_string()]);
+        let d = draft("The config lives at /etc/engram/config.toml; pass --dry-run first.");
+        assert_eq!(
+            losses(&roots, &d),
+            vec!["/run/engram/engram.sock".to_string()]
+        );
     }
 
     /// C was a duplicate of B; B is now inside M. Without this the question

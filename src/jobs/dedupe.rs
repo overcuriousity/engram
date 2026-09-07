@@ -1113,6 +1113,26 @@ mod tests {
         .await
     }
 
+    /// The same shape, but what the two differ in is a command rather than a
+    /// version. `losses` checks machine literals only, so this is what a merge
+    /// that drops something now looks like.
+    async fn disagreeing_commands(core: &Core) -> Vec<String> {
+        seed(
+            core,
+            &[
+                (
+                    "Mount the image with `mount -o ro /dev/loop0 /mnt/case`.",
+                    [1.0, 0.0],
+                ),
+                (
+                    "Mount the image with `mount -o rw /dev/loop0 /mnt/case`.",
+                    [0.93, 0.37],
+                ),
+            ],
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn two_artifacts_about_different_subjects_are_never_merged() {
         // FAT12, FAT16 and FAT32 are near-identical in form and deliberately
@@ -1443,7 +1463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_merge_that_would_lose_a_value_says_so_without_naming_the_tokens() {
+    async fn a_merge_that_would_lose_a_literal_says_so_without_naming_the_tokens() {
         // The loss check, from the unit's side. Two sentences must not be
         // written here: the lost tokens, which are as often a bare "1, 4" as a
         // version number and are evidence too thin to act on; and the judge's
@@ -1455,10 +1475,10 @@ mod tests {
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
-                "merged":{"text":"engram needs Rust 1.30.0 to build.","tags":[],"caveats":[]}}"#
+                "merged":{"text":"Mount the image with `mount -o rw /dev/loop0 /mnt/case`.","tags":[],"caveats":[]}}"#
                 .into(),
         ])));
-        let ids = disagreeing(&core).await;
+        let ids = disagreeing_commands(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
 
         run(&core, &pair.to_string()).await.unwrap();

@@ -119,7 +119,7 @@ mod tests {
         core.store
             .insert_synthesized_artifact(
                 &NewSynthesized {
-                    text: "A long explanation of why the loop mount needs version 1.21.4 and how it was found after three dead ends.".into(),
+                    text: "A long explanation of why the loop mount needs `mount -o loop /dev/loop0` and how it was found after three dead ends.".into(),
                     title: Some("Loop mounts".into()),
                     category: None,
                     tags: vec![],
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rewrite_that_drops_a_value_is_refused_without_writing() {
+    async fn a_rewrite_that_drops_a_literal_is_refused_without_writing() {
         let (core, writer) = core_with(vec![reply("The loop mount needs a recent version.")]).await;
         let id = synthesized(&core).await;
         let before = core.store.get_artifact(&id).await.unwrap();
@@ -169,12 +169,18 @@ mod tests {
     #[tokio::test]
     async fn a_shorter_rewrite_that_keeps_every_token_becomes_version_one_and_is_taken_back_by_uncondense()
      {
-        let (core, _) = core_with(vec![reply("The loop mount needs version 1.21.4.")]).await;
+        let (core, _) = core_with(vec![reply(
+            "The loop mount needs `mount -o loop /dev/loop0`.",
+        )])
+        .await;
         let id = synthesized(&core).await;
         let before = core.store.get_artifact(&id).await.unwrap();
         run(&core, &id).await.unwrap();
         let after = core.store.get_artifact(&id).await.unwrap();
-        assert_eq!(after.text, "The loop mount needs version 1.21.4.");
+        assert_eq!(
+            after.text,
+            "The loop mount needs `mount -o loop /dev/loop0`."
+        );
         assert_eq!(after.embed_rev, before.embed_rev + 1);
         let versions = core.store.versions_of(&id).await.unwrap();
         assert_eq!(versions.len(), 1);
@@ -206,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn a_rewrite_no_shorter_and_a_spent_budget_both_write_nothing() {
         let (core, writer) = core_with(vec![reply(
-            "A long explanation of why the loop mount needs version 1.21.4 and how it was found after three dead ends, again.",
+            "A long explanation of why the loop mount needs `mount -o loop /dev/loop0` and how it was found after three dead ends, again.",
         )])
         .await;
         let id = synthesized(&core).await;
@@ -214,7 +220,7 @@ mod tests {
         assert_eq!(writer.calls(), 1);
         assert!(core.store.versions_of(&id).await.unwrap().is_empty());
 
-        let (mut core, writer) = core_with(vec![reply("1.21.4")]).await;
+        let (mut core, writer) = core_with(vec![reply("`mount -o loop /dev/loop0`")]).await;
         core.evolve.max_actions_per_week = 0;
         let id = synthesized(&core).await;
         run(&core, &id).await.unwrap();
