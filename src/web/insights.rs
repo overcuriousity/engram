@@ -1163,12 +1163,13 @@ async fn rules_str(core: &crate::core::Core) -> Result<Option<String>> {
 
 fn params_str(p: &crate::store::generations::GenerationParams) -> String {
     format!(
-        "recency {:.2}, cap {}, pool ×{}, half-life {}d, lift {}, spread {}, rerank {}, review {:.2}",
+        "recency {:.2}, cap {}, pool ×{}, half-life {}d, lift {}, sitting {}, spread {}, rerank {}, review {:.2}",
         p.recency_weight,
         cap_str(p.per_source_cap),
         p.candidate_multiplier,
         p.recency_half_life_days,
         p.prime_lift,
+        if p.sitting_prime { "on" } else { "off" },
         p.spread_max,
         if p.rerank { "on" } else { "off" },
         p.review_min
@@ -1415,6 +1416,28 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    #[test]
+    fn a_generation_says_whether_the_sitting_is_taking_part() {
+        // A knob a generation can carry and the page cannot name is a knob
+        // nobody can check against what they are reading.
+        use crate::store::generations::GenerationParams;
+        let on = GenerationParams {
+            sitting_prime: true,
+            ..Default::default()
+        };
+        assert!(
+            super::params_str(&on).contains("sitting on"),
+            "{}",
+            super::params_str(&on)
+        );
+        let off = GenerationParams::default();
+        assert!(
+            super::params_str(&off).contains("sitting off"),
+            "{}",
+            super::params_str(&off)
+        );
+    }
 
     async fn insights(core: crate::core::Core) -> String {
         let (app, cookie) = app_with_cookie(core).await;

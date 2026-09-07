@@ -784,6 +784,13 @@ month_cycle = 0.0
 # differently in two sittings is exactly what is disorienting about it — so it
 # is off, the lift shares the one budget `associate.prime_lift` bounds, rank 0
 # never moves, and a hit it lifted says so on the row.
+#
+# Off is the starting rung rather than a verdict. Every search records what the
+# sitting held whether or not this is on, so the evidence accumulates from the
+# first day; a base with `evolve.autonomous` on replays it and moves this from
+# here on what it finds. Only once `associate.prime_lift` is above zero, since
+# below that there is no budget for the sitting to share and the flip could
+# change nothing.
 prime = false
 
 [time]

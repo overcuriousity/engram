@@ -175,6 +175,7 @@ anything.** Keep the whole line when you write a result down.
 | Embed templates | `ENGRAM__INFER__EMBED__QUERY_TEMPLATE`, `..._DOCUMENT_TEMPLATE` | The envelope each side is embedded in. Asymmetric models care a great deal. | both |
 | Priming lift | `ENGRAM__ASSOCIATE__PRIME_LIFT` | How many places an accessible hit may climb. `0` turns priming off. | MRR |
 | Priming margin | `ENGRAM__ASSOCIATE__PRIME_MARGIN` | How much more accessible it has to be before it climbs. | MRR |
+| Sitting priming | `ENGRAM__SITTING__PRIME` | Whether what this sitting has touched takes part in the lift. Shares `prime_lift`'s budget, so it does nothing at `0`. Swept by the idle pass, not by this harness. | MRR |
 | Weak threshold | `ENGRAM__VECTOR__WEAK_BELOW` | Similarity under which a hit is labelled *loose*. Changes no order — it changes what the page claims, and what becomes an `unmatched` knowledge gap. | neither; read the page |
 
 For the ask harness, the levers are the excerpt budget and the answering model
@@ -248,13 +249,17 @@ rather than against today's other candidates.
 Being clear about this matters more than the numbers, because the temptation is
 to run *something* and call the question answered.
 
-- **Anything about a sequence of queries.** The harness scores each pair
-  independently against a static index. Features about continuity within one
-  sitting — priming from the live sitting (`[sitting] prime`), working memory,
-  anything reading `Origin::session` — cannot move a number here, because the
-  harness searches through `Door::Ui` with no session attached. Measuring those
-  needs a harness that scores *runs* of queries, which does not exist yet. Until
-  it does, `[sitting] prime` stays off and unmeasured, and ROADMAP.md says so.
+- **Anything about a sequence of queries, *in this harness*.** The harness
+  below scores each pair independently against a static index, through
+  `Door::Ui` with no session attached, so it cannot see continuity within one
+  sitting. The runtime idle pass can, and it is a different instrument: it
+  replays through `Door::Judge` with the `Priming` the original search recorded
+  — activation, sitting and due — handed back by `Origin::primed_as`. Every
+  search records what the sitting held whether or not `[sitting] prime` is on,
+  which is what makes the knob measurable at all, and the flip sits on the
+  ladder in `src/core/ranking.rs`. It is measured there, not here. What still
+  has no instrument is anything reading `Origin::session` that the recorded
+  `Priming` does not carry — working memory, and the shape of a run as a run.
 - **Anything needing engagement.** Activation, pursuits and promotion are
   driven by what a person opened and dwelt on. The harness opens nothing and
   sets `mark: false` deliberately — resurfacing reads `last_seen_at`, and a

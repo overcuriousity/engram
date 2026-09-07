@@ -476,11 +476,13 @@ impl Default for ActivationConfig {
 pub struct SittingConfig {
     /// Let what this sitting has touched lift a result.
     ///
-    /// Off until the harness says otherwise. It is the only part of the sitting
-    /// that moves an order, and the same query ranking differently in two
-    /// sittings is exactly what is disorienting about it — so it ships off, the
-    /// lift is bounded by the same budget activation's is, and rank 0 never
-    /// moves.
+    /// The file's value is the starting rung: it is the only part of the
+    /// sitting that moves an order, and the same query ranking differently in
+    /// two sittings is exactly what is disorienting about it — so it ships off,
+    /// the lift is bounded by the same budget activation's is, and rank 0 never
+    /// moves. What the sitting held is recorded whether or not this is on, so
+    /// the idle pass can replay a search with it on and find out whether it
+    /// should be; from there the live value is the generation's, not this.
     pub prime: bool,
 }
 
