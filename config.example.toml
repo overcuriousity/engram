@@ -612,14 +612,22 @@ spread_from = 3
 spread_max = 3
 # How much more accessible a hit must be than the one above it to pass it, as a
 # fraction of the most accessible hit in that list; and how many places it may
-# climb. 0 turns priming off, and it ships off: a feature that reorders results
-# and says something about you does not go on until it has been measured.
-# `prime_lift` is the starting rung, and the idle pass is the measurement: a
-# base with `evolve.autonomous` on replays what use left behind at every rung
-# and moves from here on what it finds. Accessibility here is use — opened,
-# confirmed, cited — never how often something was listed.
+# climb. 0 turns priming off. Accessibility here is use — opened, confirmed,
+# cited — never how often something was listed, so a hit nobody has reached
+# cannot be primed at all.
+#
+# This file ships the lowest non-zero rung: one place, never past rank 1, and
+# only for a hit that beats the one above it by more than half the top
+# engagement. It is a starting rung and not a verdict — the idle pass replays
+# what use left behind at every rung and moves from here on what it finds, the
+# probe anchor refuses a rung that loses on the base's own probes, and the
+# lived watch reverts one whose observations get worse.
+#
+# The compiled default is still 0, and that is deliberate: it is what an
+# existing base falls back to, so upgrading a deployment that never wrote this
+# key moves nothing. Only a base started from this file begins primed.
 prime_margin = 0.5
-prime_lift = 0
+prime_lift = 1
 
 [activation]
 half_life_days = 14
@@ -785,13 +793,17 @@ month_cycle = 0.0
 # is off, the lift shares the one budget `associate.prime_lift` bounds, rank 0
 # never moves, and a hit it lifted says so on the row.
 #
-# Off is the starting rung rather than a verdict. Every search records what the
-# sitting held whether or not this is on, so the evidence accumulates from the
-# first day; a base with `evolve.autonomous` on replays it and moves this from
-# here on what it finds. Only once `associate.prime_lift` is above zero, since
-# below that there is no budget for the sitting to share and the flip could
-# change nothing.
-prime = false
+# On in this file, and a starting rung rather than a verdict. Every search
+# records what the sitting held whether or not this is on, so the evidence
+# accumulates from the first day; a base with `evolve.autonomous` on replays it
+# and moves this from here on what it finds. It needs `associate.prime_lift`
+# above zero to do anything at all — below that there is no budget for the
+# sitting to share — and the server says so at startup if you zero one without
+# the other.
+#
+# The compiled default is still off, for the reason under `prime_lift`: an
+# existing base that never wrote this key is not moved by an upgrade.
+prime = true
 
 [time]
 # A due reminder inside this many hours is shown on the front page, and may

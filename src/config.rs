@@ -2630,6 +2630,41 @@ impl Config {
                  are ever rewritten."
             );
         }
+        for key in self.inert_priming_keys() {
+            tracing::warn!(
+                key,
+                "{key} is on but associate.prime_lift is 0, so it does nothing: both lifts \
+                 share the one budget prime_lift bounds, and priming returns the list \
+                 untouched at zero. Raise prime_lift, or turn this off to say what you mean."
+            );
+        }
+    }
+
+    /// Keys that are switched on and cannot act, because the budget they share
+    /// is zero.
+    ///
+    /// `sitting.prime` and `time.lift` both lift by the step `prime_lift`
+    /// bounds, so at zero they are on and inert — and `time.lift` ships on,
+    /// which means the combination is reachable without anybody choosing it.
+    /// Worth saying out loud now that `config.example.toml` ships the lift
+    /// non-zero: an operator who turns priming off by zeroing one key leaves
+    /// two others claiming to do something.
+    ///
+    /// Only under `full`. At `off` and `learning` the mode itself resolves
+    /// `prime_lift` to zero on purpose, and a warning there would be the
+    /// server complaining about a choice it made.
+    fn inert_priming_keys(&self) -> Vec<&'static str> {
+        if self.learn.mode != LearnMode::Full || self.associate.prime_lift > 0 {
+            return Vec::new();
+        }
+        let mut keys = Vec::new();
+        if self.sitting.prime {
+            keys.push("sitting.prime");
+        }
+        if self.time.lift {
+            keys.push("time.lift");
+        }
+        keys
     }
 
     /// The output ceiling's name is a guess whenever `reasoning_effort` is set
@@ -3259,6 +3294,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, &format!("{MINIMAL}\n[feedback]\ncandidates = 5\n"));
         assert_eq!(Config::load(Some(&p)).unwrap().feedback.candidates, 5);
+    }
+
+    #[test]
+    fn a_lift_of_zero_makes_the_knobs_that_share_its_budget_inert() {
+        let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert!(
+            cfg.inert_priming_keys().is_empty(),
+            "the shipped file lifts, so nothing on it is inert"
+        );
+
+        // The way an operator turns priming off: zero the lift and leave the
+        // two keys that ride on it exactly as the file shipped them.
+        cfg.associate.prime_lift = 0;
+        assert_eq!(
+            cfg.inert_priming_keys(),
+            vec!["sitting.prime", "time.lift"],
+            "both share the budget, and both are on in the shipped file"
+        );
+
+        // Saying it properly costs no warning.
+        cfg.sitting.prime = false;
+        cfg.time.lift = false;
+        assert!(cfg.inert_priming_keys().is_empty());
+    }
+
+    #[test]
+    fn the_learn_modes_do_not_warn_about_the_lift_they_zeroed_themselves() {
+        // `off` and `learning` resolve `prime_lift` to zero on purpose. A
+        // warning there would be the server complaining about its own choice,
+        // and `time.lift` ships on, so it would fire on every such base.
+        let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        cfg.associate.prime_lift = 0;
+        for mode in [LearnMode::Off, LearnMode::Learning] {
+            cfg.learn.mode = mode;
+            assert!(cfg.inert_priming_keys().is_empty(), "{mode:?}");
+        }
     }
 
     #[test]

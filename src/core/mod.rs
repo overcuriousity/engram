@@ -1050,6 +1050,44 @@ mod tests {
         );
     }
 
+    /// Both halves of one decision, which is why they are asserted together.
+    ///
+    /// A new deployment is told to `cp config.example.toml config.toml`, so
+    /// this file is what a fresh base ranks by, and it ships primed: the
+    /// lowest rung of the lift, with the sitting taking part in it.
+    ///
+    /// The compiled defaults stay off, and that is the other half. An existing
+    /// base does not rank by the file — `boot_generation` serves what the base
+    /// adopted — but it does compare the file it booted under against the one
+    /// it sees now, and a change there supersedes the live generation. Had the
+    /// compiled default moved, every base that never wrote these keys would
+    /// have been pulled to the new value on upgrade, discarding whatever its
+    /// own idle pass had earned. Moving the file and not the default is what
+    /// keeps "new deployments only" true.
+    #[tokio::test]
+    async fn the_example_config_ships_primed_and_the_compiled_defaults_do_not() {
+        let cfg = Config::load(std::path::Path::new("config.example.toml").into()).unwrap();
+        assert_eq!(
+            cfg.associate.prime_lift, 1,
+            "a base started from this file begins on the lowest non-zero rung"
+        );
+        assert!(
+            crate::core::ranking::PRIME_LIFTS.contains(&cfg.associate.prime_lift),
+            "and that rung is one the idle pass can walk away from"
+        );
+        assert!(
+            cfg.sitting.prime,
+            "with the sitting taking part in the lift it shares"
+        );
+
+        assert_eq!(
+            crate::config::default_prime_lift(),
+            0,
+            "the compiled default stays off, so an upgrade moves no existing base"
+        );
+        assert!(!crate::config::default_sitting_prime());
+    }
+
     /// The one wiring decision `from_config` makes that is not a straight
     /// field copy: rerank is optional, and an absent block must leave search
     /// in vector order rather than defaulting to an endpoint.

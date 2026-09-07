@@ -39,10 +39,11 @@
     <div class="label pane-label">Use</div>
     {# Activation above the capture baseline, decayed — what opening,
        confirming and citing put there, in units of one open. Not "what a
-       search would find": with `associate.prime_lift` at zero activation moves
-       no result, and with `retrieved` at zero a raw reading only ever counted
-       the days since capture. The bottom band is the point of the row: how
-       much of this base nobody has ever reached for. #}
+       search would find": priming moves a hit by at most a rung of
+       `associate.prime_lift`, one place on a base started from the shipped
+       file and none where the lift is zero, and with `retrieved` at zero a raw
+       reading only ever counted the days since capture. The bottom band is the
+       point of the row: how much of this base nobody has ever reached for. #}
     {% for b in used %}
     <p class="measure-row"><span>{{ b.label }}</span><span class="mono">{{ b.count }}</span></p>
     {% endfor %}
