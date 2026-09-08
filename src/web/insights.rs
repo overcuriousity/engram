@@ -107,6 +107,12 @@ pub struct SupersededRow {
     pub subtitle: String,
     pub winner_id: String,
     pub winner_title: String,
+    /// Whether `winner_title` is a name somebody wrote — see `ui::RowLabel`.
+    /// The winner goes through `row_label` like every other row, so it can be
+    /// the opening of a passage that has no name, or the literal `(deleted)`
+    /// standing in for a winner that has since gone; neither is a name and
+    /// neither may be set in the place one goes.
+    pub winner_named: bool,
 }
 
 /// An artifact flagged stale with no specific replacement.
@@ -432,6 +438,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                 named: false,
             },
         };
+        let winner_named = winner.named;
         let winner_title = winner.text;
         let label = row_label(&c);
         superseded.push(SupersededRow {
@@ -441,6 +448,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             id: c.id,
             winner_id,
             winner_title,
+            winner_named,
         });
     }
 
@@ -783,7 +791,12 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             beside: vec![crate::web::ui::SourceRow {
                 id: s.winner_id,
                 title: s.winner_title,
-                named: true,
+                // Carried, not assumed. `row_label` decided this above, and
+                // discarding its answer here set a passage's opening — or the
+                // `(deleted)` of a winner that has itself gone — in the place
+                // a name goes, which is the one thing `RowLabel` exists to
+                // stop.
+                named: s.winner_named,
                 subtitle: String::new(),
                 corpus_id: String::new(),
             }],

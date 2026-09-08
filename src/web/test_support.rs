@@ -261,18 +261,35 @@ pub(crate) fn chrome() -> Option<std::path::PathBuf> {
     }
     let home = std::env::var("HOME").ok()?;
     let cache = std::path::PathBuf::from(home).join(".cache/ms-playwright");
-    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(&cache)
+    let mut found: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(&cache)
         .ok()?
         .filter_map(|e| e.ok())
-        .map(|e| {
-            e.path()
-                .join("chrome-headless-shell-linux64/chrome-headless-shell")
+        .filter_map(|e| {
+            let bin = e
+                .path()
+                .join("chrome-headless-shell-linux64/chrome-headless-shell");
+            bin.exists().then(|| (playwright_build(&e.file_name()), bin))
         })
-        .filter(|p| p.exists())
         .collect();
-    // Newest install wins, so an old download is not preferred forever.
+    // Newest install wins, so an old download is not preferred forever. By the
+    // build number and not by the name: sorting the paths themselves is
+    // lexicographic, which puts `chromium_headless_shell-999` after `-1148`
+    // and pins the oldest install forever — exactly what this line is here to
+    // prevent.
     found.sort();
-    found.pop()
+    found.pop().map(|(_, p)| p)
+}
+
+/// The build number Playwright ends a download directory with —
+/// `chromium_headless_shell-1148` is build 1148 — or zero where the name ends
+/// in anything else, which sorts such a directory below every numbered one
+/// rather than letting it win on a comparison nobody can predict.
+fn playwright_build(dir: &std::ffi::OsStr) -> u64 {
+    dir.to_string_lossy()
+        .rsplit('-')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Every full page a signed-in person can open, with something in the base
@@ -363,11 +380,22 @@ pub(crate) fn measure(pages: &[(String, String)], width: &str) -> serde_json::Va
         .arg(width)
         .output()
         .expect("node is needed to run this test");
+    // The harness's own exit first, and its stderr with it. A node that threw
+    // before it could print left this asserting on an empty stdout, so the
+    // failure read as "the harness printed nothing" — or, worse, as a JSON
+    // error about whatever unrelated line was last — and said nothing about
+    // the stack that actually explains it.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the width harness exited with {}: {stderr}",
+        out.status
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let line = stdout
         .lines()
         .last()
-        .unwrap_or_else(|| panic!("the harness printed nothing: {stdout}"));
+        .unwrap_or_else(|| panic!("the harness printed nothing: {stdout}{stderr}"));
     let run: serde_json::Value =
         serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"));
     assert_eq!(

@@ -848,20 +848,33 @@ async fn context_offer(tenant: Tenant, Form(f): Form<ContextForm>) -> UiResult<R
     // folded into the denominator of the one number the block weights are
     // meant to be fitted against later. `/ui/context/seen` is the other half.
     // Fetched here rather than carried on `Offer`: the recommender ranks
-    // artifacts and has no business knowing how a card reads. A row that has
-    // gone since the profile was built leaves an empty snippet, which is the
-    // card it was before this line existed rather than an error.
-    let snippet = match &offer {
-        Some(o) => match tenant.core.store.get_artifact(&o.artifact_id).await {
-            Ok(c) => markdown::snippet(&c.text, 160),
-            Err(_) => String::new(),
-        },
-        None => String::new(),
+    // artifacts and has no business knowing how a card reads.
+    //
+    // A card is a link with something readable on it, and it can end up with
+    // nothing on it at all. `recommend::title_of` is empty for an artifact
+    // with no name of its own, and `markdown::snippet` is empty for a body
+    // that renders to no text — a figure alone, a rule alone. Both at once is
+    // an `offer-filled` box holding a link with nothing to read and nothing
+    // to click, which is the card `_context.html`'s nameless branch exists to
+    // prevent. No offer is made instead: the area is then what it is whenever
+    // nothing is recommended, which is empty. Nothing is recorded either, and
+    // that is the point — a card nobody could read must not count as shown.
+    //
+    // A row deleted since the ranking lands here too, with an empty snippet,
+    // and is not what this guards: `context_clusters` cascades with the
+    // artifact, so a deleted one is dropped where its clusters are read and
+    // never reaches a card. See `recommend::tests`.
+    let offer = match offer {
+        Some(o) => {
+            let snippet = match tenant.core.store.get_artifact(&o.artifact_id).await {
+                Ok(c) => markdown::snippet(&c.text, 160),
+                Err(_) => String::new(),
+            };
+            (!o.title.is_empty() || !snippet.is_empty()).then(|| offer_view(o, snippet))
+        }
+        None => None,
     };
-    Ok(HtmlTemplate(ContextTemplate {
-        offer: offer.map(|o| offer_view(o, snippet)),
-    })
-    .into_response())
+    Ok(HtmlTemplate(ContextTemplate { offer }).into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1232,12 +1245,17 @@ pub(crate) async fn search_results(
 /// the hit that recalled them.
 ///
 /// Untitled hits are left out rather than named "Untitled": a row reading
-/// `seen together with "Untitled"` says nothing and looks like it does.
+/// `seen together with "Untitled"` says nothing and looks like it does. A
+/// borrowed name is left out for the stronger version of that reason — see
+/// `SearchResult::borrowed_name`. It belongs to the section the hit was cut
+/// from, so `seen together with "Kapitel 3"` quotes a name that `render_hit`
+/// has just taken off the very row it is pointing at, and the reader is told
+/// to look for a heading that is nowhere on the page.
 fn ranked_titles(
     hits: &[crate::core::search::SearchResult],
 ) -> std::collections::HashMap<String, String> {
     hits.iter()
-        .filter(|h| h.via.is_none())
+        .filter(|h| h.via.is_none() && !h.borrowed_name)
         .filter_map(|h| Some((h.artifact_id.clone(), h.title.clone()?)))
         .collect()
 }
@@ -3000,6 +3018,22 @@ mod tests {
     /// The same base, plus one established situation matching the bundle the
     /// tests post — so the reason line actually renders.
     async fn app_with_a_learned_situation() -> (axum::Router, String, String) {
+        app_with_a_learned_situation_over(
+            "when the recycling centre is open",
+            Some("recycling centre"),
+            None,
+        )
+        .await
+    }
+
+    /// The same, over an artifact the caller describes. `provenance` is set on
+    /// the vector payload as well as the row, because the offer's name is read
+    /// from the payload and its snippet from the row.
+    async fn app_with_a_learned_situation_over(
+        text: &str,
+        title: Option<&str>,
+        provenance: Option<&str>,
+    ) -> (axum::Router, String, String) {
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
         core.learn.enabled = true;
@@ -3009,8 +3043,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    text: "when the recycling centre is open".into(),
-                    title: Some("recycling centre".into()),
+                    text: text.into(),
+                    title: title.map(str::to_string),
                     ..Default::default()
                 }],
             )
@@ -3018,6 +3052,14 @@ mod tests {
             .unwrap()
             .remove(0)
             .id;
+        if let Some(p) = provenance {
+            sqlx::query("UPDATE artifacts SET provenance = ? WHERE id = ?")
+                .bind(p)
+                .bind(&aid)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+        }
         core.vectors
             .upsert(vec![crate::vector::VectorPoint {
                 vector: vec![1.0; 8],
@@ -3025,8 +3067,9 @@ mod tests {
                 payload: crate::vector::VectorPayload {
                     artifact_id: aid.clone(),
                     corpus_id: src.id.clone(),
-                    text: "when the recycling centre is open".into(),
-                    title: Some("recycling centre".into()),
+                    text: text.into(),
+                    title: title.map(str::to_string),
+                    provenance: provenance.map(str::to_string),
                     ..Default::default()
                 },
             }])
@@ -3064,6 +3107,39 @@ mod tests {
 
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         (app, cookie, aid)
+    }
+
+    /// Nothing to read means no card, not an empty one.
+    ///
+    /// The nameless branch of `_context.html` makes the snippet the whole of
+    /// the link, and a passage whose body renders to no text at all — a
+    /// figure alone, a rule alone — has no snippet either. Both empty is an
+    /// `offer-filled` box with a link in it that has nothing to read and
+    /// nothing to click, which is exactly the card that branch was added to
+    /// prevent. The area stays as it is when nothing is recommended, and the
+    /// `seen` beacon has nothing to confirm.
+    #[tokio::test]
+    async fn an_offer_with_neither_a_name_nor_a_snippet_is_not_made() {
+        let (app, cookie, _aid) =
+            app_with_a_learned_situation_over("![](figure.png)", None, Some("passage")).await;
+        let res = app
+            .oneshot(form(
+                "/ui/context",
+                &cookie,
+                "bundle=%7B%22tz%22%3A%22Europe%2FBerlin%22%7D",
+            ))
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+        assert!(
+            !body.contains("offer-filled"),
+            "a card was drawn around nothing: {body}"
+        );
+        assert!(!body.contains("<a "), "a link with nothing in it: {body}");
+        assert!(
+            !body.contains("data-rec-id"),
+            "an unreadable card must not be confirmable as seen: {body}"
+        );
     }
 
     #[tokio::test]

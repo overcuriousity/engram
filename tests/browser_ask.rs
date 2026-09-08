@@ -34,17 +34,32 @@ fn chrome() -> Option<PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
         let cache = PathBuf::from(&home).join(".cache/ms-playwright");
         if let Ok(entries) = std::fs::read_dir(&cache) {
-            let mut found: Vec<PathBuf> = entries
+            let mut found: Vec<(u64, PathBuf)> = entries
                 .filter_map(|e| e.ok())
-                .map(|e| {
-                    e.path()
-                        .join("chrome-headless-shell-linux64/chrome-headless-shell")
+                .filter_map(|e| {
+                    let bin = e
+                        .path()
+                        .join("chrome-headless-shell-linux64/chrome-headless-shell");
+                    // The build number Playwright ends the directory name with
+                    // — `chromium_headless_shell-1148` is build 1148 — and
+                    // zero for a name that ends in anything else.
+                    let build = e
+                        .file_name()
+                        .to_string_lossy()
+                        .rsplit('-')
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                    bin.exists().then_some((build, bin))
                 })
-                .filter(|p| p.exists())
                 .collect();
-            // Newest install wins, so an old download is not preferred forever.
+            // Newest install wins, so an old download is not preferred
+            // forever. By the build number and not by the name: sorting the
+            // paths themselves is lexicographic, which puts
+            // `chromium_headless_shell-999` after `-1148` and pins the oldest
+            // install forever — exactly what this line is here to prevent.
             found.sort();
-            if let Some(p) = found.pop() {
+            if let Some((_, p)) = found.pop() {
                 return Some(p);
             }
         }

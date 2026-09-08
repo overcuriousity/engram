@@ -944,7 +944,11 @@ impl Core {
                 past_cliff: false,
                 retired: is_retired,
                 similarity: None,
-                borrowed_name: false,
+                // The same read `model_written` above makes, on the same row.
+                // A reached passage carries its section's heading exactly as a
+                // ranked one does, and `false` here put that heading back into
+                // the rail and into the answer's "Artifacts used" card.
+                borrowed_name: !c.provenance.names_its_own_text(),
                 // What makes a reached artifact tellable apart from a retrieved
                 // one, by a reader and by a test alike: a ranked hit has no
                 // `via`, and this one names the hit it was reached from.

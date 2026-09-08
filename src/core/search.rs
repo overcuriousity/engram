@@ -1155,15 +1155,24 @@ impl Core {
                 past_cliff: false,
                 retired: false,
                 similarity: None,
-                borrowed_name: false,
+                // Read from the row, the way the ranked path reads it from the
+                // payload. A recalled passage carries the heading of the
+                // section it was cut from just as a ranked one does, and
+                // hard-coding `false` here put that heading back on the one
+                // rail that sits directly under the rows it was taken off.
+                borrowed_name: !c.provenance.names_its_own_text(),
                 // Set here, where `via` is known. Never ranked, so every other
                 // stage stays absent rather than defaulting to values that
                 // would read as facts about a competition that never happened.
                 explanation: Some(crate::core::explain::HitExplanation::recalled(&l.via)),
                 via: Some(l.via),
                 reason: l.reason,
-                model_written: false,
-                synthesized: false,
+                // Also the row's own answer, and for a harder reason than the
+                // heading: `model_written` is what stops a paraphrase being
+                // handed back as its own root, and a merged artifact reached
+                // by association is as model-written as one that was ranked.
+                model_written: c.provenance.is_model_written(),
+                synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
                 origin_count: 0,
             });
         }
@@ -4725,6 +4734,68 @@ mod tests {
         let mut query = q("t0\nalpha text");
         query.limit = 1;
         assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
+    }
+
+    /// A passage recalled by association shows no name, exactly as a ranked
+    /// one does.
+    ///
+    /// The rail puts the two lists one under the other, so a heading that the
+    /// ranked rows no longer carry reappearing three rows down does not read
+    /// as a different rule — it reads as the same rule applied wrongly. Both
+    /// answers come off the row's own provenance, which is why this also pins
+    /// `model_written`: a merge reached by association is as model-written as
+    /// one that was ranked, and `false` there is how a paraphrase is handed
+    /// back as its own root.
+    #[tokio::test]
+    async fn a_recalled_hit_is_named_and_attributed_by_its_own_provenance() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        async fn recalled(core: &crate::core::Core) -> SearchResult {
+            let mut query = q("t0\nalpha text");
+            query.limit = 1;
+            core.search(&query, Door::Ui)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|h| h.via.is_some())
+                .expect("the associated hit")
+        }
+
+        // A slice of a section, carrying that section's heading — `t1` here,
+        // which names the seeded corpus and not this passage.
+        sqlx::query("UPDATE artifacts SET provenance = 'passage' WHERE id = ?")
+            .bind(&b)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let hit = recalled(&core).await;
+        assert!(
+            hit.borrowed_name,
+            "a recalled passage carries a heading that is not its own: {:?}",
+            hit.title
+        );
+        assert!(!hit.model_written, "a passage is source text");
+
+        // The other side of the same read: a merge names its own text, and is
+        // never its own root.
+        sqlx::query("UPDATE artifacts SET provenance = 'merged' WHERE id = ?")
+            .bind(&b)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let hit = recalled(&core).await;
+        assert!(!hit.borrowed_name, "a merge was named by what wrote it");
+        assert!(hit.model_written, "a merge reached by association is a merge");
     }
 
     #[tokio::test]

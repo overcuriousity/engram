@@ -42,7 +42,11 @@
      heading of the section it was cut from, and `recommend::title_of` returns
      nothing for it — the text *is* the link, set as text rather than in the
      place a name would go. Dropping the heading and leaving the paragraph
-     below made a card nobody could open. #}
+     below made a card nobody could open.
+
+     The branch relies on the snippet being there, and `context_offer` is what
+     makes that true: it makes no offer at all when the name and the text are
+     both empty, so this cannot render a link with nothing in it. #}
   {% if !o.title.is_empty() %}
   <a class="offer-title" href="/ui/artifacts/{{ o.id }}{{ o.rec }}">{{ o.title }}</a>
   {# What the thing says, under what it is called. The reason line below is

@@ -687,6 +687,48 @@ mod tests {
         assert_eq!(offer.artifact_id, near);
     }
 
+    /// A deleted artifact is never offered: the next best that is still there
+    /// is, and it is reached through the ladder rather than off the floor.
+    ///
+    /// There is no liveness check in `offer` and there does not need to be,
+    /// which is the thing worth pinning. `context_clusters.artifact_id` is
+    /// `ON DELETE CASCADE`, so a row's clusters go with the row and the
+    /// candidate is dropped where the clusters are read — the vector point
+    /// outlives both, so without that cascade it would win the ranking and
+    /// make a card whose link 404s, and whose snippet is read from a row that
+    /// is not there. `web::ui::context_offer` guards the card it would make;
+    /// this guards the guarantee that it is never made.
+    #[tokio::test]
+    async fn a_deleted_artifact_is_not_offered_and_the_next_best_is() {
+        let core = recommending_core(FRIDAY).await;
+        let near = seed_artifact(&core, "recycling centre").await;
+        let far = seed_artifact(&core, "invoice template").await;
+        learn(&core, &near, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
+        learn(&core, &far, "alice", FRIDAY - 14 * 86_400, &phone_bundle()).await;
+
+        let offered = async || {
+            core.offer(Some("alice"), &phone_bundle())
+                .await
+                .unwrap()
+                .expect("an offer")
+        };
+        assert_eq!(offered().await.artifact_id, near, "it wins while it is there");
+
+        sqlx::query("DELETE FROM artifacts WHERE id = ?")
+            .bind(&near)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        let offer = offered().await;
+        assert_eq!(offer.artifact_id, far, "the next best that is still there");
+        assert_ne!(
+            offer.rung,
+            Rung::Random,
+            "reached through the ladder, not off the floor below it"
+        );
+    }
+
     #[tokio::test]
     async fn a_recurring_situation_is_called_a_pattern_and_names_its_blocks() {
         let core = recommending_core(FRIDAY).await;

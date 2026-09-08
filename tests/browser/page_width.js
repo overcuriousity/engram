@@ -23,6 +23,7 @@
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const { spawn } = require('child_process');
 
 const ROOT = process.argv[2];
@@ -142,15 +143,15 @@ const server = http.createServer((req, res) => {
   if (req.url.startsWith('/assets/')) {
     // The stamp the templates carry is a cache key, not part of the name.
     const name = req.url.slice('/assets/'.length).split('?')[0];
-    const path = ROOT + '/assets/' + name;
-    if (!name.includes('..') && fs.existsSync(path)) {
+    const file = ROOT + '/assets/' + name;
+    if (!name.includes('..') && fs.existsSync(file)) {
       const type = name.endsWith('.css') ? 'text/css'
         : name.endsWith('.js') ? 'text/javascript'
         : name.endsWith('.woff2') ? 'font/woff2'
         : name.endsWith('.svg') ? 'image/svg+xml'
         : 'application/octet-stream';
       res.writeHead(200, { 'content-type': type });
-      return res.end(fs.readFileSync(path));
+      return res.end(fs.readFileSync(file));
     }
   }
   if (req.url === '/report' && req.method === 'POST') {
@@ -173,6 +174,9 @@ const server = http.createServer((req, res) => {
 
 let child = null;
 let timer = null;
+// Every profile directory handed to a browser, so `finish` can take them away
+// again. One per page per width, and nothing else removes them.
+const profiles = [];
 
 function next() {
   if (child) { child.kill(); child = null; }
@@ -186,7 +190,10 @@ function next() {
       '--disable-gpu',
       '--dump-dom',
       '--window-size=' + WIDTH + ',900',
-      '--user-data-dir=' + fs.mkdtempSync(os.tmpdir() + '/engram-chrome-'),
+      // A fresh profile per browser, so nothing a page does is carried into
+      // the next measurement — and remembered, because a temp directory
+      // nobody removes is one this test leaves behind on every run.
+      '--user-data-dir=' + profile(),
       'http://127.0.0.1:' + pending + '/page'
     ],
     { stdio: 'ignore' }
@@ -199,10 +206,30 @@ function next() {
   }, 20000);
 }
 
+function profile() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'engram-chrome-'));
+  profiles.push(dir);
+  return dir;
+}
+
 function finish() {
   if (child) child.kill();
   server.close();
+  // The result first: `process.exit` below runs nothing on the way out, so
+  // this is the last chance to print it, and a run that measured everything
+  // correctly must not lose its answer to a directory that would not go.
   console.log(JSON.stringify({ width: WIDTH, pages: results }));
+  // Each profile is tens of megabytes and there is one per page per width; a
+  // full run left eighteen of them in the temp directory, every time.
+  for (const dir of profiles) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      // The browser that held it is being killed as this runs, so a file that
+      // is still open here is possible and is not worth failing a green run
+      // over. The temp directory is swept by the system either way.
+    }
+  }
   process.exit(0);
 }
 
