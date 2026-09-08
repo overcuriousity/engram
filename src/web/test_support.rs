@@ -235,6 +235,172 @@ pub fn a_png() -> Vec<u8> {
     out.into_inner()
 }
 
+// ── Nothing runs off the side of the window ─────────────────────────────
+//
+// One property, over every page there is, and it cannot be asserted about
+// markup: a row of controls that does not fit renders perfectly, validates
+// perfectly, and makes the document wider than the window. The page then
+// slides sideways under the thumb — a scrollbar nobody asked for in a
+// browser, and in an installed window a control that cannot be reached at
+// all, because there is no wider window to open. So the measurement has to
+// happen where the layout does, which is a browser.
+//
+// `#[ignore]`, for the reason `tests/browser_ask.rs` is: this needs node
+// and a headless Chrome, and `cargo test` may assume neither. The tests that
+// use these live where the thing they measure does — `web::tests` for every
+// page at once, `web::ui::tests` for one rail row.
+
+/// The headless Chrome to drive, or `None` when the machine has none.
+///
+/// A second copy of `tests/browser_ask.rs`'s locator, and deliberately: the
+/// integration crate there sees only this crate's public API, and this test
+/// needs `test_support`, which is `cfg(test)`. Neither can call the other's.
+pub(crate) fn chrome() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("ENGRAM_CHROME") {
+        return Some(std::path::PathBuf::from(p));
+    }
+    let home = std::env::var("HOME").ok()?;
+    let cache = std::path::PathBuf::from(home).join(".cache/ms-playwright");
+    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(&cache)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            e.path()
+                .join("chrome-headless-shell-linux64/chrome-headless-shell")
+        })
+        .filter(|p| p.exists())
+        .collect();
+    // Newest install wins, so an old download is not preferred forever.
+    found.sort();
+    found.pop()
+}
+
+/// Every full page a signed-in person can open, with something in the base
+/// for each of them to have to render. `/ui/ops` is not one of them any
+/// more — it redirects to Insights, which is already here.
+///
+/// A PDF, because the corpus page's control row is at its longest there —
+/// re-segment, the original, re-extract and delete — and that row is what
+/// sent this whole page sideways.
+pub(crate) async fn every_page() -> Vec<(String, String)> {
+    use crate::store::corpora::{CorpusStatus, Reading};
+
+    let (app, cookie, core) = crate::web::test_support::app_session_and_core().await;
+    let doc = core
+        .store
+        .insert_attached_corpus(
+            "h",
+            crate::core::ingest::ORIGIN_PDF,
+            Some("Betriebssysteme und digitale Spuren — NTFS, Teil 1"),
+            None,
+            &serde_json::json!({"file": {"name": "FBUDS-03-NTFS-1.pdf"}}),
+            Reading::EXTRACTION,
+            &crate::store::attachments::NewFile {
+                kind: "pdf",
+                mime: "application/pdf",
+                filename: Some("FBUDS-03-NTFS-1.pdf"),
+                bytes: b"%PDF-1.4",
+                preview: b"",
+                width: None,
+                height: None,
+            },
+        )
+        .await
+        .unwrap()
+        .into_corpus();
+    core.store
+        .set_read_text(
+            &doc.id,
+            "NTFS is the New Technology File System.\n\n                 It shipped with Windows NT 3.1 and has been the default since.\n\n                 Every file on the volume has a record in the Master File Table.",
+            vec![],
+        )
+        .await
+        .unwrap();
+    core.store
+        .set_corpus_status(&doc.id, CorpusStatus::Ready)
+        .await
+        .unwrap();
+    crate::jobs::synthesize::segment_all(&core, &doc.id).await;
+    let artifact = core.store.artifacts_for_corpus(&doc.id).await.unwrap()[0]
+        .id
+        .clone();
+
+    let mut out = Vec::new();
+    for (name, uri) in [
+        ("search", "/ui".to_string()),
+        ("insights", "/ui/insights".into()),
+        ("settings", "/ui/settings".into()),
+        ("day", "/ui/day/2026-09-08".into()),
+        ("corpus", format!("/ui/corpora/{}", doc.id)),
+        ("artifact", format!("/ui/artifacts/{artifact}")),
+    ] {
+        let html = crate::web::test_support::get_body(&app, &cookie, &uri).await;
+        out.push((name.to_string(), html));
+    }
+    out
+}
+
+/// One run of the harness over `pages`, at `width`, as JSON.
+pub(crate) fn measure(pages: &[(String, String)], width: &str) -> serde_json::Value {
+    let chrome = chrome().expect(
+        "no headless Chrome found. Set ENGRAM_CHROME to one, or install Playwright's \
+         chrome-headless-shell, to run this test.",
+    );
+    let root = env!("CARGO_MANIFEST_DIR");
+    let listed: Vec<serde_json::Value> = pages
+        .iter()
+        .map(|(name, html)| serde_json::json!({"name": name, "html": html}))
+        .collect();
+    let dir = tempfile::tempdir().expect("a place to hand the pages over");
+    let list = dir.path().join("pages.json");
+    std::fs::write(&list, serde_json::to_vec(&listed).unwrap()).unwrap();
+
+    let out = std::process::Command::new("node")
+        .arg(format!("{root}/tests/browser/page_width.js"))
+        .arg(root)
+        .arg(&chrome)
+        .arg(&list)
+        .arg(width)
+        .output()
+        .expect("node is needed to run this test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .last()
+        .unwrap_or_else(|| panic!("the harness printed nothing: {stdout}"));
+    let run: serde_json::Value =
+        serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"));
+    assert_eq!(
+        run["pages"].as_array().map(|p| p.len()),
+        Some(pages.len()),
+        "a result per page: {run}"
+    );
+    run
+}
+
+/// The two claims every page has to satisfy, whatever is on it.
+pub(crate) fn nothing_is_broken(run: &serde_json::Value, width: &str) {
+    for p in run["pages"].as_array().unwrap() {
+        assert!(p["error"].is_null(), "{p}");
+        let doc = p["scrollWidth"].as_i64().unwrap();
+        let window = p["clientWidth"].as_i64().unwrap();
+        assert!(
+            doc <= window,
+            "at {width}px the {} page is {doc}px wide in a {window}px window, so the \
+             whole page scrolls sideways. What sticks out: {}",
+            p["name"],
+            p["over"],
+        );
+        let squeezed = p["squeezed"].as_array().expect("a squeeze list");
+        assert!(
+            squeezed.is_empty(),
+            "at {width}px the {} page crushes text into a column narrower than its own \
+             letters, which the browser then clips away entirely: {squeezed:?}",
+            p["name"],
+        );
+    }
+}
+
 // ── A signed-in app, and the shapes a page test asks for ────────────────────
 //
 // These grew inside `web::ui`'s test module and were reachable only from it,

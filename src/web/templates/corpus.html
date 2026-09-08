@@ -1,43 +1,66 @@
 {% extends "layout.html" %}
 {% block title %}{{ title }} — engram{% endblock %}
+{# The same page the artifact takes the window for, and for the same reason:
+   what is on it is a pair of columns — the source, and what was written from
+   it — and a reading measure put that pair into 46rem and left the rest of the
+   window empty. Bands beside a wide artifact column are what this page is;
+   they are also the only thing here that wants the width. Everything above
+   them keeps a measure of its own — see `.src-top` in 44-corpus.css.
+
+   `regions-table` rather than `regions-split`, which is the other full-width
+   region: split pins the body to the window and hands the height to two panes
+   that scroll inside it, and this page is a long one that scrolls as a page. #}
+{% block regions %}regions-table{% endblock %}
 {% block content %}
 {# The page said nothing about which capture it was: a status chip, two
    buttons, and a browser tab reading "Source" for every source there is.
    The same label Recent and the day page use, so one capture has one
    name wherever it is named. #}
-<h1>{{ title }}</h1>
-<div class="row" style="margin-bottom:1rem">
-  <span class="badge {{ badge }}">{{ status }}</span>
-  <span class="spacer"></span>
-  {# Re-segmenting a placeholder would delete the restored artifacts and pay the
-     model to re-derive them from their own text. Nothing to re-segment. An
-     image with no reading yet has nothing to re-segment either, and neither
-     does a PDF with no extraction yet. #}
-  {% if !restored && !unread %}
-  <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline">
-    <button class="btn btn-sm" type="submit">Re-segment</button>
-  </form>
-  {% endif %}
-  {% if image %}
-  <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline"
-        onsubmit="return confirm('Read the photo again? The current reading and its artifacts are replaced.')">
-    <input type="hidden" name="stage" value="describe">
-    <button class="btn btn-sm" type="submit">Re-read</button>
-  </form>
-  {% endif %}
-  {% if pdf %}
-  <a class="btn btn-sm" href="/api/v1/corpora/{{ id }}/file">Original PDF</a>
-  <form method="post" action="/ui/corpora/{{ id }}/reprocess" style="display:inline"
-        onsubmit="return confirm('Read the PDF again? The current extraction and its artifacts are replaced.')">
-    <input type="hidden" name="stage" value="extract">
-    <button class="btn btn-sm" type="submit">Re-extract</button>
-  </form>
-  {% endif %}
-  <form method="post" action="/ui/corpora/{{ id }}/delete" style="display:inline"
-        onsubmit="return confirm('Delete this source and all its artifacts?')">
-    <button class="btn btn-sm btn-danger" type="submit">Delete</button>
-  </form>
-</div>
+<div class="src-top">
+  {# The status belongs to the capture, so it stands with the capture's name
+     rather than opening the row of things you can do to it. That row used to
+     lead with the chip and a `.spacer`, which pushed four controls at the far
+     edge of a screen too narrow to hold them. #}
+  <div class="src-head">
+    <h1>{{ title }}</h1>
+    <span class="badge {{ badge }}">{{ status }}</span>
+  </div>
+  {# `.actions`, the same row an artifact's own controls use: delete goes last
+     and takes the far end, so the one thing here that cannot be undone is
+     never flush against three that can. `.pane-header` for the same reason it
+     carries one there — the distance is the point, and it needs something to
+     be distant within, or the lone red button reads as stranded rather than as
+     caution. #}
+  <div class="actions pane-header">
+    {# Re-segmenting a placeholder would delete the restored artifacts and pay the
+       model to re-derive them from their own text. Nothing to re-segment. An
+       image with no reading yet has nothing to re-segment either, and neither
+       does a PDF with no extraction yet. #}
+    {% if !restored && !unread %}
+    <form method="post" action="/ui/corpora/{{ id }}/reprocess">
+      <button class="btn btn-sm" type="submit">Re-segment</button>
+    </form>
+    {% endif %}
+    {% if image %}
+    <form method="post" action="/ui/corpora/{{ id }}/reprocess"
+          onsubmit="return confirm('Read the photo again? The current reading and its artifacts are replaced.')">
+      <input type="hidden" name="stage" value="describe">
+      <button class="btn btn-sm" type="submit">Re-read</button>
+    </form>
+    {% endif %}
+    {% if pdf %}
+    <a class="btn btn-sm" href="/api/v1/corpora/{{ id }}/file">Original PDF</a>
+    <form method="post" action="/ui/corpora/{{ id }}/reprocess"
+          onsubmit="return confirm('Read the PDF again? The current extraction and its artifacts are replaced.')">
+      <input type="hidden" name="stage" value="extract">
+      <button class="btn btn-sm" type="submit">Re-extract</button>
+    </form>
+    {% endif %}
+    <form method="post" action="/ui/corpora/{{ id }}/delete"
+          onsubmit="return confirm('Delete this source and all its artifacts?')">
+      <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+    </form>
+  </div>
 
 {% if let Some(u) = source_url %}
 {# The one hop back to where this was read. A link, not text: a URL you
@@ -130,11 +153,15 @@
    when there is no red band for it to land on. #}
 <p class="muted" id="uncovered">{{ c }} of this capture's wording survived into an artifact.</p>
 {% endif %}
+</div>{# /.src-top — everything below here takes the window #}
 
 {% if bands.is_empty() %}
 {# Nothing to band: a restored placeholder, whose text is its own artifacts
    joined back together, or a photo the vision model has not read yet. #}
-<div class="card">
+{# Kept to a measure, like the head above it: this branch is one long column of
+   wrapped text with nothing beside it, and the width the bands want is a width
+   that would run it to two hundred characters a line. #}
+<div class="card src-flat">
   <div class="card-head">
     <span class="card-title">{% if restored %}Restored artifacts{% else if image %}Transcription{% else %}Raw source{% endif %}</span>
   </div>

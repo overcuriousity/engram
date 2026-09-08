@@ -482,4 +482,21 @@ mod tests {
         // is well under this; a book-sized paste is refused with a message.
         assert_eq!(MAX_BODY_BYTES, 8 * 1024 * 1024);
     }
+
+    /// No page is wider than the window it is read in, and nothing on one is
+    /// crushed to a column of single characters.
+    ///
+    /// 375 is the narrow half of what a phone is; 700 is the band above the tab
+    /// bar's breakpoint and below the one that puts two regions side by side;
+    /// 1500 is the first width at which the workspace is three-up, which is the
+    /// arrangement most of the layout exists for and none of it was measuring.
+    #[tokio::test]
+    #[ignore = "needs node and a headless Chrome; see the note above"]
+    async fn no_page_runs_off_the_side_of_a_phone() {
+        let pages = crate::web::test_support::every_page().await;
+        for width in ["375", "700", "1500"] {
+            let run = crate::web::test_support::measure(&pages, width);
+            crate::web::test_support::nothing_is_broken(&run, width);
+        }
+    }
 }
