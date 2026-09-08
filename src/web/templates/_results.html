@@ -124,13 +124,12 @@
         <span class="badge" title="A model wrote this">model-written</span>
         {% endif %}
         {% endif %}
-        {# No heading where the artifact has no title: a verbatim passage has
-           none by design, and "Untitled" is a word that says nothing standing
-           where a name would say something. The snippet carries the row. #}
+        {# No heading unless the name is this text's own. A passage carries the
+           heading of the section it was cut from and a note carries none at
+           all; `render_hit` empties both, and "Untitled" is a word that says
+           nothing standing where a name would. The snippet carries the row. #}
         {% if !r.title.is_empty() %}
-        {# A passage with no heading is shown under its note's title, marked
-           so — a muted `·` before it — because a passage is not the note. #}
-        <span class="rail-title{% if r.titled_by_corpus %} rail-title-corpus{% endif %}"{% if r.titled_by_corpus %} title="The note this passage is from"{% endif %}>{{ r.title }}</span>
+        <span class="rail-title">{{ r.title }}</span>
         {% endif %}
       </div>
       {# Rank, title, two lines. No tags: the pane beside this lists them in

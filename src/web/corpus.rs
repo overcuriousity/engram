@@ -12,7 +12,7 @@ use crate::store::corpora::CorpusStatus;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
-use crate::web::ui::{ArtifactView, artifact_title, artifact_view, status_badge};
+use crate::web::ui::{ArtifactView, artifact_view, status_badge};
 use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
@@ -335,7 +335,15 @@ async fn corpus_detail(
                 if carded.insert(c.id.clone()) {
                     artifacts.push(artifact_view(c));
                 } else {
-                    echoes.push((c.id.clone(), artifact_title(c)));
+                    // A link whose whole content is the label, so it falls to
+                    // the opening of the text where the artifact has no name
+                    // of its own — see `ui::RowLabel`.
+                    let label = crate::web::ui::row_label(c);
+                    echoes.push(BandEcho {
+                        id: c.id.clone(),
+                        label: label.text,
+                        named: label.named,
+                    });
                 }
             }
             BandView {
@@ -525,6 +533,14 @@ pub struct PromotedWindow {
 }
 
 /// One stretch of the source on the corpus page, beside what came of it.
+/// A pointer up at an artifact carded in an earlier band. A link and nothing
+/// else, so its label can never be empty — see `ui::RowLabel`.
+pub struct BandEcho {
+    pub id: String,
+    pub label: String,
+    pub named: bool,
+}
+
 pub struct BandView {
     pub from: i64,
     pub to: i64,
@@ -534,7 +550,7 @@ pub struct BandView {
     /// earlier one — the overlaps. A line pointing up at the card, because the
     /// card itself can only exist once: two copies of it share their element
     /// ids, and edit and delete then reach the wrong one.
-    pub echoes: Vec<(String, String)>,
+    pub echoes: Vec<BandEcho>,
     /// Nothing was written from these lines.
     pub gap: bool,
     /// For a gap band, the lines a re-read would actually cover: the whole
@@ -565,6 +581,56 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// A band echo is a link and nothing else — "↑ ⟨label⟩", pointing up at
+    /// the card in the band that owns it. A passage there was pointed at by
+    /// the heading of the section it was cut from.
+    #[tokio::test]
+    async fn a_band_echo_for_a_passage_points_at_it_by_how_its_text_opens() {
+        let core = crate::core::test_support::test_core().await;
+        let raw = "eins\nzwei\ndrei\nvier";
+        let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
+        let span = |a: i64, b: i64| Some(crate::store::artifacts::CorpusSpan::located(a, b));
+        // Overlapping spans: line 1 is the first alone, lines 2-3 are both, and
+        // line 4 the second alone. The first is carded in the opening band and
+        // echoed in the one it overlaps into, which is the row under test.
+        core.store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 0,
+                        text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                        title: Some("Kapitel 3".into()),
+                        corpus_span: span(1, 3),
+                        ..Default::default()
+                    },
+                    crate::store::artifacts::NewArtifact {
+                        ordinal: 1,
+                        text: "Ein zweiter Abschnitt.".into(),
+                        title: Some("Kapitel 4".into()),
+                        corpus_span: span(2, 4),
+                        ..Default::default()
+                    },
+                ],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = get_body(&app, &cookie, &format!("/ui/corpora/{}", src.id)).await;
+        let echo = html
+            .split(r#"<p class="band-echo">"#)
+            .nth(1)
+            .expect("a band echo is on the page");
+        let echo = echo.split("</p>").next().unwrap();
+        assert!(!echo.contains("Kapitel"), "the echo read {echo}");
+        assert!(
+            echo.contains("Der Vorgang setzt voraus"),
+            "the echo read {echo}"
+        );
+    }
 
     #[tokio::test]
     async fn a_merged_artifact_shows_its_sources_instead_of_corpus_lines() {

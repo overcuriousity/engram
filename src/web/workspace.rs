@@ -1771,6 +1771,37 @@ mod tests {
         );
     }
 
+    /// A cited excerpt is a card with the excerpt in it. Where the excerpt is
+    /// a passage there is no name to head it with, and the card wrote an empty
+    /// `card-title` over text that starts one line lower.
+    #[test]
+    fn a_cited_passage_gets_no_heading_over_its_excerpt() {
+        let mut cited = crate::web::ui::RenderedResult {
+            title: String::new(),
+            html: "<p>Der Vorgang setzt voraus, dass das Journal noch steht.</p>".into(),
+            ..crate::web::ui::RenderedResult::default()
+        };
+        cited.rank = "#1".into();
+        let html = askama::Template::render(&AnswerTemplate {
+            answer: "<p>An answer.</p>".into(),
+            citations: vec![cited],
+            dropped: 0,
+            truncated: false,
+            retired_only: false,
+            abstained: false,
+            unsupported: vec![],
+            event_id: None,
+            verdict_bar: String::new(),
+        })
+        .unwrap();
+        assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
+        assert_eq!(
+            html.matches("card-title").count(),
+            1,
+            "only the answer card is headed: {html}"
+        );
+    }
+
     fn answer_fixture(dropped: usize) -> String {
         askama::Template::render(&AnswerTemplate {
             answer: "<p>An answer.</p>".into(),

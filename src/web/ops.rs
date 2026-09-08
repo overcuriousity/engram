@@ -16,7 +16,6 @@ use crate::tenants::Tenant;
 use crate::web::artifact::{ArtifactDetailFragment, ArtifactViewParams, build_artifact_detail};
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
-use crate::web::ui::title_of;
 use crate::web::ui_error::UiResult;
 use axum::Router;
 use axum::extract::{Form, Path, Query};
@@ -406,6 +405,23 @@ pub struct PairCluster {
 /// Used by Capture, which shows them because that is where the work arrives,
 /// and by nothing else: Housekeeping is what is left over once the only part of
 /// Ops that needs a person has moved to the page people actually open.
+/// What the decide card calls one side of a pair, and the opening it prints
+/// beside it.
+///
+/// The card names both sides in prose, in two Keep buttons and in the confirm
+/// dialog, so an empty name is not an option here — a passage is named by how
+/// its text opens (`row_label`). The opening then goes: it is the same words,
+/// and `disambiguate_pair_titles` only ever adds it to tell two rows carrying
+/// one name apart.
+fn pair_side(c: &crate::store::artifacts::Chunk) -> (String, String) {
+    let label = crate::web::ui::row_label(c);
+    let opening = match label.named {
+        true => crate::web::markdown::stand_in_title(&c.text, 40),
+        false => String::new(),
+    };
+    (label.text, opening)
+}
+
 pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
     let mut waiting = 0i64;
     for state in PAIR_STATES {
@@ -431,12 +447,13 @@ pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
             ) else {
                 continue;
             };
-            let obsolete_title = p.obsolete_id.as_deref().map(|id| {
-                if id == a.id {
-                    title_of(&a)
-                } else {
-                    title_of(&b)
-                }
+            let (side_a, side_b) = (pair_side(&a), pair_side(&b));
+            // The same name the card gives that side, not a second reading of
+            // the same question: the judge's line said "Kapitel 3" about a
+            // passage the two links beside it called by its opening.
+            let obsolete_title = p.obsolete_id.as_deref().map(|id| match id == a.id {
+                true => side_a.0.clone(),
+                false => side_b.0.clone(),
             });
             // Keeping one side is superseding the other, so the judge naming
             // `a` obsolete is a recommendation to keep `b`.
@@ -480,12 +497,12 @@ pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
             pairs.push(PairRow {
                 id: p.id,
                 percent: (p.score * 100.0).round() as i64,
-                a_title: title_of(&a),
-                b_title: title_of(&b),
+                a_title: side_a.0,
+                b_title: side_b.0,
                 // Kept whether or not it is shown; `disambiguate_pair_titles`
                 // clears the ones the page does not need.
-                a_opening: crate::web::markdown::stand_in_title(&a.text, 40),
-                b_opening: crate::web::markdown::stand_in_title(&b.text, 40),
+                a_opening: side_a.1,
+                b_opening: side_b.1,
                 a_excerpt: crate::web::markdown::snippet(&a.text, 400),
                 b_excerpt: crate::web::markdown::snippet(&b.text, 400),
                 a_id: p.a_id,
@@ -671,6 +688,42 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    /// The decide card names both sides in prose, in the two Keep buttons and
+    /// in the confirm dialog. Emptied, the buttons read `Keep ""` and the two
+    /// links have nothing to click — so a passage is named here by how its
+    /// text opens, and the opening beside it goes, or the card says it twice.
+    #[test]
+    fn a_side_of_a_pair_that_has_no_name_is_named_by_its_opening() {
+        let passage = crate::store::artifacts::Chunk {
+            provenance: crate::store::artifacts::Provenance::Passage,
+            title: Some("Kapitel 3".into()),
+            text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+            ..crate::web::test_support::chunk_fixture(None, "")
+        };
+        let (title, opening) = pair_side(&passage);
+        assert!(title.starts_with("Der Vorgang setzt voraus"), "{title:?}");
+        assert!(!title.contains("Kapitel"), "{title:?}");
+        assert!(
+            opening.is_empty(),
+            "the opening stood beside itself: {opening:?}"
+        );
+
+        let named = crate::store::artifacts::Chunk {
+            title: Some("Wie ein Journal steht".into()),
+            ..passage.clone()
+        };
+        let named = crate::store::artifacts::Chunk {
+            provenance: crate::store::artifacts::Provenance::Captured,
+            ..named
+        };
+        let (title, opening) = pair_side(&named);
+        assert_eq!(title, "Wie ein Journal steht");
+        assert!(
+            !opening.is_empty(),
+            "a named side still needs its opening to tell two of them apart"
+        );
+    }
 
     fn pair_row_fixture(a_id: &str, a_title: &str, a_opening: &str) -> PairRow {
         PairRow {

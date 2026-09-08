@@ -324,3 +324,9 @@ mark {
      would put a permanent gradient on the boxes that are too short to scroll,
      which is the one case that has nothing to indicate. */
 }
+
+/* A row whose whole content is a label — a Housekeeping cell, a lineage node,
+   a day's opened list — has nothing to show when the artifact has no name of
+   its own, so it shows how the text opens instead. This is what keeps that
+   from reading as a name: see `ui::RowLabel`. */
+.name-opening { font-weight: 400; color: var(--color-fg-secondary); }

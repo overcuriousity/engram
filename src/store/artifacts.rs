@@ -129,6 +129,21 @@ impl Provenance {
     pub fn is_source_text(&self) -> bool {
         !self.is_model_written()
     }
+    /// Whether the stored title is a name somebody wrote about *this* text.
+    ///
+    /// A `Passage` always has one and it is never its own: `split_passages`
+    /// gives each slice the heading of the section it was cut from and carries
+    /// the last heading above it down, so one heading stands over as many
+    /// passages as the section is long. It names the section. A `Note` has no
+    /// heading at all — the operator typed a sentence, not a title.
+    ///
+    /// Everything else was named by the model that wrote the text, in the same
+    /// call that wrote it. Note that this does not line up with
+    /// `is_model_written`: `Captured` is the synthesis rewrite of a window and
+    /// carries a real name, and it is source text.
+    pub fn names_its_own_text(&self) -> bool {
+        !matches!(self, Provenance::Passage | Provenance::Note)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

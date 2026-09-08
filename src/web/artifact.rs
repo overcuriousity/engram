@@ -33,7 +33,14 @@ const RELATED_LIMIT: usize = 5;
 /// A chunk beside the source lines it claims.
 pub struct ArtifactDetail {
     pub id: String,
+    /// The name a writer gave this text, or empty where nobody did — a
+    /// passage and a note have none. The pane writes no heading element for an
+    /// empty one; see `title_of`.
     pub title: String,
+    /// What a list of names calls this artifact: `title` where there is one,
+    /// and otherwise the opening of the text. Only the browser tab and the
+    /// history entry use it — they are a list of names and cannot show a card.
+    pub tab: String,
     /// Sanitized by `markdown::render`. Rendered with `|safe`.
     pub html: String,
     pub category: Option<String>,
@@ -245,6 +252,24 @@ impl ArtifactDetail {
 }
 
 /// Everything the pane needs, in one place, so the handler is only routing.
+/// What the Related list calls a neighbour: the same rule as `title_of`, read
+/// off a vector payload instead of a row.
+///
+/// The snippet fallback that used to stand here is gone: the row prints one
+/// under the name anyway, so an untitled neighbour was listed under the first
+/// forty characters of the text and then showed the first ninety beneath it.
+fn neighbour_title(p: &crate::vector::VectorPayload) -> String {
+    let names_itself = p
+        .provenance
+        .as_deref()
+        .map(crate::store::artifacts::Provenance::parse)
+        .is_none_or(|p| p.names_its_own_text());
+    match names_itself {
+        true => p.title.clone().unwrap_or_default(),
+        false => String::new(),
+    }
+}
+
 pub(crate) async fn build_artifact_detail(
     core: &crate::core::Core,
     artifact_id: &str,
@@ -289,10 +314,7 @@ pub(crate) async fn build_artifact_detail(
         })
         .into_iter()
         .map(|h| RelatedArtifact {
-            title: h
-                .payload
-                .title
-                .unwrap_or_else(|| markdown::snippet(&h.payload.text, 40)),
+            title: neighbour_title(&h.payload),
             snippet: markdown::snippet(&h.payload.text, 90),
             id: h.payload.artifact_id,
         })
@@ -389,6 +411,7 @@ pub(crate) async fn build_artifact_detail(
     // The same rule as `artifact_title`, and for the same reason: an ordinal in
     // the ingest is not a name. Taken before the struct, which moves `c`.
     let title = artifact_title(&c);
+    let tab = crate::web::ui::row_label(&c).text;
     // A missing due moment is not a missing pane: most artifacts carry none.
     // Undated reminders are left out, the same as `due_for` leaves them out of
     // the list badge — there is no "in 2 h" to say about one.
@@ -477,6 +500,7 @@ pub(crate) async fn build_artifact_detail(
         lineage,
         id: c.id,
         title,
+        tab,
         html,
         text: c.text,
         category: c.category,
@@ -786,6 +810,183 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// A passage carries the document heading it happened to sit under —
+    /// `split_passages` copies it down, so one heading ends up over twenty
+    /// passages. That is a name for the section, never for this text, and the
+    /// two surfaces that print a name above the text must not print it.
+    #[tokio::test]
+    async fn a_passage_shows_no_heading_even_when_the_document_gave_it_one() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core
+            .ingest("body of the passage", "web", None)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "body of the passage".into(),
+                    title: Some("Wiederherstellung geloeschter Eintraege".into()),
+                    segment_idx: Some(0),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let c = core.store.get_artifact(&p[0].id).await.unwrap();
+        assert_eq!(
+            artifact_view(&c).title,
+            "",
+            "the corpus card named a passage"
+        );
+        let d = super::build_artifact_detail(&core, &p[0].id, "")
+            .await
+            .unwrap();
+        assert_eq!(d.title, "", "the detail pane named a passage");
+    }
+
+    /// `d.title` is empty for a passage, but the pane still wrote the element
+    /// that holds it: an empty `card-title` before the Edit button, taking the
+    /// head row's gap and the heading's line-height over a card whose text
+    /// starts at the top. And the browser tab needs a word, so the page title
+    /// falls to the opening of the text.
+    #[tokio::test]
+    async fn the_pane_writes_no_heading_element_over_a_passage() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core
+            .ingest(
+                "Der Vorgang setzt voraus, dass das Journal noch steht.",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    title: Some("Kapitel 3".into()),
+                    segment_idx: Some(0),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let d = super::build_artifact_detail(&core, &p[0].id, "")
+            .await
+            .unwrap();
+        let html = askama::Template::render(&ArtifactDetailFragment { d }).unwrap();
+        assert!(!html.contains("Kapitel 3"), "{html}");
+        assert!(
+            !html.contains("card-title"),
+            "an empty heading still took a line: {html}"
+        );
+    }
+
+    /// The full page still needs a word: a browser tab and a history entry
+    /// are a list of names, and `{{ d.title }} — engram` over a passage left
+    /// every one of them reading " — engram".
+    #[tokio::test]
+    async fn the_page_title_of_a_passage_is_how_its_text_opens() {
+        let core = crate::core::test_support::test_core().await;
+        let text = "Der Vorgang setzt voraus, dass das Journal noch steht.";
+        let src = core.ingest(text, "web", None).await.unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: text.into(),
+                    title: Some("Kapitel 3".into()),
+                    segment_idx: Some(0),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let d = super::build_artifact_detail(&core, &p[0].id, "")
+            .await
+            .unwrap();
+        let html = askama::Template::render(&ArtifactDetailPage { d }).unwrap();
+        let tab = html
+            .split("<title>")
+            .nth(1)
+            .and_then(|t| t.split("</title>").next())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            tab.starts_with("Der Vorgang setzt voraus"),
+            "the tab read {tab:?}"
+        );
+        assert!(!tab.contains("Kapitel 3"), "the tab read {tab:?}");
+    }
+
+    /// The Related list is built off vector payloads rather than rows, so it
+    /// has its own reading of the same question — and it answered it
+    /// differently: `payload.title` straight through, which put the section
+    /// heading over a neighbouring passage while the rail beside it showed
+    /// none.
+    #[test]
+    fn a_neighbouring_passage_is_listed_without_a_name() {
+        let payload = |provenance: &str, title: Option<&str>| crate::vector::VectorPayload {
+            artifact_id: "a".into(),
+            corpus_id: "c".into(),
+            text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+            title: title.map(str::to_string),
+            provenance: Some(provenance.into()),
+            ..Default::default()
+        };
+        assert_eq!(neighbour_title(&payload("passage", Some("Kapitel 3"))), "");
+        assert_eq!(neighbour_title(&payload("note", None)), "");
+        assert_eq!(
+            neighbour_title(&payload("captured", Some("Wie ein Journal steht"))),
+            "Wie ein Journal steht",
+            "a name a writer gave this text is still shown"
+        );
+    }
+
+    /// Related and Seen together are rows with a snippet under the name. With
+    /// no name the element was still written, so each row opened with an empty
+    /// line where the other rows carry a heading.
+    #[tokio::test]
+    async fn a_related_row_with_no_name_writes_no_heading_element() {
+        let core = crate::core::test_support::test_core().await;
+        let text = "Der Vorgang setzt voraus, dass das Journal noch steht.";
+        let src = core.ingest(text, "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: text.into(),
+                    title: Some("Wie ein Journal steht".into()),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        let mut d = super::build_artifact_detail(&core, &a[0].id, "")
+            .await
+            .unwrap();
+        d.related = vec![RelatedArtifact {
+            id: "n1".into(),
+            title: String::new(),
+            snippet: "Ein benachbarter Abschnitt".into(),
+        }];
+        let html = askama::Template::render(&ArtifactDetailFragment { d }).unwrap();
+        assert!(html.contains("Ein benachbarter Abschnitt"), "{html}");
+        assert!(
+            !html.contains("rail-title"),
+            "an empty heading still took a line: {html}"
+        );
+    }
 
     #[tokio::test]
     async fn a_snoozed_reminder_reads_the_same_in_the_pane_as_in_the_row() {

@@ -228,11 +228,14 @@ pub struct SearchResult {
     /// `None` for a hit only the lexical half found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f32>,
-    /// `title` is the corpus's, not this passage's own. The stored title is
-    /// only ever a real heading; a passage without one is shown under the
-    /// note it came from, and said to be, so it is not mistaken for the whole.
+    /// `title` is not a name of *this* text. Two ways that happens: the hit is
+    /// a passage carrying the heading of the section it was cut from — see
+    /// `Provenance::names_its_own_text` — or it had no title and `fill_titles`
+    /// put the note's name there so a rail of `(untitled)` rows is readable.
+    /// A door that shows names decides for itself what to do with a borrowed
+    /// one; the web rail shows none, and the machine-facing doors keep it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub titled_by_corpus: bool,
+    pub borrowed_name: bool,
     /// The ranked hit that recalled this one. `None` for a ranked hit — which
     /// is every hit inside `limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,7 +278,7 @@ impl Default for SearchResult {
             past_cliff: false,
             retired: false,
             similarity: None,
-            titled_by_corpus: false,
+            borrowed_name: false,
             via: None,
             reason: None,
             explanation: None,
@@ -297,6 +300,11 @@ impl From<SearchHit> for SearchResult {
         SearchResult {
             model_written: provenance.is_some_and(|p| p.is_model_written()),
             synthesized: provenance == Some(crate::store::artifacts::Provenance::Synthesized),
+            // A passage carries the heading of the section it was cut from and
+            // a note carries none; neither is a name for this text. Said here
+            // rather than at each door, so `fill_titles` below is the only
+            // other thing that can set it and every door reads one flag.
+            borrowed_name: provenance.is_some_and(|p| !p.names_its_own_text()),
             origin_count: h.payload.origin_corpora.len(),
             artifact_id: h.payload.artifact_id,
             corpus_id: h.payload.corpus_id,
@@ -316,7 +324,6 @@ impl From<SearchHit> for SearchResult {
             past_cliff: false,
             retired: false,
             similarity: h.similarity,
-            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -869,7 +876,8 @@ impl Core {
     /// `(untitled)` rows is unreadable when the note's own title is one join
     /// away. Done here, once, on the way out of the ranking: the CLI, MCP, the
     /// web rail and the extension all inherit it. Said on the result
-    /// (`titled_by_corpus`) so a door can show that the name is the note's.
+    /// (`borrowed_name`) so a door can decide whether to show a name that is
+    /// the note's rather than this passage's.
     ///
     /// Best-effort: a failed read costs the titles, never the results.
     pub(crate) async fn fill_titles(&self, results: &mut [SearchResult]) {
@@ -893,7 +901,7 @@ impl Core {
         for r in results.iter_mut().filter(|r| r.title.is_none()) {
             if let Some(t) = titles.get(&r.corpus_id) {
                 r.title = Some(t.clone());
-                r.titled_by_corpus = true;
+                r.borrowed_name = true;
             }
         }
     }
@@ -1147,7 +1155,7 @@ impl Core {
                 past_cliff: false,
                 retired: false,
                 similarity: None,
-                titled_by_corpus: false,
+                borrowed_name: false,
                 // Set here, where `via` is known. Never ranked, so every other
                 // stage stays absent rather than defaulting to values that
                 // would read as facts about a competition that never happened.
@@ -4180,6 +4188,46 @@ mod tests {
         );
     }
 
+    /// A passage *with* a heading is the harder half. `fill_titles` never
+    /// touches it — it has a title — so nothing said the title was borrowed,
+    /// and the rail printed the section's name over the slice as if the slice
+    /// owned it.
+    #[tokio::test]
+    async fn a_passage_carrying_its_sections_heading_says_the_name_is_borrowed() {
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("feeding schedule", "web", Some("Sourdough"))
+            .await
+            .unwrap();
+        let new = vec![NewArtifact {
+            text: "feeding schedule that finally worked".to_string(),
+            title: Some("Kapitel 3".to_string()),
+            ..Default::default()
+        }];
+        for c in core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &new,
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap()
+        {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+        let hits = core
+            .search(&q("feeding schedule"), Door::Judge)
+            .await
+            .unwrap();
+        assert_eq!(hits[0].title.as_deref(), Some("Kapitel 3"));
+        assert!(
+            hits[0].borrowed_name,
+            "the heading names the section, not this passage"
+        );
+    }
+
     #[tokio::test]
     async fn a_passage_with_no_heading_is_shown_under_its_notes_title() {
         // Most pasted notes have no markdown heading, so their passages are
@@ -4214,12 +4262,12 @@ mod tests {
         };
         assert_eq!(of(&named).title.as_deref(), Some("Sourdough"));
         assert!(
-            of(&named).titled_by_corpus,
-            "the title must say it is the note's"
+            of(&named).borrowed_name,
+            "the title must say it is not this passage's own"
         );
         // Nothing is invented where the note has no title either.
         assert_eq!(of(&unnamed).title, None);
-        assert!(!of(&unnamed).titled_by_corpus);
+        assert!(!of(&unnamed).borrowed_name);
     }
 
     #[tokio::test]

@@ -803,3 +803,36 @@ pub(crate) fn row_on(
         pair_score: None,
     }
 }
+
+/// A `Chunk` with every field named, so a test can say the one thing it
+/// cares about and nothing else. `Chunk` has no `Default` on purpose —
+/// most of its fields are decisions — so the fixture carries them here
+/// rather than putting a misleading default on the type.
+pub(crate) fn chunk_fixture(title: Option<&str>, text: &str) -> crate::store::artifacts::Chunk {
+    crate::store::artifacts::Chunk {
+        id: "a".into(),
+        corpus_id: Some("s".into()),
+        provenance: crate::store::artifacts::Provenance::Captured,
+        source_count: 0,
+        ordinal: 56,
+        text: text.into(),
+        corpus_span: None,
+        title: title.map(str::to_string),
+        category: None,
+        tags: vec![],
+        embed_state: crate::store::artifacts::EmbedState::Embedded,
+        embed_model: None,
+        created_at: 0,
+        embed_rev: 0,
+        segment_idx: None,
+        flags: vec![],
+        flag_detail: None,
+        superseded_by: None,
+        caveats: vec![],
+        status: crate::store::artifacts::ArtifactStatus::Active,
+        last_verified_at: None,
+        cues: vec![],
+        retired_at: None,
+        reaped_at: None,
+    }
+}

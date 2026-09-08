@@ -22,9 +22,6 @@ pub struct RenderedResult {
     /// Empty where the artifact has no title of its own. The rail then renders
     /// no heading at all — see `render_hit`.
     pub title: String,
-    /// The title is the corpus's — see `SearchResult::titled_by_corpus`. The
-    /// rail says so quietly rather than passing a passage off as the whole.
-    pub titled_by_corpus: bool,
     /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
     pub html: String,
     /// Markup-free preview for the rail, where rendered HTML would not fit.
@@ -244,14 +241,10 @@ pub(crate) fn artifact_html(c: &crate::store::artifacts::Chunk) -> String {
 pub(crate) fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
     ArtifactView {
         id: c.id.clone(),
-        // A passage has no title by design and its first line is its body:
-        // shown as both, the card said everything twice.
-        title: if c.provenance == crate::store::artifacts::Provenance::Passage && c.title.is_none()
-        {
-            String::new()
-        } else {
-            artifact_title(c)
-        },
+        // Empty for a passage and a note, which `title_of` answers for every
+        // surface at once. The card prints no heading over those: their first
+        // line is their body, and shown as both the card said everything twice.
+        title: artifact_title(c),
         html: artifact_html(c),
         text: c.text.clone(),
         tags: c.tags.clone(),
@@ -398,6 +391,37 @@ struct ResultsTemplate {
     /// later one into the same row before the button is pressed. See
     /// `Store::gap_event`.
     q: String,
+}
+
+/// Test-only, for the same reason `ResultsTemplate`'s is: a row has twenty
+/// fields and a test that renders one usually cares about two of them.
+#[cfg(test)]
+impl Default for RenderedResult {
+    fn default() -> Self {
+        Self {
+            artifact_id: String::new(),
+            title: String::new(),
+            html: String::new(),
+            snippet: String::new(),
+            category: None,
+            tags: vec![],
+            corpus_id: String::new(),
+            rank: String::new(),
+            weak: false,
+            primed: false,
+            in_sitting: false,
+            due_in: None,
+            past_cliff: false,
+            retired: false,
+            via_title: None,
+            reason: None,
+            why_ranked: None,
+            model_written: false,
+            origin_count: 0,
+            continues: false,
+            continues_in: String::new(),
+        }
+    }
 }
 
 /// Test-only, for the reason `NewArtifact`'s is: a field added to a template
@@ -588,6 +612,9 @@ pub(crate) fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i
 pub struct SourceRow {
     pub id: String,
     pub title: String,
+    /// See `RowLabel::named`. A row whose label is the artifact's own opening
+    /// sets it as text, not in the place a name would go.
+    pub named: bool,
     /// See `SupersededRow::subtitle`. A merge written from two sources that
     /// shared a title listed that title twice and said nothing else.
     pub subtitle: String,
@@ -596,14 +623,54 @@ pub struct SourceRow {
     pub corpus_id: String,
 }
 
-/// When an artifact was written and how it opens, for a table where the title
+/// What a row calls an artifact, where the row's whole content is this one
+/// string: a Housekeeping table cell, a lineage node, a day's opened list.
+pub struct RowLabel {
+    pub text: String,
+    /// Whether `text` is a name somebody wrote, or the opening of the text
+    /// standing in for one. A door sets the second as text — no bolding, not
+    /// in the place a name would go — because it is not a name and must not
+    /// read as one.
+    pub named: bool,
+}
+
+/// A name where a writer gave the artifact one; otherwise the opening of its
+/// own text.
+///
+/// This is the one place the old body-derived title survives, and it survives
+/// on purpose: emptying a cell whose whole content is the label leaves a link
+/// nobody can see or click. `title_of` used to fall back to the id for the
+/// same reason, and an id is a name only a database has use for.
+pub(crate) fn row_label(c: &crate::store::artifacts::Chunk) -> RowLabel {
+    match title_of(c) {
+        name if name.is_empty() => RowLabel {
+            text: opening_of(c),
+            named: false,
+        },
+        name => RowLabel {
+            text: name,
+            named: true,
+        },
+    }
+}
+
+/// How an artifact's own text opens, for a row that has nothing else to show.
+pub(crate) fn opening_of(c: &crate::store::artifacts::Chunk) -> String {
+    markdown::snippet(&c.text, 60)
+}
+
+/// When an artifact was written and how it opens, for a table where the name
 /// alone may not be unique.
+///
+/// Only where there *is* a name. A passage and a note are labelled by their
+/// own opening (`row_label`), and the subtitle then printed that same opening
+/// again on the line directly beneath it.
 pub(crate) fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
-    format!(
-        "{} · {}",
-        fmt_time(c.created_at),
-        markdown::snippet(&c.text, 60)
-    )
+    let when = fmt_time(c.created_at);
+    match row_label(c).named {
+        true => format!("{when} · {}", opening_of(c)),
+        false => when,
+    }
 }
 
 /// The source list a merge renders: its lineage roots, fetched and titled.
@@ -626,9 +693,11 @@ pub(crate) async fn source_rows(
             continue;
         }
         if let Ok(r) = store.get_artifact(rid).await {
+            let label = row_label(&r);
             sources.push(SourceRow {
                 corpus_id: r.corpus_id.clone().unwrap_or_default(),
-                title: title_of(&r),
+                title: label.text,
+                named: label.named,
                 subtitle: row_subtitle(&r),
                 id: r.id,
             });
@@ -1201,11 +1270,14 @@ pub(crate) fn render_hit(
 ) -> RenderedResult {
     RenderedResult {
         artifact_id: h.artifact_id,
-        // Empty, never "Untitled": a verbatim passage has no title by design,
-        // and a rail of "Untitled" headings is a column of a word that says
-        // nothing where a name would say something. The row shows its snippet.
-        title: h.title.unwrap_or_default(),
-        titled_by_corpus: h.titled_by_corpus,
+        // Empty, never "Untitled" and never a borrowed heading: a passage has
+        // no name of its own — see `SearchResult::borrowed_name` — and a rail
+        // of names that belong to something else says nothing where a name
+        // would say something. The row shows its snippet.
+        title: match h.borrowed_name {
+            true => String::new(),
+            false => h.title.unwrap_or_default(),
+        },
         html: markdown::render(&h.text),
         snippet: markdown::snippet(&h.text, 140),
         category: h.category,
@@ -1404,6 +1476,13 @@ async fn queue_fragment(tenant: Tenant) -> UiResult<Response> {
 /// `markdown::stand_in_title` — so the sitting and the pair cards
 /// cannot drift apart again.
 pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
+    // A passage and a note have no name of their own — see
+    // `Provenance::names_its_own_text`. The stored heading on a passage names
+    // the section it was cut from, and showing it here put a name over twenty
+    // slices that share nothing but a chapter.
+    if !c.provenance.names_its_own_text() {
+        return String::new();
+    }
     // The stored title goes through the same rule, because synthesis writes it
     // and nothing stopped it writing markup into one: Housekeeping listed a
     // merged artifact as "**Was nicht abgedeckt ist:** * Es werden keine". A
@@ -1547,37 +1626,109 @@ pub fn ui_router() -> Router<AppState> {
 mod tests {
     use super::*;
 
-    /// A `Chunk` with every field named, so a test can say the one thing it
-    /// cares about and nothing else. `Chunk` has no `Default` on purpose —
-    /// most of its fields are decisions — so the fixture carries them here
-    /// rather than putting a misleading default on the type.
-    fn chunk_fixture(title: Option<&str>, text: &str) -> crate::store::artifacts::Chunk {
+    use crate::web::test_support::chunk_fixture;
+
+    /// A passage fixture: the heading the document gave it, over text of its
+    /// own.
+    fn passage_fixture(title: Option<&str>, text: &str) -> crate::store::artifacts::Chunk {
         crate::store::artifacts::Chunk {
-            id: "a".into(),
-            corpus_id: Some("s".into()),
-            provenance: crate::store::artifacts::Provenance::Captured,
-            source_count: 0,
-            ordinal: 56,
-            text: text.into(),
-            corpus_span: None,
-            title: title.map(str::to_string),
-            category: None,
-            tags: vec![],
-            embed_state: crate::store::artifacts::EmbedState::Embedded,
-            embed_model: None,
-            created_at: 0,
-            embed_rev: 0,
-            segment_idx: None,
-            flags: vec![],
-            flag_detail: None,
-            superseded_by: None,
-            caveats: vec![],
-            status: crate::store::artifacts::ArtifactStatus::Active,
-            last_verified_at: None,
-            cues: vec![],
-            retired_at: None,
-            reaped_at: None,
+            provenance: crate::store::artifacts::Provenance::Passage,
+            ..chunk_fixture(title, text)
         }
+    }
+
+    /// A table cell or a graph node whose whole content is the label has
+    /// nothing else to fall back on: emptied, it is a link nobody can see or
+    /// click. It shows the opening of the text instead, and says so, so the
+    /// door can set it as text rather than in the place a name would go.
+    #[test]
+    fn a_row_that_is_only_a_label_falls_back_to_the_text_not_to_a_name() {
+        let c = passage_fixture(
+            Some("Wiederherstellung geloeschter Eintraege"),
+            "Der Vorgang setzt voraus, dass das Journal noch vollstaendig ist.",
+        );
+        let l = row_label(&c);
+        assert!(
+            l.text.starts_with("Der Vorgang setzt voraus"),
+            "the row carried the section heading: {:?}",
+            l.text
+        );
+        assert!(!l.named, "the opening of a text is not a name");
+    }
+
+    /// The rule must not overshoot. `Captured` is the synthesis rewrite of a
+    /// window — a model wrote the text and named it in the same call — and it
+    /// is source text, so a rule written against `is_model_written` would have
+    /// stripped exactly the names worth keeping.
+    #[test]
+    fn an_artifact_a_writer_named_keeps_its_name() {
+        let c = chunk_fixture(Some("Wie ein Journal wiederhergestellt wird"), "body");
+        assert_eq!(title_of(&c), "Wie ein Journal wiederhergestellt wird");
+        let l = row_label(&c);
+        assert_eq!(l.text, "Wie ein Journal wiederhergestellt wird");
+        assert!(l.named);
+    }
+
+    /// Store a passage carrying the heading of the section it was cut from,
+    /// and hand back its id.
+    async fn stored_passage(core: &crate::core::Core, title: &str, text: &str) -> (String, String) {
+        let src = core.ingest(text, "web", None).await.unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: text.into(),
+                    title: Some(title.into()),
+                    segment_idx: Some(0),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        (src.id, p[0].id.clone())
+    }
+
+    /// Housekeeping lists a merge's sources as bare anchors — the label is the
+    /// whole cell. Emptying it there leaves a link with nothing to read and
+    /// nothing to click.
+    #[tokio::test]
+    async fn a_housekeeping_source_row_for_a_passage_is_still_a_link_you_can_read() {
+        let core = crate::core::test_support::test_core().await;
+        let (_, pid) = stored_passage(
+            &core,
+            "Kapitel 3",
+            "Der Vorgang setzt voraus, dass das Journal noch vollstaendig ist.",
+        )
+        .await;
+        let rows = source_rows(&core.store, "some-merge", &[pid]).await;
+        assert!(
+            rows[0].title.starts_with("Der Vorgang setzt voraus"),
+            "the source row read {:?}",
+            rows[0].title
+        );
+        assert!(!rows[0].named, "the opening of a text is not a name");
+    }
+
+    /// `row_subtitle` is "when it was written · how it opens", for a table
+    /// where the name alone may not be unique. Where the label already *is*
+    /// the opening, the subtitle repeated it directly underneath.
+    #[tokio::test]
+    async fn a_row_whose_label_is_its_opening_does_not_say_it_twice() {
+        let core = crate::core::test_support::test_core().await;
+        let (_, pid) = stored_passage(
+            &core,
+            "Kapitel 3",
+            "Der Vorgang setzt voraus, dass das Journal noch vollstaendig ist.",
+        )
+        .await;
+        let rows = source_rows(&core.store, "some-merge", &[pid]).await;
+        assert!(
+            !rows[0].subtitle.contains("Der Vorgang setzt voraus"),
+            "the opening stood twice, once under itself: {:?}",
+            rows[0].subtitle
+        );
     }
 
     fn queue_row_fixture(label: &str, opening: &str) -> QueueRow {
@@ -3480,7 +3631,6 @@ mod tests {
             why_ranked: None,
             artifact_id: id.into(),
             title: String::new(),
-            titled_by_corpus: false,
             html: String::new(),
             snippet: String::new(),
             category: None,
@@ -3635,7 +3785,6 @@ mod tests {
             why_ranked: None,
             artifact_id: "a1".into(),
             title: "The one that was recalled".into(),
-            titled_by_corpus: false,
             html: String::new(),
             snippet: "a snippet".into(),
             category: None,
@@ -3655,6 +3804,48 @@ mod tests {
             continues: false,
             continues_in: String::new(),
         }
+    }
+
+    /// The offer card's only link is its heading. Dropping the heading for a
+    /// passage left a card nobody could open — the snippet under it is a
+    /// paragraph. With no name the snippet becomes the link, set as text.
+    #[test]
+    fn an_offer_with_no_name_is_still_a_card_you_can_open() {
+        let card = |title: &str| {
+            askama::Template::render(&ContextTemplate {
+                offer: Some(OfferView {
+                    id: "a1".into(),
+                    rec: String::new(),
+                    title: title.into(),
+                    snippet: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    kind: "pattern".into(),
+                    rung: String::new(),
+                    when: String::new(),
+                    detail: String::new(),
+                    blocks: String::new(),
+                    slot: String::new(),
+                }),
+            })
+            .unwrap()
+        };
+        let bare = card("");
+        assert_eq!(
+            bare.matches("<a ").count(),
+            1,
+            "the card has exactly one link: {bare}"
+        );
+        assert!(bare.contains("Der Vorgang setzt voraus"), "{bare}");
+        assert!(bare.contains("name-opening"), "{bare}");
+        assert_eq!(
+            bare.matches("Der Vorgang setzt voraus").count(),
+            1,
+            "the snippet stood twice, once under itself: {bare}"
+        );
+
+        let named = card("Wie ein Journal steht");
+        assert!(named.contains("Wie ein Journal steht"), "{named}");
+        assert!(named.contains("Der Vorgang setzt voraus"), "{named}");
+        assert!(!named.contains("name-opening"), "{named}");
     }
 
     /// The rule is drawn once, before the first row past the cliff, and the
@@ -3698,28 +3889,41 @@ mod tests {
         assert!(!flat.contains("rail-past"), "{flat}");
     }
 
+    /// A borrowed name is no name. It used to be shown greyed under a "from"
+    /// prefix, which was honest about whose name it was and still put a name
+    /// over a passage — and where the passage carried the heading of its own
+    /// section there was nothing to grey, so the section's name stood over
+    /// twenty slices as if it were theirs. The rail shows the text instead.
     #[test]
-    fn a_title_borrowed_from_the_note_is_marked_as_the_notes() {
-        let mut own = rendered(None, None);
-        own.title = "Sourdough".into();
-        let mut borrowed = own.clone();
-        borrowed.titled_by_corpus = true;
+    fn the_rail_shows_no_name_where_the_name_is_not_this_texts_own() {
+        let hit = |borrowed: bool| crate::core::search::SearchResult {
+            artifact_id: "a".into(),
+            title: Some("Wiederherstellung geloeschter Eintraege".into()),
+            text: "Der Vorgang setzt voraus, dass das Journal noch vollstaendig ist.".into(),
+            borrowed_name: borrowed,
+            ..Default::default()
+        };
+        let titles = std::collections::HashMap::new();
+        assert_eq!(render_hit(0, hit(true), &titles, false).title, "");
+        assert_eq!(
+            render_hit(0, hit(false), &titles, false).title,
+            "Wiederherstellung geloeschter Eintraege",
+            "a name a writer gave this text is still shown"
+        );
         let body = ResultsTemplate {
-            results: vec![own, borrowed],
+            results: vec![render_hit(0, hit(true), &titles, false)],
             ..Default::default()
         }
         .render()
         .unwrap();
-        assert_eq!(body.matches("Sourdough").count(), 2, "{body}");
-        assert_eq!(body.matches("rail-title-corpus").count(), 1, "{body}");
-        // And the class has to *do* something. It shipped with no rule behind
-        // it anywhere in the sheet, so a borrowed title rendered identical to
-        // a heading the passage owns and the distinction lived only in the
-        // tooltip — while this assertion passed on the class string alone.
+        assert!(!body.contains("Wiederherstellung"), "{body}");
+        assert!(body.contains("Der Vorgang setzt voraus"), "{body}");
+        // The greyed "from" form goes with it: a class with no renderer left
+        // is a rule nobody can reach.
         let css = include_str!("../../assets/app.css");
         assert!(
-            css.contains(".rail-title-corpus"),
-            "the borrowed-title class has no rule in app.css"
+            !css.contains(".rail-title-corpus"),
+            "the rule outlived its door"
         );
     }
 
@@ -3815,7 +4019,6 @@ mod tests {
             why_ranked: None,
             artifact_id: "r1".into(),
             title: "The ranked hit".into(),
-            titled_by_corpus: false,
             html: String::new(),
             snippet: "a snippet".into(),
             category: None,
@@ -6706,5 +6909,86 @@ mod tests {
         }
         let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.gaps, s.hits, s.judged), (1, 0, 1), "{s:?}");
+    }
+
+    /// A result row carrying every badge it can, in a rail dragged to its floor.
+    ///
+    /// This is the shape that broke: `.rail-head` could not wrap, a `.badge` is
+    /// `white-space: nowrap` and a `.rail-title` may break anywhere — so once
+    /// three chips filled the row the title was squeezed to one character and
+    /// set itself thirty lines tall in a box the rail clips. The card became a
+    /// chip, four hundred pixels of nothing, and a snippet.
+    ///
+    /// The page is the real workspace from the router with the real rail
+    /// fragment swapped into `#results`, which is the swap the box performs on
+    /// every keystroke. `--rail-w` is the floor `railHandle` in app.js clamps a
+    /// drag to, and `pane-open` is the class the same file adds once something
+    /// is open — both are states a person reaches by dragging the boundary and
+    /// opening a result, not shapes invented here.
+    ///
+    /// Badges rather than a search: `weak` needs a poor score, `primed` needs
+    /// activation and `due_in` needs a reminder, and no query produces all
+    /// three at once. The template is the one that ships either way.
+    #[tokio::test]
+    #[ignore = "needs node and a headless Chrome; see `test_support::measure`"]
+    async fn a_result_wearing_every_badge_still_shows_its_title() {
+        use askama::Template as _;
+
+        let (app, cookie, _core) = app_session_and_core().await;
+        let page = get_body(&app, &cookie, "/ui").await;
+
+        let mut row = ranked(true);
+        row.primed = true;
+        row.due_in = Some("in under an hour".into());
+        row.title = "Neues Einlesen von Corpora in engram".into();
+        row.snippet = "Um die Corpora in engram neu einzulesen, öffne das Interface.".into();
+        let rail = ResultsTemplate {
+            results: vec![row],
+            terms: "engram".into(),
+            ..Default::default()
+        }
+        .render()
+        .expect("the rail fragment");
+
+        // The swap htmx performs, and what app.js does around it. `workspace.html`
+        // ships the rail and the pane `hidden` and the idle column open — the
+        // page has not been typed into yet — and `hideIdle` is what turns that
+        // around on the first keystroke. A hidden element has no size and
+        // measures as nothing, so without this the harness dutifully reported a
+        // perfect page and saw none of it.
+        let page = page
+            .replace(
+                r#"<div id="results" role="listbox" aria-label="Results">"#,
+                &format!(r#"<div id="results" role="listbox" aria-label="Results">{rail}"#),
+            )
+            .replace(
+                r#"<div id="rail" class="region-rail rail" hidden>"#,
+                r#"<div id="rail" class="region-rail rail">"#,
+            )
+            .replace(
+                r#"<div id="pane" class="region-focus pane" hidden"#,
+                r#"<div id="pane" class="region-focus pane""#,
+            )
+            .replace(r#"<div id="idle">"#, r#"<div id="idle" hidden>"#)
+            // The rail at the narrowest a drag may leave it, with something
+            // open beside it: `--rail-w` is `railHandle`'s floor and
+            // `pane-open` is what the pane gains when an artifact lands in it.
+            .replace(
+                r#"class="regions regions-rail-focus-source"#,
+                r#"style="--rail-w:15rem" class="pane-open regions regions-rail-focus-source"#,
+            );
+        for expected in ["rail-title", "--rail-w", r#"class="region-rail rail">"#] {
+            assert!(
+                page.contains(expected),
+                "the page was not assembled: {expected}"
+            );
+        }
+        assert!(
+            !page.contains(r#"class="region-rail rail" hidden"#),
+            "the rail is still hidden, so there is nothing to measure"
+        );
+
+        let run = crate::web::test_support::measure(&[("results".into(), page)], "1500");
+        crate::web::test_support::nothing_is_broken(&run, "1500");
     }
 }

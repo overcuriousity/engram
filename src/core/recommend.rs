@@ -413,7 +413,22 @@ impl Core {
     }
 }
 
+/// What the offer card calls the artifact it is offering.
+///
+/// Empty where nobody named this text: a passage carries the heading of the
+/// section it was cut from and a note carries none, and the card shows a
+/// snippet of the text underneath either way — see
+/// `Provenance::names_its_own_text`. The card renders no heading at all rather
+/// than one belonging to something else.
 fn title_of(p: &crate::vector::VectorPayload) -> String {
+    let names_itself = p
+        .provenance
+        .as_deref()
+        .map(crate::store::artifacts::Provenance::parse)
+        .is_none_or(|p| p.names_its_own_text());
+    if !names_itself {
+        return String::new();
+    }
     p.title
         .clone()
         .filter(|t| !t.is_empty())
@@ -435,6 +450,28 @@ mod tests {
     use super::*;
     use crate::core::context::{Clock, encoder_version};
     use crate::core::test_support::{phone_bundle, recommending_core, seed_artifact};
+
+    /// The offer card shows a snippet under what it is called, so a passage —
+    /// which has no name of its own, only the heading of the section it was
+    /// cut from — is offered by its text alone. See
+    /// `Provenance::names_its_own_text`.
+    #[test]
+    fn an_offer_over_a_passage_is_made_without_a_name() {
+        let payload = |provenance: &str, title: Option<&str>| crate::vector::VectorPayload {
+            artifact_id: "a".into(),
+            corpus_id: "c".into(),
+            text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+            title: title.map(str::to_string),
+            provenance: Some(provenance.into()),
+            ..Default::default()
+        };
+        assert_eq!(title_of(&payload("passage", Some("Kapitel 3"))), "");
+        assert_eq!(title_of(&payload("note", None)), "");
+        assert_eq!(
+            title_of(&payload("captured", Some("Wie ein Journal steht"))),
+            "Wie ein Journal steht"
+        );
+    }
 
     /// 2026-08-21T13:52:00Z — a Friday, 15:52 in Berlin.
     const FRIDAY: i64 = 1_787_320_320;

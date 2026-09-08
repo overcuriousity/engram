@@ -25,7 +25,7 @@ use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
 use crate::web::tenant::CanJudge;
-use crate::web::ui::{SourceRow, row_subtitle, source_rows, sweep_label, tally_sweep, title_of};
+use crate::web::ui::{SourceRow, row_label, row_subtitle, source_rows, sweep_label, tally_sweep};
 use crate::web::ui_error::UiResult;
 
 /// The retrieval measure, flattened for the template.
@@ -97,6 +97,9 @@ pub struct ParkedRow {
 pub struct SupersededRow {
     pub id: String,
     pub title: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
     /// When it was written and how it opens. Two artifacts can carry the same
     /// title — a merge of two documents that named a section identically
     /// produces exactly that — and a table of them is unreadable without
@@ -110,12 +113,20 @@ pub struct SupersededRow {
 pub struct DeprecatedRow {
     pub id: String,
     pub title: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
 }
 
 /// One buried artifact, for the Reaped section.
 pub struct GraveRow {
     pub id: String,
     pub title: String,
+    /// Always true here, and stated rather than left to be noticed: the
+    /// graveyard keeps the title as it stood when the row was buried and has
+    /// no provenance column to say whether that name was the text's own. A
+    /// buried passage is therefore still listed under its section's heading.
+    pub named: bool,
     pub ago: String,
     pub reason: Option<String>,
 }
@@ -124,6 +135,9 @@ pub struct GraveRow {
 pub struct StaleRow {
     pub id: String,
     pub title: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
     pub last_verified: String,
 }
 
@@ -241,6 +255,9 @@ impl InsightsTemplate {
 pub(crate) struct GeneratedRow {
     id: String,
     title: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
     subtitle: String,
     cues: Vec<String>,
     sources: Vec<SourceRow>,
@@ -249,6 +266,9 @@ pub(crate) struct GeneratedRow {
 pub(crate) struct MergedRow {
     id: String,
     title: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
     /// See `SupersededRow::subtitle`: what tells two rows with one title apart.
     subtitle: String,
     /// What it was written from, in the order the lineage stores them.
@@ -275,6 +295,9 @@ pub(crate) struct MergedRow {
 pub(crate) struct QueueRow {
     href: String,
     title: String,
+    /// See `ui::RowLabel::named`. A label that is the artifact's own opening
+    /// is set as text, not in the place a name would go.
+    named: bool,
     /// What tells two rows with one title apart. Empty where nothing does.
     subtitle: String,
     /// The one-word name for what put this row here, as a badge.
@@ -402,12 +425,18 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         .await?
     {
         let winner_id = c.superseded_by.clone().unwrap_or_default();
-        let winner_title = match tenant.core.store.get_artifact(&winner_id).await {
-            Ok(w) => title_of(&w),
-            Err(_) => "(deleted)".to_string(),
+        let winner = match tenant.core.store.get_artifact(&winner_id).await {
+            Ok(w) => row_label(&w),
+            Err(_) => crate::web::ui::RowLabel {
+                text: "(deleted)".to_string(),
+                named: false,
+            },
         };
+        let winner_title = winner.text;
+        let label = row_label(&c);
         superseded.push(SupersededRow {
-            title: title_of(&c),
+            named: label.named,
+            title: label.text,
             subtitle: row_subtitle(&c),
             id: c.id,
             winner_id,
@@ -432,9 +461,11 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
         )
         .await;
+        let label = row_label(&c);
         merged.push(MergedRow {
             orphaned: c.flags.iter().any(|f| f == "orphaned_source"),
-            title: title_of(&c),
+            named: label.named,
+            title: label.text,
             subtitle: row_subtitle(&c),
             id: c.id,
             sources,
@@ -460,8 +491,10 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             gen_roots.get(&c.id).map(Vec::as_slice).unwrap_or_default(),
         )
         .await;
+        let label = row_label(&c);
         generated.push(GeneratedRow {
-            title: title_of(&c),
+            named: label.named,
+            title: label.text,
             subtitle: row_subtitle(&c),
             cues: c.cues.clone(),
             id: c.id,
@@ -556,7 +589,8 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         .await?
         .into_iter()
         .map(|c| DeprecatedRow {
-            title: title_of(&c),
+            named: row_label(&c).named,
+            title: row_label(&c).text,
             id: c.id,
         })
         .collect();
@@ -573,6 +607,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         .await?
         .into_iter()
         .map(|g| GraveRow {
+            named: true,
             title: g.title.unwrap_or_else(|| "(untitled)".to_string()),
             ago: ago(g.reaped_at),
             id: g.id,
@@ -593,7 +628,17 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         })
         .into_iter()
         .map(|r| StaleRow {
-            title: r.title.unwrap_or_else(|| markdown::snippet(&r.text, 60)),
+            // A stale candidate is a search result, so the flag is already on
+            // it: `borrowed_name` covers a passage carrying its section's
+            // heading as well as one that never had a title at all.
+            named: !r.borrowed_name && r.title.is_some(),
+            title: match r.borrowed_name {
+                true => markdown::snippet(&r.text, 60),
+                false => r
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| markdown::snippet(&r.text, 60)),
+            },
             id: r.artifact_id,
             last_verified: r
                 .last_verified_at
@@ -611,6 +656,9 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for p_ in parked {
         queue.push(QueueRow {
             href: format!("/ui/corpora/{}", p_.id),
+            // A corpus label is always a name: `corpus_label` falls back to
+            // "document" or the opening rather than to nothing.
+            named: true,
             title: p_.title,
             subtitle: format!("{} B", p_.bytes),
             kind: "parked",
@@ -618,6 +666,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             beside: vec![crate::web::ui::SourceRow {
                 id: String::new(),
                 title: p_.other_title,
+                named: true,
                 subtitle: String::new(),
                 corpus_id: p_.other_id,
             }],
@@ -647,6 +696,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for s in stale {
         queue.push(QueueRow {
             href: format!("/ui/artifacts/{}", s.id),
+            named: s.named,
             title: s.title,
             subtitle: String::new(),
             kind: "unverified",
@@ -674,6 +724,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         let n = m.sources.len();
         queue.push(QueueRow {
             href: format!("/ui/artifacts/{}", m.id),
+            named: m.named,
             title: m.title,
             subtitle: m.subtitle,
             kind: "merged",
@@ -697,6 +748,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for g in generated {
         queue.push(QueueRow {
             href: format!("/ui/artifacts/{}", g.id),
+            named: g.named,
             title: g.title,
             subtitle: g.subtitle,
             kind: "generated",
@@ -723,6 +775,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for s in superseded {
         queue.push(QueueRow {
             href: format!("/ui/artifacts/{}", s.id),
+            named: s.named,
             title: s.title,
             subtitle: s.subtitle,
             kind: "hidden",
@@ -730,6 +783,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             beside: vec![crate::web::ui::SourceRow {
                 id: s.winner_id,
                 title: s.winner_title,
+                named: true,
                 subtitle: String::new(),
                 corpus_id: String::new(),
             }],
@@ -744,6 +798,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for d in deprecated {
         queue.push(QueueRow {
             href: format!("/ui/artifacts/{}", d.id),
+            named: d.named,
             title: d.title,
             subtitle: String::new(),
             kind: "hidden",
@@ -760,6 +815,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for g in reaped {
         queue.push(QueueRow {
             href: format!("/ui/artifacts/{}", g.id),
+            named: g.named,
             title: g.title,
             subtitle: String::new(),
             kind: "buried",
@@ -1453,6 +1509,62 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         body_of(res).await
+    }
+
+    /// Housekeeping's tables are anchors and nothing else: the label is the
+    /// whole cell. Emptied for a passage they are links nobody can see or
+    /// click, so a passage is listed by how its text opens — set as text, and
+    /// without the subtitle repeating that same opening underneath it.
+    #[tokio::test]
+    async fn a_superseded_passage_is_listed_by_how_its_text_opens() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core
+            .store
+            .insert_corpus("one\ntwo", "web", None)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    title: Some("Kapitel 3".into()),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let winner = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "Wie ein Journal steht".into(),
+                    title: Some("Wie ein Journal steht".into()),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        core.store
+            .set_superseded_by(&p[0].id, Some(&winner[0].id))
+            .await
+            .unwrap();
+
+        let html = insights(core).await;
+        assert!(!html.contains("Kapitel 3"), "{html}");
+        assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
+        assert!(
+            html.contains("name-opening"),
+            "the opening was set as a name: {html}"
+        );
+        assert_eq!(
+            html.matches("Der Vorgang setzt voraus").count(),
+            1,
+            "the opening stood twice, once under itself: {html}"
+        );
     }
 
     /// Five headings answered with a zero make a base with nothing wrong with

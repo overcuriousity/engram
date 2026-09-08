@@ -172,8 +172,12 @@
     <div>
       <div class="label pane-label">Artifact</div>
       <div class="card">
-        <div class="card-head">
-          <span class="card-title">{{ d.title }}</span>
+        <div class="card-head{% if d.title.is_empty() %} card-head-bare{% endif %}">
+          {# No heading over a passage or a note: neither has a name of its own
+             — see `Provenance::names_its_own_text` — and the text starts one
+             line below. The element goes with the name, or an empty one takes
+             the head row's gap over a card that has nothing to head. #}
+          {% if !d.title.is_empty() %}<span class="card-title">{{ d.title }}</span>{% endif %}
           <span class="spacer"></span>
           {# The corpus page could edit an artifact and this one could not, on
              the screen whose whole subject is one artifact. Same box, same
@@ -295,7 +299,13 @@
            hx-get="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
            hx-target="closest [data-terms]" hx-swap="outerHTML"
            hx-push-url="true">
+          {# No heading where the neighbour has no name of its own — a passage
+             carries its section's, and the snippet below is the row. The
+             element goes with the name; an empty one opened the row with a
+             blank line the named rows beside it do not have. #}
+          {% if !r.title.is_empty() %}
           <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
+          {% endif %}
           <div class="rail-snippet">{{ r.snippet }}</div>
         </a>
         {% endfor %}
@@ -313,7 +323,9 @@
              hx-get="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
              hx-target="closest [data-terms]" hx-swap="outerHTML"
              hx-push-url="true">
+            {% if !r.title.is_empty() %}
             <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
+            {% endif %}
             {% if let Some(why) = r.why %}<div class="rail-why">{{ why }}</div>{% endif %}
             <div class="rail-snippet">{{ r.snippet }} · {{ r.corpus_title }}</div>
           </a>

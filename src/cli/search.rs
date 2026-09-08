@@ -357,7 +357,7 @@ pub(crate) mod fixture {
             past_cliff,
             retired: false,
             similarity: None,
-            titled_by_corpus: false,
+            borrowed_name: false,
             via: None,
             reason: None,
             explanation: None,

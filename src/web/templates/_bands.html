@@ -43,7 +43,7 @@
          the copy at the top rather than the one that was pressed. The line
          points up at it instead. #}
       {% for e in b.echoes %}
-      <p class="band-echo"><a class="quiet-link" href="#artifact-{{ e.0 }}">↑ {{ e.1 }}</a></p>
+      <p class="band-echo"><a class="quiet-link{% if !e.named %} name-opening{% endif %}" href="#artifact-{{ e.id }}">↑ {{ e.label }}</a></p>
       {% endfor %}
       {% for c in b.artifacts %}{% include "_artifact.html" %}{% endfor %}
     </div>

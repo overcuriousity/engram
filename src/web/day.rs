@@ -53,11 +53,21 @@ pub(crate) struct Line {
     pub detail: String,
 }
 
+/// One artifact a sitting opened, as the row links to it. A pair of strings
+/// could not say whether the label was a name or the opening of the text
+/// standing in for one — see `ui::RowLabel` — and the row is a link and
+/// nothing else, so it needs both.
+pub(crate) struct Opened {
+    pub id: String,
+    pub label: String,
+    pub named: bool,
+}
+
 pub(crate) struct Sitting {
     pub span: String,
     pub query: String,
     pub searches: usize,
-    pub opened: Vec<(String, String)>,
+    pub opened: Vec<Opened>,
 }
 
 #[derive(Template)]
@@ -233,7 +243,12 @@ async fn page(
         let mut opened = vec![];
         for aid in &p.sources {
             if let Ok(a) = store.get_artifact(aid).await {
-                opened.push((aid.clone(), a.title.unwrap_or_else(|| "untitled".into())));
+                let label = crate::web::ui::row_label(&a);
+                opened.push(Opened {
+                    id: aid.clone(),
+                    label: label.text,
+                    named: label.named,
+                });
             }
         }
         sittings.push(Sitting {
@@ -616,6 +631,60 @@ mod tests {
         assert!(
             html.contains(r#"action="/ui/day/2026-08-28/entry""#),
             "and the form posts the canonical day"
+        );
+    }
+
+    /// A sitting names what it opened, and nothing else: the row is a comma
+    /// list of links. A passage there was listed under the heading of the
+    /// section it was cut from, and a note under the word "untitled".
+    #[tokio::test]
+    async fn a_sitting_names_a_passage_it_opened_by_how_its_text_opens() {
+        let mut core = test_core().await;
+        let tz = chrono_tz::Tz::Europe__Berlin;
+        let day = tz
+            .with_ymd_and_hms(2026, 8, 30, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        core.clock = Clock::Fixed(day + 10 * 3_600);
+        let src = core
+            .store
+            .insert_corpus("one\ntwo", "web", None)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    title: Some("Kapitel 3".into()),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        core.store
+            .insert_pursuit(
+                day + 14 * 3_600,
+                &["qdrant payload filter".into()],
+                std::slice::from_ref(&p[0].id),
+                None,
+            )
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("Kapitel 3"), "{html}");
+        assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
+        assert!(
+            html.contains("name-opening"),
+            "the opening was set as a name: {html}"
         );
     }
 

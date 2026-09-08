@@ -944,7 +944,7 @@ impl Core {
                 past_cliff: false,
                 retired: is_retired,
                 similarity: None,
-                titled_by_corpus: false,
+                borrowed_name: false,
                 // What makes a reached artifact tellable apart from a retrieved
                 // one, by a reader and by a test alike: a ranked hit has no
                 // `via`, and this one names the hit it was reached from.

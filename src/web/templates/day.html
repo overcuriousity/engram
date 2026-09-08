@@ -51,7 +51,7 @@
 {% if !sittings.is_empty() %}
 <h2 class="label">Sittings</h2>
 {% for s in sittings %}
-<p class="day-line"><span class="mono muted">{{ s.span }}</span> — {{ s.searches }} search{% if s.searches != 1 %}es{% endif %} around “{{ s.query }}”{% if !s.opened.is_empty() %}, opened {% for o in s.opened %}<a href="/ui/artifacts/{{ o.0 }}">{{ o.1 }}</a>{% if !loop.last %}, {% endif %}{% endfor %}{% endif %}</p>
+<p class="day-line"><span class="mono muted">{{ s.span }}</span> — {{ s.searches }} search{% if s.searches != 1 %}es{% endif %} around “{{ s.query }}”{% if !s.opened.is_empty() %}, opened {% for o in s.opened %}<a href="/ui/artifacts/{{ o.id }}"{% if !o.named %} class="name-opening"{% endif %}>{{ o.label }}</a>{% if !loop.last %}, {% endif %}{% endfor %}{% endif %}</p>
 {% endfor %}
 {% endif %}
 {% endblock %}

@@ -1584,6 +1584,7 @@ mod tests {
 
     fn due_row(title: &str, at: Option<i64>) -> crate::store::moments::DueRow {
         crate::store::moments::DueRow {
+            named: true,
             moment: crate::store::moments::Moment {
                 id: format!("m-{title}"),
                 artifact_id: "a".into(),

@@ -60,6 +60,9 @@ struct TzForm {
 pub(crate) struct DueView {
     pub id: String,
     pub artifact_id: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
     pub title: String,
     pub when: String,
     /// The absolute time, always, for the row's tooltip. `when` is the short
@@ -83,6 +86,9 @@ pub(crate) struct DueView {
 
 pub(crate) struct EventView {
     pub artifact_id: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
     pub title: String,
     pub when: String,
     pub span: String,
@@ -319,6 +325,7 @@ async fn render(
             DueView {
                 id: r.moment.id.clone(),
                 artifact_id: r.moment.artifact_id.clone(),
+                named: r.named,
                 title: r.title,
                 when: eff
                     .map(|a| due_words(a, now, tz))
@@ -343,6 +350,7 @@ async fn render(
         .into_iter()
         .map(|r| EventView {
             artifact_id: r.moment.artifact_id,
+            named: r.named,
             title: r.title,
             when: r
                 .moment
@@ -615,6 +623,59 @@ mod tests {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// A due row is a link and its time; there is no snippet beside it. So a
+    /// reminder set on a passage was listed under the heading of the section
+    /// the passage was cut from — a name for a chapter standing over a
+    /// reminder about three sentences of it.
+    #[tokio::test]
+    async fn a_reminder_on_a_passage_is_listed_by_how_its_text_opens() {
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("one\ntwo", "web", None)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    title: Some("Kapitel 3".into()),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        core.store
+            .insert_moment(&NewMoment {
+                artifact_id: p[0].id.clone(),
+                kind: Kind::Due,
+                at: Some(crate::store::now() - 3_600),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Cue,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("Kapitel 3"), "{html}");
+        assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
+        assert!(
+            html.contains("name-opening"),
+            "the opening was set as a name: {html}"
+        );
     }
 
     #[tokio::test]

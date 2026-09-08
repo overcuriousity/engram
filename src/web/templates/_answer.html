@@ -52,8 +52,11 @@
 <h3>Artifacts used</h3>
 {% for r in citations %}
 <div class="card">
-  <div class="card-head">
-    <span class="card-title">{{ r.title }}</span>
+  <div class="card-head{% if r.title.is_empty() %} card-head-bare{% endif %}">
+    {# No heading over an excerpt that has no name of its own — a passage
+       carries the heading of the section it was cut from, and the excerpt
+       below is what was cited. See `render_hit`. #}
+    {% if !r.title.is_empty() %}<span class="card-title">{{ r.title }}</span>{% endif %}
     <span class="card-meta">{{ r.rank }}</span>
   </div>
   <div class="md">{{ r.html|safe }}</div>

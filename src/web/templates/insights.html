@@ -181,7 +181,10 @@
   {% for r in queue %}
     <tr>
       <td>
-        <a href="{{ r.href }}">{{ r.title }}</a>
+        {# A label that is the artifact's own opening rather than a name it was
+           given is set as text — see `ui::RowLabel`. The anchor stays: a row
+           whose whole content is the label cannot be emptied. #}
+        <a href="{{ r.href }}"{% if !r.named %} class="name-opening"{% endif %}>{{ r.title }}</a>
         {% if !r.subtitle.is_empty() %}<div class="muted row-sub">{{ r.subtitle }}</div>{% endif %}
         {% if let Some(c) = r.caveat %}<div class="muted row-sub">{{ c }}</div>{% endif %}
       </td>
@@ -195,7 +198,7 @@
           {% if src.id.is_empty() %}
           <a href="/ui/corpora/{{ src.corpus_id }}">{{ src.title }}</a>
           {% else %}
-          <a href="/ui/artifacts/{{ src.id }}">{{ src.title }}</a>
+          <a href="/ui/artifacts/{{ src.id }}"{% if !src.named %} class="name-opening"{% endif %}>{{ src.title }}</a>
           {% endif %}
           {% if !src.subtitle.is_empty() %}<div class="muted row-sub">{{ src.subtitle }}</div>{% endif %}
         </div>

@@ -119,6 +119,11 @@ pub struct NewMoment {
 pub struct DueRow {
     pub moment: Moment,
     pub title: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`. A due row is a link and its
+    /// time, with no snippet beside it, so the label can never be empty; it
+    /// can say it is not a name.
+    pub named: bool,
     pub opening: String,
 }
 
@@ -153,12 +158,18 @@ fn row_of(r: &sqlx::sqlite::SqliteRow) -> DueRow {
         .chars()
         .take(120)
         .collect::<String>();
+    // A passage carries the heading of the section it was cut from and a note
+    // carries none — neither is a name for this text, so neither is offered as
+    // one and the row falls to its opening. See
+    // `Provenance::names_its_own_text`.
+    let named = crate::store::artifacts::Provenance::parse(&r.get::<String, _>("provenance"))
+        .names_its_own_text();
     let title: Option<String> = r.get("title");
+    let title = title.filter(|t| !t.is_empty() && named);
     DueRow {
         moment: moment_of(r),
-        title: title
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| opening.clone()),
+        named: title.is_some(),
+        title: title.unwrap_or_else(|| opening.clone()),
         opening,
     }
 }
@@ -170,8 +181,7 @@ fn eff_at(r: &DueRow) -> i64 {
     r.moment.snoozed_until.or(r.moment.at).unwrap_or(0)
 }
 
-const JOINED: &str =
-    "SELECT m.*, a.title, a.text FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
+const JOINED: &str = "SELECT m.*, a.title, a.text, a.provenance FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
 
 impl Store {
     /// The note this moment was read out of.

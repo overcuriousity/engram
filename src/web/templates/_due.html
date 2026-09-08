@@ -48,7 +48,9 @@
      gradient that only steps five times an hour is not a gradient. #}
   <div class="due-row{% if r.overdue %} due-overdue{% endif %}{% if r.undated %} due-undated{% endif %}{% if r.fresh %} due-new{% endif %}"
        {% if !r.undated %}style="--heat: {{ r.heat }}" data-due-at="{{ r.at }}"{% endif %}>
-    <a class="due-title" href="/ui/artifacts/{{ r.artifact_id }}" title="{{ r.title }}">{{ r.title }}</a>
+    {# A label that is the artifact's own opening rather than a name it was
+       given is set as text — see `ui::RowLabel`. #}
+    <a class="due-title{% if !r.named %} name-opening{% endif %}" href="/ui/artifacts/{{ r.artifact_id }}" title="{{ r.title }}">{{ r.title }}</a>
     {# The date lives in the title because `when` gives it up as soon as it
        turns into a countdown, and which day a thing is due is not losable. #}
     <span class="due-when"{% if !r.undated %} title="{{ r.full }}"{% endif %}><span class="due-count">{{ r.when }}</span>{% if r.recurring %} <span title="repeats">↻</span>{% endif %}</span>
@@ -112,7 +114,7 @@
 {% endif %}
 {% if !events.is_empty() %}
   <p class="muted due-coming">Coming up:
-    {% for e in events %}<a href="/ui/artifacts/{{ e.artifact_id }}" title="{{ e.span }}">{{ e.title }}</a> <span class="due-when">{{ e.when }}</span>{% if !loop.last %} · {% endif %}{% endfor %}
+    {% for e in events %}<a href="/ui/artifacts/{{ e.artifact_id }}"{% if !e.named %} class="name-opening"{% endif %} title="{{ e.span }}">{{ e.title }}</a> <span class="due-when">{{ e.when }}</span>{% if !loop.last %} · {% endif %}{% endfor %}
   </p>
 {% endif %}
 </div>

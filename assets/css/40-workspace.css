@@ -397,8 +397,6 @@ body { overflow-x: hidden; }
    left-hand side missing, and the only thing that said otherwise was that
    tooltip — which is to say nothing at all on the phone this is mostly read
    on. A word does the marking now and needs no explaining. */
-.rail-title-corpus { font-weight: 400; color: var(--color-fg-secondary); }
-.rail-title-corpus::before { content: "from "; color: var(--color-fg-muted); }
 /* Two lines at most, and a floor under it: an artifact whose excerpt came back
    empty collapsed to a bare title, so card heights swung between one line and
    four down a list that is read by scanning. */
