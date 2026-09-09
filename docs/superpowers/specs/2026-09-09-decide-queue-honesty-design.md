@@ -237,16 +237,52 @@ retroactively park an existing corpus.
 
 ### E — the Synthese button
 
-A new route beside the two that already post to a pair:
+**Corrected after review.** The first draft of this section said the route
+would call `crate::jobs::merge::write` directly. That is not possible.
+`merge::write(core, draft, roots)` takes a `MergedDraft` — the finished text of
+the new artifact — and today that text exists only as the `merged` field of a
+judge's verdict. Someone has to write it, and that is an inference call.
 
-```
-POST /ui/ops/pairs/{id}/synthesize
-```
+Where that call goes is settled by the tree: **no UI route makes one.** Every
+inference is a `Stage` on the job queue, which is where budget (`may_act`),
+backoff, `judge_attempts` and the unreadable-answer count live. A synchronous
+call in a handler would be the first of its kind and would bypass all of it.
 
-in `src/web/ops.rs`, calling `crate::jobs::merge::write` — the same machinery
-`dedupe.rs` uses for `Relation::Duplicate`. It writes a `Provenance::Merged`
-artifact, records `artifact_sources`, supersedes both sources into it and
-journals a `Kind::Merge` action per source. Undo already exists at
+So the press records intent and the queue does the work.
+
+**The route.** `POST /ui/ops/pairs/{id}/synthesize` in `src/web/ops.rs`, beside
+`dismiss`, `discard` and `supersede`. It marks the pair as one the operator
+asked to have synthesized and arms a `Stage::Dedupe` unit for it. It writes no
+artifact and calls no model.
+
+**The pair.** `artifact_pairs` gains `synthesis_asked INTEGER NOT NULL DEFAULT
+0`, set by that route. This is the operator's judgement, recorded: *these two
+cover the same ground.* It is deliberately a separate column rather than a
+`PairState`, because the pair's state still describes what the judge found,
+and this describes what a person decided.
+
+**The job.** In `src/jobs/dedupe.rs`, a pair carrying the flag takes a
+different path. The verdict prompt is not asked — the judgement is already
+made — and a new write-only prompt is used instead: the two artifacts, and the
+instruction to write one that says everything both said. The result is a
+`MergedDraft`, and from there the existing `Relation::Duplicate` tail runs
+unchanged: `merge::write`, one `Kind::Merge` action per source, and
+`set_pair_merged`.
+
+This needs `SYNTHESIZE_SYSTEM`, a `synthesize_schema()` and a
+`parse_synthesis()` returning `MergedDraft` in `src/infer/prompt.rs`. The
+merge-writing rules already stated in `DEDUPE_SYSTEM` for the `duplicate`
+branch — every number, version, date, path, flag, command and error string
+survives; the text stands on its own — carry over verbatim, because they are
+the same requirement.
+
+**When it cannot be written.** `merge::write` returning `Error::Validation` is
+handled as it is today: the pair is settled for a person with the existing
+refusal text. The flag is cleared so the card stops promising a synthesis that
+will not arrive.
+
+**On the card.** While the flag is set and no merge has landed, the row says
+the synthesis was asked for, in place of the buttons. Undo already exists at
 `/ui/ops/merges/{id}/undo`.
 
 `PairRow` gains `mergeable: bool`, computed with the same `roots_of` check
@@ -330,8 +366,15 @@ deliberately not part of this work.
 - `pair_rows` sets `mergeable` false when either member's lineage names a
   non-captured root, and the template omits the button then.
 - The synthesize route refuses a pair whose members are not both active, the
-  way `apply_pair_supersede_ui` does, and refuses an id that is not part of
-  the pair.
+  way `apply_pair_supersede_ui` does, and refuses a pair that is not
+  `mergeable`. It writes no artifact and makes no model call: after the press,
+  `synthesis_asked` is set and a `Stage::Dedupe` unit is armed, and nothing
+  else has changed.
+- A pair carrying `synthesis_asked` takes the write-only prompt, not the
+  verdict prompt, and lands a `Provenance::Merged` artifact with one
+  `Kind::Merge` action per source.
+- A pair carrying `synthesis_asked` whose merge is refused by
+  `merge::write` settles for a person and clears the flag.
 - `dedupe_schema()` orders `detail` before `relation` in all four variants;
   `parse_dedupe` still reads a reply written in either order.
 - A recorded `Kind::Merge` action's detail is the action's own description,
