@@ -509,6 +509,10 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         time: engram::config::TimeConfig::default(),
         reap: engram::config::ReapConfig::default(),
         generator: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
+        // None, as the library's own `test_core` has it: a synthesis is only
+        // ever written for a pair a person pressed, and the harness presses
+        // nothing.
+        pair_synthesizer: None,
         // The harness measures the shipped default, which is one round.
         planner: None,
         describer: None,

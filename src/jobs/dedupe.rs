@@ -2081,7 +2081,11 @@ mod tests {
         // judge's own merge leaves too: `merge::write` writes and enqueues an
         // embed, and `merge::finish` hides them when that lands. The lineage is
         // what says the merge holds them.
-        let roots = core.store.roots_of(&[merged.clone()]).await.unwrap();
+        let roots = core
+            .store
+            .roots_of(std::slice::from_ref(&merged))
+            .await
+            .unwrap();
         assert_eq!(
             roots[&merged].len(),
             2,
