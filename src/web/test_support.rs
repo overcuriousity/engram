@@ -268,7 +268,8 @@ pub(crate) fn chrome() -> Option<std::path::PathBuf> {
             let bin = e
                 .path()
                 .join("chrome-headless-shell-linux64/chrome-headless-shell");
-            bin.exists().then(|| (playwright_build(&e.file_name()), bin))
+            bin.exists()
+                .then(|| (playwright_build(&e.file_name()), bin))
         })
         .collect();
     // Newest install wins, so an old download is not preferred forever. By the

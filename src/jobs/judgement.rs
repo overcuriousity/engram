@@ -157,7 +157,18 @@ pub async fn apply(
         }
         if let Err(err) = core
             .store
-            .relate_synthesized(anchor_id, &l.artifact_id, &l.reason)
+            // Twice the floor it has to clear, so an asserted relation is
+            // visible for a half-life on the model's word alone and then
+            // fades like anything else nothing uses. Derived from `show_min`
+            // rather than written flat, so a base that raises the floor
+            // raises this with it.
+            .relate_synthesized(
+                anchor_id,
+                &l.artifact_id,
+                &l.reason,
+                core.associate.show_min * 2.0,
+                core.associate.half_life_days,
+            )
             .await
         {
             tracing::warn!(corpus_id, other = %l.artifact_id, error = %err, "could not record a judged link");

@@ -24,8 +24,24 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     if c.provenance == crate::store::artifacts::Provenance::Passage || !c.in_results() {
         return Ok(());
     }
-    // Read again at the unit, not only where it was armed: the window may
-    // have closed while this waited in the queue.
+    // Both gates are read again at the unit, not only where it was armed:
+    // permission and budget can each have gone while this waited in the queue.
+    //
+    // `acts_on_corpus()` as well as `may_act()`, for the reason
+    // `background.rs` gives about Reap: `may_act` answers `true`
+    // unconditionally below "full", so on its own it was no gate at all here.
+    // A `Condense` row is *persisted* — armed under "full", it outlives a drop
+    // to "ranking" and a restart, and the generator rewrote the artifact
+    // anyway. `jobs::retract`, the path that takes a condensation back, is
+    // itself behind `acts_on_corpus()` and so was switched off at that same
+    // level: the rewrite happened and nothing could undo it.
+    if !core.evolve.autonomous.acts_on_corpus() {
+        tracing::info!(
+            artifact_id,
+            "the corpus rules are switched off; the condensation is dropped"
+        );
+        return Ok(());
+    }
     if !core.may_act().await? {
         tracing::info!(
             artifact_id,
@@ -226,5 +242,32 @@ mod tests {
         run(&core, &id).await.unwrap();
         assert_eq!(writer.calls(), 0, "the budget is read before the call");
         assert!(core.store.versions_of(&id).await.unwrap().is_empty());
+    }
+
+    /// A `Condense` row outlives the permission it was armed under: it is
+    /// persisted, so dropping to "ranking" and restarting used to find it
+    /// still on the queue and rewrite the artifact anyway — with
+    /// `jobs::retract`, the only way back, switched off at that same level.
+    #[tokio::test]
+    async fn a_row_armed_under_full_writes_nothing_once_the_permission_is_gone() {
+        for level in [
+            crate::config::Autonomy::Off,
+            crate::config::Autonomy::Ranking,
+        ] {
+            let (mut core, writer) = core_with(vec![reply("`mount -o loop /dev/loop0`")]).await;
+            let id = synthesized(&core).await;
+            arm(&core, &id).await.unwrap();
+            core.evolve.autonomous = level;
+            run(&core, &id).await.unwrap();
+            assert_eq!(
+                writer.calls(),
+                0,
+                "the permission is read before the call: {level:?}"
+            );
+            assert!(
+                core.store.versions_of(&id).await.unwrap().is_empty(),
+                "an artifact the operator did not permit rewriting was rewritten: {level:?}"
+            );
+        }
     }
 }

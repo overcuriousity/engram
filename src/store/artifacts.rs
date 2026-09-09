@@ -1881,10 +1881,20 @@ impl Store {
     }
 
     /// What is in the graveyard, newest burial first, at most `limit`.
+    ///
+    /// Only graves whose stub is still there, as `graveyard_vectors` reads it
+    /// and for the reader's half of the same reason: this list is the Restore
+    /// button, and an artifact whose row was deleted with its corpus has
+    /// nothing to restore into. The text stays in the table — a grave is
+    /// permanent so that no reap verdict is ever wrong invisibly — it is just
+    /// no longer offered as an undo that cannot happen.
     pub async fn graveyard_list(&self, limit: i64) -> Result<Vec<Grave>> {
         sqlx::query(
-            "SELECT id, title, meta_json, reaped_at FROM graveyard
-              ORDER BY reaped_at DESC, id DESC LIMIT ?",
+            "SELECT g.id AS id, g.title AS title, g.meta_json AS meta_json,
+                    g.reaped_at AS reaped_at
+               FROM graveyard g
+               JOIN artifacts a ON a.id = g.id
+              ORDER BY g.reaped_at DESC, g.id DESC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -1910,21 +1920,33 @@ impl Store {
     /// graveyard is small — a bounded number of burials a day — so a
     /// give-up is compared with all of it in Rust rather than through the
     /// vector store, which no longer holds the point.
+    ///
+    /// Only graves whose stub is still there. A grave is permanent by design
+    /// and carries no foreign key, so deleting the artifact — or the corpus it
+    /// belonged to — leaves the text and its open `Reap` row behind with
+    /// nothing to put back. `retract::rule_two` would pick such an orphan as
+    /// its best hidden candidate, and `reactivate` answers `NotFound`: the `?`
+    /// took the whole pass down *before* the cursor was stamped, so every
+    /// give-up recorded after it was re-read and re-failed on the next lap,
+    /// for ever. An artifact that cannot be restored is not a candidate for
+    /// restoring it.
     pub async fn graveyard_vectors(&self, embed_model: &str) -> Result<Vec<(String, Vec<f32>)>> {
-        Ok(
-            sqlx::query("SELECT id, vec FROM graveyard WHERE vec IS NOT NULL AND embed_model = ?")
-                .bind(embed_model)
-                .fetch_all(&self.pool)
-                .await?
-                .iter()
-                .map(|r| {
-                    (
-                        r.get::<String, _>("id"),
-                        crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("vec")),
-                    )
-                })
-                .collect(),
+        Ok(sqlx::query(
+            "SELECT g.id AS id, g.vec AS vec FROM graveyard g
+                   JOIN artifacts a ON a.id = g.id
+                  WHERE g.vec IS NOT NULL AND g.embed_model = ?",
         )
+        .bind(embed_model)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            (
+                r.get::<String, _>("id"),
+                crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("vec")),
+            )
+        })
+        .collect())
     }
 
     /// Point a still-reapable candidate at the rewrite the sweep made for it.

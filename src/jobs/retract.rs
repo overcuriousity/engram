@@ -211,15 +211,35 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
         let reason = format!(
             "a search given up on would have been answered by it (cosine {sim:.2} against {best_live:.2} live)"
         );
+        // A subject that is gone is skipped, not raised. `graveyard_vectors`
+        // and the hit list both exclude artifacts whose row has been deleted,
+        // so reaching here means one left between that read and this write —
+        // but the cost of being wrong about that is the whole rule, not one
+        // subject: every `?` in this loop returns *before* the cursor is
+        // stamped below, so a single unrestorable row re-read and re-failed
+        // every give-up after it, on every lap, for ever. Nothing this rule
+        // does is worth that.
+        let restore = match a.kind {
+            Kind::Discard | Kind::Reap => core.reactivate(&a.subject_id).await,
+            Kind::Supersede => core.unsupersede(&a.subject_id).await,
+            _ => Ok(()),
+        };
+        if let Err(crate::error::Error::NotFound) = restore {
+            tracing::info!(
+                subject = %a.subject_id,
+                kind = a.kind.as_str(),
+                "the artifact this would have put back is gone; leaving the row alone"
+            );
+            continue;
+        }
+        restore?;
         match a.kind {
             Kind::Discard | Kind::Reap => {
-                core.reactivate(&a.subject_id).await?;
                 core.store
                     .undo_action_on(&a.subject_id, a.kind, UndoneBy::Evidence, &reason)
                     .await?;
             }
             Kind::Supersede => {
-                core.unsupersede(&a.subject_id).await?;
                 core.store
                     .undo_action_on(&a.subject_id, Kind::Supersede, UndoneBy::Evidence, &reason)
                     .await?;
@@ -1076,6 +1096,63 @@ mod tests {
             .delete_artifacts(std::slice::from_ref(&id.to_string()))
             .await
             .unwrap();
+    }
+
+    /// A grave whose artifact was deleted with its corpus must not be able to
+    /// stop the rule.
+    ///
+    /// Nothing cascades into `graveyard` and nothing sweeps it — a grave is
+    /// permanent so that no reap verdict is ever wrong invisibly — so the row
+    /// and its open `Reap` row outlive the artifact. Picked as the best hidden
+    /// candidate, `reactivate` answered `NotFound` and the `?` took the pass
+    /// down before `meta_set` ever ran: the cursor never moved, so the same
+    /// give-up was re-read and re-failed on every lap afterwards and no
+    /// give-up recorded after it was ever acted on again.
+    #[tokio::test]
+    async fn a_grave_whose_artifact_is_gone_neither_stops_the_rule_nor_moves_the_cursor_back() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        let model = core.embedder.model().to_string();
+        buried(&core, &answer, &model).await;
+        // The corpus goes, and the stub with it. The grave and the open `Reap`
+        // row stay, exactly as they do in production.
+        let corpus = core
+            .store
+            .get_artifact(&answer)
+            .await
+            .unwrap()
+            .corpus_id
+            .expect("a buried stub still names its corpus");
+        core.store.delete_corpus(&corpus).await.unwrap();
+        assert!(
+            matches!(
+                core.store.get_artifact(&answer).await,
+                Err(crate::error::Error::NotFound)
+            ),
+            "the premise: the stub left with its corpus"
+        );
+        assert!(
+            core.store.graveyard_row(&answer).await.unwrap().is_some(),
+            "the grave is permanent by design"
+        );
+        assert!(
+            core.store
+                .open_action_on(&answer, Kind::Reap)
+                .await
+                .unwrap()
+                .is_some(),
+            "and so is its journal row"
+        );
+        gave_up(&core, &g.id).await;
+
+        let out = rule_two(&core, crate::store::now()).await.unwrap();
+        assert_eq!(out, (0, false), "an orphan is not something to restore");
+        // The cursor moved, which is the whole point: the next pass reads
+        // what comes after this give-up rather than starting here again.
+        assert!(
+            core.store.meta_get(GAVE_UP_AFTER).await.unwrap().is_some(),
+            "the pass died before it could stamp where it had read to"
+        );
     }
 
     #[tokio::test]

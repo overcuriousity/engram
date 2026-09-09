@@ -106,16 +106,64 @@ impl Store {
     /// sweep, decayed under `prune_learning_links` until it was deleted, and
     /// spent a judge call on the way past. The subselects read the same rows
     /// the synthesis call was made against.
-    pub async fn relate_synthesized(&self, a: &str, b: &str, reason: &str) -> Result<()> {
+    ///
+    /// `weight` is the caller's, because the number that decides whether a
+    /// link is worth showing lives in `[associate]` and the store does not
+    /// read config. It has to clear `associate.show_min`, and clear it by
+    /// enough to survive a decay: written flat at `1.0` against the shipped
+    /// floor of `2.0`, every relation the model asserted was invisible to
+    /// every reader that applies the floor — the association band
+    /// (`core::search::associated`), the artifact pane, and `ask`'s reach —
+    /// from the moment it was written, for ever, while `prune_learning_links`
+    /// never came for it either because it is `related` and not `learning`. A
+    /// row nothing shows and nothing removes.
+    ///
+    /// The conflict branch folds the decay in before taking the maximum, the
+    /// way `bump_one` does: `bumped_at` moves to now, so carrying the stored
+    /// number across unchanged would silently restore weight that thirty days
+    /// had taken off. A dismissal still outranks the model, and outranks it
+    /// here too — the weight of a dismissed row is left exactly as it was, so
+    /// the evidence behind the operator's decision stays readable.
+    pub async fn relate_synthesized(
+        &self,
+        a: &str,
+        b: &str,
+        reason: &str,
+        weight: f64,
+        half_life_days: f64,
+    ) -> Result<()> {
         let (a, b) = canonical(a, b);
+        let at = now();
+        let mut tx = self.pool.begin_with(IMMEDIATE).await?;
+        let existing = sqlx::query(
+            "SELECT weight, bumped_at, state FROM artifact_links
+                                     WHERE a_id = ? AND b_id = ?",
+        )
+        .bind(a)
+        .bind(b)
+        .fetch_optional(&mut *tx)
+        .await?;
+        // Read inside the transaction the write happens in, so the decay is
+        // folded from the number the update is about to replace.
+        let dismissed = existing.as_ref().is_some_and(|r| {
+            LinkState::parse(r.get::<String, _>("state").as_str()) == LinkState::Dismissed
+        });
+        let carried = existing
+            .as_ref()
+            .map(|r| decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days))
+            .unwrap_or(0.0);
         sqlx::query(
             "INSERT INTO artifact_links
                    (a_id, b_id, weight, bumped_at, queries, cues, state, reason,
                     judged_rev_a, judged_rev_b, created_at)
-             VALUES (?, ?, 1.0, ?, 0, '[]', 'related', ?,
+             VALUES (?, ?, ?, ?, 0, '[]', 'related', ?,
                      (SELECT embed_rev FROM artifacts WHERE id = ?),
                      (SELECT embed_rev FROM artifacts WHERE id = ?), ?)
              ON CONFLICT(a_id, b_id) DO UPDATE SET
+               weight = CASE WHEN artifact_links.state = 'dismissed'
+                             THEN artifact_links.weight ELSE excluded.weight END,
+               bumped_at = CASE WHEN artifact_links.state = 'dismissed'
+                                THEN artifact_links.bumped_at ELSE excluded.bumped_at END,
                state = CASE WHEN artifact_links.state = 'dismissed'
                             THEN artifact_links.state ELSE 'related' END,
                reason = CASE WHEN artifact_links.state = 'dismissed'
@@ -129,13 +177,19 @@ impl Store {
         )
         .bind(a)
         .bind(b)
-        .bind(now())
+        .bind(if dismissed {
+            carried
+        } else {
+            weight.max(carried)
+        })
+        .bind(at)
         .bind(reason)
         .bind(a)
         .bind(b)
-        .bind(now())
-        .execute(&self.pool)
+        .bind(at)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -1450,7 +1504,7 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let (a, b) = two_corpora(&store).await;
         store
-            .relate_synthesized(&a, &b, "both describe the same procedure")
+            .relate_synthesized(&a, &b, "both describe the same procedure", 4.0, 30.0)
             .await
             .unwrap();
 
@@ -1487,12 +1541,110 @@ mod tests {
             .unwrap();
         store.dismiss_link(&a, &b).await.unwrap();
         store
-            .relate_synthesized(&a, &b, "the model disagrees")
+            .relate_synthesized(&a, &b, "the model disagrees", 4.0, 30.0)
             .await
             .unwrap();
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(l.state, LinkState::Dismissed);
         assert_ne!(l.reason.as_deref(), Some("the model disagrees"));
+        assert_eq!(
+            l.weight, 5.0,
+            "a dismissal keeps the evidence it was made against"
+        );
+    }
+
+    /// A relation the model asserted has to be visible to the readers that
+    /// apply `associate.show_min`. Written flat at `1.0` against the shipped
+    /// floor of `2.0` it was invisible in the association band, the artifact
+    /// pane and `ask`'s reach from the moment it was written — and never
+    /// pruned either, because `prune_learning_links` only takes `learning`
+    /// rows. A row nothing showed and nothing removed.
+    #[tokio::test]
+    async fn a_synthesized_relation_clears_the_floor_it_has_to_be_shown_over() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        let show_min = 2.0;
+        store
+            .relate_synthesized(
+                &a,
+                &b,
+                "both describe the same procedure",
+                show_min * 2.0,
+                30.0,
+            )
+            .await
+            .unwrap();
+        let at = now();
+        let shown = store
+            .links_from(
+                std::slice::from_ref(&a),
+                &[LinkState::Related],
+                30.0,
+                at,
+                show_min,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            shown.len(),
+            1,
+            "the band never showed what the model asserted"
+        );
+        assert_eq!(shown[0].other, b);
+
+        // And a half-life later it is still above the floor, which is what
+        // separates this from writing the floor itself.
+        let shown = store
+            .links_from(
+                std::slice::from_ref(&a),
+                &[LinkState::Related],
+                30.0,
+                at + 29 * 86_400,
+                show_min,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(shown.len(), 1, "it fell under the floor within the month");
+    }
+
+    /// Re-asserting folds the decay in rather than restoring weight that time
+    /// took off, the way `bump_one` does — and never lowers a link that use
+    /// has carried above what an assertion is worth.
+    #[tokio::test]
+    async fn re_asserting_folds_the_decay_in_and_never_lowers_an_earned_link() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        store
+            .bump_link(&a, &b, 9.0, Some("q"), 30.0, now())
+            .await
+            .unwrap();
+        store
+            .relate_synthesized(&a, &b, "the model agrees", 4.0, 30.0)
+            .await
+            .unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(
+            l.weight, 9.0,
+            "an assertion must not lower what use has earned"
+        );
+
+        // The other direction: a link last touched two half-lives ago is worth
+        // 2.25 now, not 9.0, so the assertion carries it — and `bumped_at`
+        // moving to now must not hand back the weight those sixty days took
+        // off, which is what carrying the stored number across would do.
+        let (c, d) = two_corpora(&store).await;
+        store
+            .bump_link(&c, &d, 9.0, Some("q"), 30.0, now() - 60 * 86_400)
+            .await
+            .unwrap();
+        store
+            .relate_synthesized(&c, &d, "the model agrees", 4.0, 30.0)
+            .await
+            .unwrap();
+        let l = store.get_link(&c, &d).await.unwrap().unwrap();
+        assert_eq!(l.weight, 4.0, "the decay was not folded in");
     }
 
     #[tokio::test]

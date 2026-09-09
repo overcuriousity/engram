@@ -712,7 +712,11 @@ mod tests {
                 .unwrap()
                 .expect("an offer")
         };
-        assert_eq!(offered().await.artifact_id, near, "it wins while it is there");
+        assert_eq!(
+            offered().await.artifact_id,
+            near,
+            "it wins while it is there"
+        );
 
         sqlx::query("DELETE FROM artifacts WHERE id = ?")
             .bind(&near)

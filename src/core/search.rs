@@ -4795,7 +4795,10 @@ mod tests {
             .unwrap();
         let hit = recalled(&core).await;
         assert!(!hit.borrowed_name, "a merge was named by what wrote it");
-        assert!(hit.model_written, "a merge reached by association is a merge");
+        assert!(
+            hit.model_written,
+            "a merge reached by association is a merge"
+        );
     }
 
     #[tokio::test]
