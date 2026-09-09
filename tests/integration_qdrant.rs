@@ -2291,7 +2291,11 @@ async fn integration_tags_a_two_corpus_fixture_the_way_the_rule_says() {
     assert_eq!((r.integrated, r.novel), (2, 2), "{r:?}");
     // The second corpus restates the first with one value changed, at a
     // cosine above `auto_supersede`: the same statement carrying a different
-    // version, which is a conflict for a person.
+    // version. That used to be tagged a conflict and filed as a contradiction
+    // on nothing but value-shaped tokens differing, which is a question about
+    // what two artifacts *say* and not one that splitting on whitespace can be
+    // asked. The heuristic is retired: near text is `known`, and it files
+    // nothing.
     let b = sleeping_artifact(
         &core,
         &v,
@@ -2302,10 +2306,15 @@ async fn integration_tags_a_two_corpus_fixture_the_way_the_rule_says() {
     )
     .await;
     let r = engram::jobs::sleep::integrate(&core, now).await.unwrap();
-    assert_eq!((r.integrated, r.conflicts), (1, 1), "{r:?}");
+    assert_eq!((r.integrated, r.known), (1, 1), "{r:?}");
+    assert_eq!(
+        r.conflicts, 0,
+        "nothing writes a conflict any more; the field survives so older \
+         rows still read back as what they were: {r:?}"
+    );
     assert_eq!(
         core.store.integration_of(&b).await.unwrap().unwrap().tag,
-        Tag::Conflict
+        Tag::Known
     );
     assert_eq!(
         core.store.integration_of(&a1).await.unwrap().unwrap().tag,
@@ -2315,14 +2324,13 @@ async fn integration_tags_a_two_corpus_fixture_the_way_the_rule_says() {
     assert_eq!(core.store.rehearsals_of(&a1).await.unwrap().len(), 1);
     assert_eq!(core.store.rehearsals_of(&a2).await.unwrap().len(), 1);
     assert!(core.store.rehearsals_of(&b).await.unwrap().is_empty());
-    let pair = core.store.pair_between(&a1, &b).await.unwrap().or(core
-        .store
-        .pair_between(&a2, &b)
-        .await
-        .unwrap());
-    assert_eq!(
-        pair.unwrap().state,
-        engram::store::pairs::PairState::Contradiction
+    // And nothing is put in front of a person. The pair queue's cards make
+    // claims about meaning — `_decide.html` renders a pair as "these two
+    // disagree" — and two documents sharing a template are not disagreeing.
+    assert!(
+        core.store.pair_between(&a1, &b).await.unwrap().is_none()
+            && core.store.pair_between(&a2, &b).await.unwrap().is_none(),
+        "near text files no pair"
     );
 }
 
@@ -2411,7 +2419,7 @@ async fn a_probe_replayed_under_two_recency_weights_moves_the_way_the_recency_te
 
 #[tokio::test]
 #[ignore]
-async fn an_interference_pair_is_filed_for_a_fixture_built_to_produce_one() {
+async fn interference_is_counted_and_filed_nowhere_for_a_fixture_built_to_produce_it() {
     let (core, v) = sleeping_core("engram_it_sleep_interference").await;
     let now = epoch_now();
     // The owner, and a competitor from another corpus that sits exactly on
@@ -2453,12 +2461,20 @@ async fn an_interference_pair_is_filed_for_a_fixture_built_to_produce_one() {
             .unwrap();
         assert_eq!((r.rehearsed, r.found), (1, 1), "{r:?}");
     }
-    let (filed, stopped) = engram::jobs::sleep::interference(&core, &live, now)
+    let (observed, stopped) = engram::jobs::sleep::interference(&core, &live, now)
         .await
         .unwrap();
     assert!(!stopped);
-    assert_eq!(filed, 1);
-    let pair = core.store.pair_between(&owner, &x).await.unwrap().unwrap();
-    assert_eq!(pair.state, engram::store::pairs::PairState::Pending);
-    assert!(pair.detail.unwrap_or_default().contains("interference"));
+    // Observed, and that is all. Rule 3 used to record an `artifact_pairs` row
+    // per interferer, which put a *ranking* observation onto a queue whose
+    // cards make claims about meaning: retrieval competition is a fact about
+    // ordering, and two documents sharing a template outrank each other
+    // without disagreeing about anything. It is counted for Ops now and files
+    // nothing — which is what makes it safe to run where dedupe could once
+    // merge away the very artifact that was only briefly unfindable.
+    assert_eq!(observed, 1);
+    assert!(
+        core.store.pair_between(&owner, &x).await.unwrap().is_none(),
+        "interference is counted, not filed"
+    );
 }
