@@ -592,6 +592,18 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             };
             // One row per original, naming the merge, before the pair says it
             // happened: a merge with no row is what the journal exists to end.
+            //
+            // The act's own description, and not `s.detail`. That field is the
+            // judge's sentence — what the model thought — and one field cannot
+            // be both that and the reason the base acted, because the first can
+            // argue against the second: a base holds a merge journalled "Both
+            // artifacts describe the same veterinary practice … so they are
+            // distinct". Reconciling the two after the fact would mean reading
+            // a label against free prose, which is not a question token
+            // comparison can answer. The sentence is not lost — `set_pair_merged`
+            // below carries it onto the pair, which is where a reader looks for
+            // what the judge said.
+            let act = format!("merged into {} from {} sources", m.id, sources.len());
             for source in &sources {
                 core.store
                     .record_action(&action(
@@ -599,7 +611,7 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                         &s.pair,
                         source,
                         Some(&m.id),
-                        s.detail.as_deref(),
+                        Some(act.as_str()),
                     ))
                     .await?;
             }
@@ -1998,8 +2010,59 @@ mod tests {
         let subjects: std::collections::HashSet<String> =
             rows.iter().map(|r| r.subject_id.clone()).collect();
         assert_eq!(subjects, ids.iter().cloned().collect());
-        assert_eq!(rows[0].detail.as_deref(), Some("same thing"));
+        // The act, not the judge's sentence — see
+        // `a_merge_action_records_the_act_and_not_the_judges_sentence`.
+        assert!(rows[0].detail.as_deref().unwrap_or_default().contains("merged into"));
         assert!(rows[0].pair_score.is_some());
+    }
+
+    /// The judge's sentence says what the model thought. It is not the reason
+    /// the base acted, and it can argue against the act it was being used to
+    /// justify: the live base holds a merge journalled as "Both artifacts
+    /// describe the same veterinary practice … so they are distinct".
+    ///
+    /// Nothing reconciles the two afterwards, and nothing should try —
+    /// agreement between a label and a sentence of free prose is not a question
+    /// token comparison can answer. So the two roles are separated instead: the
+    /// action row says what happened, and the sentence stays on the pair, which
+    /// is where a reader looks for what the judge said.
+    #[tokio::test]
+    async fn a_merge_action_records_the_act_and_not_the_judges_sentence() {
+        use crate::store::actions::Kind;
+        let mut core = test_core().await;
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"relation":"duplicate","detail":"these two are distinct",
+                "merged":{"title":"Pool","text":"the pool holds sixteen connections","tags":[],"caveats":[]}}"#
+                .into(),
+        ])));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Pool sizing", "sixteen connections", [1.0, 0.0]),
+                ("Connections", "sixteen connections", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
+        assert_eq!(rows.len(), 2, "one row per original");
+        for r in &rows {
+            let d = r.detail.clone().unwrap_or_default();
+            assert!(
+                d.contains("merged into"),
+                "the action says what happened, got {d:?}"
+            );
+            assert!(
+                !d.contains("distinct"),
+                "the judge's sentence is not the reason the base acted, got {d:?}"
+            );
+        }
+        // Not lost: the pair still carries what the judge said.
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(p.detail.as_deref(), Some("these two are distinct"));
     }
 
     #[tokio::test]
