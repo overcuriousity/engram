@@ -213,6 +213,14 @@ pub struct ArtifactPair {
     /// parsed as a verdict. The ceiling that stops asking is on this and not on
     /// `judge_attempts` — see `MAX_UNREADABLE_JUDGEMENTS`.
     pub judge_unreadable: i64,
+    /// An operator pressed Synthese: they have judged that these two cover the
+    /// same ground, and only the writing is left.
+    ///
+    /// A column rather than a `PairState`, because `state` records what the
+    /// judge found and this records what a person decided to do about it.
+    /// Those are two different facts about one pair, and overwriting the first
+    /// to store the second would lose the finding that put it on the queue.
+    pub synthesis_asked: bool,
     /// Which artifact the judge named obsolete, when `state` is `Superseded`.
     /// Lets the review UI offer "apply supersede" without asking the model
     /// again.
@@ -268,6 +276,7 @@ pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
         judge_unreadable: r.get("judge_unreadable"),
         obsolete_id: r.get("obsolete_id"),
         merged_into: r.get("merged_into"),
+        synthesis_asked: r.get::<i64, _>("synthesis_asked") != 0,
     }
 }
 
@@ -604,6 +613,34 @@ impl Store {
         if res.rows_affected() == 0 {
             return Err(crate::error::Error::NotFound);
         }
+        Ok(())
+    }
+
+    /// Record that a person asked for this pair to be synthesized.
+    ///
+    /// The press is the judgement: an operator has read both sides and decided
+    /// they cover the same ground. The dedupe unit reads this and takes the
+    /// write-only prompt instead of the verdict prompt, because asking the
+    /// model to decide again invites it to overturn them — and on this class of
+    /// pair it does not decide reliably: asked twelve times about one pair of
+    /// artifacts about the same veterinary practice, the judge wrote the same
+    /// reasoning every time and labelled it `distinct` nine times and
+    /// `duplicate` three.
+    pub async fn ask_pair_synthesis(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE artifact_pairs SET synthesis_asked = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clear it. Called when the merge path refuses the draft, so the card
+    /// stops promising a synthesis that will not arrive.
+    pub async fn clear_pair_synthesis(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE artifact_pairs SET synthesis_asked = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -1421,6 +1458,30 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The operator's judgement, kept beside the judge's rather than on top of
+    /// it. `state` says what the model found; this says what a person decided
+    /// to do about it, and both are worth having.
+    #[tokio::test]
+    async fn a_pair_remembers_that_a_person_asked_for_a_synthesis() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].clone();
+        assert!(!p.synthesis_asked, "nobody has asked yet");
+
+        s.ask_pair_synthesis(p.id).await.unwrap();
+        let after = s.get_pair(p.id).await.unwrap();
+        assert!(after.synthesis_asked);
+        assert_eq!(
+            after.state,
+            PairState::Pending,
+            "the judge's finding is not overwritten by the operator's ask"
+        );
+
+        s.clear_pair_synthesis(p.id).await.unwrap();
+        assert!(!s.get_pair(p.id).await.unwrap().synthesis_asked);
+    }
 
     #[tokio::test]
     async fn a_band_record_counts_judged_pairs_and_the_journal_s_actions_in_its_score_range() {

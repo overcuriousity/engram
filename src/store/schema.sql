@@ -277,6 +277,12 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- subsystem whose defence is that every decision is reversible and
   -- reviewable, who decided is not something to infer.
   decided_by     TEXT,
+  -- An operator pressed Synthese: they judged that these two cover the same
+  -- ground, and only the writing is left. A column and not a `state`, because
+  -- `state` records what the judge found and this records what a person
+  -- decided to do about it — two facts about one pair, and storing the second
+  -- on top of the first would lose the finding that put it on the queue.
+  synthesis_asked INTEGER NOT NULL DEFAULT 0,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);

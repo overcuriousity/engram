@@ -131,7 +131,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 16] = [
+        const ADDITIVE: [(&str, &str, &str); 17] = [
             (
                 "artifacts",
                 "updated_at",
@@ -159,6 +159,14 @@ impl Store {
                 "search_events",
                 "opened_at",
                 "ALTER TABLE search_events ADD COLUMN opened_at INTEGER",
+            ),
+            // Not nullable and defaulted to 0, unlike the columns around it:
+            // the absence of a request is a true statement about every row
+            // that predates the button, because nobody could press it.
+            (
+                "artifact_pairs",
+                "synthesis_asked",
+                "ALTER TABLE artifact_pairs ADD COLUMN synthesis_asked INTEGER NOT NULL DEFAULT 0",
             ),
             // Nullable, no default, and NULL is the truth about every row that
             // predates it: no reminder on that note had been completed,
