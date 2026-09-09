@@ -240,6 +240,17 @@ async fn ask_pair_synthesis_ui(
         )
         .into());
     }
+    // The card only draws this button where the merge path will take it, but a
+    // hidden button is not a check: a page drawn before something changed still
+    // carries it, and the press that arrives is as real as any other. Refused
+    // here rather than three steps later, where the unit would clear the ask
+    // and settle the pair for a person who would then wonder what they pressed.
+    if !pair_is_mergeable(&tenant, &pair.a_id, &pair.b_id).await? {
+        return Err(crate::error::Error::Validation(
+            "one of these is stored source text, which a merge may not rewrite".into(),
+        )
+        .into());
+    }
     tenant.core.store.ask_pair_synthesis(pid).await?;
     // Idle-only, like `consolidate` arms it: re-arming a queued unit winds its
     // attempts back to zero.
@@ -492,6 +503,31 @@ fn pair_side(c: &crate::store::artifacts::Chunk) -> (String, String) {
     (label.text, opening)
 }
 
+/// Whether `insert_merged_artifact` would accept a merge over these two.
+///
+/// The lineage check `jobs::dedupe` makes at admission (`dedupe.rs`), asked in
+/// two places for two reasons: the card uses it to decide whether to draw the
+/// Synthese button at all, and the route uses it to refuse a press that arrives
+/// anyway. Hiding a button is not a check — a page drawn before an artifact was
+/// merged still has the button on it, and the POST it sends is as real as any
+/// other.
+///
+/// A passage is its own root, so a pair of passages answers false. That is the
+/// common case rather than an edge one: most of a base is passages.
+async fn pair_is_mergeable(tenant: &Tenant, a_id: &str, b_id: &str) -> Result<bool> {
+    let members = vec![a_id.to_string(), b_id.to_string()];
+    let root_map = tenant.core.store.roots_of(&members).await?;
+    let all_roots: Vec<String> = root_map.values().flatten().cloned().collect();
+    Ok(!all_roots.is_empty()
+        && tenant
+            .core
+            .store
+            .artifacts_by_ids(&all_roots)
+            .await?
+            .iter()
+            .all(|r| r.provenance == crate::store::artifacts::Provenance::Captured))
+}
+
 pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
     let mut waiting = 0i64;
     for state in PAIR_STATES {
@@ -567,17 +603,7 @@ pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
             // The lineage check `jobs::dedupe` makes before it calls the
             // model. Asked per row rather than once, because a pair names two
             // artifacts and each carries its own lineage.
-            let member_ids = vec![p.a_id.clone(), p.b_id.clone()];
-            let root_map = tenant.core.store.roots_of(&member_ids).await?;
-            let all_roots: Vec<String> = root_map.values().flatten().cloned().collect();
-            let mergeable = !all_roots.is_empty()
-                && tenant
-                    .core
-                    .store
-                    .artifacts_by_ids(&all_roots)
-                    .await?
-                    .iter()
-                    .all(|r| r.provenance == crate::store::artifacts::Provenance::Captured);
+            let mergeable = pair_is_mergeable(tenant, &p.a_id, &p.b_id).await?;
             let synthesis_asked = p.synthesis_asked;
             pairs.push(PairRow {
                 id: p.id,
@@ -1368,6 +1394,93 @@ mod tests {
             html.matches("/synthesize").count(),
             1,
             "only the captured pair offers a synthesis"
+        );
+    }
+
+    /// Hiding a button is not a check. A page drawn before something changed
+    /// still carries it, and the POST it sends is as real as any other — so
+    /// both refusals the card relies on are made again at the door.
+    #[tokio::test]
+    async fn the_synthesize_route_refuses_what_the_card_would_not_have_offered() {
+        use crate::store::artifacts::{NewArtifact, Provenance};
+        let (app, cookie, core) = app_session_and_core().await;
+
+        // Stored source text: the merge path may not rewrite it.
+        let src = core.store.insert_corpus("y", "web", None).await.unwrap();
+        let raw: Vec<NewArtifact> = ["verbatim left", "verbatim right"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| NewArtifact {
+                ordinal: i as i64,
+                text: (*t).to_string(),
+                title: Some((*t).to_string()),
+                ..Default::default()
+            })
+            .collect();
+        let passages: Vec<String> = core
+            .store
+            .insert_artifacts_with_provenance(&src.id, &raw, Provenance::Passage)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        core.store
+            .record_pair(&passages[0], &passages[1], 0.9)
+            .await
+            .unwrap();
+        let over_passages = core
+            .store
+            .pair_between(&passages[0], &passages[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{over_passages}/synthesize"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !core
+                .store
+                .get_pair(over_passages)
+                .await
+                .unwrap()
+                .synthesis_asked,
+            "a press over stored source text records nothing"
+        );
+
+        // A side that has already left results.
+        let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let gone = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        core.store
+            .set_artifact_status(&ids[0], crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{gone}/synthesize"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !core.store.get_pair(gone).await.unwrap().synthesis_asked,
+            "a press naming an artifact that is out of results records nothing"
         );
     }
 
