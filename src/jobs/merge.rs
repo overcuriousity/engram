@@ -876,11 +876,12 @@ mod tests {
     async fn a_merge_takes_its_roots_verdicts_with_it() {
         use crate::store::pairs::PairState;
         let mut core = crate::core::test_support::test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        // Through the press: a duplicate verdict is a proposal now and writes
+        // nothing on its own, so the writer is what this test needs.
+        core.pair_synthesizer = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"relation":"duplicate","detail":"same claim",
-                "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
-                          "tags":[],"caveats":[]}}"#
+                r#"{"merged":{"title":"Mounting","text":"Mount the filesystem, or attach the volume, before writing.",
+                          "category":"procedure","caveats":[]}}"#
                     .into(),
             ]),
         ));
@@ -922,6 +923,7 @@ mod tests {
             .unwrap()
             .id;
 
+        core.store.ask_pair_synthesis(dupe).await.unwrap();
         crate::jobs::dedupe::run(&core, &dupe.to_string())
             .await
             .unwrap();
@@ -963,11 +965,12 @@ mod tests {
         // literally the same bug as
         // reactivating_a_superseded_artifact_survives_the_next_sweep.
         let mut core = crate::core::test_support::test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        // Through the press: a duplicate verdict is a proposal now and writes
+        // nothing on its own, so the writer is what this test needs.
+        core.pair_synthesizer = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"relation":"duplicate","detail":"same claim",
-                "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
-                          "tags":[],"caveats":[]}}"#
+                r#"{"merged":{"title":"Mounting","text":"Mount the filesystem, or attach the volume, before writing.",
+                          "category":"procedure","caveats":[]}}"#
                     .into(),
             ]),
         ));
@@ -989,6 +992,7 @@ mod tests {
             .await
             .unwrap()[0]
             .id;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
         crate::jobs::dedupe::run(&core, &pair.to_string())
             .await
             .unwrap();

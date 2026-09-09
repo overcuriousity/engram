@@ -85,6 +85,19 @@ pub enum PairState {
     /// The variant and everything that renders it stay for the rows an older
     /// base filed, which are still waiting on that press.
     Vacuous,
+    /// The judge read both and found they cover the same ground: one artifact
+    /// should hold what both say.
+    ///
+    /// A proposal, not an action. It used to merge on the spot, and the label
+    /// is not steady enough to carry that: asked twelve times about two
+    /// artifacts describing one veterinary practice — one the contact details,
+    /// the other the services — the live judge wrote the same reasoning every
+    /// time and split nine to three between `distinct` and `duplicate`. The
+    /// prompt's own categories both fit that shape. A coin flip is a poor thing
+    /// to hide two artifacts behind a third on, so the reading is the model's
+    /// and the press is the operator's — `synthesis_asked`, and the writing
+    /// follows.
+    Duplicate,
     /// A lifecycle event took one of the two artifacts out of results, so the
     /// question cannot be acted on — not because anyone answered it.
     ///
@@ -120,6 +133,7 @@ impl PairState {
             PairState::NearIdentical => "near_identical",
             PairState::Oversized => "oversized",
             PairState::Vacuous => "vacuous",
+            PairState::Duplicate => "duplicate",
             PairState::Stale => "stale",
         }
     }
@@ -132,6 +146,7 @@ impl PairState {
             "near_identical" => PairState::NearIdentical,
             "oversized" => PairState::Oversized,
             "vacuous" => PairState::Vacuous,
+            "duplicate" => PairState::Duplicate,
             "stale" => PairState::Stale,
             _ => PairState::Pending,
         }

@@ -659,80 +659,32 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             // confirmation forever.
             settle(core, &s.pair, PairState::Dismissed, s.detail.as_deref()).await
         }
+        // A proposal, not an action.
+        //
+        // This arm used to write the merge on the spot. The verdict is not
+        // steady enough to carry that: asked twelve times about two artifacts
+        // describing one veterinary practice — one holding the contact details,
+        // the other the services — the live judge wrote the same reasoning
+        // every time and answered `distinct` nine times and `duplicate` three.
+        // Both of the prompt's categories fit that shape word for word, so the
+        // label is a coin flip, and a coin flip is a poor thing to hide two
+        // artifacts behind a third on.
+        //
+        // Sharpening the prompt was tried and measured before this was written.
+        // Narrowing `distinct` to "different subjects" did move the target case
+        // to `duplicate`, and it also took a control pair of plainly unrelated
+        // documents from three false duplicates in twelve to five. It was not
+        // shipped.
+        //
+        // So the reading stays the model's and the decision becomes the
+        // operator's: the pair lands on the queue saying these two cover the
+        // same ground, and `web::ops::ask_pair_synthesis_ui` is the press that
+        // writes it. `s.merged` — the draft this call already paid for — is
+        // dropped, and that is the honest cost: a draft written under a label
+        // nobody has confirmed is not worth keeping, and the writing pass asks
+        // for one under a prompt that is not deciding anything.
         Relation::Duplicate => {
-            let draft = s
-                .merged
-                .as_ref()
-                .expect("interpret keeps this or downgrades to Conflict");
-            // Both members, not their roots. A merged member is not its own
-            // root, and `finish` hides what the lineage names — so passing only
-            // the roots would leave that earlier merge active and near-identical
-            // to the new one. `insert_merged_artifact` flattens both of them to
-            // captured roots, and `subsumed_merges` catches the merged member.
-            let sources: Vec<String> = s.members.iter().map(|m| m.id.clone()).collect();
-            let subjects: Vec<&str> = sources.iter().map(String::as_str).collect();
-            if taken_back_before(core, Kind::Merge, &subjects).await? {
-                return settle(core, &s.pair, PairState::Contradiction, Some(TAKEN_BACK)).await;
-            }
-            // `Validation` is the merge path's own refusal — a root it may not
-            // rewrite — and not a failure to retry. Retrying is precisely the
-            // damage: the pair would stay `Pending`, `arm_dedupe` re-arms it,
-            // and the same refusal is bought again every tick. `run` already
-            // declines such a pair before the call, so reaching this is a case
-            // that check does not cover; the row is handed to a person rather
-            // than left circling.
-            let m = match crate::jobs::merge::write(core, draft, &sources).await {
-                Ok(m) => m,
-                Err(Error::Validation(why)) => {
-                    tracing::warn!(
-                        pair = s.pair.id,
-                        reason = %why,
-                        "the merge path refused this draft; handing the pair to a person"
-                    );
-                    return settle(
-                        core,
-                        &s.pair,
-                        PairState::Contradiction,
-                        Some(
-                            "These could not be merged: the merge was refused because of \
-                             what one of them is made of. Resolve by hand.",
-                        ),
-                    )
-                    .await;
-                }
-                Err(e) => return Err(e),
-            };
-            // One row per original, naming the merge, before the pair says it
-            // happened: a merge with no row is what the journal exists to end.
-            //
-            // The act's own description, and not `s.detail`. That field is the
-            // judge's sentence — what the model thought — and one field cannot
-            // be both that and the reason the base acted, because the first can
-            // argue against the second: a base holds a merge journalled "Both
-            // artifacts describe the same veterinary practice … so they are
-            // distinct". Reconciling the two after the fact would mean reading
-            // a label against free prose, which is not a question token
-            // comparison can answer. The sentence is not lost — `set_pair_merged`
-            // below carries it onto the pair, which is where a reader looks for
-            // what the judge said.
-            let act = format!("merged into {} from {} sources", m.id, sources.len());
-            for source in &sources {
-                core.store
-                    .record_action(&action(
-                        Kind::Merge,
-                        &s.pair,
-                        source,
-                        Some(&m.id),
-                        Some(act.as_str()),
-                    ))
-                    .await?;
-            }
-            // `merged_into` rather than a detail string: if the embed never
-            // lands, the sweep's reap has to find exactly this pair and reopen
-            // it (`reap_stranded`).
-            core.store
-                .set_pair_merged(s.pair.id, &m.id, s.detail.as_deref(), DecidedBy::Model)
-                .await
+            settle(core, &s.pair, PairState::Duplicate, s.detail.as_deref()).await
         }
     }
 }
@@ -2172,8 +2124,13 @@ mod tests {
         );
     }
 
+    /// A duplicate verdict is a proposal now, and the queue is where it lands.
+    ///
+    /// It used to merge on the spot. `PairState::Duplicate` carries the
+    /// measurements that took the action off it: the same reasoning, twelve
+    /// times, split nine to three between two labels that both fit.
     #[tokio::test]
-    async fn a_merge_journals_one_row_per_original_naming_the_merge() {
+    async fn a_duplicate_verdict_is_proposed_and_nothing_is_written() {
         use crate::store::actions::Kind;
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
@@ -2190,6 +2147,55 @@ mod tests {
         )
         .await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(p.state, PairState::Duplicate, "it lands on the queue");
+        assert_eq!(p.detail.as_deref(), Some("same thing"), "with the reading");
+        assert!(p.merged_into.is_none(), "and nothing was written");
+        assert!(
+            core.store.merged_artifacts(10).await.unwrap().is_empty(),
+            "no merged artifact exists until somebody presses"
+        );
+        assert!(
+            core.store.open_actions(&[Kind::Merge], 10).await.unwrap().is_empty(),
+            "and the journal has nothing to record"
+        );
+        for id in &ids {
+            assert!(
+                core.store.get_artifact(id).await.unwrap().in_results(),
+                "both sides stay in results"
+            );
+        }
+    }
+
+    /// A merge's journal line says what happened.
+    ///
+    /// It used to carry the judge's sentence as the reason the base acted —
+    /// one field in two roles, and only the first can contradict the second.
+    /// The live base holds a merge journalled "Both artifacts describe the same
+    /// veterinary practice … so they are distinct". Reconciling a label against
+    /// free prose after the fact is not a question token comparison can answer,
+    /// so the roles are kept apart instead.
+    #[tokio::test]
+    async fn a_merge_action_records_the_act_and_not_a_verdict() {
+        use crate::store::actions::Kind;
+        let mut core = test_core().await;
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"merged":{"title":"Pool","text":"the pool holds sixteen connections","category":"reference","caveats":[]}}"#
+                .into(),
+        ])));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Pool sizing", "sixteen connections", [1.0, 0.0]),
+                ("Connections", "sixteen connections", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
 
         run(&core, &pair.to_string()).await.unwrap();
 
@@ -2201,7 +2207,7 @@ mod tests {
             .merged_into
             .expect("the pair names its merge");
         let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 2, "one row per original");
         assert!(
             rows.iter()
                 .all(|r| r.survivor_id.as_deref() == Some(merged.as_str()))
@@ -2209,59 +2215,14 @@ mod tests {
         let subjects: std::collections::HashSet<String> =
             rows.iter().map(|r| r.subject_id.clone()).collect();
         assert_eq!(subjects, ids.iter().cloned().collect());
-        // The act, not the judge's sentence — see
-        // `a_merge_action_records_the_act_and_not_the_judges_sentence`.
-        assert!(rows[0].detail.as_deref().unwrap_or_default().contains("merged into"));
-        assert!(rows[0].pair_score.is_some());
-    }
-
-    /// The judge's sentence says what the model thought. It is not the reason
-    /// the base acted, and it can argue against the act it was being used to
-    /// justify: the live base holds a merge journalled as "Both artifacts
-    /// describe the same veterinary practice … so they are distinct".
-    ///
-    /// Nothing reconciles the two afterwards, and nothing should try —
-    /// agreement between a label and a sentence of free prose is not a question
-    /// token comparison can answer. So the two roles are separated instead: the
-    /// action row says what happened, and the sentence stays on the pair, which
-    /// is where a reader looks for what the judge said.
-    #[tokio::test]
-    async fn a_merge_action_records_the_act_and_not_the_judges_sentence() {
-        use crate::store::actions::Kind;
-        let mut core = test_core().await;
-        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"duplicate","detail":"these two are distinct",
-                "merged":{"title":"Pool","text":"the pool holds sixteen connections","tags":[],"caveats":[]}}"#
-                .into(),
-        ])));
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Pool sizing", "sixteen connections", [1.0, 0.0]),
-                ("Connections", "sixteen connections", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-
-        let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
-        assert_eq!(rows.len(), 2, "one row per original");
         for r in &rows {
             let d = r.detail.clone().unwrap_or_default();
             assert!(
                 d.contains("merged into"),
                 "the action says what happened, got {d:?}"
             );
-            assert!(
-                !d.contains("distinct"),
-                "the judge's sentence is not the reason the base acted, got {d:?}"
-            );
         }
-        // Not lost: the pair still carries what the judge said.
-        let p = core.store.get_pair(pair).await.unwrap();
-        assert_eq!(p.detail.as_deref(), Some("these two are distinct"));
+        assert!(rows[0].pair_score.is_some());
     }
 
     #[tokio::test]
@@ -2270,9 +2231,10 @@ mod tests {
         // again, and it carries the flattened lineage of both sides rather than
         // naming the intermediate.
         let mut core = test_core().await;
-        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"relation":"duplicate","detail":"same thing",
-                "merged":{"title":"Pool","text":"max_connections is 16, raise it for batch jobs, sixteen connections","tags":[],"caveats":[]}}"#
+        // Through the press, because a duplicate verdict is a proposal now and
+        // writes nothing on its own — see `a_duplicate_verdict_is_proposed_and_nothing_is_written`.
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"merged":{"title":"Pool","text":"max_connections is 16, raise it for batch jobs, sixteen connections","category":"reference","caveats":[]}}"#
                 .into(),
         ])));
         let ids = seed_titled(
@@ -2292,6 +2254,7 @@ mod tests {
         )
         .await;
         let pair = queue_pair(&core, &m1, &ids[2]).await;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
 
         run(&core, &pair.to_string()).await.unwrap();
 

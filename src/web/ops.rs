@@ -34,9 +34,15 @@ use axum::routing::post;
 /// the cap strands nothing — there is no second page to go and find the rest
 /// on, which is the point: Housekeeping is reference, not work.
 pub(crate) const PAIR_LIMIT: usize = 5;
-const PAIR_STATES: [crate::store::pairs::PairState; 4] = [
+const PAIR_STATES: [crate::store::pairs::PairState; 5] = [
     crate::store::pairs::PairState::Contradiction,
     crate::store::pairs::PairState::Superseded,
+    // The judge read both and found one artifact should hold what both say. A
+    // proposal rather than a merge already applied: see `PairState::Duplicate`
+    // for the measurements that took the action off this verdict. The card
+    // renders it through the same branch a pending pair uses — "these two cover
+    // the same ground" — and the Synthese button is the press that acts on it.
+    crate::store::pairs::PairState::Duplicate,
     // Only ever rows an older base filed: a vacuous verdict is now carried
     // out where it is found (`jobs::dedupe::discard_both`) and its pair
     // settles `Dismissed`. Still listed, because those rows are a
@@ -985,11 +991,12 @@ mod tests {
     async fn pressing_undo_on_a_merge_stamps_its_rows_as_taken_back_by_the_operator() {
         use crate::store::actions::{Kind, UndoneBy};
         let mut core = crate::core::test_support::test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        // Through the press: a duplicate verdict is a proposal now and writes
+        // nothing on its own, so the writer is what this test needs.
+        core.pair_synthesizer = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"relation":"duplicate","detail":"same claim",
-                "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
-                          "tags":[],"caveats":[]}}"#
+                r#"{"merged":{"title":"Mounting","text":"Mount the filesystem, or attach the volume, before writing.",
+                          "category":"procedure","caveats":[]}}"#
                     .into(),
             ]),
         ));
@@ -1011,6 +1018,7 @@ mod tests {
             .await
             .unwrap()[0]
             .id;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
         crate::jobs::dedupe::run(&core, &pair.to_string())
             .await
             .unwrap();
