@@ -1145,6 +1145,18 @@ impl HttpCompleter {
         Self::judging(cfg, ("artifact", prompt::generate_schema()))
     }
 
+    /// The model that writes one artifact from a pair an operator asked to
+    /// have synthesized, on the judges' endpoint.
+    ///
+    /// Its own completer for the reason `for_link_judging` is: the response
+    /// format lives in the struct, and this asks for a merged artifact rather
+    /// than a verdict. Under the dedupe grammar the reply would have to carry a
+    /// `relation` — a decision this call is explicitly not making, because a
+    /// person already made it.
+    pub fn for_pair_synthesis(cfg: &SynthesizeRole) -> Self {
+        Self::judging(cfg, ("synthesis", prompt::synthesize_schema()))
+    }
+
     /// The model that says, once, which subjects one answer still lacks.
     ///
     /// Takes a `TierConfig` rather than a role because that is honestly what it

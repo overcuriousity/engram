@@ -191,6 +191,13 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             provenance = r.provenance.as_str(),
             "a member's lineage names something a merge may not rewrite; handing the pair to a person"
         );
+        // A person may have pressed Synthese on a lineage that has changed
+        // under them since the card was drawn. The ask is cleared rather than
+        // left standing, because the card reads it as "the writing is queued"
+        // and nothing is going to write this one.
+        if p.synthesis_asked {
+            core.store.clear_pair_synthesis(p.id).await?;
+        }
         return settle(
             core,
             &p,
@@ -201,6 +208,24 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             ),
         )
         .await;
+    }
+
+    // An operator pressed Synthese. The verdict is not asked for, because it
+    // has been given: they read both sides and decided these cover the same
+    // ground. Asking the model to decide again invites it to answer `distinct`
+    // and leave the press with nothing to show for it — and it does not decide
+    // this class reliably. Asked twelve times about two artifacts describing
+    // one veterinary practice, one carrying the contact details and the other
+    // the services, the live judge wrote the same reasoning every time and
+    // labelled it `distinct` nine times and `duplicate` three. The prompt's own
+    // categories both fit that shape, so the label was a coin flip on an action
+    // that hides two artifacts behind a third.
+    //
+    // Below the lineage refusal above, not before it: a person asking does not
+    // make stored source text mergeable, and `merge::write` would refuse it
+    // anyway.
+    if p.synthesis_asked {
+        return synthesize_asked_pair(core, &p, members).await;
     }
 
     // A merged member's captured roots, oldest first — context, never an input.
@@ -448,6 +473,93 @@ fn interpret(
         members,
         pair,
     }
+}
+
+/// Write one artifact from a pair an operator asked to have synthesized.
+///
+/// The judgement is theirs and is not revisited; only the writing is asked for.
+/// From the draft on this is the `Relation::Duplicate` tail, and deliberately
+/// the same one: a synthesis an operator asked for and a merge the judge
+/// applied must leave the base in the same shape, or the journal has two kinds
+/// of merge in it and the undo path has to know which is which.
+async fn synthesize_asked_pair(
+    core: &Core,
+    p: &ArtifactPair,
+    members: Vec<Chunk>,
+) -> Result<()> {
+    use crate::store::actions::Kind;
+    let Some(writer) = core.pair_synthesizer.clone() else {
+        // Nothing to ask with. The flag stays set, so the press is not lost and
+        // the next run with a writer configured picks it up.
+        return Ok(());
+    };
+    core.store.record_judge_attempt(p.id).await?;
+    let user = synthesis_prompt(&members);
+    let permit = core.gate.background().await;
+    let reply = writer
+        .complete(crate::infer::prompt::SYNTHESIZE_SYSTEM, &user)
+        .await;
+    permit.finished();
+    let draft = crate::infer::prompt::parse_synthesis(&reply?)?;
+
+    let sources: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
+    match crate::jobs::merge::write(core, &draft, &sources).await {
+        Ok(m) => {
+            let act = format!("merged into {} from {} sources", m.id, sources.len());
+            for source in &sources {
+                core.store
+                    .record_action(&action(Kind::Merge, p, source, Some(&m.id), Some(act.as_str())))
+                    .await?;
+            }
+            core.store
+                .set_pair_merged(
+                    p.id,
+                    &m.id,
+                    Some("synthesized at an operator's request"),
+                    DecidedBy::Operator,
+                )
+                .await
+        }
+        // The merge path's own refusal, not a failure to retry. The flag is
+        // cleared first so the card stops promising a synthesis that will not
+        // arrive — leaving it set would show "asked for" forever beside a pair
+        // nothing is going to write.
+        Err(Error::Validation(why)) => {
+            tracing::warn!(
+                pair = p.id,
+                reason = %why,
+                "the merge path refused a synthesis an operator asked for"
+            );
+            core.store.clear_pair_synthesis(p.id).await?;
+            settle(
+                core,
+                p,
+                PairState::Contradiction,
+                Some(
+                    "These could not be merged: the merge was refused because of \
+                     what one of them is made of. Resolve by hand.",
+                ),
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The two artifacts, for a call that is writing rather than deciding.
+///
+/// Unlettered, unlike `dedupe_prompt`: a letter exists so a verdict can name a
+/// side, and this reply names nothing. No sources block either — the draft is
+/// written from the two bodies themselves, and a merged member's roots would be
+/// reference material for a judgement nobody is making here.
+fn synthesis_prompt(members: &[Chunk]) -> String {
+    let mut s = String::new();
+    for m in members {
+        let title = crate::web::ui::row_label(m).text;
+        s.push_str(&format!("----- ARTIFACT -----\nTitle: {title}\n\n{}\n", m.text));
+    }
+    s.push_str("----- END -----");
+    s
 }
 
 async fn apply(core: &Core, s: Settlement) -> Result<()> {
@@ -1970,6 +2082,93 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "the merge was blamed for a value an earlier one had dropped"
+        );
+    }
+
+    /// The press is the judgement. The verdict prompt is not asked, so a model
+    /// that would have said `distinct` — as the live judge does about this
+    /// shape of pair, nine times in twelve — cannot overturn the operator.
+    #[tokio::test]
+    async fn a_pair_a_person_asked_about_is_written_without_being_judged_again() {
+        use crate::store::actions::Kind;
+        let mut core = test_core().await;
+        // A verdict-shaped reply would not parse here: this path asks for a
+        // draft. If the branch fell through to the judge, the test fails.
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"merged":{"title":"Tierarztpraxis Dr. Brinkmann","text":"Kleintierpraxis in Bad Aibling. Sprechzeiten Mo-Fr 08:00-12:00.","category":"reference","caveats":[]}}"#
+                .into(),
+        ])));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
+                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        let merged = p.merged_into.expect("a merged artifact answered the pair");
+        let m = core.store.get_artifact(&merged).await.unwrap();
+        assert_eq!(m.provenance, Provenance::Merged);
+        assert_eq!(
+            p.decided_by,
+            Some(DecidedBy::Operator),
+            "the press is what settled this, not the model"
+        );
+        // The sources are still in results here, and that is the shape the
+        // judge's own merge leaves too: `merge::write` writes and enqueues an
+        // embed, and `merge::finish` hides them when that lands. The lineage is
+        // what says the merge holds them.
+        let roots = core.store.roots_of(&[merged.clone()]).await.unwrap();
+        assert_eq!(
+            roots[&merged].len(),
+            2,
+            "the synthesis records both originals as its roots"
+        );
+        let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
+        assert_eq!(rows.len(), 2, "one row per original, as any merge journals");
+    }
+
+    /// A person asking does not make stored source text mergeable. When the
+    /// merge path refuses, the ask is cleared so the card stops promising a
+    /// synthesis that will not arrive.
+    #[tokio::test]
+    async fn a_refused_synthesis_clears_the_ask() {
+        let core = test_core().await;
+        let src = core.store.insert_corpus("skript", "web", None).await.unwrap();
+        let raw: Vec<crate::store::artifacts::NewArtifact> = ["Spuren sind materiell.", "Spuren sind Veraenderungen."]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| crate::store::artifacts::NewArtifact {
+                ordinal: i as i64,
+                text: (*t).to_string(),
+                segment_idx: Some(0),
+                ..Default::default()
+            })
+            .collect();
+        let passages: Vec<String> = core
+            .store
+            .insert_artifacts_with_provenance(&src.id, &raw, Provenance::Passage)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        let pair = queue_pair(&core, &passages[0], &passages[1]).await;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_none(), "nothing was written");
+        assert!(
+            !p.synthesis_asked,
+            "the card stops promising what will not come"
         );
     }
 

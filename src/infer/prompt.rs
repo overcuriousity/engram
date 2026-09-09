@@ -1231,6 +1231,106 @@ Reply with JSON only, no commentary, in exactly this shape:
 - supersedes: the letter of the artifact that is obsolete. Only with "replaced"; omit it otherwise.
 - merged: only with "duplicate"; omit it entirely otherwise. `text` must stand on its own without its sources. `caveats` are the conditions under which it does not apply."#;
 
+/// Writing one artifact from two, when a person has already judged that the two
+/// cover the same ground.
+///
+/// Deliberately not `DEDUPE_SYSTEM` with the branch forced. That prompt's whole
+/// body is about *deciding*, and the deciding here is done: an operator read
+/// both sides and pressed the button. Asking the model to decide again invites
+/// it to answer "distinct" and leave the press with nothing to show for it —
+/// and on this shape of pair it does not decide reliably. Asked twelve times
+/// about two artifacts describing one veterinary practice, one carrying the
+/// contact details and the other the services, the live judge wrote the same
+/// reasoning every time and labelled it `distinct` nine times and `duplicate`
+/// three. The reading was sound; the label was a coin flip.
+///
+/// The merge-writing rules are `DEDUPE_SYSTEM`'s own, restated rather than
+/// referenced, because they are the requirement rather than a style: a merge
+/// that drops a number is worse than no merge at all.
+pub const SYNTHESIZE_SYSTEM: &str = r#"You are given two knowledge artifacts that a person has already judged to cover the same ground. Whether they do is settled and is not your question. Write one artifact that says everything both of them said.
+
+The merged text must contain every number, version, date, path, flag, command and error string that appeared in either input. Where two of them disagree, keep both and say which artifact each came from. Dropping one is the failure this task exists to avoid.
+
+It must read as one self-contained artifact rather than a list of sources, and it must stand on its own without them: a reader who never sees the originals must not be left with a dangling reference to "the other document" or "as above".
+
+The title names the subject. An artifact whose body never says what it is about is what makes it unfindable later — a section headed "FAT32" becomes a body that opens "32 Bit Clusternummern" and never says FAT32 again, and then only the title can answer what it is for.
+
+Reply with JSON only, no commentary, in exactly this shape:
+
+{"merged": {"title": "...", "text": "...", "category": "...", "caveats": []}}
+
+- text: the merged artifact. Never empty.
+- title: what it is about.
+- category: one of the listed categories.
+- caveats: the conditions under which it does not apply; an empty list when there are none."#;
+
+/// The response format for `SYNTHESIZE_SYSTEM`.
+///
+/// Every property is listed and required, for the reason `dedupe_schema` gives:
+/// under `strict` a listed-but-optional property is not a looser schema, it is
+/// one the hosted APIs reject outright — which fails the call rather than
+/// loosening it.
+pub fn synthesize_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "merged": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "title": {"type": "string"},
+                    "category": {"type": "string", "enum": CATEGORIES},
+                    "caveats": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["text", "title", "category", "caveats"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["merged"],
+        "additionalProperties": false
+    })
+}
+
+/// One synthesis, parsed.
+///
+/// Unlike `parse_dedupe` there is no salvage and no downgrade. That parser can
+/// turn an unreadable direction into a conflict because a conflict is still a
+/// true thing to say about the pair; here the judgement was a person's, so a
+/// reply carrying no usable text is a failed call and nothing else. Returning
+/// an empty draft would write an artifact that says nothing and hide two that
+/// did.
+pub fn parse_synthesis(body: &str) -> Result<MergedDraft> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        merged: RawMerged,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawMerged {
+        text: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        category: Option<String>,
+        #[serde(default)]
+        caveats: Vec<String>,
+    }
+    let raw: Raw = serde_json::from_str(extract_json(body)).map_err(|e| {
+        Error::MalformedLlmOutput(format!("synthesis reply was not the expected JSON: {e}"))
+    })?;
+    if raw.merged.text.trim().is_empty() {
+        return Err(Error::MalformedLlmOutput(
+            "synthesis reply carried no text".into(),
+        ));
+    }
+    Ok(MergedDraft {
+        title: raw.merged.title.map(|t| t.trim().to_string()),
+        text: raw.merged.text,
+        category: raw.merged.category.as_deref().map(normalize_category),
+        tags: Vec::new(),
+        caveats: raw.merged.caveats,
+    })
+}
+
 /// The two artifacts, each under its letter and its title, each followed by its
 /// captured sources when it has any.
 ///
@@ -2643,6 +2743,47 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The operator has judged; the model only writes. There is no relation to
+    /// parse and no verdict to downgrade — a reply with no usable text is a
+    /// failed call, because an empty draft would write an artifact that says
+    /// nothing and hide two that did.
+    #[test]
+    fn a_synthesis_reply_parses_into_a_draft() {
+        let body = r#"{"merged":{"title":"Praxis","text":"Alles zusammen.","category":"reference","caveats":[]}}"#;
+        let d = parse_synthesis(body).expect("a well-formed draft parses");
+        assert_eq!(d.title.as_deref(), Some("Praxis"));
+        assert_eq!(d.text, "Alles zusammen.");
+        assert!(d.caveats.is_empty());
+    }
+
+    #[test]
+    fn a_synthesis_reply_with_no_text_is_an_error() {
+        let body = r#"{"merged":{"title":"Praxis","text":"   ","category":"reference","caveats":[]}}"#;
+        assert!(parse_synthesis(body).is_err(), "an empty body is no draft");
+    }
+
+    #[test]
+    fn a_synthesis_reply_in_a_fence_still_parses() {
+        let body = "```json\n{\"merged\":{\"title\":\"P\",\"text\":\"x\",\"category\":\"reference\",\"caveats\":[]}}\n```";
+        assert!(parse_synthesis(body).is_ok(), "fences are stripped like everywhere else");
+    }
+
+    /// `strict` rejects a listed-but-optional property outright, which fails
+    /// the call rather than loosening the schema.
+    #[test]
+    fn the_synthesis_schema_requires_every_field_it_lists() {
+        let s = synthesize_schema();
+        let m = &s["properties"]["merged"];
+        let required = m["required"].as_array().expect("required is a list");
+        for f in ["text", "title", "category", "caveats"] {
+            assert!(
+                required.iter().any(|r| r.as_str() == Some(f)),
+                "{f} must be required"
+            );
+        }
+        assert_eq!(m["additionalProperties"], serde_json::json!(false));
+    }
     use super::*;
 
     #[test]

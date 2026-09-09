@@ -175,6 +175,16 @@ pub struct Core {
     /// judges, its own response shape, background only. `None` with no
     /// synthesize role.
     pub generator: Option<Arc<dyn Completer>>,
+    /// The model that writes one artifact from a pair an operator asked to have
+    /// synthesized. Same endpoint as the judges, its own response shape.
+    ///
+    /// Separate from `judge` because it is not asked for a verdict: the press
+    /// was the verdict. Under the dedupe grammar the reply would have to carry
+    /// a `relation`, and the judge does not decide this class reliably — asked
+    /// twelve times about two artifacts describing one veterinary practice, it
+    /// wrote the same reasoning every time and split nine to three between
+    /// `distinct` and `duplicate`. `None` with no synthesize role.
+    pub pair_synthesizer: Option<Arc<dyn Completer>>,
     /// The model that says, once, which subjects an answer still lacks — and
     /// with it, whether an ask gets a fanned-out second round of retrieval at
     /// all.
@@ -535,6 +545,9 @@ impl Core {
             generator: Some(Arc::new(
                 HttpCompleter::for_generating(synth).with_counter(counter.clone()),
             )),
+            pair_synthesizer: Some(Arc::new(
+                HttpCompleter::for_pair_synthesis(synth).with_counter(counter.clone()),
+            )),
             planner: cfg.infer.ask.as_ref().and_then(|a| {
                 a.plan.then(|| {
                     Arc::new(HttpCompleter::for_plan(&a.plan_on()).with_counter(counter.clone()))
@@ -852,6 +865,10 @@ pub mod test_support {
             })),
             reaper: Some(Arc::new(FakeCompleter::default())),
             generator: Some(Arc::new(FakeCompleter::default())),
+            // No default writer: a synthesis is only ever written for a pair a
+            // person pressed, and a test that means to exercise that path says
+            // so by setting this.
+            pair_synthesizer: None,
             // Off, unlike the shipped default: a test that wants a fan-out puts
             // a completer here, and every other test gets one round and no
             // extra call to account for.
