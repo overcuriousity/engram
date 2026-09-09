@@ -45,6 +45,12 @@
       <div><b>{{ p.b_title }}</b><p>{{ p.b_excerpt }}</p></div>
     </div>
   </details>
+  {# Already asked for: the writing is queued and the answers are no longer
+     the question. Saying so beats leaving four buttons that would each undo
+     the press. #}
+  {% if p.synthesis_asked %}
+  <div class="decide-finding">A synthesis was asked for; it is written on the next pass.</div>
+  {% else %}
   <div class="row">
     {# The judge's pick, when it has one, is the accented button rather than a
        separate action — a recommendation about which of these two to press,
@@ -71,6 +77,26 @@
       <input type="hidden" name="keep" value="{{ p.b_id }}">
       <button class="btn btn-sm decide-keep {% if p.keeps_b %}btn-accent{% endif %}" type="submit"><span>Keep “{{ p.b_title }}”</span></button>
     </form>
+    {# The fourth answer, and the only one that ends with a new artifact rather
+       than with one of these two hidden behind the other. Two artifacts about
+       one subject where each carries what the other lacks are not answered by
+       keeping either: whichever you keep, the other half is gone.
+
+       Offered only where the merge path will take it. `insert_merged_artifact`
+       refuses a lineage naming stored source text, and a button whose press can
+       only return a validation error is worse than no button at all.
+
+       Titles out of `data-*` for the reason the Keep buttons read theirs that
+       way: escaped into an attribute an apostrophe survives, escaped into a
+       string literal inside an attribute it does not — and a handler that is a
+       syntax error fails open. #}
+    {% if p.mergeable %}
+    <form method="post" action="/ui/ops/pairs/{{ p.id }}/synthesize"
+          data-a="{{ p.a_title }}" data-b="{{ p.b_title }}"
+          onsubmit="return confirm('Write one artifact from “' + this.dataset.a + '” and “' + this.dataset.b + '”, and hide both behind it? You can undo this from Insights.')">
+      <button class="btn btn-sm" type="submit">Synthese</button>
+    </form>
+    {% endif %}
     {# The third answer, and the only one that ends with both artifacts gone.
        Offered on every card rather than only where the judge proposed it: it
        is the judge that is the recommendation here, not the availability. A
@@ -90,6 +116,7 @@
       <button class="btn btn-sm btn-ghost" type="submit">Dismiss</button>
     </form>
   </div>
+  {% endif %}
 </div>
 {% endfor %}
 {% endfor %}

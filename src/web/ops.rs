@@ -198,6 +198,58 @@ struct KeepForm {
     back: ReturnTo,
 }
 
+/// Record that this pair should become one artifact, and arm the unit that
+/// writes it.
+///
+/// The press is the judgement. An operator has read both sides and decided they
+/// cover the same ground; what is left is the writing, and the writing is an
+/// inference call — so it goes where every other inference in this tree goes,
+/// onto the job queue, where the budget, the backoff and the attempt count
+/// live. Nothing is written here and no model is called: no route under
+/// `src/web` calls one, and a handler that blocked on a judge would hold the
+/// request open for as long as the endpoint felt like taking.
+///
+/// Why a person and not the judge: asked twelve times about two artifacts
+/// describing one veterinary practice — one carrying the contact details, the
+/// other the services — the judge wrote the same reasoning every time and
+/// labelled it `distinct` nine times and `duplicate` three. The prompt's own
+/// categories both fit that shape, so the label is a coin flip on a decision
+/// that hides two artifacts behind a third. The reading is the model's; the
+/// call is the operator's.
+async fn ask_pair_synthesis_ui(
+    tenant: Tenant,
+    Path(pid): Path<i64>,
+    Form(back): Form<ReturnTo>,
+) -> UiResult<Response> {
+    let pair = tenant.core.store.get_pair(pid).await?;
+    // The same refusal the Keep buttons make. Every button on this card acts on
+    // both sides, and a side already out of results is work nobody can do.
+    let (a, b) = (
+        tenant.core.store.get_artifact(&pair.a_id).await?,
+        tenant.core.store.get_artifact(&pair.b_id).await?,
+    );
+    if !a.in_results() || !b.in_results() {
+        return Err(crate::error::Error::Validation(
+            "one of these has already left results".into(),
+        )
+        .into());
+    }
+    tenant.core.store.ask_pair_synthesis(pid).await?;
+    // Idle-only, like `consolidate` arms it: re-arming a queued unit winds its
+    // attempts back to zero.
+    tenant
+        .core
+        .store
+        .rearm_idle_seq(
+            crate::store::jobs::Stage::Dedupe,
+            "pair",
+            &pid.to_string(),
+            0,
+        )
+        .await?;
+    Ok(Redirect::to(back.path()).into_response())
+}
+
 /// Resolve a pair by naming the artifact that survives; the other is superseded
 /// by it.
 ///
@@ -389,6 +441,18 @@ pub struct PairRow {
     /// both" the way `keeps_a` accents a Keep — a recommendation about which
     /// button to press, not a third thing to do.
     pub vacuous: bool,
+    /// Every root of both members is `Captured`, so `insert_merged_artifact`
+    /// will accept a merge over them.
+    ///
+    /// The same lineage check `jobs::dedupe` makes at admission, asked here so
+    /// the card does not offer a button whose press can only come back a
+    /// validation error. A passage is its own root, so a pair of passages
+    /// fails it — which is the common case and exactly the one worth not
+    /// offering.
+    pub mergeable: bool,
+    /// An operator has already pressed Synthese and the writing is queued. The
+    /// row says so instead of offering the answers again.
+    pub synthesis_asked: bool,
 }
 
 /// One decision, however many pairs it takes to state it.
@@ -494,6 +558,21 @@ pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
             } else {
                 p.detail
             };
+            // The lineage check `jobs::dedupe` makes before it calls the
+            // model. Asked per row rather than once, because a pair names two
+            // artifacts and each carries its own lineage.
+            let member_ids = vec![p.a_id.clone(), p.b_id.clone()];
+            let root_map = tenant.core.store.roots_of(&member_ids).await?;
+            let all_roots: Vec<String> = root_map.values().flatten().cloned().collect();
+            let mergeable = !all_roots.is_empty()
+                && tenant
+                    .core
+                    .store
+                    .artifacts_by_ids(&all_roots)
+                    .await?
+                    .iter()
+                    .all(|r| r.provenance == crate::store::artifacts::Provenance::Captured);
+            let synthesis_asked = p.synthesis_asked;
             pairs.push(PairRow {
                 id: p.id,
                 percent: (p.score * 100.0).round() as i64,
@@ -514,6 +593,8 @@ pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
                 keeps_a,
                 keeps_b,
                 vacuous: state == crate::store::pairs::PairState::Vacuous,
+                mergeable,
+                synthesis_asked,
             });
             if pairs.len() == PAIR_LIMIT {
                 break 'fill;
@@ -644,6 +725,10 @@ pub(crate) fn routes() -> Router<AppState> {
             "/ui/ops/pairs/{id}/supersede",
             post(apply_pair_supersede_ui),
         )
+        .route(
+            "/ui/ops/pairs/{id}/synthesize",
+            post(ask_pair_synthesis_ui),
+        )
 }
 
 #[cfg(test)]
@@ -744,6 +829,8 @@ mod tests {
             vacuous: false,
             keeps_a: false,
             keeps_b: false,
+            mergeable: false,
+            synthesis_asked: false,
         }
     }
 
@@ -1216,6 +1303,104 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// `insert_merged_artifact` refuses a lineage that names anything but
+    /// captured roots, so offering the button over passages is offering a press
+    /// that can only answer with a validation error. A passage is its own root,
+    /// which is what makes this the common case rather than an edge one.
+    #[tokio::test]
+    async fn the_synthesize_button_is_offered_only_where_a_merge_can_be_written() {
+        use crate::store::artifacts::{NewArtifact, Provenance};
+        let (app, cookie, core) = app_session_and_core().await;
+
+        // Two captured artifacts: a merge over them is allowed.
+        let captured = artifacts(&core, &["clinic hours", "clinic services"]).await;
+        core.store
+            .record_pair(&captured[0], &captured[1], 0.9)
+            .await
+            .unwrap();
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(
+            html.contains("Synthese"),
+            "a captured pair can become one artifact"
+        );
+
+        // Two passages: stored source text, which a merge may not rewrite.
+        let src = core.store.insert_corpus("y", "web", None).await.unwrap();
+        let raw: Vec<NewArtifact> = ["verbatim left", "verbatim right"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| NewArtifact {
+                ordinal: i as i64,
+                text: (*t).to_string(),
+                title: Some((*t).to_string()),
+                ..Default::default()
+            })
+            .collect();
+        let passages: Vec<String> = core
+            .store
+            .insert_artifacts_with_provenance(&src.id, &raw, Provenance::Passage)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+
+        core.store
+            .record_pair(&passages[0], &passages[1], 0.9)
+            .await
+            .unwrap();
+
+        // Both pairs are on the page now. Exactly one of them offers the
+        // button, and it is not the one made of stored source text.
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(html.contains("verbatim left"), "the passage pair is on the queue");
+        assert_eq!(
+            html.matches("/synthesize").count(),
+            1,
+            "only the captured pair offers a synthesis"
+        );
+    }
+
+    /// The press records a judgement and arms a unit. It writes no artifact and
+    /// calls no model: no route under `src/web` calls one, and a handler that
+    /// blocked on a judge would hold the request open for as long as the
+    /// endpoint felt like taking.
+    #[tokio::test]
+    async fn pressing_synthesize_records_the_ask_and_writes_nothing() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/synthesize", pair.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        let after = core.store.get_pair(pair.id).await.unwrap();
+        assert!(after.synthesis_asked, "the ask is recorded");
+        assert!(after.merged_into.is_none(), "the route writes no merge");
+        for id in &ids {
+            assert!(
+                core.store.get_artifact(id).await.unwrap().in_results(),
+                "and hides neither side"
+            );
+        }
+
+        // The card stops offering the answers and says what is pending.
+        let html = get_body(&app, &cookie, "/ui/insights").await;
+        assert!(html.contains("A synthesis was asked for"));
     }
 
     /// A verdict is a recommendation on the card, never an action taken. So
