@@ -34,7 +34,8 @@ pub struct Retracted {
     pub undone: usize,
     /// Artifacts rule 2 restored.
     pub restored: usize,
-    /// Pairs rule 3 filed for interference.
+    /// Interferers rule 3 observed. Counted only: retrieval competition is a
+    /// fact about ranking, and `sleep::interference` files nothing.
     pub interference: usize,
     /// Condensations armed.
     pub condensed: usize,

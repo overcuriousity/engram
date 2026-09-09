@@ -41,7 +41,8 @@ pub struct Report {
     /// Probes the rehearse phase replayed, and the ones it retired on the way.
     pub rehearsed: usize,
     pub retired: usize,
-    /// Pairs rule 3 filed for interference.
+    /// Interferers rule 3 observed. Counted only: retrieval competition is a
+    /// fact about ranking, and `sleep::interference` files nothing.
     pub interference: usize,
     /// Condensations the pass armed.
     pub condensed: usize,

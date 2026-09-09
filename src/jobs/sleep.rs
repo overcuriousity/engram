@@ -412,9 +412,11 @@ async fn remint(
 /// owner is not in the results, so a probe whose owner is simply not
 /// retrievable — one condensed and awaiting a re-embed, which still passes
 /// `in_results()` — contributed a full slate of ids to the "stood above it in
-/// every one" test and made interference out of consistency. The pairs filed
-/// from that feed dedupe, which could then merge or supersede away the very
-/// artifact that was only briefly unfindable.
+/// every one" test and made interference out of consistency. That mattered
+/// more when the rule filed pairs and dedupe could merge or supersede away the
+/// very artifact that was only briefly unfindable; it files nothing now, so
+/// the cost of the same mistake is a wrong number on Ops rather than a lost
+/// artifact. The guard stays: a wrong number is still wrong.
 pub fn interferers<F>(
     results: &[crate::store::rehearsals::RehearsalResult],
     own_corpus: Option<&str>,
@@ -438,18 +440,37 @@ where
     out
 }
 
-/// Rule 3: forgetting by displacement. A probe owner outranked by the same
-/// artifact in every retained result has been answered for by it; the cosine
-/// at embed time did not call them duplicates, behaviour did. File the pair
-/// for the judge; the chain after this is dedupe's, unchanged. Returns
-/// (pairs filed, stopped early).
+/// Rule 3: forgetting by displacement. Which artifacts stand above a probe
+/// owner in every one of its retained results — retrieval competition,
+/// counted for Ops. Returns (interferers observed, stopped early).
+///
+/// It files nothing, and that is the point. It used to record an
+/// `artifact_pairs` row per interferer, which put a ranking observation onto a
+/// queue whose cards make claims about meaning: `_decide.html` renders a pair
+/// as "these two disagree", and two documents sharing a template outrank each
+/// other constantly while agreeing about everything. A base's whole queue was
+/// this rule's output — cover pages against cover pages, one town's shop
+/// listings against another's — and not one of them was a disagreement.
+///
+/// It also carried neither passage guard its sibling producers have
+/// (`relate::arm`, `associate::judge` both refuse a passage), so it was the
+/// only reason passage pairs reached consolidation at all — where `dedupe`
+/// cannot merge stored source text and settles them `Contradiction`, which is
+/// the state that renders as the claim. And it invented a `0.0` score out of a
+/// missed neighbour lookup, colliding with the marker `web::ops` reads as
+/// "found by co-retrieval, never measured".
+///
+/// The budget does not gate it any more either. That check was here because
+/// filing is what leads to a merge; with nothing written there is nothing to
+/// withhold, and a count that fell to zero when the week ran out would report
+/// that the competition had stopped rather than that the spending had.
 pub async fn interference(
     core: &Core,
     live: &crate::store::generations::Generation,
     started: i64,
 ) -> Result<(usize, bool)> {
     use crate::store::actions::Kind;
-    let mut filed = 0;
+    let mut observed = 0;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (probe, _) in core
         .store
@@ -457,7 +478,7 @@ pub async fn interference(
         .await?
     {
         if core.store.activity_since(started).await? {
-            return Ok((filed, true));
+            return Ok((observed, true));
         }
         if !seen.insert(probe.artifact_id.clone()) {
             continue;
@@ -500,22 +521,16 @@ pub async fn interference(
             corpora.get(id).cloned().flatten()
         });
         for x in found {
-            // `artifact_pairs` carries foreign keys on both members and
-            // `INSERT OR IGNORE` does not suppress a foreign-key violation, so
-            // filing against an id the base no longer has failed the whole
-            // retention sweep — every rule after this one included — over one
-            // artifact somebody deleted. One id skipped is the right size of
-            // consequence.
+            // An id the base no longer has is not an observation about
+            // anything still in results. `outranked_by` is free-form JSON
+            // written when the rehearsal ran, and a burial or a merge can take
+            // the artifact it names away afterwards.
             if gone.contains(&x) {
-                tracing::debug!(owner = %owner.id, outranker = %x, "an outranker the base no longer has; nothing to file against");
+                tracing::debug!(owner = %owner.id, outranker = %x, "an outranker the base no longer has");
                 continue;
             }
-            // Filing is not acting, but it is what leads to one: it stops at
-            // the budget with the rest of the corpus half.
-            if !core.may_act().await? {
-                return Ok((filed, false));
-            }
-            // A pair the base once acted on and took back is a person's now.
+            // A pair the base once acted on and took back is a person's now,
+            // and their decision is not re-observed at them.
             if core.store.action_was_undone(&owner.id, Kind::Merge).await?
                 || core
                     .store
@@ -526,31 +541,10 @@ pub async fn interference(
             {
                 continue;
             }
-            if core.store.pair_between(&owner.id, &x).await?.is_some() {
-                continue;
-            }
-            let detail = format!(
-                "interference: {x} stood above this in every one of {} rehearsals",
-                results.len()
-            );
-            let score = core
-                .vectors
-                .neighbours(&owner.id, core.consolidate.per_point)
-                .await?
-                .into_iter()
-                .find(|h| h.payload.artifact_id == x)
-                .and_then(|h| h.similarity)
-                .unwrap_or(0.0);
-            if core
-                .store
-                .record_pair_with_detail(&owner.id, &x, score, &detail)
-                .await?
-            {
-                filed += 1;
-            }
+            observed += 1;
         }
     }
-    Ok((filed, false))
+    Ok((observed, false))
 }
 
 /// A stable owner dragging one competitor, with use behind it: arm a
@@ -997,15 +991,19 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let (filed, _) = interference(&core, &live, crate::store::now())
+        let (seen, _) = interference(&core, &live, crate::store::now())
             .await
             .expect("one missing id does not fail the sweep");
-        assert_eq!(filed, 1, "the outranker that is still there is still filed");
-        assert!(core.store.pair_between(&a1, &b).await.unwrap().is_some());
+        assert_eq!(seen, 1, "the outranker that is still there is still counted");
+        assert!(core.store.pair_between(&a1, &b).await.unwrap().is_none());
     }
 
+    /// Retrieval competition is a fact about ranking, not about meaning. It is
+    /// counted for Ops and it files nothing: the decide card renders a pair as
+    /// "these two disagree", and two documents sharing a template outrank each
+    /// other constantly while agreeing about everything.
     #[tokio::test]
-    async fn interference_files_one_pending_pair_and_never_the_same_pair_twice() {
+    async fn interference_counts_what_it_sees_and_files_no_pair() {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         let live = live_generation(&core).await;
@@ -1035,24 +1033,82 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let (filed, _) = interference(&core, &live, crate::store::now())
+        let (seen, _) = interference(&core, &live, crate::store::now())
             .await
             .unwrap();
-        assert_eq!(filed, 1);
-        let pair = core.store.pair_between(&a1, &b).await.unwrap().unwrap();
-        assert_eq!(pair.state, crate::store::pairs::PairState::Pending);
-        assert!(pair.detail.unwrap_or_default().contains("interference"));
+        assert_eq!(seen, 1, "the interferer is still counted");
+        assert!(
+            core.store.pair_between(&a1, &b).await.unwrap().is_none(),
+            "retrieval competition is not a dedupe finding and files no pair"
+        );
+        // Observing is idempotent in a way filing never was: the same standing
+        // is still the same standing on the next pass, and reporting it twice
+        // is the truth twice rather than a duplicate row.
         assert_eq!(
             interference(&core, &live, crate::store::now())
                 .await
                 .unwrap()
                 .0,
-            0
+            1
         );
     }
 
+    /// `web::ops` reads an exact zero score as "found by co-retrieval, never
+    /// measured". Interference manufactured one out of a missed neighbour
+    /// lookup — `unwrap_or(0.0)` over a `find` that returned nothing — which
+    /// put two meanings on one value. It writes no score at all now.
     #[tokio::test]
-    async fn interference_stops_filing_when_the_week_is_spent() {
+    async fn interference_writes_no_pair_carrying_a_zero_score() {
+        let (mut core, a1, _a2, b) = two_corpora().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let live = live_generation(&core).await;
+        let pid = core
+            .store
+            .record_rehearsal(&NewRehearsal {
+                class: Class::Cue,
+                query: "q".into(),
+                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: a1.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: pid.clone(),
+                    generation_id: live.id.clone(),
+                    rank: Some(2),
+                    outranked_by: vec![b.clone()],
+                })
+                .await
+                .unwrap();
+        }
+        interference(&core, &live, crate::store::now())
+            .await
+            .unwrap();
+        for p in core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 100)
+            .await
+            .unwrap()
+        {
+            assert!(
+                p.score != 0.0 || p.detail.as_deref() == Some("link"),
+                "an exact zero means the link judge filed it, and nothing else"
+            );
+        }
+    }
+
+    /// The week's budget is about acting, and observing is not acting. It used
+    /// to gate this rule because the rule filed pairs, and filing is what leads
+    /// to a merge; with nothing written there is nothing to withhold, and a
+    /// count that went to zero when the budget ran out would have Ops report
+    /// that the competition stopped rather than that the spending did.
+    #[tokio::test]
+    async fn interference_keeps_counting_when_the_week_is_spent() {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         core.evolve.max_actions_per_week = 0;
@@ -1086,7 +1142,8 @@ mod tests {
                 .await
                 .unwrap()
                 .0,
-            0
+            1,
+            "the standing is reported whatever is left of the budget"
         );
         assert!(core.store.pair_between(&a1, &b).await.unwrap().is_none());
     }

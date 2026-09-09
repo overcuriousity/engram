@@ -1103,8 +1103,12 @@ fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
         ));
     }
     if r.interference > 0 {
+        // "Saw", not "Filed". The rule files nothing: retrieval competition is
+        // a fact about ranking, and the queue this used to write to makes
+        // claims about meaning. A sentence promising pairs sent a reader to a
+        // page that would never show them.
         s.push_str(&format!(
-            " Filed {} pair{} for interference.",
+            " Saw {} artifact{} outranked in every rehearsal.",
             r.interference,
             if r.interference == 1 { "" } else { "s" }
         ));
