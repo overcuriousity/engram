@@ -994,7 +994,10 @@ mod tests {
         let (seen, _) = interference(&core, &live, crate::store::now())
             .await
             .expect("one missing id does not fail the sweep");
-        assert_eq!(seen, 1, "the outranker that is still there is still counted");
+        assert_eq!(
+            seen, 1,
+            "the outranker that is still there is still counted"
+        );
         assert!(core.store.pair_between(&a1, &b).await.unwrap().is_none());
     }
 

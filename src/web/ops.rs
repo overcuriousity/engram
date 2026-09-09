@@ -731,10 +731,7 @@ pub(crate) fn routes() -> Router<AppState> {
             "/ui/ops/pairs/{id}/supersede",
             post(apply_pair_supersede_ui),
         )
-        .route(
-            "/ui/ops/pairs/{id}/synthesize",
-            post(ask_pair_synthesis_ui),
-        )
+        .route("/ui/ops/pairs/{id}/synthesize", post(ask_pair_synthesis_ui))
 }
 
 #[cfg(test)]
@@ -1363,7 +1360,10 @@ mod tests {
         // Both pairs are on the page now. Exactly one of them offers the
         // button, and it is not the one made of stored source text.
         let html = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(html.contains("verbatim left"), "the passage pair is on the queue");
+        assert!(
+            html.contains("verbatim left"),
+            "the passage pair is on the queue"
+        );
         assert_eq!(
             html.matches("/synthesize").count(),
             1,

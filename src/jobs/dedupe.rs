@@ -482,11 +482,7 @@ fn interpret(
 /// the same one: a synthesis an operator asked for and a merge the judge
 /// applied must leave the base in the same shape, or the journal has two kinds
 /// of merge in it and the undo path has to know which is which.
-async fn synthesize_asked_pair(
-    core: &Core,
-    p: &ArtifactPair,
-    members: Vec<Chunk>,
-) -> Result<()> {
+async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk>) -> Result<()> {
     use crate::store::actions::Kind;
     let Some(writer) = core.pair_synthesizer.clone() else {
         // Nothing to ask with. The flag stays set, so the press is not lost and
@@ -508,7 +504,13 @@ async fn synthesize_asked_pair(
             let act = format!("merged into {} from {} sources", m.id, sources.len());
             for source in &sources {
                 core.store
-                    .record_action(&action(Kind::Merge, p, source, Some(&m.id), Some(act.as_str())))
+                    .record_action(&action(
+                        Kind::Merge,
+                        p,
+                        source,
+                        Some(&m.id),
+                        Some(act.as_str()),
+                    ))
                     .await?;
             }
             core.store
@@ -556,7 +558,10 @@ fn synthesis_prompt(members: &[Chunk]) -> String {
     let mut s = String::new();
     for m in members {
         let title = crate::web::ui::row_label(m).text;
-        s.push_str(&format!("----- ARTIFACT -----\nTitle: {title}\n\n{}\n", m.text));
+        s.push_str(&format!(
+            "----- ARTIFACT -----\nTitle: {title}\n\n{}\n",
+            m.text
+        ));
     }
     s.push_str("----- END -----");
     s
@@ -2092,17 +2097,22 @@ mod tests {
     #[tokio::test]
     async fn a_refused_synthesis_clears_the_ask() {
         let core = test_core().await;
-        let src = core.store.insert_corpus("skript", "web", None).await.unwrap();
-        let raw: Vec<crate::store::artifacts::NewArtifact> = ["Spuren sind materiell.", "Spuren sind Veraenderungen."]
-            .iter()
-            .enumerate()
-            .map(|(i, t)| crate::store::artifacts::NewArtifact {
-                ordinal: i as i64,
-                text: (*t).to_string(),
-                segment_idx: Some(0),
-                ..Default::default()
-            })
-            .collect();
+        let src = core
+            .store
+            .insert_corpus("skript", "web", None)
+            .await
+            .unwrap();
+        let raw: Vec<crate::store::artifacts::NewArtifact> =
+            ["Spuren sind materiell.", "Spuren sind Veraenderungen."]
+                .iter()
+                .enumerate()
+                .map(|(i, t)| crate::store::artifacts::NewArtifact {
+                    ordinal: i as i64,
+                    text: (*t).to_string(),
+                    segment_idx: Some(0),
+                    ..Default::default()
+                })
+                .collect();
         let passages: Vec<String> = core
             .store
             .insert_artifacts_with_provenance(&src.id, &raw, Provenance::Passage)
@@ -2159,7 +2169,11 @@ mod tests {
             "no merged artifact exists until somebody presses"
         );
         assert!(
-            core.store.open_actions(&[Kind::Merge], 10).await.unwrap().is_empty(),
+            core.store
+                .open_actions(&[Kind::Merge], 10)
+                .await
+                .unwrap()
+                .is_empty(),
             "and the journal has nothing to record"
         );
         for id in &ids {

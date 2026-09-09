@@ -2759,14 +2759,18 @@ mod tests {
 
     #[test]
     fn a_synthesis_reply_with_no_text_is_an_error() {
-        let body = r#"{"merged":{"title":"Praxis","text":"   ","category":"reference","caveats":[]}}"#;
+        let body =
+            r#"{"merged":{"title":"Praxis","text":"   ","category":"reference","caveats":[]}}"#;
         assert!(parse_synthesis(body).is_err(), "an empty body is no draft");
     }
 
     #[test]
     fn a_synthesis_reply_in_a_fence_still_parses() {
         let body = "```json\n{\"merged\":{\"title\":\"P\",\"text\":\"x\",\"category\":\"reference\",\"caveats\":[]}}\n```";
-        assert!(parse_synthesis(body).is_ok(), "fences are stripped like everywhere else");
+        assert!(
+            parse_synthesis(body).is_ok(),
+            "fences are stripped like everywhere else"
+        );
     }
 
     /// `strict` rejects a listed-but-optional property outright, which fails
