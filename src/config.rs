@@ -883,6 +883,16 @@ pub struct ConsolidateConfig {
     pub enabled: bool,
     /// Estimated Jaccard over word shingles above which a capture is parked as
     /// a near-duplicate of an existing corpus.
+    ///
+    /// 0.60 is measured rather than chosen. Over a live base's 3916 corpus
+    /// pairs, computed with `store::shingle::similarity` itself, the one real
+    /// duplicate — a news article captured once through the web door and once
+    /// through the journal door, differing only in extraction boilerplate —
+    /// scored 0.789, and the next-highest pair in the whole base scored 0.036.
+    /// Everything between is empty, so the threshold sits in the middle of a
+    /// gap rather than on a slope. It shipped at 0.90, which is above the only
+    /// case it had to catch: two readings of one document never agree closely
+    /// enough for that, because the boilerplate each door keeps is different.
     pub near_dupe_min: f64,
     /// Cosine at or above which a pair is worth an operator's attention.
     pub review_min: f32,
@@ -929,7 +939,7 @@ impl Default for ConsolidateConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            near_dupe_min: 0.90,
+            near_dupe_min: 0.60,
             review_min: default_review_min(),
             auto_supersede: 0.95,
             per_point: 5,
@@ -2937,6 +2947,31 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The near-duplicate threshold sits in the gap the evidence shows rather
+    /// than above it.
+    ///
+    /// Measured over a live base's 3916 corpus pairs with
+    /// `store::shingle::similarity` itself: the one real duplicate — a news
+    /// article captured through the web door and again through the journal
+    /// door — scored 0.789, and the next-highest pair in the entire base
+    /// scored 0.036. Nothing lies between the two. It shipped at 0.90, above
+    /// the only duplicate the base actually had, which therefore stayed in it
+    /// twice.
+    #[test]
+    fn near_dupe_min_catches_a_recapture_and_not_a_related_document() {
+        let c = ConsolidateConfig::default();
+        assert!(
+            c.near_dupe_min <= 0.78,
+            "a re-capture through another door scored 0.789; {} is above it",
+            c.near_dupe_min
+        );
+        assert!(
+            c.near_dupe_min > 0.10,
+            "the highest false candidate scored 0.036; {} is not clear of it",
+            c.near_dupe_min
+        );
+    }
 
     #[test]
     fn autonomy_reads_the_old_bool_and_the_three_words() {

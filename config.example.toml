@@ -472,7 +472,13 @@ enabled = true
 # Estimated overlap of word shingles above which a new capture is parked as a
 # near-duplicate of an existing corpus rather than segmented. It is stored
 # either way; parking only withholds the model call until you decide on Ops.
-near_dupe_min = 0.90
+#
+# Measured, not chosen: over one base's 3916 corpus pairs the single real
+# duplicate — one article captured through two different doors — scored 0.789,
+# and the next-highest pair scored 0.036. Two readings of one document never
+# agree more closely than that, because the boilerplate each door keeps is
+# different, so a threshold up at 0.90 catches nothing that matters.
+near_dupe_min = 0.60
 # Cosine at or above which a pair of artifacts goes on the review queue.
 #
 # A floor, not an admission. Clearing it is necessary and not sufficient: a pair
