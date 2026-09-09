@@ -171,25 +171,24 @@ The model returned `relation: "duplicate"` and then wrote prose concluding the
 opposite. Nothing reconciles the two, and the prose is what gets journaled and
 displayed.
 
-The cause is visible in `dedupe_schema()` (`src/infer/prompt.rs:2224`) and in
-the shape `DEDUPE_SYSTEM` shows:
-
-```json
-{"verdict": {"relation": "duplicate", "detail": "...", "merged": {…}}}
-```
-
-`relation` comes first, in the example and in each of the four `anyOf`
-variants' `properties` and `required`. The response format is sent with
+**The cause was not what this spec first said it was.** The original diagnosis
+blamed field order: `relation` comes before `detail` in `dedupe_schema()` and in
+the shape `DEDUPE_SYSTEM` shows, the response format is sent with
 `"strict": true` and compiled into "a grammar the decoder cannot leave"
-(`src/infer/openai.rs:888`). The model is therefore required to commit to the
-label before it has written a word of justification — and the justification,
-written second, is where the better reasoning shows up.
+(`src/infer/openai.rs:888`), so the model appeared to be forced to commit to a
+label before writing any justification.
 
-A string comparison between the two fields is not the fix. Agreement between a
-label and a sentence of free prose is a semantic question over nondeterministic
-text, and deterministic token matching answers it badly; the tree already paid
-for that lesson once, in the `infer::facts` post-mortem recorded above
-`dedupe_prompt`. The fix belongs at the inference layer.
+Measured against the live judge, that is false. It already emits `detail`
+first, with the shipped schema and the shipped example. The label is not a
+commitment taken before the reasoning; it is a choice made **after** it, between
+two categories that both fit. See **F2** for the numbers and for what replaced
+the proposed fix.
+
+A string comparison between the two fields would not have helped either, and is
+not the shape of a fix here. Agreement between a label and a sentence of free
+prose is a semantic question over nondeterministic text, and the tree already
+paid for answering that kind of question with token matching once — the
+`infer::facts` post-mortem above `dedupe_prompt`.
 
 ## The changes
 
@@ -323,32 +322,67 @@ This needs no text analysis. It removes the case where a journal line asserts
 a reason that argues against the action beside it, and it holds whether or not
 F2 succeeds.
 
-### F2 — reason before verdict
+### F2 — refuted by measurement, and replaced
 
-In `dedupe_schema()`, move `detail` ahead of `relation` in every one of the
-four `anyOf` variants, in both `properties` and `required`, and update the
-example shape in `DEDUPE_SYSTEM` to match. The model then states why before it
-names what, and the label is conditioned on the reasoning rather than the
-reasoning on the label.
+**This section proposed the wrong fix.** It is kept rather than deleted,
+because the reasoning that produced it was plausible and the measurement that
+killed it is the useful part.
 
-`parse_dedupe` needs no change — it deserializes through serde and is
-order-independent. Only generation is affected.
+The proposal was to move `detail` ahead of `relation` in `dedupe_schema`, on the
+theory that `strict` made the schema a grammar and forced the model to commit
+to a label before writing any justification. Three measurements against the
+live judge, in order:
 
-This is prevention rather than detection, and it costs no additional call. A
-second inference pass checking prose against verdict remains available if this
-proves insufficient, but at two merges in the base's whole history, a
-verification call on every verdict is a poor trade against a divergence the
-ordering may remove outright.
+1. **The endpoint accepts a reordered `anyOf`.** The union still discriminates
+   on `relation`; the variants share a prefix until it arrives; the reply
+   parsed. So the change was *possible*.
+2. **It would have changed nothing.** With the shipped schema and the shipped
+   example — `relation` first in both — the judge already emits `detail` first,
+   every time. The premise was simply false. (`serde_json` here carries
+   `preserve_order` transitively through `indexmap`, so the schema does
+   serialise `relation` first as written; the model orders its own output
+   anyway.)
+3. **The real cause is the taxonomy, not the ordering.** Asked twelve times
+   about the two veterinary-practice artifacts under the real prompt and real
+   schema, the judge wrote materially the same reasoning every time — "both
+   describe the same practice, A has the contact details, B has the services" —
+   and labelled it `distinct` nine times and `duplicate` three. Two runs with
+   near-identical prose got opposite labels.
 
-**Risk, stated plainly.** The four variants are discriminated by `relation`.
-With `detail` first they share a common prefix, and the branch is not decided
-until `relation` arrives. Grammar compilers handle common prefixes, but the
-tree's own warning applies — "A grammar is only as good as the endpoint
-honouring it, and `structured_output` can be switched off"
-(`src/infer/prompt.rs`). This must be verified against the live judge before
-it is committed. If the endpoint will not honour it, F2 falls back to
-instructing the ordering in `DEDUPE_SYSTEM` prose alone, and the F3 safety net
-below becomes necessary.
+The prompt's own definitions both fit that shape word for word: `duplicate` is
+"they make the same claim, and each carries some detail the others lack", and
+`distinct` is "different subjects, **or one covers something the others simply
+do not**". A pair with one subject and complementary content satisfies both.
+
+**A prompt fix was tried and rejected on its own control.** Narrowing `distinct`
+to "different subjects" and naming the complementary case as `duplicate`:
+
+| | vet pair (wants `duplicate`) | pair 529, unrelated (wants `distinct`) |
+|---|---|---|
+| shipped | 3/12 duplicate | 3/12 duplicate |
+| narrowed | 8/12 duplicate | **5/12 duplicate** |
+
+It moves the target case and makes the control worse — from 25% to 42% false
+duplicates, on a verdict that hides two artifacts behind a third. At N=5 the
+control had looked clean; that was noise, and stopping there would have shipped
+a regression as a fix.
+
+The residual finding is worth recording on its own: **even as shipped**, the
+judge calls two plainly unrelated documents a duplicate in a quarter of runs.
+That is not introduced by any change here. Its exposure is smaller than the
+table suggests, because after **A** neither remaining producer files a pair
+like 529 at all.
+
+**What ships instead: the verdict stops acting.** `Relation::Duplicate` settles
+the pair to a new `PairState::Duplicate` and writes nothing. The card already
+renders anything that is neither vacuous nor a contradiction as "these two
+cover the same ground", which is exactly what the verdict now claims, and
+**E**'s button is the press that acts on it. The reading is the model's; the
+decision is a person's.
+
+The draft that call already paid for is dropped. A draft written under a label
+nobody has confirmed is not worth keeping, and the writing pass asks for a
+fresh one under a prompt that is not deciding anything.
 
 ### F3 — not built now
 
