@@ -579,6 +579,64 @@ mod tests {
     use crate::store::jobs::{MAX_ATTEMPTS, backoff_secs};
     use std::sync::Arc;
 
+    /// A standing count claims no work, and a report that gains one keeps
+    /// working without being told about this.
+    ///
+    /// Asserted on the retention report itself rather than on a hand-written
+    /// JSON blob: the whole mechanism is that `did_work` reads the fields a
+    /// sweep already serializes, so a field moved into or out of `Standing` is
+    /// only correct if it is correct *there*.
+    #[test]
+    fn a_sweeps_standing_counts_are_not_work() {
+        use crate::jobs::retention::{Report, Standing};
+
+        // A base with retrieval competition and a probe set that the lap keeps
+        // re-measuring, and nothing else happening. Every number here says what
+        // the base holds, not what this pass did to it.
+        let quiet = Report {
+            standing: Standing {
+                clusters: 7,
+                rehearsed: 42,
+                interference: 3,
+            },
+            ..Default::default()
+        };
+        assert!(
+            !did_work(&detail(&quiet).unwrap()),
+            "a quiet base reported work, so the backoff never engages"
+        );
+
+        // And the moment anything actually moves, it is work again — which is
+        // what makes the backoff safe to have at all.
+        for busy in [
+            Report {
+                moved: 1,
+                ..quiet.clone()
+            },
+            Report {
+                retired: 1,
+                ..quiet.clone()
+            },
+            Report {
+                condensed: 1,
+                ..quiet.clone()
+            },
+            Report {
+                integrated: 1,
+                ..quiet.clone()
+            },
+            Report {
+                gave_up: 1,
+                ..quiet.clone()
+            },
+        ] {
+            assert!(
+                did_work(&detail(&busy).unwrap()),
+                "a pass that changed something reported none: {busy:?}"
+            );
+        }
+    }
+
     /// The row a sweep leaves behind, whatever state it left in.
     async fn pending_run_after(core: &Core, stage: Stage) -> Option<i64> {
         sqlx::query_scalar("SELECT run_after FROM jobs WHERE stage = ? AND state = 'pending'")

@@ -24,6 +24,31 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     if c.provenance == crate::store::artifacts::Provenance::Passage || !c.in_results() {
         return Ok(());
     }
+    // Already condensed, and the arming path's own check is not enough to say
+    // so. `sleep::condense_candidates` asks this before arming, which stops a
+    // second *arming*; it does nothing about the same arming running twice.
+    // The write below commits and the `enqueue` after it lives in another
+    // database, so a retryable failure there leaves this unit queued with the
+    // condensation already applied — and the retry rewrote the artifact a
+    // second time off one arming.
+    //
+    // Two versions off one nomination is not merely redundant. `undo_action_on`
+    // stamps *every* open row for a subject and kind, so taking the newer
+    // condensation back marks the older one undone as well, and the original
+    // text — the one the first rewrite retired — is hidden from `jobs::retract`
+    // for good: it reads open rows, and there are none left.
+    if let Some(open) = core
+        .store
+        .open_action_on(&c.id, crate::store::actions::Kind::Condense)
+        .await?
+    {
+        tracing::info!(
+            artifact_id,
+            action = %open.id,
+            "this artifact is already condensed and the condensation stands; nothing written"
+        );
+        return Ok(());
+    }
     // Both gates are read again at the unit, not only where it was armed:
     // permission and budget can each have gone while this waited in the queue.
     //
@@ -101,10 +126,34 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         "before_chars": c.text.len(),
         "after_chars": g.text.len(),
     });
-    let (action_id, n) = core
+    // `c.embed_rev` is the revision the text above was read at, and the model
+    // call between the two is unbounded in time. An edit that landed in that
+    // window has to win: it is a person's, it is newer, and the `losses()`
+    // check just above was computed against the copy it replaced.
+    let Some((action_id, n)) = core
         .store
-        .condense_artifact(&c.id, &g.text, Some(&g.title), &g.caveats, evidence)
-        .await?;
+        .condense_artifact(
+            &c.id,
+            Some(c.embed_rev),
+            &g.text,
+            Some(&g.title),
+            &g.caveats,
+            evidence,
+        )
+        .await?
+    else {
+        // Dropped rather than retried. The rewrite that came back describes
+        // text the base no longer holds, so there is nothing here worth
+        // keeping — and if the artifact still earns a condensation,
+        // `sleep::condense_candidates` nominates it again on a later pass with
+        // the current text in front of it.
+        tracing::info!(
+            artifact_id,
+            rev = c.embed_rev,
+            "the artifact was edited while this was being written; the rewrite is dropped"
+        );
+        return Ok(());
+    };
     core.store.enqueue(Stage::Embed, "artifact", &c.id).await?;
     tracing::info!(artifact_id, action = %action_id, version = n, "condensed");
     Ok(())
@@ -222,6 +271,85 @@ mod tests {
                 .action_was_undone(&id, crate::store::actions::Kind::Condense)
                 .await
                 .unwrap()
+        );
+    }
+
+    /// One arming, one condensation. The enqueue after the commit lives in
+    /// another database, so a retryable failure there leaves this unit queued
+    /// with the rewrite already applied — and the retry used to write a second
+    /// version off the same nomination. The arming path's own check
+    /// (`sleep::condense_candidates`) stops a second *arming* and does nothing
+    /// about this.
+    ///
+    /// Two versions off one nomination is not merely redundant:
+    /// `undo_action_on` stamps every open row for a subject and kind, so
+    /// taking the newer one back marks the older undone too, and the original
+    /// text is hidden from `jobs::retract` for good.
+    #[tokio::test]
+    async fn an_artifact_that_is_already_condensed_is_not_condensed_again() {
+        let (core, writer) = core_with(vec![
+            reply("The loop mount needs `mount -o loop /dev/loop0`."),
+            reply("Needs `mount -o loop /dev/loop0`."),
+        ])
+        .await;
+        let id = synthesized(&core).await;
+        run(&core, &id).await.unwrap();
+        assert_eq!(core.store.versions_of(&id).await.unwrap().len(), 1);
+
+        // The retry the failed enqueue would have caused.
+        run(&core, &id).await.unwrap();
+
+        assert_eq!(writer.calls(), 1, "the second run spends no model call");
+        assert_eq!(
+            core.store.versions_of(&id).await.unwrap().len(),
+            1,
+            "one nomination, one version"
+        );
+    }
+
+    /// A condensation is a read-modify-write with a model call in the middle,
+    /// and that call takes as long as the endpoint feels like taking. An edit
+    /// through the API in that window has to win: it is a person's, it is
+    /// newer, and the `losses()` guard that is the whole safety argument of
+    /// this path was computed against the copy it replaced — so a value the
+    /// user had just added was covered by nothing at all.
+    #[tokio::test]
+    async fn an_edit_made_while_the_rewrite_was_being_written_is_not_reverted() {
+        let (core, _) = core_with(vec![reply(
+            "The loop mount needs `mount -o loop /dev/loop0`.",
+        )])
+        .await;
+        let id = synthesized(&core).await;
+        // The revision the unit would have read the text at, before the model
+        // was asked. The scripted writer answers instantly, so the window is
+        // opened by hand — but the revision is the whole of what the check
+        // reads, and bumping it is exactly what an edit does.
+        let read_at = core.store.get_artifact(&id).await.unwrap().embed_rev;
+        let edited = "Loop mounts need `mount -o loop /dev/loop0` and `losetup -f`.";
+        core.store.update_artifact_text(&id, edited).await.unwrap();
+
+        let written = core
+            .store
+            .condense_artifact(
+                &id,
+                Some(read_at),
+                "The loop mount needs `mount -o loop /dev/loop0`.",
+                Some("Loop mounts"),
+                &[],
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        assert!(written.is_none(), "the stale rewrite was written anyway");
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().text,
+            edited,
+            "the edit stands"
+        );
+        assert!(
+            core.store.versions_of(&id).await.unwrap().is_empty(),
+            "and nothing was journaled for a write that did not happen"
         );
     }
 

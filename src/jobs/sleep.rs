@@ -84,6 +84,55 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
 
         let nearest = surviving.first();
         let tag = tag_for(review_min, nearest.map(|(s, _)| *s));
+
+        // The probes first, and the integration row that closes the artifact
+        // out only once they are written.
+        //
+        // The other order is the one the whole write path is arranged to
+        // avoid: `record_integration` commits, and `artifacts_to_integrate`
+        // excludes anything that has a row — so an artifact was marked
+        // integrated and *then* its capture probes were minted behind two
+        // `?`s. A vector store that hiccupped at `dense_of` aborted the pass
+        // with no `sleep_runs` row to say so, and every later pass skipped the
+        // artifact as already integrated. Nothing else mints a capture probe:
+        // `integrate` files an artifact once and never revisits it, so those
+        // probes were not late, they were gone — and with them the anchor that
+        // refuses a candidate generation and reverts a bad one.
+        //
+        // Written twice rather than not at all, in the failure this leaves:
+        // `record_rehearsal` is unique over `(artifact_id, class, query)` where
+        // `retired_at IS NULL`, so a pass that mints probes and then fails to
+        // record the integration re-mints nothing on the next lap — it gets
+        // `None` back and counts nothing — and goes on to write the row.
+        //
+        // The vector is the artifact's own, read back from the index so
+        // nothing is embedded. `None` means it has no point yet: nothing to
+        // mint a probe from, and nothing that says the integration should
+        // wait, so the row is still written and the artifact is done with.
+        let mut minted = 0;
+        if let Some(vec) = core.vectors.dense_of(&a.id).await? {
+            for (sim, other) in &surviving {
+                if *sim < review_min {
+                    break;
+                }
+                if core
+                    .store
+                    .record_rehearsal(&NewRehearsal {
+                        class: Class::Capture,
+                        query: a.text.clone(),
+                        query_vec: vec.clone(),
+                        embed_model: model.clone(),
+                        artifact_id: other.id.clone(),
+                        source_id: Some(a.id.clone()),
+                    })
+                    .await?
+                    .is_some()
+                {
+                    minted += 1;
+                }
+            }
+        }
+
         let written = core
             .store
             .record_integration(&Integration {
@@ -95,9 +144,13 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
                 detail: None,
             })
             .await?;
+        // Counted off the row, which is what makes this pass the one that
+        // integrated the artifact. `false` is another pass having got there
+        // first, and its probes are the ones that stand.
         if !written {
             continue;
         }
+        out.probes += minted;
         out.integrated += 1;
         match tag {
             Tag::Novel => out.novel += 1,
@@ -107,31 +160,6 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
             // survive so the integrations and sleep runs recorded before the
             // evidence heuristic was retired still read back as what they were.
             Tag::Conflict => {}
-        }
-        // The vector is the artifact's own, read back from the index so
-        // nothing is embedded.
-        let Some(vec) = core.vectors.dense_of(&a.id).await? else {
-            continue;
-        };
-        for (sim, other) in &surviving {
-            if *sim < review_min {
-                break;
-            }
-            if core
-                .store
-                .record_rehearsal(&NewRehearsal {
-                    class: Class::Capture,
-                    query: a.text.clone(),
-                    query_vec: vec.clone(),
-                    embed_model: model.clone(),
-                    artifact_id: other.id.clone(),
-                    source_id: Some(a.id.clone()),
-                })
-                .await?
-                .is_some()
-            {
-                out.probes += 1;
-            }
         }
     }
     Ok(out)
@@ -143,6 +171,22 @@ pub const REHEARSED_AFTER: &str = "sleep.rehearsed_after";
 pub struct Replayed {
     pub rehearsed: usize,
     pub found: usize,
+    /// Of those replayed, the ones that landed somewhere new — a different
+    /// rank than this probe's last result under this generation, found where
+    /// it was missing, or missing where it was found. A probe measured with no
+    /// previous result under this generation counts, because a first
+    /// measurement is all signal.
+    ///
+    /// This is what the pass *learned*, and it is the number `jobs::did_work`
+    /// reads. `rehearsed` is not: the lap wraps, so on any base that has ever
+    /// captured anything it is non-zero on every pass for ever, and a count
+    /// that is never zero is a backoff that never engages. Replaying a probe
+    /// to the rank it already had, under the parameters it already had, is not
+    /// work — it is the same measurement again, and the base is entitled to
+    /// sleep through it. What moves is what is worth waking for, which is the
+    /// rule `fragile_rehearsals` already applies to *which* probes to spend a
+    /// pass on, read here one level up at *how often* to spend one.
+    pub moved: usize,
     /// Probes retired on the way: another embedder, or an owner gone.
     pub retired: usize,
     /// Of those, the ones asked again at the live embedder. See `remint`.
@@ -221,6 +265,13 @@ pub async fn rehearse(
     let lap_start = batch.len();
     batch.extend(lap);
 
+    // Where each of these probes stood last time, in one query rather than a
+    // point lookup per probe on a pass that already runs `OBSERVATION_LIMIT`
+    // searches. Absent means never measured under this generation, which is
+    // not the same fact as measured and missed — see `latest_ranks_under`.
+    let ids: Vec<String> = batch.iter().map(|r| r.id.clone()).collect();
+    let was = core.store.latest_ranks_under(&ids, &live.id).await?;
+
     let mut cursor = after;
     for (i, r) in batch.iter().enumerate() {
         if core.store.activity_since(started).await? {
@@ -296,6 +347,13 @@ pub async fn rehearse(
         out.rehearsed += 1;
         if rank.is_some() {
             out.found += 1;
+        }
+        // Stored 1-based, measured 0-based, and the comparison has to be made
+        // in one of them or every probe reads as having moved.
+        let now_at = rank.map(|r| r as i64 + 1);
+        match was.get(&r.id) {
+            Some(before) => out.moved += usize::from(*before != now_at),
+            None => out.moved += 1,
         }
         core.store
             .record_rehearsal_result(&crate::store::rehearsals::NewResult {
@@ -489,10 +547,18 @@ pub async fn interference(
         if !owner.in_results() {
             continue;
         }
-        // Every retained result of every live probe of this owner, together.
+        // Every retained result of every live probe of this owner, together —
+        // under the live generation and no other. A rank is a measurement made
+        // at one set of ranking parameters, so results either side of a
+        // generation boundary are two different measurements, and nothing
+        // expires them at the shipped default of `retain_days = 0`.
         let mut results = Vec::new();
         for p in core.store.rehearsals_of(&owner.id).await? {
-            results.extend(core.store.results_of(&p.id, OBSERVATION_LIMIT).await?);
+            results.extend(
+                core.store
+                    .results_of_under(&p.id, &live.id, OBSERVATION_LIMIT)
+                    .await?,
+            );
         }
         let mut corpora: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -592,9 +658,20 @@ pub async fn condense_candidates(
         {
             continue;
         }
+        // Under the live generation only. Unscoped, this test was permanent
+        // and self-inflicted: `condense_artifact` sets `embed_state =
+        // 'pending'`, so the first rehearsal after any condensation records a
+        // `rank: None` — and one such row anywhere in the artifact's history
+        // then disabled condense *and* interference for that owner for ever,
+        // on a miss the base itself had manufactured under settings it no
+        // longer runs.
         let mut results = Vec::new();
         for p in core.store.rehearsals_of(&owner.id).await? {
-            results.extend(core.store.results_of(&p.id, OBSERVATION_LIMIT).await?);
+            results.extend(
+                core.store
+                    .results_of_under(&p.id, &live.id, OBSERVATION_LIMIT)
+                    .await?,
+            );
         }
         if results.len() < 2 || results.iter().any(|r| r.rank.is_none()) {
             continue;
@@ -1149,6 +1226,133 @@ mod tests {
             "the standing is reported whatever is left of the budget"
         );
         assert!(core.store.pair_between(&a1, &b).await.unwrap().is_none());
+    }
+
+    /// A miss recorded under a generation the base no longer runs must not
+    /// answer for the one it does.
+    ///
+    /// `condense_candidates` refuses an owner any of whose results missed, and
+    /// `results_of` bound no generation and no window — with nothing expiring
+    /// at the shipped `retain_days = 0`, that is the artifact's whole history
+    /// for ever. Self-inflicted, too: `condense_artifact` sets `embed_state =
+    /// 'pending'`, so the first rehearsal after any condensation records
+    /// exactly such a miss, and one of them disabled condense *and*
+    /// interference for that owner permanently.
+    #[tokio::test]
+    async fn a_miss_under_an_older_generation_does_not_disable_condense_for_ever() {
+        let (mut core, a1, _a2, b) = two_corpora().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.promote.activation_above = 0.0;
+        let old = live_generation(&core).await;
+        let pid = core
+            .store
+            .record_rehearsal(&NewRehearsal {
+                class: Class::Cue,
+                query: "q".into(),
+                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: a1.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        // The manufactured miss, under the generation that is about to be
+        // superseded.
+        core.store
+            .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                rehearsal_id: pid.clone(),
+                generation_id: old.id.clone(),
+                rank: None,
+                outranked_by: vec![],
+            })
+            .await
+            .unwrap();
+
+        // A new generation, and two clean results under it.
+        let live = live_generation(&core).await;
+        assert_ne!(live.id, old.id);
+        for _ in 0..2 {
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: pid.clone(),
+                    generation_id: live.id.clone(),
+                    rank: Some(2),
+                    outranked_by: vec![b.clone()],
+                })
+                .await
+                .unwrap();
+        }
+
+        let (armed, _) = condense_candidates(&core, &live, crate::store::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            armed, 1,
+            "a miss under settings the base no longer runs held the rule shut"
+        );
+        assert_eq!(
+            interference(&core, &live, crate::store::now())
+                .await
+                .unwrap()
+                .0,
+            1,
+            "and the same history was read by rule 3"
+        );
+    }
+
+    /// What the pass learned, as opposed to how many measurements it repeated.
+    ///
+    /// The lap wraps, so `rehearsed` is non-zero on every pass for ever on any
+    /// base that has ever captured anything — and a count that is never zero
+    /// is an empty-run backoff that never engages. Replaying a probe to the
+    /// rank it already had, under the parameters it already had, is the same
+    /// measurement again; `moved` is the part that is news.
+    #[tokio::test]
+    async fn only_a_probe_that_landed_somewhere_new_counts_as_work() {
+        let (core, _a1, _a2, _b) = two_corpora().await;
+        let live = live_generation(&core).await;
+        integrate(&core, crate::store::now()).await.unwrap();
+
+        // First measurement: every probe is news, because none of them has a
+        // result under this generation yet.
+        let first = rehearse(&core, &live, crate::store::now()).await.unwrap();
+        assert!(first.rehearsed > 0);
+        assert_eq!(
+            first.moved, first.rehearsed,
+            "a first measurement is all signal"
+        );
+
+        // The lap wraps and measures the same probes against an unchanged
+        // base. Same ranks, nothing learned.
+        let second = rehearse(&core, &live, crate::store::now()).await.unwrap();
+        assert_eq!(second.rehearsed, first.rehearsed, "the lap wrapped");
+        assert_eq!(
+            second.moved, 0,
+            "an unchanged base reported work and the backoff never engaged"
+        );
+    }
+
+    /// A capture probe exists or the artifact is not integrated. The other
+    /// order marked the artifact done and *then* minted them behind two `?`s,
+    /// so a vector-store hiccup left it skipped as already integrated on every
+    /// later pass — and nothing else mints a capture probe.
+    #[tokio::test]
+    async fn an_integrated_artifact_always_has_the_probes_its_integration_implies() {
+        let (core, a1, a2, b) = two_corpora().await;
+        let out = integrate(&core, crate::store::now()).await.unwrap();
+        assert!(out.integrated > 0);
+        assert!(out.probes > 0, "the near hits minted nothing");
+        // Every probe the pass counted is on the base, readable from the
+        // artifact it answers for.
+        let mut found = 0;
+        for id in [&a1, &a2, &b] {
+            found += core.store.rehearsals_of(id).await.unwrap().len();
+        }
+        assert_eq!(
+            found, out.probes,
+            "the count and the rows disagree, so one of them was written without the other"
+        );
     }
 
     /// Not replayed — the vector is from another era and is not comparable

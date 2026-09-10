@@ -22,20 +22,45 @@ impl Store {
     /// The write, in one transaction: version `n` = the current text, the
     /// artifact's text/title/caveats replaced, `embed_rev` bumped, the journal
     /// row. All of it or none of it. Returns `(action_id, n)`.
+    ///
+    /// `expected_rev` is the `embed_rev` the caller read the text at, and
+    /// `None` where it did not read one — a restore, which is putting back a
+    /// version rather than rewriting the current one. `Ok(None)` means the
+    /// artifact has moved on since and nothing was written.
+    ///
+    /// The check is `mark_embedded`'s idiom, and it is here for the same
+    /// reason: a condensation is a read-modify-write with a model call in the
+    /// middle of it, and that call takes as long as the endpoint feels like
+    /// taking. `jobs::condense::run` reads the text, spends a minute
+    /// generating a shorter one, and writes it back — so an edit through the
+    /// API in that window was silently reverted to a rewrite of the text as it
+    /// stood *before* the edit. Worse than losing the edit: the `losses()`
+    /// guard that is the whole safety argument of this path was computed
+    /// against the stale copy, so a value the user had just added was covered
+    /// by nothing at all.
     pub async fn condense_artifact(
         &self,
         id: &str,
+        expected_rev: Option<i64>,
         text: &str,
         title: Option<&str>,
         caveats: &[String],
         mut evidence: serde_json::Value,
-    ) -> Result<(String, i64)> {
+    ) -> Result<Option<(String, i64)>> {
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
-        let row = sqlx::query("SELECT text, title, caveats FROM artifacts WHERE id = ?")
+        let row = sqlx::query("SELECT text, title, caveats, embed_rev FROM artifacts WHERE id = ?")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(Error::NotFound)?;
+        // Before anything is written, so the version row and the journal row
+        // are never minted for a rewrite that is then thrown away. The
+        // transaction is dropped rather than committed.
+        if let Some(want) = expected_rev
+            && row.get::<i64, _>("embed_rev") != want
+        {
+            return Ok(None);
+        }
         let n: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(n), 0) + 1 FROM artifact_versions WHERE artifact_id = ?",
         )
@@ -85,7 +110,7 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok((action_id, n))
+        Ok(Some((action_id, n)))
     }
 
     /// Oldest first.
@@ -172,9 +197,17 @@ mod tests {
         let id = one(&store).await;
         let before = store.get_artifact(&id).await.unwrap();
         let (action, n) = store
-            .condense_artifact(&id, "1.21.4", Some("Short"), &[], serde_json::json!({}))
+            .condense_artifact(
+                &id,
+                Some(before.embed_rev),
+                "1.21.4",
+                Some("Short"),
+                &[],
+                serde_json::json!({}),
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .expect("the revision is the one just read");
         assert_eq!(n, 1);
         let after = store.get_artifact(&id).await.unwrap();
         assert_eq!(after.text, "1.21.4");
@@ -195,9 +228,10 @@ mod tests {
         );
 
         let (_, n2) = store
-            .condense_artifact(&id, "1.21", None, &[], serde_json::json!({}))
+            .condense_artifact(&id, None, "1.21", None, &[], serde_json::json!({}))
             .await
-            .unwrap();
+            .unwrap()
+            .expect("no revision pinned");
         assert_eq!(n2, 2);
 
         store.restore_version(&id, 1).await.unwrap();

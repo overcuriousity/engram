@@ -659,6 +659,42 @@ impl Store {
         Ok(())
     }
 
+    /// Pairs an operator pressed Synthese on and nothing has written yet.
+    ///
+    /// Not `state = 'pending'`, which is the one thing that separates this from
+    /// `pairs_to_judge`: the press is offered on every card the queue renders,
+    /// and by the time it is pressed the pair is far more often `Duplicate` —
+    /// the judge read both sides, said they cover the same ground, and left the
+    /// action to a person. So the state says nothing about whether the writing
+    /// is owed; `synthesis_asked` does, and `merged_into` says whether it has
+    /// happened.
+    ///
+    /// This exists because the press alone cannot keep the promise the card
+    /// makes. `ask_pair_synthesis_ui` arms the unit once, and the unit is
+    /// allowed to come back having written nothing — the week's budget is
+    /// spent, no `pair_synthesizer` is configured yet — at which point the row
+    /// is closed and nothing would ever arm it again. The card would go on
+    /// saying "it is written on the next pass" for ever. The sweep re-arming
+    /// these is what makes that sentence true.
+    ///
+    /// Held back past `MAX_UNREADABLE_JUDGEMENTS` for the reason
+    /// `pairs_to_judge` gives: a reply that cannot be parsed is a reply that
+    /// will not parse next time either, and a pair nothing can write must stop
+    /// buying model calls at some point.
+    pub async fn pairs_awaiting_synthesis(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifact_pairs
+              WHERE synthesis_asked = 1 AND merged_into IS NULL
+                AND judge_unreadable < ?
+              ORDER BY judge_attempts ASC, score DESC, created_at DESC LIMIT ?",
+        )
+        .bind(MAX_UNREADABLE_JUDGEMENTS)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_pair).collect())
+    }
+
     /// Settle a pair as answered by an applied merge. `merged_into` names the
     /// merged artifact, which is what lets the stranded-merge reap reopen
     /// exactly the pairs a merge that never embedded had closed.

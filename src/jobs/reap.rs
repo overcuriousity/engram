@@ -60,6 +60,14 @@ pub async fn run(core: &Core) -> Result<Report> {
             .await?
         {
             tracing::debug!(artifact_id = %c.id, "a burial taken back before; left alone");
+            // Stood down, not merely skipped. This is a permanent answer about
+            // this row — a burial taken back is never bought again — and
+            // `reap_candidates` orders by `retired_at ASC`, so leaving the
+            // stamp alone makes it the oldest retirement in the base for ever:
+            // one nominee slot on every sweep, and the candidates behind it
+            // never reached. Exactly the starvation `step_aside` exists for,
+            // arriving through the one branch that never spends a model call.
+            step_aside(core, &c.id).await;
             continue;
         }
         let verdict = judge_one(core, c).await;
@@ -646,6 +654,58 @@ mod tests {
             .await
             .unwrap();
         backdate_retired_at(core, id, 100 * 86_400).await;
+    }
+
+    /// A burial taken back is a permanent answer about that row, and
+    /// `reap_candidates` orders by `retired_at ASC`. Skipped without a fresh
+    /// stamp it is the oldest retirement in the base for ever: one nominee
+    /// slot on every sweep, and the candidates behind it never reached — the
+    /// starvation `step_aside`'s own doc comment describes, arriving through
+    /// the one branch that never spends a model call.
+    #[tokio::test]
+    async fn a_burial_taken_back_stands_down_instead_of_holding_its_slot() {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        let mut core = test_core().await;
+        core.reap.enabled = true;
+        // No judge: every nominee that reaches the call fails there, which is
+        // fine — the branch under test is above it.
+        let ids = seed(&core, &["taken back before", "behind it"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        deprecate_long_ago(&core, &ids[1]).await;
+        // A burial on the first, already taken back.
+        core.store
+            .record_action(&NewAction {
+                job: Job::Reap,
+                kind: Kind::Reap,
+                subject_id: ids[0].clone(),
+                survivor_id: None,
+                detail: None,
+                evidence: serde_json::json!({}),
+                pair_score: None,
+            })
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(&ids[0], Kind::Reap, UndoneBy::Operator, "restored")
+            .await
+            .unwrap();
+        let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+
+        run(&core).await.unwrap();
+
+        let after = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+        assert!(
+            after > before,
+            "the row kept its place at the head of the queue: {before:?} -> {after:?}"
+        );
+        // And only that row. A candidate whose judge call merely failed —
+        // there is no reap model here — says nothing about itself, and the
+        // sweep's own cadence is its retry.
+        assert_eq!(
+            core.store.get_artifact(&ids[1]).await.unwrap().retired_at,
+            Some(crate::store::now() - 100 * 86_400),
+            "a candidate the endpoint never answered for was stood down too"
+        );
     }
 
     #[tokio::test]

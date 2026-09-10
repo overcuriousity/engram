@@ -232,26 +232,34 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
             );
             continue;
         }
-        restore?;
-        match a.kind {
-            Kind::Discard | Kind::Reap => {
-                core.store
-                    .undo_action_on(&a.subject_id, a.kind, UndoneBy::Evidence, &reason)
-                    .await?;
+        // The same line rule 1 draws, and for the same reason: every `?` in
+        // this loop returns before the cursor is stamped, so a row whose undo
+        // cannot be carried out would re-read and re-fail on every later pass
+        // and take the rest of the idle pass with it. The `NotFound` guard
+        // above is this rule with one cause named; a failure with any other
+        // cause is no better to wedge on.
+        if let Err(e) = restore {
+            tracing::warn!(
+                subject = %a.subject_id,
+                kind = a.kind.as_str(),
+                error = %e,
+                "could not restore what a give-up would have been answered by; moving on"
+            );
+            continue;
+        }
+        match stamp_restored(core, &a, &reason).await {
+            Ok(true) => {}
+            // A kind this rule does not take back. Not a failure.
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    subject = %a.subject_id,
+                    kind = a.kind.as_str(),
+                    error = %e,
+                    "restored an artifact but could not stamp the journal; moving on"
+                );
+                continue;
             }
-            Kind::Supersede => {
-                core.store
-                    .undo_action_on(&a.subject_id, Kind::Supersede, UndoneBy::Evidence, &reason)
-                    .await?;
-            }
-            Kind::Merge => {
-                let survivor = a.survivor_id.clone().expect("a merge row names its merge");
-                crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence).await?;
-                core.store
-                    .undo_actions_under(&survivor, UndoneBy::Evidence, &reason)
-                    .await?;
-            }
-            Kind::Promote | Kind::Moment | Kind::Condense => continue,
         }
         restored += 1;
         tracing::info!(
@@ -264,6 +272,65 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
     }
     core.store.meta_set(GAVE_UP_AFTER, &cursor.encode()).await?;
     Ok((restored, false))
+}
+
+/// Stamp the journal rows for one of rule 2's restores, and undo the merge
+/// behind a `Merge` row. `false` for a kind this rule does not take back.
+///
+/// Split out of the loop for the reason `take_back` is: so the caller can
+/// catch a failure and step over the row rather than end the pass on it.
+async fn stamp_restored(
+    core: &Core,
+    a: &crate::store::actions::Action,
+    reason: &str,
+) -> Result<bool> {
+    match a.kind {
+        Kind::Discard | Kind::Reap => {
+            core.store
+                .undo_action_on(&a.subject_id, a.kind, UndoneBy::Evidence, reason)
+                .await?;
+        }
+        Kind::Supersede => {
+            core.store
+                .undo_action_on(&a.subject_id, Kind::Supersede, UndoneBy::Evidence, reason)
+                .await?;
+        }
+        Kind::Merge => {
+            let survivor = a.survivor_id.clone().expect("a merge row names its merge");
+            crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence).await?;
+            core.store
+                .undo_actions_under(&survivor, UndoneBy::Evidence, reason)
+                .await?;
+        }
+        Kind::Promote | Kind::Moment | Kind::Condense => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Carry out one of rule 1's undos: restore what the action hid, then stamp
+/// the journal rows that recorded it. Returns the rows stamped.
+///
+/// A function rather than a match in the loop so the caller can catch a
+/// failure and step over the row — see the call site.
+async fn take_back(core: &Core, a: &crate::store::actions::Action, reason: &str) -> Result<usize> {
+    match a.kind {
+        Kind::Merge => {
+            let survivor = a.survivor_id.clone().expect("a merge row names its merge");
+            crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence).await?;
+            Ok(core
+                .store
+                .undo_actions_under(&survivor, UndoneBy::Evidence, reason)
+                .await? as usize)
+        }
+        Kind::Supersede => {
+            core.unsupersede(&a.subject_id).await?;
+            Ok(core
+                .store
+                .undo_action_on(&a.subject_id, Kind::Supersede, UndoneBy::Evidence, reason)
+                .await? as usize)
+        }
+        _ => unreachable!("only merge and supersede reach here"),
+    }
 }
 
 /// Rule 1: a survivor must still be found.
@@ -431,23 +498,29 @@ pub(crate) async fn rule_one(
             "what it hid was found better than it is, over {} observations",
             observed.len()
         );
-        match a.kind {
-            Kind::Merge => {
-                let survivor = a.survivor_id.clone().expect("a merge row names its merge");
-                crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence).await?;
-                undone += core
-                    .store
-                    .undo_actions_under(&survivor, UndoneBy::Evidence, &reason)
-                    .await? as usize;
+        // Logged and stepped over, not raised. Every `?` in this loop returns
+        // before the cursor is stamped below, so one row whose undo cannot be
+        // carried out re-read and re-failed on every later pass, for ever —
+        // and it took the whole idle pass with it: rule 2, interference,
+        // condense and ranking adoption all run after this one and none of
+        // them was reached. Rule 2 already draws this line for the one cause
+        // it knew about; the cost of being wrong about a single action is
+        // never worth the rest of the pass, whatever the cause.
+        //
+        // Left open on purpose. The row is not stamped, so the next lap comes
+        // back to it — this is a skip, not a decision — and if the failure was
+        // transient the undo happens then.
+        match take_back(core, &a, &reason).await {
+            Ok(n) => undone += n,
+            Err(e) => {
+                tracing::warn!(
+                    subject = %a.subject_id,
+                    kind = a.kind.as_str(),
+                    error = %e,
+                    "could not take a corpus action back; leaving the row open and moving on"
+                );
+                continue;
             }
-            Kind::Supersede => {
-                core.unsupersede(&a.subject_id).await?;
-                undone += core
-                    .store
-                    .undo_action_on(&a.subject_id, Kind::Supersede, UndoneBy::Evidence, &reason)
-                    .await? as usize;
-            }
-            _ => unreachable!("only merge and supersede reach here"),
         }
         tracing::info!(
             subject = %a.subject_id,
@@ -530,9 +603,10 @@ mod tests {
         let probes = probes_on(&core, &id, &g, 3).await;
         let (action, _) = core
             .store
-            .condense_artifact(&id, "shorter", None, &[], serde_json::json!({}))
+            .condense_artifact(&id, None, "shorter", None, &[], serde_json::json!({}))
             .await
-            .unwrap();
+            .unwrap()
+            .expect("no revision was pinned");
         let at = core.store.action(&action).await.unwrap().unwrap().at;
         for p in &probes {
             result_at(&core, p, &g, Some(1), at - 10).await;
@@ -569,9 +643,10 @@ mod tests {
         let old_probes = probes_on(&core, &id, &g, 4).await;
         let (action, _) = core
             .store
-            .condense_artifact(&id, "shorter", None, &[], serde_json::json!({}))
+            .condense_artifact(&id, None, "shorter", None, &[], serde_json::json!({}))
             .await
-            .unwrap();
+            .unwrap()
+            .expect("no revision was pinned");
         let at = core.store.action(&action).await.unwrap().unwrap().at;
         // Four easy questions, answered at rank 1, all of them before the
         // condensation — and then retired, so nothing replays them again.

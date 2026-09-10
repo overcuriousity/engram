@@ -345,10 +345,22 @@ async fn reactivate_ui(
     Form(back): Form<ReturnTo>,
 ) -> UiResult<Response> {
     tenant.core.reactivate(&aid).await?;
-    // Whichever of the two hid it stamps; the other stamps nothing.
+    // Whichever of the three hid it stamps; the others stamp nothing, since
+    // `undo_action_on` matches only open rows of that kind on this subject.
+    //
+    // `Supersede` belongs here even though the button that undoes a plain
+    // supersession is `unsupersede_ui`'s. An artifact can be deprecated *and*
+    // superseded — `insights::page` lists the deprecated with no
+    // `superseded_by IS NULL` filter, so such a row appears under Restore —
+    // and `Core::reactivate` falls straight through to `unsupersede_locked`
+    // for it. Unstamped, the supersession's journal row stayed open: it is
+    // what `dedupe::taken_back_before` reads to hand a pair to a person
+    // instead of ruling on it again, so the sweep simply re-applied the
+    // supersession the operator had just undone.
     for kind in [
         crate::store::actions::Kind::Discard,
         crate::store::actions::Kind::Reap,
+        crate::store::actions::Kind::Supersede,
     ] {
         tenant
             .core
@@ -1481,6 +1493,75 @@ mod tests {
         assert!(
             !core.store.get_pair(gone).await.unwrap().synthesis_asked,
             "a press naming an artifact that is out of results records nothing"
+        );
+    }
+
+    /// Restore has to stamp whichever row was hiding the artifact, and a
+    /// supersession is one of them.
+    ///
+    /// An artifact can be deprecated *and* superseded, and `insights::page`
+    /// lists the deprecated with no `superseded_by IS NULL` filter — so such a
+    /// row appears under Restore, and `Core::reactivate` falls straight
+    /// through to `unsupersede_locked` for it. Unstamped, the supersession's
+    /// journal row stayed open, which is what `dedupe::taken_back_before`
+    /// reads to hand a pair to a person rather than ruling on it again: the
+    /// sweep simply re-applied the supersession the operator had just undone.
+    #[tokio::test]
+    async fn restoring_a_superseded_artifact_stamps_the_supersession() {
+        use crate::store::actions::{Job, Kind, NewAction};
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
+        // Hidden behind the other, journaled the way a corpus job journals it.
+        core.supersede_with(
+            &ids[0],
+            &ids[1],
+            Some(NewAction {
+                job: Job::Dedupe,
+                kind: Kind::Supersede,
+                subject_id: ids[0].clone(),
+                survivor_id: Some(ids[1].clone()),
+                detail: None,
+                evidence: serde_json::json!({}),
+                pair_score: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            core.store
+                .open_action_on(&ids[0], Kind::Supersede)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/artifacts/{}/reactivate", ids[0]),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            core.store.get_artifact(&ids[0]).await.unwrap().in_results(),
+            "the restore itself did not happen"
+        );
+        assert!(
+            core.store
+                .open_action_on(&ids[0], Kind::Supersede)
+                .await
+                .unwrap()
+                .is_none(),
+            "the supersession row is still open, so the sweep will re-apply it"
+        );
+        assert!(
+            core.store
+                .action_was_undone(&ids[0], Kind::Supersede)
+                .await
+                .unwrap(),
+            "and nothing records that a person took it back"
         );
     }
 

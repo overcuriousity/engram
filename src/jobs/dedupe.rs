@@ -93,9 +93,32 @@ pub struct Settlement {
 pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let id: i64 = pair_id.parse().map_err(|_| Error::NotFound)?;
     let p = core.store.get_pair(id).await?;
-    if p.state != PairState::Pending {
-        // Settled by an operator, by a later sweep, or by the unit that merged
-        // one of its members while this one waited out a backoff.
+    // Settled by an operator, by a later sweep, or by the unit that merged one
+    // of its members while this one waited out a backoff.
+    //
+    // `synthesis_asked` is the exception, and it has to be: the press is
+    // offered on every card the queue draws, and the card a person most often
+    // presses it on is a settled one. `Relation::Duplicate` no longer merges
+    // where it is found — it settles the pair `PairState::Duplicate` and waits
+    // for exactly this press — so the ordinary path to a synthesis arrives here
+    // in a state that is not `Pending`, and without the second half of this
+    // test every one of those presses was sent home having done nothing.
+    //
+    // Nothing recovered from that. `_decide.html` replaces all four answer
+    // buttons the moment the flag is set, so the card read "a synthesis was
+    // asked for; it is written on the next pass" with no way left to answer it,
+    // and both callers of `clear_pair_synthesis` sit below this line. The pair
+    // was frozen for good, on the one press that is supposed to resolve it.
+    //
+    // Every test seeded a `Pending` pair, which is why the suite was green.
+    if p.state != PairState::Pending && !p.synthesis_asked {
+        return Ok(());
+    }
+    if p.synthesis_asked && p.merged_into.is_some() {
+        // Already written. The flag outlived its own answer — a second arming
+        // racing the first, or an old row — and re-running it would merge the
+        // pair twice.
+        core.store.clear_pair_synthesis(p.id).await?;
         return Ok(());
     }
     // The week's budget, read before the judge call: a verdict this unit may
@@ -121,6 +144,13 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     // out a backoff, and spending the scarcest thing in the system to rule on an
     // artifact no longer in results buys nothing.
     if !a.in_results() || !b.in_results() {
+        // The ask goes with it. `ask_pair_synthesis_ui` checks both sides are
+        // live at the press, but a lifecycle event can take one away while the
+        // unit waits out a backoff — and a cleared flag is what stops the card
+        // promising a synthesis nothing is going to write.
+        if p.synthesis_asked {
+            core.store.clear_pair_synthesis(p.id).await?;
+        }
         return settle(
             core,
             &p,
@@ -489,14 +519,102 @@ async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk
         // the next run with a writer configured picks it up.
         return Ok(());
     };
-    core.store.record_judge_attempt(p.id).await?;
+    // The two bodies have to fit one call. The judge path asks this and trims
+    // its context block until they do; there is no context block here, so
+    // there is nothing to give up and the answer is either yes or a pair no
+    // model can write. Unasked, two large artifacts failed at the endpoint
+    // every tick for ever — the same treadmill the fit loop exists to end,
+    // reached from the one path that never had one.
     let user = synthesis_prompt(&members);
+    let counter = crate::infer::budget::TokenCounter::default();
+    let cost = counter.count(crate::infer::prompt::SYNTHESIZE_SYSTEM) + counter.count(&user);
+    if crate::infer::budget::checked_ceiling_for_prompt(
+        writer.context_tokens(),
+        cost,
+        writer.max_output_tokens(),
+    )
+    .is_none()
+    {
+        tracing::warn!(
+            pair = p.id,
+            "these two artifacts do not fit one call; the synthesis is refused"
+        );
+        core.store.clear_pair_synthesis(p.id).await?;
+        return settle(
+            core,
+            p,
+            PairState::Contradiction,
+            Some("these two artifacts do not fit one call; resolve by hand"),
+        )
+        .await;
+    }
+
+    core.store.record_judge_attempt(p.id).await?;
     let permit = core.gate.background().await;
     let reply = writer
         .complete(crate::infer::prompt::SYNTHESIZE_SYSTEM, &user)
         .await;
     permit.finished();
-    let draft = crate::infer::prompt::parse_synthesis(&reply?)?;
+    let reply = reply?;
+    let draft = match crate::infer::prompt::parse_synthesis(&reply) {
+        Ok(d) => d,
+        // Counted, for the reason the judge path counts its own: without it
+        // nothing here ever stops. The pair keeps `synthesis_asked` set, the
+        // sweep re-arms it on every tick, and each tick buys another call on a
+        // reply that will not parse — unbounded at the shipped default, where
+        // `may_act()` answers `true` unconditionally below "full".
+        // `pairs_awaiting_synthesis` holds the row back past
+        // `MAX_UNREADABLE_JUDGEMENTS`, exactly as `pairs_to_judge` does.
+        Err(e) => {
+            core.store.record_unreadable_judgement(p.id).await?;
+            tracing::warn!(
+                pair = p.id,
+                reply_len = reply.len(),
+                error = %e,
+                "synthesis reply unreadable; the pair keeps its ask and waits"
+            );
+            return Err(e);
+        }
+    };
+
+    // The loss check, on the one path that now writes a dedupe merge.
+    //
+    // `interpret` still has one, and it is unreachable: its `Duplicate` branch
+    // writes nothing any more and drops the draft. So this arm inherited the
+    // whole of the guard the module header calls the requirement rather than a
+    // style, and `merge::write` validates nothing — it takes a draft and
+    // inserts it. Two artifacts differing only in `mount -o ro` against
+    // `mount -o rw` went in, the writer kept one of them, `merge::finish`
+    // superseded both sources on embed, and the other command was gone with no
+    // card and no warning.
+    //
+    // Against the members for the reason `interpret` gives at length: a merged
+    // member's own text is already a generation away from its sources, so
+    // checking a draft against those sources would refuse a value an earlier
+    // merge dropped and freeze that lineage for ever.
+    let lost = crate::jobs::merge::losses(&members, &draft);
+    if !lost.is_empty() {
+        tracing::warn!(
+            pair = p.id,
+            lost = lost.join(", "),
+            "refused a synthesis that would have dropped these"
+        );
+        // Cleared and handed over, the same shape as the merge path's own
+        // refusal below. The operator's judgement — that these two cover the
+        // same ground — is not overturned by this; what is refused is only the
+        // automatic writing of it, and the sentence says which.
+        core.store.clear_pair_synthesis(p.id).await?;
+        return settle(
+            core,
+            p,
+            PairState::Contradiction,
+            Some(
+                "These could not be written as one: the draft would have dropped a value \
+                 one of them states. Which is current is the judgement this hands over.",
+            ),
+        )
+        .await;
+    }
 
     let sources: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
     match crate::jobs::merge::write(core, &draft, &sources).await {
@@ -2093,6 +2211,189 @@ mod tests {
         );
         let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
         assert_eq!(rows.len(), 2, "one row per original, as any merge journals");
+    }
+
+    /// The press has to work on the card it is actually offered on.
+    ///
+    /// `Relation::Duplicate` settles the pair `PairState::Duplicate` and waits
+    /// for a person; the Synthese button is drawn on that card, and by then the
+    /// pair is not `Pending`. The unit's opening guard sent every one of those
+    /// presses home having done nothing — and `_decide.html` had already
+    /// replaced all four answer buttons, so the card was frozen for good on the
+    /// one press that resolves it.
+    ///
+    /// Every other test here seeds a `Pending` pair, which is exactly why the
+    /// suite stayed green through it.
+    #[tokio::test]
+    async fn a_settled_duplicate_is_written_when_a_person_presses_synthese() {
+        let mut core = test_core().await;
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"merged":{"title":"Tierarztpraxis","text":"Kleintierpraxis in Bad Aibling. Sprechzeiten Mo-Fr 08:00-12:00.","category":"reference","caveats":[]}}"#
+                .into(),
+        ])));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
+                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        // The state the judge leaves behind, and the state the card is drawn
+        // from. Nothing here is `Pending` any more.
+        core.store
+            .set_pair_state(
+                pair,
+                PairState::Duplicate,
+                Some("these two cover the same ground"),
+                DecidedBy::Model,
+            )
+            .await
+            .unwrap();
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(
+            p.merged_into.is_some(),
+            "the press on a settled duplicate wrote nothing: {p:?}"
+        );
+        assert_eq!(p.decided_by, Some(DecidedBy::Operator));
+    }
+
+    /// A pair settled any other way is still left alone without a press. The
+    /// guard is widened by `synthesis_asked`, not removed.
+    #[tokio::test]
+    async fn a_settled_pair_nobody_pressed_is_still_left_alone() {
+        let mut core = test_core().await;
+        // Empty scripts: any call at all comes back an error, and the
+        // `unwrap` below carries it out. That is the assertion — nothing may
+        // be asked about this pair, by either role.
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
+        core.judge = Some(Arc::new(ScriptedCompleter::new(vec![])));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
+                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        core.store
+            .set_pair_state(pair, PairState::Duplicate, None, DecidedBy::Model)
+            .await
+            .unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_none(), "nothing was pressed");
+        assert_eq!(p.state, PairState::Duplicate, "and nothing was resettled");
+    }
+
+    /// The loss check is the requirement rather than a style, and this is the
+    /// only path that writes a dedupe merge now: `interpret`'s own check sits
+    /// on a branch whose write was taken away.
+    ///
+    /// Two artifacts differing only in `mount -o ro` against `mount -o rw`. The
+    /// draft keeps one, `merge::finish` would supersede both sources on embed,
+    /// and the other command would be gone with no card and no warning.
+    #[tokio::test]
+    async fn a_synthesis_that_would_drop_a_literal_is_refused_and_handed_over() {
+        let mut core = test_core().await;
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
+            r#"{"merged":{"title":"Loop mounts","text":"Mount the image read-only with `mount -o ro image.dd /mnt`.","category":"reference","caveats":[]}}"#
+                .into(),
+        ])));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Read-only", "use `mount -o ro image.dd /mnt`", [1.0, 0.0]),
+                ("Writable", "use `mount -o rw image.dd /mnt`", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(
+            p.merged_into.is_none(),
+            "a draft that drops a command was written anyway"
+        );
+        assert_eq!(p.state, PairState::Contradiction, "handed to a person");
+        assert!(!p.synthesis_asked, "the card stops promising it");
+        for id in &ids {
+            assert!(
+                core.store.get_artifact(id).await.unwrap().in_results(),
+                "both sides stay readable"
+            );
+        }
+    }
+
+    /// A reply that will not parse has to cost the pair something, or the sweep
+    /// re-arms it and buys another call every tick for ever — unbounded at the
+    /// shipped default, where `may_act()` answers `true` below "full".
+    #[tokio::test]
+    async fn an_unreadable_synthesis_reply_is_counted_against_the_pair() {
+        let mut core = test_core().await;
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
+            "not json at all".into(),
+        ])));
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
+                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+
+        run(&core, &pair.to_string())
+            .await
+            .expect_err("an unreadable reply is an error");
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(p.judge_unreadable, 1, "the pair carries the cost");
+        assert!(p.synthesis_asked, "the press is not lost to one bad reply");
+    }
+
+    /// And past the ceiling the sweep stops offering it, so the calls end.
+    #[tokio::test]
+    async fn a_pair_whose_replies_never_parse_leaves_the_synthesis_queue() {
+        let core = test_core().await;
+        let ids = seed_titled(
+            &core,
+            &[
+                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
+                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
+            ],
+        )
+        .await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+        assert_eq!(
+            core.store.pairs_awaiting_synthesis(10).await.unwrap().len(),
+            1
+        );
+        for _ in 0..crate::store::pairs::MAX_UNREADABLE_JUDGEMENTS {
+            core.store.record_unreadable_judgement(pair).await.unwrap();
+        }
+        assert!(
+            core.store
+                .pairs_awaiting_synthesis(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a pair nothing can write must stop buying model calls"
+        );
     }
 
     /// A person asking does not make stored source text mergeable. When the

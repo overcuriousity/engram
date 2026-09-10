@@ -401,6 +401,30 @@ const FILE_PARAMS_SEEN: &str = "evolve.file_params";
 /// The caller serves under whatever comes back. Without this a restart would
 /// quietly return the ranking to the file while every observation kept being
 /// written under a generation that no longer described it.
+/// Whether the loop chose this generation, as opposed to a person applying it.
+///
+/// Two ways in, and `run_id` is only the first. The replay sweep names the
+/// `eval_runs` row that argued for its candidate, so `run_id` is set — but
+/// `tune::adopt_lived`, which adopts on what the band actually earned rather
+/// than on a replay, goes through `adopt_generation_lived` and writes
+/// `run_id = NULL`. There is no run to name; the evidence is the observations
+/// themselves.
+///
+/// What separates that from a person's Apply is `predicted`. `restate_generation`
+/// — the one path a hand reaches, from a `config.toml` edit or the Apply button
+/// — leaves both empty, and says so: "nothing proposed this and nothing is
+/// watching it". A lived adoption always carries the rate that argued for it.
+///
+/// So: a run, or a parent and a prediction. `web::insights` already sorts the
+/// history by exactly this and renders the middle case as "adopted by the base
+/// on what the band earned"; reading it differently here meant a `spread_max`
+/// or a `review_min` the loop had chosen was indistinguishable from one
+/// somebody typed, and turning autonomy off — which is documented as the way
+/// back to the file, exactly — did not bring those knobs back.
+fn loop_moved(g: &Generation) -> bool {
+    g.run_id.is_some() || (g.parent_id.is_some() && g.predicted.is_some())
+}
+
 pub async fn boot_generation(
     store: &Store,
     file: GenerationParams,
@@ -413,7 +437,7 @@ pub async fn boot_generation(
         None => None,
     };
     let mut live = ensure_generation(store, file, embed_recipe, chat_model).await?;
-    let file_wins = seen != Some(file) || (!autonomous && live.run_id.is_some());
+    let file_wins = seen != Some(file) || (!autonomous && loop_moved(&live));
     if live.params != file && file_wins {
         tracing::info!(
             recency_weight = file.recency_weight,
@@ -732,6 +756,64 @@ mod tests {
             p(0.05, Some(3)),
             "off leaves today's behaviour exactly"
         );
+    }
+
+    /// The loop adopts two ways, and only one of them names a run.
+    ///
+    /// `tune::adopt_lived` adopts on what the band actually earned rather than
+    /// on a replay, so there is no `eval_runs` row to point at and
+    /// `adopt_generation_lived` writes `run_id = NULL`. Read as `run_id`
+    /// alone, a `spread_max` or a `review_min` the loop had chosen was
+    /// indistinguishable from one somebody typed, and switching autonomy off —
+    /// which is documented as the way back to the file, exactly — left those
+    /// knobs where the loop had put them.
+    #[tokio::test]
+    async fn switching_autonomy_off_returns_the_base_to_the_file_after_a_lived_adoption() {
+        let store = Store::memory().await.unwrap();
+        let file = p(0.05, Some(3));
+        let first = boot_generation(&store, file, "recipe-a", "qwen", true)
+            .await
+            .unwrap();
+        let mut adopted = sample();
+        adopted.parent_id = Some(first.id);
+        adopted.params = p(0.25, Some(3));
+        adopted.embed_recipe = "recipe-a".into();
+        // The lived path: a prediction, and no run to name.
+        let id = store.adopt_generation_lived(&adopted, 0.62).await.unwrap();
+        assert!(
+            store.generation(&id).await.unwrap().unwrap().run_id.is_none(),
+            "a lived adoption names no run, which is the whole trap"
+        );
+
+        let g = boot_generation(&store, file, "recipe-a", "qwen", false)
+            .await
+            .unwrap();
+        assert_ne!(g.id, id);
+        assert_eq!(
+            g.params,
+            p(0.05, Some(3)),
+            "off is the way back to the file for every knob the loop moved"
+        );
+    }
+
+    /// And it still survives while autonomy is on, like any other adoption.
+    #[tokio::test]
+    async fn a_lived_adoption_survives_a_restart_with_autonomy_on() {
+        let store = Store::memory().await.unwrap();
+        let file = p(0.05, Some(3));
+        let first = boot_generation(&store, file, "recipe-a", "qwen", true)
+            .await
+            .unwrap();
+        let mut adopted = sample();
+        adopted.parent_id = Some(first.id);
+        adopted.params = p(0.25, Some(3));
+        adopted.embed_recipe = "recipe-a".into();
+        let id = store.adopt_generation_lived(&adopted, 0.62).await.unwrap();
+
+        let g = boot_generation(&store, file, "recipe-a", "qwen", true)
+            .await
+            .unwrap();
+        assert_eq!(g.id, id, "the base serves what it adopted");
     }
 
     #[tokio::test]

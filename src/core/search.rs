@@ -1254,6 +1254,27 @@ impl Core {
     /// stored observations spend no inference — the vector is stored beside
     /// each one for exactly this.
     pub fn remember_query_vector(&self, q: &str, vector: Vec<f32>) {
+        // An empty vector is not a vector this query was searched with; it is
+        // the absence of one, spelled `unwrap_or_default()` somewhere upstream.
+        // `ask` stores `cached_query_vector(&req.q).unwrap_or_default()` on its
+        // row, so a question whose embedding had already fallen out of this
+        // cache is recorded with `vec![]` — and the observation written beside
+        // it carries the same. The sweep then replays that observation and
+        // hands the empty vector straight back here.
+        //
+        // This cache is not the sweep's own: `search_inner` reads it verbatim,
+        // for every door. So one such replay left a zero-dimension vector under
+        // a query that people actually type, and the next real search of that
+        // wording ran against it — `cosine` refuses a width it does not share
+        // and answers 0.0, so the search returned its candidates in no
+        // meaningful order at all, silently, until the entry was evicted.
+        //
+        // Refused here rather than at each of the three call sites, because
+        // this is the one place all of them pass through and a fourth is one
+        // patch away.
+        if vector.is_empty() {
+            return;
+        }
         let key = q.split_whitespace().collect::<Vec<_>>().join(" ");
         if let Ok(mut c) = self.query_cache.lock()
             && c.get(&key).is_none()
@@ -1961,6 +1982,34 @@ mod tests {
     use crate::store::artifacts::NewArtifact;
     use crate::store::feedback::Door;
     use sqlx::Row;
+
+    /// An empty vector is the *absence* of one, spelled `unwrap_or_default()`
+    /// upstream — and this cache is not the sweep's own. `search_inner` reads
+    /// it verbatim for every door, so one replay of an observation recorded
+    /// without a vector left a zero-dimension entry under a query people
+    /// actually type, and the next real search of that wording ranked on
+    /// nothing at all: `cosine` refuses a width it does not share.
+    #[tokio::test]
+    async fn an_empty_query_vector_is_never_remembered() {
+        let core = test_core().await;
+        core.remember_query_vector("wie mounte ich das image", vec![]);
+        assert!(
+            core.cached_query_vector("wie mounte ich das image").is_none(),
+            "the absence of a vector was cached as a vector"
+        );
+        // A real one still lands, and still wins over a later empty.
+        core.remember_query_vector("wie mounte ich das image", vec![0.1, 0.2]);
+        assert_eq!(
+            core.cached_query_vector("wie mounte ich das image"),
+            Some(vec![0.1, 0.2])
+        );
+        core.remember_query_vector("wie mounte ich das image", vec![]);
+        assert_eq!(
+            core.cached_query_vector("wie mounte ich das image"),
+            Some(vec![0.1, 0.2]),
+            "and cannot be displaced by one"
+        );
+    }
 
     async fn seed(core: &crate::core::Core, texts: &[(&str, &str, &[&str])]) -> String {
         seed_from(core, "raw", texts).await

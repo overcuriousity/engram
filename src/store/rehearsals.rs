@@ -254,6 +254,80 @@ impl Store {
         .collect()
     }
 
+    /// The same, bounded to one generation.
+    ///
+    /// What every *rule* reading retained results wants, and `results_of` is
+    /// not it. A rehearsal result is a rank measured under one set of ranking
+    /// parameters, so results from two generations are two different
+    /// measurements and comparing them across the boundary compares the knobs
+    /// rather than the base. Nothing expires them either at the default
+    /// `retain_days = 0`, so an unscoped read is the whole history of the
+    /// artifact for ever.
+    ///
+    /// That is not academic. `sleep::condense_candidates` refuses an owner any
+    /// of whose results missed (`rank IS NULL`), and `condense_artifact` sets
+    /// `embed_state = 'pending'` — so the first rehearsal after a condensation
+    /// records exactly such a miss, and unscoped it disabled condense *and*
+    /// interference for that owner permanently, on evidence the base itself
+    /// had manufactured one generation ago.
+    pub async fn results_of_under(
+        &self,
+        rehearsal_id: &str,
+        generation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<RehearsalResult>> {
+        sqlx::query(
+            "SELECT id, rehearsal_id, generation_id, at, rank, outranked_by
+               FROM rehearsal_results WHERE rehearsal_id = ? AND generation_id = ?
+              ORDER BY at DESC, id DESC LIMIT ?",
+        )
+        .bind(rehearsal_id)
+        .bind(generation_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(read_result)
+        .collect()
+    }
+
+    /// The most recent rank each of these probes was measured at under this
+    /// generation. Absent from the map where the probe has no result yet.
+    ///
+    /// One query for a whole batch, because the caller has the batch in hand
+    /// and the alternative is a point lookup per probe on a pass that already
+    /// runs `OBSERVATION_LIMIT` searches. The value is nested `Option`
+    /// deliberately: absent means never measured, `Some(None)` means measured
+    /// and missed, and those are different facts.
+    pub async fn latest_ranks_under(
+        &self,
+        rehearsal_ids: &[String],
+        generation_id: &str,
+    ) -> Result<std::collections::HashMap<String, Option<i64>>> {
+        if rehearsal_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let holes = vec!["?"; rehearsal_ids.len()].join(", ");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT rehearsal_id, rank FROM (
+               SELECT rehearsal_id, rank,
+                      ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n
+                 FROM rehearsal_results
+                WHERE generation_id = ? AND rehearsal_id IN ({holes})
+             ) WHERE n = 1"
+        )))
+        .bind(generation_id);
+        for id in rehearsal_ids {
+            q = q.bind(id);
+        }
+        Ok(q
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| (r.get("rehearsal_id"), r.get("rank")))
+            .collect())
+    }
+
     /// Live probes whose last two results under `generation_id` disagree —
     /// found then not, or a different rank, NULL counted as its own value.
     /// What wobbles is what needs rehearsing. Oldest result first.

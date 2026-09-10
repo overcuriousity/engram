@@ -975,23 +975,90 @@ fn cap_str(c: Option<usize>) -> String {
 /// wrong; they are not the same quantity, and side by side they invited being
 /// read as one.
 fn describe(run: &crate::store::eval_runs::EvalRun) -> String {
+    let moved = moved_knobs(&run.base_params, &run.best_params);
+    let moved = match moved.is_empty() {
+        // Nothing in the params differs. Not reachable from a recommendation —
+        // the ladder does not offer a candidate equal to its base — but a row
+        // can be read back from an older base, and "· replayed over 120 pairs"
+        // with nothing before it is not a line.
+        true => params_str(&run.best_params),
+        false => moved.join(", "),
+    };
     format!(
-        "recency {:.2} → {:.2}, cap {} → {}, pool ×{} → ×{}, half-life {}d → {}d · \
-         replayed over {} pairs: MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}",
-        run.base_params.recency_weight,
-        run.best_params.recency_weight,
-        cap_str(run.base_params.per_source_cap),
-        cap_str(run.best_params.per_source_cap),
-        run.base_params.candidate_multiplier,
-        run.best_params.candidate_multiplier,
-        run.base_params.recency_half_life_days,
-        run.best_params.recency_half_life_days,
-        run.pairs_used,
-        run.base_mrr,
-        run.best_mrr,
-        run.base_recall,
-        run.best_recall,
+        "{moved} · replayed over {} pairs: MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}",
+        run.pairs_used, run.base_mrr, run.best_mrr, run.base_recall, run.best_recall,
     )
+}
+
+/// Every swept knob whose value differs, as `name before → after`.
+///
+/// All nine, and that is the fix: this line used to name four of them, chosen
+/// when four was all the sweep moved. `sitting_prime`, `prime_lift`,
+/// `spread_max`, `rerank` and `review_min` joined the ladder afterwards and
+/// nothing here learned about them, so an adopted sitting flip rendered as
+/// "recency 0.05 → 0.05, cap 3 → 3, pool ×3 → ×3, half-life 180d → 180d" — a
+/// change with no visible change, on the one line whose whole job is to say
+/// what moved.
+///
+/// Only what moved, rather than all nine both sides. On a sweep that turns one
+/// knob — which is what the ladder does — eight ninths of the full line is the
+/// same number twice, and the reader has to find the pair that differs. That
+/// is the same work the old line failed at, done by hand.
+///
+/// `params_str` below prints the full state and stays the place for that; it
+/// is what the generation history renders, where there is no "before" to
+/// compare against.
+fn moved_knobs(
+    a: &crate::store::generations::GenerationParams,
+    b: &crate::store::generations::GenerationParams,
+) -> Vec<String> {
+    let on = |v: bool| if v { "on" } else { "off" };
+    let mut out = Vec::new();
+    if a.recency_weight != b.recency_weight {
+        out.push(format!(
+            "recency {:.2} → {:.2}",
+            a.recency_weight, b.recency_weight
+        ));
+    }
+    if a.per_source_cap != b.per_source_cap {
+        out.push(format!(
+            "cap {} → {}",
+            cap_str(a.per_source_cap),
+            cap_str(b.per_source_cap)
+        ));
+    }
+    if a.candidate_multiplier != b.candidate_multiplier {
+        out.push(format!(
+            "pool ×{} → ×{}",
+            a.candidate_multiplier, b.candidate_multiplier
+        ));
+    }
+    if a.recency_half_life_days != b.recency_half_life_days {
+        out.push(format!(
+            "half-life {}d → {}d",
+            a.recency_half_life_days, b.recency_half_life_days
+        ));
+    }
+    if a.prime_lift != b.prime_lift {
+        out.push(format!("lift {} → {}", a.prime_lift, b.prime_lift));
+    }
+    if a.sitting_prime != b.sitting_prime {
+        out.push(format!(
+            "sitting {} → {}",
+            on(a.sitting_prime),
+            on(b.sitting_prime)
+        ));
+    }
+    if a.spread_max != b.spread_max {
+        out.push(format!("spread {} → {}", a.spread_max, b.spread_max));
+    }
+    if a.rerank != b.rerank {
+        out.push(format!("rerank {} → {}", on(a.rerank), on(b.rerank)));
+    }
+    if a.review_min != b.review_min {
+        out.push(format!("review {:.2} → {:.2}", a.review_min, b.review_min));
+    }
+    out
 }
 
 fn rank_str(r: Option<usize>) -> String {
@@ -1509,6 +1576,73 @@ mod tests {
             super::params_str(&off).contains("sitting off"),
             "{}",
             super::params_str(&off)
+        );
+    }
+
+    /// The recommendation line has to name the knob that moved.
+    ///
+    /// It used to print four of the nine the sweep turns, chosen when four was
+    /// all it turned. `sitting_prime`, `prime_lift`, `spread_max`, `rerank` and
+    /// `review_min` joined the ladder afterwards, so an adopted sitting flip
+    /// rendered as "recency 0.05 → 0.05, cap 3 → 3, pool ×3 → ×3, half-life
+    /// 180d → 180d" — a change with no visible change, on the one line whose
+    /// whole job is to say what changed.
+    #[test]
+    fn the_recommendation_line_names_every_knob_that_moved() {
+        use crate::store::generations::GenerationParams;
+        let base = GenerationParams::default();
+
+        let flip = GenerationParams {
+            sitting_prime: !base.sitting_prime,
+            ..base
+        };
+        let line = super::moved_knobs(&base, &flip).join(", ");
+        assert!(line.contains("sitting"), "{line}");
+        assert_eq!(
+            super::moved_knobs(&base, &flip).len(),
+            1,
+            "and names nothing that stood still: {line}"
+        );
+
+        // The other four latecomers, each on its own.
+        let cases: Vec<(GenerationParams, &str)> = vec![
+            (
+                GenerationParams {
+                    rerank: !base.rerank,
+                    ..base
+                },
+                "rerank",
+            ),
+            (
+                GenerationParams {
+                    spread_max: base.spread_max + 1,
+                    ..base
+                },
+                "spread",
+            ),
+            (
+                GenerationParams {
+                    prime_lift: base.prime_lift + 1,
+                    ..base
+                },
+                "lift",
+            ),
+            (
+                GenerationParams {
+                    review_min: base.review_min + 0.1,
+                    ..base
+                },
+                "review",
+            ),
+        ];
+        for (candidate, name) in cases {
+            let line = super::moved_knobs(&base, &candidate).join(", ");
+            assert!(line.contains(name), "{name} is not named in {line:?}");
+        }
+
+        assert!(
+            super::moved_knobs(&base, &base).is_empty(),
+            "nothing moved, nothing named"
         );
     }
 

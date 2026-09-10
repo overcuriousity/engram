@@ -42,13 +42,40 @@ pub async fn run(core: &Core) -> Result<usize> {
         return Ok(0);
     };
 
-    let after: i64 = core
+    let cutoff = crate::store::now() - window;
+    let stamped: Option<i64> = core
         .store
         .meta_get(EVENTS_AFTER)
         .await?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let cutoff = crate::store::now() - window;
+        .and_then(|s| s.parse().ok());
+    let Some(after) = stamped else {
+        // The first pass sets the watermark and reads nothing.
+        //
+        // It used to default to `0`, which on any base that existed before
+        // this rule did meant one pass over the entire search history with no
+        // `LIMIT` under it. Every historic search nobody happened to open
+        // became a `-0.25` observation — and stamped with the generation that
+        // is live *now*, because that is the only generation an observation can
+        // be written under, though not one of those searches was ever served by
+        // it. `eval::lived` sums them into that generation's account and the
+        // next watch reverts a generation that did nothing wrong, while
+        // `jobs::retract` replays the same rows as evidence to exhume buried
+        // artifacts. On the shipped default of `feedback.retain_days = 0`
+        // nothing expires them either, so the whole of it stands for ever.
+        //
+        // A backfill was never the point: this rule reads a search against the
+        // one that followed it, which is a claim about the base as it is
+        // configured now. Starting from here loses nothing that was ever
+        // measurable.
+        core.store
+            .meta_set(EVENTS_AFTER, &cutoff.to_string())
+            .await?;
+        tracing::info!(
+            from = cutoff,
+            "the give-up watermark starts here; earlier searches are not backfilled"
+        );
+        return Ok(0);
+    };
     if cutoff <= after {
         return Ok(0);
     }
@@ -153,6 +180,15 @@ mod tests {
             })
             .await
             .unwrap();
+        // A base the rule has already run on. The very first pass sets the
+        // watermark and reads nothing — see `the_first_pass_does_not_backfill`
+        // — so a fixture that seeds backdated searches has to stand for a base
+        // that is past that, or every test here would be measuring the
+        // bootstrap instead of the rule.
+        core.store
+            .meta_set(EVENTS_AFTER, &(crate::store::now() - 100_000).to_string())
+            .await
+            .unwrap();
         (core, generation)
     }
 
@@ -191,6 +227,59 @@ mod tests {
             .await
             .unwrap();
         id
+    }
+
+    /// The first pass sets the watermark and writes nothing.
+    ///
+    /// It used to default to `0`, so on any base that existed before this rule
+    /// did the first pass walked the entire search history with no `LIMIT`
+    /// under it, and every historic search nobody happened to open became a
+    /// `-0.25` observation — stamped with the generation that is live *now*,
+    /// though not one of those searches was ever served by it. `eval::lived`
+    /// sums them into that generation's account and the next watch reverts a
+    /// generation that did nothing wrong, while `jobs::retract` replays the
+    /// same rows to exhume buried artifacts. Nothing expires them at the
+    /// shipped `feedback.retain_days = 0` either.
+    #[tokio::test]
+    async fn the_first_pass_does_not_backfill_the_history() {
+        let core = crate::core::test_support::test_core().await;
+        let generation = core
+            .store
+            .record_generation(&NewGeneration {
+                params: GenerationParams::default(),
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        // A history: a chain that would be a give-up on any later pass.
+        record_at(&core, "loop device", 4_000).await;
+        record_at(&core, "mount loop image", 3_940).await;
+
+        assert_eq!(run(&core).await.unwrap(), 0, "the history was backfilled");
+        assert!(
+            core.store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a generation that served none of those searches was charged for them"
+        );
+        // And the stamp is set, so the next pass starts from here rather than
+        // finding the same history again.
+        assert!(
+            core.store.meta_get(EVENTS_AFTER).await.unwrap().is_some(),
+            "without a stamp the next pass backfills after all"
+        );
+
+        // And a chain after the watermark is read as it always was — here
+        // still inside the window, which is the other half of the rule: an
+        // event young enough to gain a successor has not finished being what
+        // it is.
+        record_at(&core, "wie mounte ich", 20).await;
+        record_at(&core, "loop mount image", 5).await;
+        assert_eq!(run(&core).await.unwrap(), 0, "still inside the window");
     }
 
     #[tokio::test]

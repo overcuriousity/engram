@@ -38,12 +38,13 @@ pub struct Report {
     /// the capture probes it minted doing so.
     pub integrated: usize,
     pub probes: usize,
-    /// Probes the rehearse phase replayed, and the ones it retired on the way.
-    pub rehearsed: usize,
+    /// Probes the rehearse phase retired: another embedder, or an owner gone.
+    /// A change to the probe set itself, so this pass acted.
     pub retired: usize,
-    /// Interferers rule 3 observed. Counted only: retrieval competition is a
-    /// fact about ranking, and `sleep::interference` files nothing.
-    pub interference: usize,
+    /// Of the probes replayed, the ones that landed somewhere new. What this
+    /// pass learned, as opposed to how many measurements it repeated — see
+    /// `sleep::Replayed::moved`, and `Standing::rehearsed` beside it.
+    pub moved: usize,
     /// Condensations the pass armed.
     pub condensed: usize,
 }
@@ -62,6 +63,20 @@ pub struct Report {
 pub struct Standing {
     /// Gap clusters the base holds after this pass, named or not.
     pub clusters: usize,
+    /// Probes the rehearse phase replayed.
+    ///
+    /// Standing, though it is this pass that ran them, and the distinction is
+    /// the one this struct exists to draw. The lap wraps at the end of the
+    /// probe set, so on any base that has ever captured anything this is
+    /// non-zero on every pass for ever — and a count that is never zero is a
+    /// backoff that never engages. Repeating a measurement over unchanged
+    /// inputs is not work; `Report::moved` carries the part of it that is.
+    pub rehearsed: usize,
+    /// Interferers rule 3 observed. A standing fact about the ranking rather
+    /// than anything this pass did: `sleep::interference` files nothing, and
+    /// says so at length. Left flat, it returned the same non-zero number over
+    /// an unchanged base on every run.
+    pub interference: usize,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -104,21 +119,34 @@ pub async fn run(core: &Core) -> Result<Report> {
             report.reverted = usize::from(p.reverted.is_some());
             report.undone = p.undone;
             report.restored = p.restored;
-            // The sleep phases, flat, because `jobs::did_work` reads flat
-            // numbers and nothing else. Without them a pass that integrated
-            // five hundred artifacts and replayed five hundred probes reported
-            // no work at all, and `rearm_periodic_with` doubled the interval
-            // away from `sweep_hours` towards `backoff_max_hours` — on a base
-            // whose integration backlog drains at `OBSERVATION_LIMIT` a pass,
-            // and where nothing in production calls `arm_now` to put it back.
-            // Every one of these is this pass acting, which is the test the
-            // backoff asks.
+            // The sleep phases. Flat where the number is this pass acting,
+            // because `jobs::did_work` reads flat numbers and nothing else:
+            // without them a pass that integrated five hundred artifacts
+            // reported no work at all, and `rearm_periodic_with` doubled the
+            // interval away from `sweep_hours` towards `backoff_max_hours` —
+            // on a base whose integration backlog drains at
+            // `OBSERVATION_LIMIT` a pass, and where nothing in production
+            // calls `arm_now` to put it back.
+            //
+            // And nested where it is not. "This pass acting" is a narrower
+            // test than "this pass ran a query": the rehearse lap wraps, so
+            // replaying probes over an unchanged base is the same measurement
+            // again for ever, and rule 3 counts a standing fact and files
+            // nothing at all. Left flat, those two meant the backoff could
+            // never engage on any base that had ever captured anything —
+            // which is every base it was written for. What the pass *learned*
+            // is `moved`, and that is flat.
             report.integrated = p.integrated.integrated;
             report.probes = p.integrated.probes;
-            report.rehearsed = p.replayed.rehearsed;
             report.retired = p.replayed.retired;
-            report.interference = p.interference;
+            report.moved = p.replayed.moved;
             report.condensed = p.condensed;
+            // The two that say what the base holds rather than what this pass
+            // did to it. Recorded all the same — `sweep_runs.detail` is the
+            // history a person reads — just where `did_work` does not read
+            // them.
+            report.standing.rehearsed = p.replayed.rehearsed;
+            report.standing.interference = p.interference;
         }
         Err(e) => {
             tracing::warn!(error = %e, "the idle pass failed; the live generation is unchanged");
