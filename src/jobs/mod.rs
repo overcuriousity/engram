@@ -1225,24 +1225,46 @@ mod tests {
         assert!(did_work(r#"{"expired":1,"standing":{"clusters":3}}"#));
 
         let quiet = serde_json::to_string(&crate::jobs::retention::Report {
-            standing: crate::jobs::retention::Standing { clusters: 12 },
+            standing: crate::jobs::retention::Standing {
+                clusters: 12,
+                ..Default::default()
+            },
             ..Default::default()
         })
         .unwrap();
         assert!(!did_work(&quiet), "{quiet}");
 
-        // And a sleep that only integrated and rehearsed is work. It adopted
-        // no generation and took nothing back — the four numbers the report
-        // used to carry are all zero — so the backoff doubled the interval
-        // away from `sweep_hours` on the very passes that were draining the
-        // integration backlog five hundred artifacts at a time.
+        // And a sleep that only integrated is work. It adopted no generation
+        // and took nothing back — the four numbers the report used to carry
+        // are all zero — so the backoff doubled the interval away from
+        // `sweep_hours` on the very passes that were draining the integration
+        // backlog five hundred artifacts at a time. The rehearsal beside it
+        // rides along as a standing count and neither adds to that claim nor
+        // subtracts from it.
         let slept = serde_json::to_string(&crate::jobs::retention::Report {
             integrated: 500,
-            rehearsed: 500,
+            standing: crate::jobs::retention::Standing {
+                rehearsed: 500,
+                ..Default::default()
+            },
             ..Default::default()
         })
         .unwrap();
         assert!(did_work(&slept), "{slept}");
+
+        // The other side of the move: a pass that replayed five hundred probes
+        // and changed nothing is five hundred repeated measurements, which is
+        // the dormant base the backoff exists for. Flat, `rehearsed` said work
+        // on every pass over any base that had ever captured anything.
+        let rehearsed_only = serde_json::to_string(&crate::jobs::retention::Report {
+            standing: crate::jobs::retention::Standing {
+                rehearsed: 500,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!did_work(&rehearsed_only), "{rehearsed_only}");
 
         // Same shape, and worse: `context::run` is a full recompute, so all
         // three of its standing counts are non-zero on every run over unchanged
