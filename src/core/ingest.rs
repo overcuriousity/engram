@@ -445,7 +445,31 @@ impl Core {
         let forced_remind =
             c.metadata["intent"].as_str() == Some(crate::core::moments::Intent::Remind.as_str());
 
-        if let Some(existing) = self.store.find_by_hash(&content_hash(text)).await? {
+        // The same bytes on a different day are not a duplicate — see
+        // `corpus_hash`, which is what decides it, because the column is
+        // UNIQUE and two entries are two rows or they are one.
+        //
+        // The second read is for the rows already in the base. Those were
+        // stored under the text alone, whatever day they name, so a journal
+        // entry repeated verbatim on its own day would miss the day-scoped
+        // hash and be written a second time onto the same day — which is the
+        // one duplicate this whole change is not asking for. Looked up by the
+        // old hash and accepted only where the day agrees, which is exactly
+        // the state a base upgrading into this has.
+        let existing = match self
+            .store
+            .find_by_hash(&crate::store::corpora::corpus_hash(text, &c.metadata))
+            .await?
+        {
+            Some(e) => Some(e),
+            None if c.metadata["day"].is_string() => self
+                .store
+                .find_by_hash(&content_hash(text))
+                .await?
+                .filter(|e| e.metadata["day"] == c.metadata["day"]),
+            None => None,
+        };
+        if let Some(existing) = existing {
             tracing::info!(corpus_id = %existing.id, "duplicate ingest, returning existing source");
             // The same bytes captured twice, the second time with "remind me"
             // on them. The stored corpus is the right row and this call adds

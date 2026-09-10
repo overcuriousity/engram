@@ -23,6 +23,26 @@ pub fn window_key(corpus_id: &str, idx: i64) -> String {
 }
 
 pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize> {
+    // The week's budget, asked before anything is armed — as dedupe, reap,
+    // consolidate and sleep all ask it.
+    //
+    // This unit writes a `Kind::Promote` row and `actions_since` counts every
+    // row it finds, so promotions were spending a budget they never checked.
+    // And they arrive on ordinary use rather than on a sweep: `maybe_promote`
+    // runs from `mark_artifact_opened` and `mark_artifacts_cited`, so ten
+    // promotions in a week — a person reading their own base attentively —
+    // exhausted the default cap of ten and stood the *other* units down
+    // silently. That is the starvation `actions_since`'s own doc comment
+    // describes for `moment` rows, arriving through a different door.
+    //
+    // Counted rather than excluded: a promotion is the base acting on the
+    // corpus unasked, which is exactly what the budget is a bound on. The
+    // window is simply read again once the window moves — nothing is lost,
+    // and the passages keep the activation that armed this.
+    if !core.may_act().await? {
+        tracing::info!("a window is over the promotion line, but the week's budget is spent");
+        return Ok(0);
+    }
     let activation = core.store.activation_of(ids).await?;
     let mut armed = 0;
     for id in ids {
@@ -617,6 +637,56 @@ mod tests {
         assert_eq!(
             core.store.segment_state(&corpus, 0).await.unwrap(),
             Some(SegmentState::Verbatim)
+        );
+    }
+
+    /// A promotion is the base acting on the corpus unasked, and it is counted
+    /// against the week's budget — so it has to read the budget, which is the
+    /// one thing it never did.
+    ///
+    /// The row it writes is a `Kind::Promote`, and `actions_since` counts
+    /// whatever it finds. So promotions spent a budget they never checked, and
+    /// they arrive on ordinary reading rather than on a sweep: ten of them in a
+    /// week is a person going carefully through their own base, and it stood
+    /// dedupe, reap, condense and `arm_dedupe` down for the rest of the week
+    /// without a word.
+    #[tokio::test]
+    async fn a_spent_budget_arms_no_promotion() {
+        let (mut core, corpus, p) = earned_with_one_passage().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_week = 0;
+        let now = crate::store::now();
+        core.store
+            .bump_activation(
+                std::slice::from_ref(&p),
+                core.promote.activation_above + 1.0,
+                core.activation.half_life_days,
+                now,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            maybe_promote(&core, std::slice::from_ref(&p), now)
+                .await
+                .unwrap(),
+            0,
+            "a promotion was armed on a budget that is spent"
+        );
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim),
+            "the window was reset for a promotion nobody could afford"
+        );
+
+        // Below "full" the corpus units are under their own switch and the
+        // budget is not consulted — the same line `dedupe::run` draws.
+        core.evolve.autonomous = crate::config::Autonomy::Ranking;
+        assert_eq!(
+            maybe_promote(&core, std::slice::from_ref(&p), now)
+                .await
+                .unwrap(),
+            1
         );
     }
 

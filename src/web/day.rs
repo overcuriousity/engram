@@ -603,6 +603,51 @@ mod tests {
         assert_eq!(c[0].2, "journal");
     }
 
+    /// The same short line on two days is two entries.
+    ///
+    /// A diary repeats itself — that is most of what a diary is. Deduplicated
+    /// on the text alone, the second day's writing hashed to the first day's
+    /// corpus and stored nothing; `entry` discards `ingest_capture`'s outcome,
+    /// so the press redirected as though it had worked, and the second day's
+    /// page then said "Nothing on this day."
+    ///
+    /// Both directions are checked, because the fix moves what the `UNIQUE`
+    /// column means: a repeat on the *same* day must still be one entry.
+    #[tokio::test]
+    async fn the_same_line_written_on_two_days_is_two_entries() {
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        for date in ["2026-08-28", "2026-09-03", "2026-09-03"] {
+            app.clone()
+                .oneshot(form(
+                    &format!("/ui/day/{date}/entry"),
+                    &cookie,
+                    "text=Long+day.&tz=Europe/Berlin",
+                ))
+                .await
+                .unwrap();
+        }
+
+        for date in ["2026-08-28", "2026-09-03"] {
+            let html = body_of(
+                app.clone()
+                    .oneshot(get(&format!("/ui/day/{date}?tz=Europe/Berlin"), &cookie))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert!(
+                html.contains("Long day."),
+                "{date} lost the entry written on it"
+            );
+        }
+        assert_eq!(
+            core.store.recent_captures(5).await.unwrap().len(),
+            2,
+            "the second writing on one day made a second entry"
+        );
+    }
+
     #[tokio::test]
     async fn a_leniently_spelled_day_still_shows_the_day_it_names() {
         // chrono reads `%Y-%m-%d` leniently, so `2026-8-28` parses and the page

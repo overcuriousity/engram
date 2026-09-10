@@ -212,6 +212,29 @@ pub fn content_hash(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
 }
 
+/// The hash a corpus is stored and deduplicated under.
+///
+/// The text alone for every ordinary capture, which is what this has always
+/// been. For a capture that names a day it is the day *and* the text, because
+/// a journal entry is scoped to the day it was written on — that is what
+/// `metadata.day` is and what the day page reads.
+///
+/// `content_hash` is `UNIQUE`, so this is not merely a lookup key: two entries
+/// carrying the same short line are two rows or they are one, and the column
+/// decides which. Under the text alone they were one. "Long day." written on
+/// Monday and again on Thursday returned Monday's corpus, stored nothing, and
+/// left Thursday's page reading "Nothing on this day" — the second day's
+/// writing simply discarded, with the press reporting success.
+///
+/// The day goes in front of the text with a newline between, so no day can be
+/// spelled to collide with the beginning of another entry's text.
+pub fn corpus_hash(raw_text: &str, metadata: &serde_json::Value) -> String {
+    match metadata["day"].as_str() {
+        Some(day) => content_hash(format!("{day}\n{raw_text}")),
+        None => content_hash(raw_text),
+    }
+}
+
 fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
     Corpus {
         id: r.get("id"),
@@ -301,7 +324,7 @@ impl Store {
             raw_text: raw_text.to_string(),
             origin: origin.to_string(),
             title_hint: title_hint.map(str::to_string),
-            content_hash: content_hash(raw_text),
+            content_hash: corpus_hash(raw_text, &metadata),
             status,
             created_at: now(),
             updated_at: now(),

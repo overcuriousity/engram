@@ -992,15 +992,33 @@ impl Store {
     ///
     /// `score` is left alone and is now stale, exactly as in
     /// `repoint_open_pairs`: it orders the judge queue and gates nothing here.
+    /// The pair states that are still somebody's to answer, as a SQL list.
+    ///
+    /// Written once because three queries ask it and each of them is a way for
+    /// a pair to be carried, listed or repaired — a state missing from one of
+    /// them is a question that quietly stops being asked. `Duplicate` was
+    /// missing from all three: it is the judge's proposal awaiting an
+    /// operator's Synthese press, so it is as open as `Pending` is, but a
+    /// `Duplicate` pair whose member was later superseded was carried nowhere,
+    /// listed nowhere and could not be refiled — `record_pair` is
+    /// `INSERT OR IGNORE` over `UNIQUE(a_id, b_id)`, so the row that already
+    /// exists is the only one there will ever be.
+    ///
+    /// `NoConflict`, `Dismissed` and `Oversized` are answered questions, and
+    /// `NearIdentical` is the sweep's own filing, which recomputes liveness for
+    /// the whole cluster before it acts (`jobs::consolidate`).
+    const OPEN_STATES: &str = "('pending', 'contradiction', 'superseded', 'vacuous', 'duplicate')";
+
     pub async fn follow_supersession(&self, loser: &str, winner: &str) -> Result<Followed> {
         if loser == winner {
             return Ok(Followed::default());
         }
-        let rows = sqlx::query(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifact_pairs
-              WHERE state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+              WHERE state IN {}
                 AND (a_id = ? OR b_id = ?)",
-        )
+            Self::OPEN_STATES
+        )))
         .bind(loser)
         .bind(loser)
         .fetch_all(&self.pool)
@@ -1137,8 +1155,7 @@ impl Store {
     /// takes 200 supersessions a sweep so a backlog drains over a few ticks; an
     /// unbounded settle running straight afterwards reached the other 200-and-up
     /// first and marked them `Stale`. That is a one-way door:
-    /// `supersessions_with_open_pairs` selects only
-    /// `('pending','contradiction','superseded','vacuous')`, so a stale row is
+    /// `supersessions_with_open_pairs` selects only `Self::OPEN_STATES`, so a stale row is
     /// invisible to the repair for ever, and `reopen_stale_pairs` needs both
     /// sides back in results, which a superseded loser never is. The verdict
     /// was never carried onto the winner and no later tick could carry it —
@@ -1155,19 +1172,20 @@ impl Store {
     /// `decided_by` is overwritten rather than left alone, which is the same
     /// distinction one level down: the *state* is nobody's answer, but the row
     /// still has to say who last wrote it. These candidates come from
-    /// `('pending','contradiction','superseded','vacuous')`, and a
+    /// `Self::OPEN_STATES`, and a
     /// contradiction an operator escalated carries their name — left standing
     /// beside `'stale'` it reads "an operator decided this went stale", which
     /// they did not. `'model'`, like every other rule this file applies
     /// unattended (`follow_supersession` settles `Stale` exactly so).
     pub async fn stale_unreachable_pairs(&self) -> Result<u64> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT p.id AS pair_id, x.id AS side, x.superseded_by AS winner
                FROM artifact_pairs p
                JOIN artifacts x ON x.id IN (p.a_id, p.b_id)
-              WHERE p.state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+              WHERE p.state IN {}
                 AND (x.status <> 'active' OR x.superseded_by IS NOT NULL)",
-        )
+            Self::OPEN_STATES
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -1289,14 +1307,15 @@ impl Store {
     /// instead (`stale_unreachable_pairs`), which is what keeps them findable
     /// again if the end of the chain comes back.
     pub async fn supersessions_with_open_pairs(&self, limit: i64) -> Result<Vec<(String, String)>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT DISTINCT loser.id AS loser, loser.superseded_by AS winner
                FROM artifacts loser
                JOIN artifact_pairs p ON p.a_id = loser.id OR p.b_id = loser.id
               WHERE loser.superseded_by IS NOT NULL
-                AND p.state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+                AND p.state IN {}
               LIMIT ?",
-        )
+            Self::OPEN_STATES
+        )))
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -2864,6 +2883,46 @@ mod tests {
             found,
             vec![(a.clone(), c.clone())],
             "the repair stopped at the middle of the chain"
+        );
+    }
+
+    /// Every state a person still owes an answer to is carried, listed and
+    /// repaired — including the one that waits on a press rather than a sweep.
+    ///
+    /// `Duplicate` is the judge's proposal that one artifact should hold what
+    /// both say, and it sits in the queue until somebody presses Synthese. It
+    /// was in none of the three open-state lists, so when a member was later
+    /// superseded the pair was carried nowhere and listed nowhere — and could
+    /// not be filed again either, because `record_pair` is `INSERT OR IGNORE`
+    /// over `UNIQUE(a_id, b_id)` and the row that already exists is the only
+    /// one there will ever be. The question was simply gone.
+    #[tokio::test]
+    async fn a_duplicate_pair_is_carried_onto_the_winner_like_any_other_open_one() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (a, other, winner) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(a, other, 0.91).await.unwrap();
+        let id = s.pair_between(a, other).await.unwrap().unwrap().id;
+        s.set_pair_state(
+            id,
+            PairState::Duplicate,
+            Some("covers the same ground"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
+        s.set_superseded_by(a, Some(winner)).await.unwrap();
+
+        assert_eq!(
+            s.supersessions_with_open_pairs(10).await.unwrap(),
+            vec![(a.clone(), winner.clone())],
+            "a duplicate awaiting a press was invisible to the repair"
+        );
+        s.follow_supersession(a, winner).await.unwrap();
+        let moved = s.pair_between(winner, other).await.unwrap();
+        assert!(
+            moved.is_some(),
+            "the question was not carried onto the artifact that now answers for it"
         );
     }
 
