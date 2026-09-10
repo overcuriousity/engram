@@ -853,6 +853,12 @@ CREATE INDEX IF NOT EXISTS idx_observations_generation
   ON observations(generation_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_observations_artifact
   ON observations(artifact_id) WHERE artifact_id IS NOT NULL;
+-- The anchor check reads observations by the query they were recorded under,
+-- twice per verdict, for up to 500 verdicts a pass (`eval::anchor::agreement`).
+-- Without this that is a thousand full scans of the largest table a busy base
+-- has — on the path that gates every adopt and every revert, holding the idle
+-- pass's claim throughout.
+CREATE INDEX IF NOT EXISTS idx_observations_query ON observations(query);
 
 -- ── Rehearsal ────────────────────────────────────────────────────────────────
 -- A probe: a question the base can ask itself about one artifact, with the

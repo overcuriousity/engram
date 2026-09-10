@@ -30,7 +30,14 @@ static LOADED: std::sync::OnceLock<std::sync::Mutex<Loaded>> = std::sync::OnceLo
 /// across the family). An accuracy default, not a requirement: `infer.tokenizer`
 /// points at any HF-format tokenizer.json, and every failure below falls back
 /// to the estimate rather than refusing startup.
-const BUNDLED: &[u8] = include_bytes!("../../assets/tokenizer.json");
+///
+/// `vendor/` rather than `assets/`, which is where it used to live, because
+/// `rust_embed` takes the whole of `assets/` with no exclusions: the file was
+/// embedded in the binary twice — once by this `include_bytes!` and once by
+/// the asset table — and the second copy was *served*, anonymously, at
+/// `/assets/tokenizer.json` with a year-long `max-age`. 11 MB of vocabulary
+/// nothing asks a web server for, on a route with no session behind it.
+const BUNDLED: &[u8] = include_bytes!("../../vendor/tokenizer.json");
 
 impl TokenCounter {
     pub fn count(&self, text: &str) -> usize {

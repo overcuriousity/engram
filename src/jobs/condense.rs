@@ -49,6 +49,28 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         );
         return Ok(());
     }
+    // And the other half of the arming path's test, which this had only one of.
+    //
+    // An open row says the condensation stands. A row that was *taken back*
+    // says a person or `jobs::retract` decided against it — and that leaves no
+    // open row at all, so the check above waves the unit through. In exactly
+    // the window this function's guards exist for — the rewrite committed, the
+    // `enqueue` in the other database failed, the unit still queued — an undo
+    // landing before the retry was reversed by it, unasked and unreported.
+    //
+    // `sleep::condense_candidates` asks both before it arms anything, for the
+    // same reason: a condensation somebody took back is not a nomination.
+    if core
+        .store
+        .action_was_undone(&c.id, crate::store::actions::Kind::Condense)
+        .await?
+    {
+        tracing::info!(
+            artifact_id,
+            "this artifact's condensation was taken back; the queued rewrite is dropped"
+        );
+        return Ok(());
+    }
     // Both gates are read again at the unit, not only where it was armed:
     // permission and budget can each have gone while this waited in the queue.
     //
@@ -304,6 +326,52 @@ mod tests {
             core.store.versions_of(&id).await.unwrap().len(),
             1,
             "one nomination, one version"
+        );
+    }
+
+    /// The same retry, against a condensation somebody has since taken back.
+    ///
+    /// The guard above reads open rows, and an undo leaves none — so in the
+    /// exact window these guards exist for (the rewrite committed, the
+    /// `enqueue` in the other database failed, the unit still queued) a retry
+    /// landing after the undo re-condensed the artifact and reversed it. The
+    /// operator pressed the button, watched the original come back, and it
+    /// went away again on the next tick with nothing to say why.
+    ///
+    /// `sleep::condense_candidates` has asked both questions since it was
+    /// written; this asked one of them.
+    #[tokio::test]
+    async fn a_condensation_that_was_taken_back_is_not_written_again_by_a_retry() {
+        let (core, writer) = core_with(vec![
+            reply("The loop mount needs `mount -o loop /dev/loop0`."),
+            reply("Needs `mount -o loop /dev/loop0`."),
+        ])
+        .await;
+        let id = synthesized(&core).await;
+        let before = core.store.get_artifact(&id).await.unwrap().text;
+        run(&core, &id).await.unwrap();
+        let action = core
+            .store
+            .open_action_on(&id, crate::store::actions::Kind::Condense)
+            .await
+            .unwrap()
+            .expect("journaled");
+        core.uncondense(&action.id, crate::store::actions::UndoneBy::Operator)
+            .await
+            .unwrap();
+
+        // The retry the failed enqueue would have caused, arriving after.
+        run(&core, &id).await.unwrap();
+
+        assert_eq!(
+            writer.calls(),
+            1,
+            "the retry spent a model call re-doing an undone condensation"
+        );
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().text,
+            before,
+            "the operator's undo was reversed by a retry"
         );
     }
 
