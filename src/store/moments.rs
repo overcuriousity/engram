@@ -613,6 +613,25 @@ impl Store {
         .await?)
     }
 
+    /// Give a row that carries a rule but no series its own id as one.
+    ///
+    /// The head of a recurrence names the series — that is `insert_moment`'s
+    /// rule for a new one — but rows written before the column existed carry
+    /// NULL, and nothing since has adopted them. Called when such a row arms
+    /// its successor, so that both ends of the recurrence are in one series
+    /// and `occurrences_in_series` counts the occurrence that has just
+    /// happened rather than starting from the next one.
+    ///
+    /// `COALESCE` rather than an overwrite: a row that already belongs to a
+    /// series keeps it, so this is safe to call without asking first.
+    pub async fn adopt_into_own_series(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE moments SET series_id = COALESCE(series_id, id) WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// How many occurrences one recurrence has had, counted by its series and
     /// so immune to the artifact its rows sit on.
     ///

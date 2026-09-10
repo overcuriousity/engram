@@ -219,6 +219,42 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
         // stamped below, so a single unrestorable row re-read and re-failed
         // every give-up after it, on every lap, for ever. Nothing this rule
         // does is worth that.
+        // Whether anything in the base ever said *why* this artifact stopped
+        // being active.
+        //
+        // `reap_candidates` nominates on `status != 'active'`, so a row an
+        // operator hid by hand and then let age out is buried exactly like one
+        // the judge discarded — and `reactivate` forces `Active`, so restoring
+        // it republished something a person had deliberately hidden. A search
+        // going unanswered is evidence about the ranking; it is not a second
+        // opinion on somebody's decision.
+        //
+        // The status cannot tell the two apart: both leave `Deprecated`, and
+        // the column survives the burial untouched either way. The journal
+        // can. `deprecate_with` writes a `Kind::Discard` row for a corpus job's
+        // verdict, and the Hide button on Ops calls `deprecate`, which writes
+        // none — so a deprecated row with no discard behind it is a decision
+        // nothing but a person could have made.
+        //
+        // Skipped rather than restored-as-deprecated: putting the row back at
+        // a status that is still hidden does no work, answers no give-up, and
+        // would stamp a journal row claiming it had.
+        if a.kind == Kind::Reap
+            && let Ok(c) = core.store.get_artifact(&a.subject_id).await
+            && c.status == crate::store::artifacts::ArtifactStatus::Deprecated
+            && core
+                .store
+                .open_action_on(&a.subject_id, Kind::Discard)
+                .await?
+                .is_none()
+        {
+            tracing::info!(
+                subject = %a.subject_id,
+                "a search given up on would have been answered by an artifact somebody hid \
+                 by hand before it was buried; leaving that decision alone"
+            );
+            continue;
+        }
         let restore = match a.kind {
             Kind::Discard | Kind::Reap => core.reactivate(&a.subject_id).await,
             Kind::Supersede => core.unsupersede(&a.subject_id).await,
@@ -1161,10 +1197,82 @@ mod tests {
         assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
     }
 
-    /// Bury `id` the way reap does, with its vector and a journal row.
-    async fn buried(core: &Core, id: &str, embed_model: &str) {
+    /// And it stays not the base's to restore once it has been buried.
+    ///
+    /// The rule above holds because a hand-hidden artifact has no journal row,
+    /// and rule 2 works from rows. Burial writes one — every grave has a
+    /// `Kind::Reap` — so the graveyard branch found a row where the live
+    /// branch had found none, and `reactivate` forces `Active`: a search going
+    /// unanswered republished, at full visibility, something a person had
+    /// deliberately taken out of results however long ago.
+    ///
+    /// The Reap row is still there and still open. What changes is that
+    /// nothing is restored on the strength of it, and no undo is stamped.
+    #[tokio::test]
+    async fn an_artifact_a_person_hid_stays_hidden_after_it_is_buried() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        let model = core.embedder.model().to_string();
+        // By hand, through the button's own method: no journal row, which is
+        // the whole of what distinguishes this from a judged discard.
+        core.deprecate(&answer).await.unwrap();
+        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 400 * 86_400)
+            .bind(&answer)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let dense = core
+            .vectors
+            .dense_of(&answer)
+            .await
+            .unwrap()
+            .expect("a point");
         core.store
-            .set_artifact_status(id, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .bury(
+                &answer,
+                r#"{"reason":"covered"}"#,
+                0,
+                Some(&dense),
+                Some(&model),
+                &crate::jobs::reap::test_support::row(&answer),
+            )
+            .await
+            .unwrap();
+        core.vectors
+            .delete_artifacts(std::slice::from_ref(&answer))
+            .await
+            .unwrap();
+        gave_up(&core, &g.id).await;
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false),
+            "a give-up overturned somebody's decision to hide this"
+        );
+        let row = core.store.get_artifact(&answer).await.unwrap();
+        assert!(row.reaped_at.is_some(), "the grave was opened anyway");
+        assert!(!row.in_results());
+        assert!(
+            !core
+                .store
+                .action_was_undone(&answer, Kind::Reap)
+                .await
+                .unwrap(),
+            "an undo was stamped for a restore that did not happen"
+        );
+    }
+
+    /// Bury `id` the way reap does: a judged discard, then a burial with its
+    /// vector and a journal row — the ordinary road into the graveyard,
+    /// stated through the calls that actually take it.
+    ///
+    /// The discard is journaled rather than stamped straight onto the row,
+    /// because the journal is what says a corpus job hid this and not a
+    /// person: rule 2 reads exactly that before it puts anything back. A bare
+    /// `set_artifact_status` here described a state the app has no path to.
+    async fn buried(core: &Core, id: &str, embed_model: &str) {
+        core.deprecate_with(id, Some(discard_row(id)))
             .await
             .unwrap();
         sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
