@@ -1451,9 +1451,13 @@ mod tests {
             .await
             .unwrap();
         finish(&core, &older.id).await.unwrap();
-        let newer = write(&core, &draft("all three texts"), &[older.id.clone()])
-            .await
-            .unwrap();
+        let newer = write(
+            &core,
+            &draft("all three texts"),
+            std::slice::from_ref(&older.id),
+        )
+        .await
+        .unwrap();
         finish(&core, &newer.id).await.unwrap();
 
         let hidden = core.store.get_artifact(&older.id).await.unwrap();

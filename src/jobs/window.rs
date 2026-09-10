@@ -90,7 +90,15 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // over, and `text_with_no_structure_still_splits_within_budget` asserts
     // the same bound. What must never happen is unbounded — the corpus that
     // came back fifteen times its budget.
-    let window_budget = super::synthesize::segment_budget(core, lang);
+    // No budget at all is not a small budget: the call would go out over the
+    // endpoint's real context and come back a non-retryable 400, once per
+    // window, with the cause named nowhere. Refused here instead, where the
+    // reason can be written down.
+    let Some(window_budget) = super::synthesize::segment_budget(core, lang) else {
+        let reason = super::synthesize::no_budget_reason(core, lang);
+        tracing::error!(corpus_id, window = idx, %reason, "no window can be synthesized");
+        return Err(crate::error::Error::Validation(reason));
+    };
     let window_tokens = core.counter.count(&text);
     debug_assert!(
         window_tokens <= window_budget * 2,

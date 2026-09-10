@@ -75,6 +75,28 @@ impl Door {
         Door::Ask,
     ];
 
+    /// Whether a search on this door fetches the wider pool that capture
+    /// needs — `feedback.candidates` as a floor under the over-fetch.
+    ///
+    /// The captured doors, because that pool is what they store; and `Judge`,
+    /// because `Judge` is those doors replayed. The idle pass ranks its
+    /// candidate generations through `search_with_ranking` on this door so
+    /// that measurement and the live path are one pipeline, and a floor the
+    /// replay skips is a place where they are two.
+    ///
+    /// It showed up as an axis that could adopt on nothing. The sweep replays
+    /// at `LIMIT = 10`, and the shipped floor is 20, so a `candidate_multiplier`
+    /// of 1 and of 2 both fetch 20 candidates in production and are the same
+    /// setting — while the replay fetched 10 against 20 and scored them as a
+    /// difference worth having.
+    ///
+    /// `Ask` is not here. It is a door in its own right rather than a stand-in
+    /// for one, and widening its pool would be a change to what people are
+    /// served, not to what the sweep measures.
+    pub fn fetches_the_capture_pool(&self) -> bool {
+        self.captured() || matches!(self, Door::Judge)
+    }
+
     /// Whether an open on this door is recorded, and so whether "nobody
     /// opened it" is a fact about the search or merely the absence of any way
     /// to say otherwise.

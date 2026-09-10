@@ -32,8 +32,28 @@ pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
 /// The window budget, derived from the synthesizer's context: the unit
 /// promotion reads, what coverage is measured against, and the line the size
 /// fork asks about.
-pub fn segment_budget(core: &Core, lang: crate::infer::lang::Lang) -> usize {
+///
+/// `None` where the configured context cannot hold a prompt and a smallest
+/// segment beside it — see [`segment_tokens`], which is where that is decided
+/// and why it is not a number. Every caller here has an honest answer for it,
+/// and none of them is "carry on with 256".
+pub fn segment_budget(core: &Core, lang: crate::infer::lang::Lang) -> Option<usize> {
     segment_tokens(core.synthesizer.budget(), prompt_overhead(core, lang))
+}
+
+/// What to tell somebody when there is no budget at all. One sentence, written
+/// once, because three call sites report it and they should not disagree about
+/// whose fault it is.
+pub fn no_budget_reason(core: &Core, lang: crate::infer::lang::Lang) -> String {
+    let b = core.synthesizer.budget();
+    format!(
+        "the synthesizer's context of {} tokens does not leave room for a prompt \
+         ({} tokens of instructions and context here) and a segment of at least {} \
+         beside it — raise infer.synthesize.context_tokens",
+        b.context_tokens,
+        prompt_overhead(core, lang) + b.context.total(),
+        crate::infer::budget::MIN_SEGMENT_TOKENS,
+    )
 }
 
 /// Measure how much of a corpus survived into its artifacts, and store it.
@@ -351,9 +371,17 @@ mod tests {
 
     /// A budget with room for several windows and an output ceiling that never
     /// binds, so the context blocks are what shape the windowing.
+    /// A synthesizer whose context carries the given opening and overlap.
+    ///
+    /// 4096 rather than the 2000 this used to say. The system prompt is about
+    /// 1564 tokens, so 2000 left 366 for input and output together — under the
+    /// smallest segment worth a call, and a configuration `segment_tokens` now
+    /// refuses outright. It used to be floored to 256 and these tests ran on
+    /// that: a budget no call could have honoured, which is exactly the state
+    /// the floor was hiding everywhere else.
     fn context_budget(opening: usize, overlap: usize) -> crate::infer::SynthesisBudget {
         crate::infer::SynthesisBudget {
-            context_tokens: 2000,
+            context_tokens: 4096,
             max_output_tokens: 100_000,
             output_ratio: 1.0,
             context: crate::infer::context::ContextBudget {
@@ -465,7 +493,7 @@ mod tests {
         // spins against the endpoint forever, and a debug_assert turns that
         // into a test failure instead of a production incident.
         let core = crate::core::test_support::test_core().await;
-        let budget = segment_budget(&core, crate::infer::lang::Lang::En);
+        let budget = segment_budget(&core, crate::infer::lang::Lang::En).expect("a window");
 
         let lines: Vec<String> = (0..400)
             .map(|i| format!("body line {i} with enough words to cost real tokens"))
@@ -660,6 +688,55 @@ mod tests {
     }
 
     /// A body several windows long under the fake synthesizer's budget.
+    /// A context too small for its own prompt fails the corpus with the reason,
+    /// rather than cutting it into windows no call can honour.
+    ///
+    /// The floor made this invisible: `segment_tokens` handed back 256, the
+    /// splitter cut to it, `jobs::window`'s guard compared against it and
+    /// passed, and every call went out over the endpoint's real context to be
+    /// refused with a 400 that is not retryable. Every window of every such
+    /// capture failed and the corpus settled `partial`, with the cause named
+    /// nowhere — least of all next to the setting that caused it.
+    #[tokio::test]
+    async fn a_context_too_small_to_synthesize_says_so_instead_of_failing_every_window() {
+        use crate::infer::fake::RecordingSynthesizer;
+        let mut core = test_core().await;
+        let rec = std::sync::Arc::new(RecordingSynthesizer::new(crate::infer::SynthesisBudget {
+            context_tokens: 1600,
+            max_output_tokens: 100_000,
+            output_ratio: 1.0,
+            context: crate::infer::context::ContextBudget::default(),
+        }));
+        core.synthesizer = rec.clone();
+        assert_eq!(
+            segment_budget(&core, crate::infer::lang::Lang::En),
+            None,
+            "the fixture is no longer the configuration this test is about"
+        );
+
+        let out = core
+            .ingest(&multi_segment_body(), "web", None)
+            .await
+            .unwrap();
+        plan(&core, &out.id).await.unwrap();
+
+        assert_eq!(
+            core.store.segments_for_corpus(&out.id).await.unwrap().len(),
+            0,
+            "windows were cut to a budget no call can honour"
+        );
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            crate::store::corpora::CorpusStatus::Failed,
+            "the corpus was left looking like it was on its way"
+        );
+        assert_eq!(rec.seen.lock().unwrap().len(), 0, "a call was spent anyway");
+
+        // And the reason names the knob rather than the endpoint.
+        let reason = no_budget_reason(&core, crate::infer::lang::Lang::En);
+        assert!(reason.contains("context_tokens"), "{reason}");
+    }
+
     fn multi_segment_body() -> String {
         (0..400)
             .map(|i| format!("paragraph number {i} with some filler text"))
@@ -671,7 +748,7 @@ mod tests {
         crate::infer::split::split_into_segments(
             body,
             &core.counter,
-            segment_budget(core, crate::infer::lang::Lang::En),
+            segment_budget(core, crate::infer::lang::Lang::En).expect("a window"),
         )
         .len()
     }

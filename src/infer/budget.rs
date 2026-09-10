@@ -248,12 +248,26 @@ fn estimate(text: &str) -> usize {
     text.chars().count() * 2 / 7
 }
 
-/// Usable input tokens per synthesizer call.
+/// Usable input tokens per synthesizer call, or `None` where there are none.
 ///
 /// The synthesizer rewrites rather than splits, so output can exceed input. Two
 /// independent ceilings apply: the context has to hold input plus output, and
 /// the output itself is capped by `max_output_tokens`. The smaller wins.
-pub fn segment_tokens(budget: SynthesisBudget, prompt_overhead: usize) -> usize {
+///
+/// `None` rather than a floor when what is left will not hold
+/// [`MIN_SEGMENT_TOKENS`]. The subtractions above saturate, so a window too
+/// small for its own prompt — `context_tokens = 4096` with a non-Latin `lang`,
+/// where the system prompt plus [`ContextBudget::total`] is most of the window
+/// — arrived here as zero usable tokens and was handed back as 256 anyway.
+/// Nothing downstream could tell that number from a real one: the splitter cut
+/// windows to it, the guard in `jobs::window` compared against it and passed,
+/// and every call went out over the endpoint's real context to be refused with
+/// a 400 that is not retryable. Every window of every such capture failed, and
+/// the corpus settled `partial`, with the cause named nowhere.
+///
+/// A budget that does not exist is not a small budget. Saying so here is the
+/// only place that can: the callers each have somewhere honest to put it.
+pub fn segment_tokens(budget: SynthesisBudget, prompt_overhead: usize) -> Option<usize> {
     let ratio = budget.output_ratio.max(0.1);
     let usable = budget
         .context_tokens
@@ -261,7 +275,8 @@ pub fn segment_tokens(budget: SynthesisBudget, prompt_overhead: usize) -> usize 
         .saturating_sub(budget.context.total());
     let by_context = (usable as f32 / (1.0 + ratio)) as usize;
     let by_output = (budget.max_output_tokens as f32 / ratio) as usize;
-    by_context.min(by_output).max(MIN_SEGMENT_TOKENS)
+    let room = by_context.min(by_output);
+    (room >= MIN_SEGMENT_TOKENS).then_some(room)
 }
 
 /// Headroom between an estimated prompt and the output ceiling asked for
@@ -569,6 +584,7 @@ mod tests {
         // 200 + 2*150 + 160 fences = 660 prompt tokens. The window loses that
         // divided by (1 + output_ratio), because every input token it gives up
         // frees output budget too: 660 / 2.4 = 275.
+        let (without, with) = (without.expect("a window"), with.expect("a window"));
         assert_eq!(without, 13236);
         assert_eq!(with, 12961);
         assert_eq!(without - with, 275);
@@ -586,7 +602,7 @@ mod tests {
     fn window_leaves_room_for_a_larger_rewritten_output() {
         // 32k context, 1000 tokens of prompt, output up to 1.4x the input.
         // (32768 - 1000) / 2.4 = 13236
-        let w = segment_tokens(budget(32768, 100_000, 1.4), 1000);
+        let w = segment_tokens(budget(32768, 100_000, 1.4), 1000).expect("a window");
         assert_eq!(w, 13236);
         assert!(w < 32768 / 2, "window must not assume output is free");
     }
@@ -595,15 +611,28 @@ mod tests {
     fn window_is_also_clamped_by_max_output_tokens() {
         // Context would allow ~13k, but 8192 max output at ratio 1.4 caps
         // the input at 8192 / 1.4 = 5851.
-        let w = segment_tokens(budget(32768, 8192, 1.4), 1000);
+        let w = segment_tokens(budget(32768, 8192, 1.4), 1000).expect("a window");
         assert_eq!(w, 5851);
     }
 
+    /// Overhead larger than the whole context does not wrap around — and does
+    /// not come back as a window either.
+    ///
+    /// It used to be floored to `MIN_SEGMENT_TOKENS`, which reads as a small
+    /// budget and is not one: nothing downstream could tell that 256 from a
+    /// real one, so the splitter cut to it, `jobs::window`'s guard compared
+    /// against it, and every call went out over the endpoint's real context to
+    /// be refused with a 400 that is not retryable. A budget that does not
+    /// exist has to say so.
     #[test]
-    fn window_never_returns_zero_or_underflows() {
-        // Overhead larger than the whole context must not wrap around.
-        let w = segment_tokens(budget(1000, 8192, 1.4), 5000);
-        assert!(w >= MIN_SEGMENT_TOKENS, "got {w}");
+    fn a_context_too_small_for_its_own_prompt_is_no_window_at_all() {
+        assert_eq!(segment_tokens(budget(1000, 8192, 1.4), 5000), None);
+        // And the boundary is the smallest segment worth a call, not zero.
+        let just_under = segment_tokens(budget(1000, 8192, 1.4), 400);
+        assert!(
+            just_under.is_none_or(|w| w >= MIN_SEGMENT_TOKENS),
+            "{just_under:?} is under the floor and was still offered"
+        );
     }
 
     #[test]

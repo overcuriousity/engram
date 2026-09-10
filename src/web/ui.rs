@@ -314,7 +314,17 @@ pub(crate) fn fate_echo(
             detail: String::new(),
         };
     }
-    let budget = crate::jobs::synthesize::segment_budget(core, lang).max(1);
+    // No budget at all is a configuration this base cannot synthesize under,
+    // and the echo's whole job is to say what capture will do before it is
+    // pressed. It will store the text and rewrite nothing.
+    let Some(budget) = crate::jobs::synthesize::segment_budget(core, lang) else {
+        return IntentEchoTemplate {
+            kind: "stored as written",
+            detail: "the synthesizer's context is too small to rewrite anything on this                      base; what you capture is kept verbatim"
+                .into(),
+        };
+    };
+    let budget = budget.max(1);
     let tokens = core.counter.count(q);
     if tokens <= budget {
         IntentEchoTemplate {
@@ -2521,7 +2531,9 @@ mod tests {
         // and the promise was short by up to half.
         let core = crate::core::test_support::test_core().await;
         let lang = crate::infer::lang::Lang::En;
-        let budget = crate::jobs::synthesize::segment_budget(&core, lang).max(1);
+        let budget = crate::jobs::synthesize::segment_budget(&core, lang)
+            .expect("a window")
+            .max(1);
         let para = "filler words ".repeat(budget * 6 / 10);
         // Three, not ten: the property holds from three paragraphs up — three
         // windows against the arithmetic's two — and ten put the fixture over
@@ -2557,7 +2569,9 @@ mod tests {
     async fn a_paste_too_big_to_split_twice_a_second_is_estimated_and_says_so() {
         let core = crate::core::test_support::test_core().await;
         let lang = crate::infer::lang::Lang::En;
-        let budget = crate::jobs::synthesize::segment_budget(&core, lang).max(1);
+        let budget = crate::jobs::synthesize::segment_budget(&core, lang)
+            .expect("a window")
+            .max(1);
         let para = "filler words ".repeat(budget * 6 / 10);
         let text = std::iter::repeat_n(para.trim(), 40)
             .collect::<Vec<_>>()

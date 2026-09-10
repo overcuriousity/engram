@@ -324,7 +324,7 @@ impl Store {
             raw_text: raw_text.to_string(),
             origin: origin.to_string(),
             title_hint: title_hint.map(str::to_string),
-            content_hash: corpus_hash(raw_text, &metadata),
+            content_hash: corpus_hash(raw_text, metadata),
             status,
             created_at: now(),
             updated_at: now(),

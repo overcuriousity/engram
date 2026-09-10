@@ -159,14 +159,21 @@ pub fn split_passages(
 /// re-runs this, and a segment that already owns rows is left alone.
 pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
-    let windows = split_into_segments(
-        &src.raw_text,
-        &core.counter,
-        // Against the prompt this corpus will be synthesized with: the split
-        // decides how much text one call is handed, so it has to be measured
-        // against the same overhead that call will carry.
-        super::synthesize::segment_budget(core, crate::infer::lang::of_corpus(&src.metadata)),
-    );
+    let lang = crate::infer::lang::of_corpus(&src.metadata);
+    // Against the prompt this corpus will be synthesized with: the split
+    // decides how much text one call is handed, so it has to be measured
+    // against the same overhead that call will carry — and where that leaves
+    // nothing, there is no size to cut to. Failed with the cause, rather than
+    // windows cut to a budget no call can honour.
+    let Some(budget) = super::synthesize::segment_budget(core, lang) else {
+        let reason = super::synthesize::no_budget_reason(core, lang);
+        tracing::error!(corpus_id, %reason, "cannot plan windows");
+        core.store
+            .set_corpus_status(corpus_id, CorpusStatus::Failed)
+            .await?;
+        return Ok(());
+    };
+    let windows = split_into_segments(&src.raw_text, &core.counter, budget);
     if windows.is_empty() {
         tracing::warn!(corpus_id, "source has no usable text");
         core.store

@@ -407,7 +407,14 @@ impl Core {
             return Ok(());
         }
         let lang = crate::infer::lang::of_corpus(&c.metadata);
-        let budget = crate::jobs::synthesize::segment_budget(self, lang);
+        // No budget at all: nothing can be judged in one pass, so a reminder
+        // cannot be either, and saying which knob is wrong is more use than
+        // splitting against a fiction.
+        let Some(budget) = crate::jobs::synthesize::segment_budget(self, lang) else {
+            return Err(Error::Validation(
+                crate::jobs::synthesize::no_budget_reason(self, lang),
+            ));
+        };
         let windows = crate::infer::split::split_into_segments(&c.text, &self.counter, budget);
         if windows.len() <= 1 {
             return Ok(());

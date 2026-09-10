@@ -1523,7 +1523,7 @@ impl Core {
         // Widening the fetch is also the cost of the setting: `Config::normalize`
         // caps `candidates` at `MAX_LIMIT * CANDIDATE_MULTIPLIER` so this can
         // never exceed what the widest ordinary search already fetches.
-        let candidates = if self.learn.enabled && door.captured() {
+        let candidates = if self.learn.enabled && door.fetches_the_capture_pool() {
             candidates.max(self.feedback.candidates)
         } else {
             candidates
@@ -2490,6 +2490,55 @@ mod tests {
                 "multiplier {multiplier}"
             );
         }
+    }
+
+    /// The replay fetches exactly what the live path fetches.
+    ///
+    /// The idle pass ranks its candidate generations on the Judge door so that
+    /// measurement and serving are one pipeline. `feedback.candidates` is a
+    /// floor under the over-fetch that only the captured doors applied, so the
+    /// replay was a second pipeline in the one place it must not be — and the
+    /// gap fell exactly on an axis the pass sweeps.
+    ///
+    /// At `LIMIT = 10` and the shipped floor of 20, a `candidate_multiplier`
+    /// of 1 and of 2 are the same setting in production: both fetch 20. The
+    /// replay fetched 10 against 20 and could adopt on the difference — a
+    /// change to a number that would not change a single search anyone made.
+    #[tokio::test]
+    async fn the_replay_door_fetches_the_pool_the_captured_doors_do() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(&core, &[("mounting an image", "procedure", &[])]).await;
+        let mut query = q("mount");
+        query.limit = 4;
+        let base = *core.ranking.read().unwrap();
+
+        let mut fetched = vec![];
+        for multiplier in [1usize, 2] {
+            let params = crate::core::ranking::RankingParams {
+                candidate_multiplier: multiplier,
+                per_source_cap: Some(2),
+                ..base
+            };
+            let (_, judged) = core
+                .search_with_ranking(&query, params, Door::Judge)
+                .await
+                .unwrap();
+            let (_, served) = core
+                .search_with_ranking(&query, params, Door::Ui)
+                .await
+                .unwrap();
+            assert_eq!(
+                judged.explanation.candidates_fetched, served.explanation.candidates_fetched,
+                "the replay measured a pool the live door does not fetch (multiplier {multiplier})"
+            );
+            fetched.push(judged.explanation.candidates_fetched);
+        }
+        assert_eq!(
+            fetched[0], fetched[1],
+            "two rungs the floor makes identical were measured as different"
+        );
+        assert_eq!(fetched[0], core.feedback.candidates);
     }
 
     #[tokio::test]
