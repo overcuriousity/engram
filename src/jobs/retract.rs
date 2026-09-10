@@ -297,7 +297,16 @@ async fn stamp_restored(
         }
         Kind::Merge => {
             let survivor = a.survivor_id.clone().expect("a merge row names its merge");
-            crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence).await?;
+            // Stamped only if it happened. A merge a later one has since
+            // hidden is left alone, and closing its rows on the strength of an
+            // undo that did nothing would take it out of rule 1's reach for
+            // good — see `merge::Undone`.
+            if !crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence)
+                .await?
+                .happened()
+            {
+                return Ok(false);
+            }
             core.store
                 .undo_actions_under(&survivor, UndoneBy::Evidence, reason)
                 .await?;
@@ -316,7 +325,16 @@ async fn take_back(core: &Core, a: &crate::store::actions::Action, reason: &str)
     match a.kind {
         Kind::Merge => {
             let survivor = a.survivor_id.clone().expect("a merge row names its merge");
-            crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence).await?;
+            // The same rule as `stamp_restored`: no rows are closed for an
+            // undo that did nothing. Zero rather than an error, because this
+            // is an ordinary state for rule 1 to meet and the pass must go on
+            // to the next row.
+            if !crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence)
+                .await?
+                .happened()
+            {
+                return Ok(0);
+            }
             Ok(core
                 .store
                 .undo_actions_under(&survivor, UndoneBy::Evidence, reason)

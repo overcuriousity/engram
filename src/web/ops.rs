@@ -389,7 +389,20 @@ async fn verify_ui(
 
 async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Response> {
     use crate::store::actions::UndoneBy;
-    crate::jobs::merge::undo(&tenant.core, &aid, crate::store::pairs::DecidedBy::Operator).await?;
+    // A press on a page that has gone stale: between the render and the press,
+    // a later merge subsumed this one and took its supersession. Saying so is
+    // the whole of what is available from here — the alternative is a redirect
+    // to a queue the row has left, which reads as "done".
+    if let crate::jobs::merge::Undone::HiddenBehind { later } =
+        crate::jobs::merge::undo(&tenant.core, &aid, crate::store::pairs::DecidedBy::Operator)
+            .await?
+    {
+        return Err(crate::error::Error::Validation(format!(
+            "this merge was itself merged into {later} since this page was drawn — \
+             undo that one first, and this comes back with it"
+        ))
+        .into());
+    }
     tenant
         .core
         .store
@@ -529,6 +542,24 @@ fn pair_side(c: &crate::store::artifacts::Chunk) -> (String, String) {
 async fn pair_is_mergeable(tenant: &Tenant, a_id: &str, b_id: &str) -> Result<bool> {
     let members = vec![a_id.to_string(), b_id.to_string()];
     let root_map = tenant.core.store.roots_of(&members).await?;
+    // Per member, exactly as `dedupe::run` asks it — and not over the union of
+    // both members' roots, which is what this used to do. A merge whose
+    // sources have been deleted resolves to no roots at all, so it added
+    // nothing to the union and the pair was judged on the other side's roots
+    // alone: pair one with an ordinary captured artifact and the answer came
+    // back "mergeable".
+    //
+    // The press was then accepted, and `dedupe::run` refused it a moment later
+    // on this very check — settling the pair `Contradiction` while the
+    // synthesis flag stood, which `_decide.html` draws as four buttons
+    // replaced by "a synthesis was asked for". The card returned to the top of
+    // the queue with no way left to answer it.
+    if members
+        .iter()
+        .any(|m| root_map.get(m).is_none_or(|r| r.is_empty()))
+    {
+        return Ok(false);
+    }
     let all_roots: Vec<String> = root_map.values().flatten().cloned().collect();
     Ok(!all_roots.is_empty()
         && tenant
@@ -1493,6 +1524,63 @@ mod tests {
         assert!(
             !core.store.get_pair(gone).await.unwrap().synthesis_asked,
             "a press naming an artifact that is out of results records nothing"
+        );
+
+        // A merge whose sources have been deleted, paired with an ordinary
+        // captured artifact. It resolves to no roots at all, so it added
+        // nothing to the union `pair_is_mergeable` used to test — and the
+        // pair was judged mergeable on the *other* side's roots alone.
+        //
+        // What followed was worse than a wrong button. The press was recorded,
+        // `dedupe::run` refused the same pair on its own per-member check and
+        // settled it `Contradiction`, and the card came back to the top of the
+        // queue with all four answers replaced by "a synthesis was asked for":
+        // permanently unanswerable, by the one press meant to resolve it.
+        let root = artifacts(&core, &["mount the volume before writing"]).await;
+        let orphan = core
+            .store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "mount or attach the volume before writing".into(),
+                    title: Some("Mounting".into()),
+                    category: None,
+                    tags: vec![],
+                    caveats: vec![],
+                },
+                &root,
+            )
+            .await
+            .unwrap();
+        core.store.delete_artifact(&root[0]).await.unwrap();
+        let beside = artifacts(&core, &["attach the volume before writing"]).await;
+        core.store
+            .record_pair(&orphan.id, &beside[0], 0.9)
+            .await
+            .unwrap();
+        let orphaned_pair = core
+            .store
+            .pair_between(&orphan.id, &beside[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        app.clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{orphaned_pair}/synthesize"),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !core
+                .store
+                .get_pair(orphaned_pair)
+                .await
+                .unwrap()
+                .synthesis_asked,
+            "a press over a member with no sources left records an ask nothing can answer"
         );
     }
 

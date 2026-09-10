@@ -179,12 +179,52 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
 /// handled by `heal_dangling_supersessions`, which restores what it hid — and a
 /// fresh merge is then correct, because the duplication is genuinely back. A
 /// decision may overrule the sweep; a deletion may not.
-pub async fn undo(core: &Core, merged_id: &str, by: crate::store::pairs::DecidedBy) -> Result<()> {
+pub async fn undo(
+    core: &Core,
+    merged_id: &str,
+    by: crate::store::pairs::DecidedBy,
+) -> Result<Undone> {
     let m = core.store.get_artifact(merged_id).await?;
     if m.provenance != Provenance::Merged {
         return Err(crate::error::Error::Validation(format!(
             "{merged_id} is not a merged artifact"
         )));
+    }
+
+    // Asked before anything is touched, because the answer is whether this
+    // undo happens at all.
+    //
+    // A merge hidden behind a later one is already out of results — which is
+    // the whole of what the deprecate below is asking for — and
+    // `deprecate_with` refuses it outright: it will not deprecate a row with
+    // `superseded_by` set, on the reasoning that the combination is one
+    // nothing else in the system produces.
+    //
+    // That state is reached legitimately and often: `finish` supersedes an
+    // older merge onto the newer one that subsumes it, while the older merge's
+    // own `corpus_actions` rows stay open. `retract`'s rules read open rows, so
+    // rule 1 replays one of those originals and arrives here.
+    //
+    // What used to happen then was worse than the wedge it was written to
+    // avoid. `finish` has already repointed this merge's roots onto the later
+    // one, so `artifacts_superseded_by` comes back empty: the loop below
+    // restored nothing, the deprecate was skipped, and the function returned
+    // `Ok(())` — on the strength of which every caller stamped the merge's
+    // journal rows undone. The rows are closed now, so rule 1 will never
+    // reconsider them, and Insights reported a retraction that did not happen.
+    // A no-op that reports success is not a safer failure than a loud one.
+    //
+    // So: nothing is done, and the caller is told nothing was done. Not an
+    // `Err`, because rule 1 meets this on ordinary rows and every `?` in its
+    // loop returns before the pass stamps its cursor — an error here would
+    // wedge the idle pass exactly as the deprecate once did.
+    if let Some(later) = m.superseded_by.clone() {
+        tracing::info!(
+            merged = %m.id,
+            later = %later,
+            "the merge is hidden behind a later one; leaving it, and its journal rows, alone"
+        );
+        return Ok(Undone::HiddenBehind { later });
     }
 
     // Everything it hid, not just its roots: an earlier merge it subsumed was
@@ -200,37 +240,7 @@ pub async fn undo(core: &Core, merged_id: &str, by: crate::store::pairs::Decided
     // Only after they are back. The other order leaves a moment with nothing in
     // search at all, which is the window the whole write path is ordered to
     // avoid.
-    //
-    // Unless this merge is itself hidden behind a later one, in which case it
-    // is already out of results — which is the whole of what the deprecate is
-    // asking for — and `deprecate_with` refuses it outright: it will not
-    // deprecate a row with `superseded_by` set, on the reasoning that the
-    // combination is one nothing else in the system produces.
-    //
-    // That state is reached legitimately and often: `finish` supersedes an
-    // older merge onto the newer one that subsumes it, while the older merge's
-    // own `corpus_actions` rows stay open. `retract`'s rules read open rows, so
-    // rule 1 would replay one of those originals, reactivate the sources here,
-    // and then die on the deprecate — with the `?` returning before the pass
-    // stamps its cursor, so the *next* pass read the same row and died the same
-    // way, taking rule 2, interference, condense and ranking adoption down with
-    // it and leaving the corpus half-undone. Skipped rather than forced: the
-    // supersession is a separate decision by a later merge, and undoing this
-    // merge is not a reason to overrule it.
-    let already_hidden = core
-        .store
-        .get_artifact(&m.id)
-        .await
-        .map(|c| c.superseded_by.is_some())
-        .unwrap_or(false);
-    if already_hidden {
-        tracing::info!(
-            merged = %m.id,
-            "the merge is already hidden behind a later one; leaving its supersession alone"
-        );
-    } else {
-        core.deprecate(&m.id).await?;
-    }
+    core.deprecate(&m.id).await?;
 
     // Without this the undo lasts exactly one sweep.
     for pair in core.store.pairs_among(&restored).await? {
@@ -257,7 +267,37 @@ pub async fn undo(core: &Core, merged_id: &str, by: crate::store::pairs::Decided
         )
         .await?;
     tracing::info!(merged = %m.id, restored = restored.len(), "undid a merge");
-    Ok(())
+    Ok(Undone::TakenApart {
+        restored: restored.len(),
+    })
+}
+
+/// What [`undo`] did — which is not always "undid it".
+///
+/// A value rather than an error for the second case, and a value rather than
+/// nothing for the first: every caller of `undo` follows it by stamping the
+/// merge's `corpus_actions` rows undone, and that stamp is a claim about the
+/// base that must not be made when the base did not change. Closing those rows
+/// is irreversible in the only sense that matters — rule 1 reads open rows, so
+/// a row closed on a false claim is one no later pass will look at again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Undone {
+    /// The merge was taken apart: what it hid is active again, it is
+    /// deprecated, and the pairs behind it are dismissed so the sweep does not
+    /// simply redo it. Carries how many artifacts came back.
+    TakenApart { restored: usize },
+    /// Nothing was done. A later merge subsumed this one and holds its
+    /// supersession, so taking this one apart would mean overruling a decision
+    /// the press did not name. Carries the merge now standing in front of it.
+    HiddenBehind { later: String },
+}
+
+impl Undone {
+    /// Whether the base changed, and so whether the journal rows that recorded
+    /// this merge may be stamped undone.
+    pub fn happened(&self) -> bool {
+        matches!(self, Undone::TakenApart { .. })
+    }
 }
 
 /// Retire a merge whose embedding can never arrive, and hand its pairs back
@@ -420,7 +460,12 @@ mod tests {
         assert_eq!(m.tags, vec!["pinned", "shared", "runbook"]);
     }
 
-    /// A merge hidden behind a later one can still be taken back.
+    /// A merge hidden behind a later one does not wedge the idle pass.
+    ///
+    /// It is not undone either — see
+    /// `undoing_a_merge_that_a_later_one_hides_does_nothing_and_says_so` for
+    /// what it reports instead. What this one holds is the older claim: that
+    /// meeting the state costs nothing, and leaves the base exactly as it was.
     ///
     /// `finish` supersedes an older merge onto the newer one that subsumes it,
     /// while the older merge's own `corpus_actions` rows stay open — and
@@ -431,7 +476,7 @@ mod tests {
     /// the same row and died the same way: rule 2, interference, condense and
     /// ranking adoption all sit behind rule 1 and none of them ran again.
     #[tokio::test]
-    async fn a_merge_already_hidden_behind_a_later_one_can_still_be_undone() {
+    async fn a_merge_hidden_behind_a_later_one_does_not_wedge_the_idle_pass() {
         let core = crate::core::test_support::test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(
             &core,
@@ -458,6 +503,9 @@ mod tests {
         undo(&core, &older.id, crate::store::pairs::DecidedBy::Evidence)
             .await
             .expect("an already-hidden merge wedged the whole idle pass");
+        // The rows that recorded the merge stay open: rule 1 reads open
+        // rows, and closing them here would be the last time anything
+        // looked at this merge.
 
         // The supersession stands: hiding it behind the newer merge is a
         // separate decision, and undoing this merge is not a reason to
@@ -1377,6 +1425,63 @@ mod tests {
                 .len(),
             1,
             "a second finish duplicated the question"
+        );
+    }
+
+    /// An undo that cannot happen says so, rather than reporting success for
+    /// having done nothing.
+    ///
+    /// `finish` repoints an older merge's roots onto the newer one that
+    /// subsumes it, so by the time anything asks to undo the older merge,
+    /// `artifacts_superseded_by` comes back empty and there is nothing to put
+    /// back. The old code read that as a completed undo: it restored nothing,
+    /// skipped the deprecate because the row was hidden, returned `Ok(())`,
+    /// and every caller then stamped the merge's journal rows undone — closing
+    /// them to rule 1 for good, and telling the operator on Insights that a
+    /// retraction had happened.
+    #[tokio::test]
+    async fn undoing_a_merge_that_a_later_one_hides_does_nothing_and_says_so() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let older = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        finish(&core, &older.id).await.unwrap();
+        let newer = write(&core, &draft("all three texts"), &[older.id.clone()])
+            .await
+            .unwrap();
+        finish(&core, &newer.id).await.unwrap();
+
+        let hidden = core.store.get_artifact(&older.id).await.unwrap();
+        assert_eq!(
+            hidden.superseded_by.as_deref(),
+            Some(newer.id.as_str()),
+            "the fixture stopped hiding the older merge behind the newer one"
+        );
+
+        let outcome = undo(&core, &older.id, crate::store::pairs::DecidedBy::Operator)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Undone::HiddenBehind {
+                later: newer.id.clone()
+            },
+            "an undo that changed nothing reported that it had"
+        );
+        assert!(!outcome.happened());
+
+        // And the base is untouched: the later merge still holds the
+        // supersession it made, which is the decision this press did not name.
+        let after = core.store.get_artifact(&older.id).await.unwrap();
+        assert_eq!(after.superseded_by, hidden.superseded_by);
+        assert_eq!(
+            after.status, hidden.status,
+            "the older merge was deprecated by an undo that did nothing else"
         );
     }
 }

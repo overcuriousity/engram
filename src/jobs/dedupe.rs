@@ -171,6 +171,13 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         .iter()
         .any(|c| root_map.get(&c.id).is_none_or(|r| r.is_empty()))
     {
+        // Cleared first, like every other settle below this line. "A person
+        // decides" is only true while the card still has buttons on it, and
+        // `_decide.html` replaces all four the moment the flag is set — so
+        // settling with it standing hands the pair back in the one state
+        // nobody can answer, which is the failure the comment at the top of
+        // this function is about.
+        core.store.clear_pair_synthesis(p.id).await?;
         return settle(
             core,
             &p,
