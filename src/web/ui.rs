@@ -4758,6 +4758,65 @@ mod tests {
         assert!(!html.contains("<html"), "results must be a fragment");
     }
 
+    /// A limiter is not a bad gateway.
+    ///
+    /// The endpoint answered — in milliseconds, with "too many requests" — and
+    /// the box used to report that as 502 over a page reading "the model
+    /// endpoint is not answering". The status is what the client reads to tell
+    /// a blip apart from an outage, so it has to be the truth before anything
+    /// in `app.js` can act on it.
+    ///
+    /// Busy for more calls than the budget can possibly spend, so what is
+    /// asserted here is the answer a person gets rather than the one the retry
+    /// hides.
+    #[tokio::test]
+    async fn a_rate_limited_search_is_busy_rather_than_a_bad_gateway() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.embedder = std::sync::Arc::new(
+            crate::infer::fake::FakeEmbedder::new(core.embedder.dim())
+                .busy_for_the_first(usize::MAX),
+        );
+        let (app, cookie) = app_for(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/search/results?q=mounting")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The client half of the same rule. htmx swaps nothing on a 5xx, so what
+    /// the rail does about one is entirely `app.js`'s decision — and for a
+    /// keystroke that was merely shed, the decision must not be `failedSwap`:
+    /// typing one character into a box showing eight results would replace
+    /// them with an error box.
+    #[test]
+    fn a_busy_search_keeps_the_results_it_was_typed_over() {
+        let js = include_str!("../../assets/app.js");
+        assert!(
+            js.contains("status === 503 && busyNote("),
+            "nothing tells a busy search apart from a broken one in app.js"
+        );
+        let note = js
+            .split_once("function busyNote(")
+            .expect("busyNote is gone")
+            .1;
+        let body = &note[..note.find("\n  }").expect("busyNote's end")];
+        assert!(
+            body.contains("insertBefore"),
+            "the note must go above the results, not over them: {body}"
+        );
+        assert!(
+            !body.contains("textContent = ''"),
+            "busyNote empties the rail, which is the whole thing it exists not to do: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn a_box_with_no_search_reranker_never_claims_refinement() {
         // The tick says "the reranker confirmed this order". With no reranker

@@ -320,8 +320,7 @@ impl Store {
         for id in rehearsal_ids {
             q = q.bind(id);
         }
-        Ok(q
-            .fetch_all(&self.pool)
+        Ok(q.fetch_all(&self.pool)
             .await?
             .iter()
             .map(|r| (r.get("rehearsal_id"), r.get("rank")))

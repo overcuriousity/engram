@@ -41,6 +41,10 @@ pub struct FakeEmbedder {
     /// When set, every call is refused with this reason — the endpoint's "no",
     /// which a worker must not retry.
     reject_with: Option<String>,
+    /// Calls still to be answered with "too many requests" before this
+    /// embedder starts working. The endpoint's "not now", which is the one
+    /// answer a caller can fix by asking again.
+    busy_for: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeEmbedder {
@@ -55,6 +59,7 @@ impl FakeEmbedder {
             calls: std::sync::atomic::AtomicUsize::new(0),
             sent: std::sync::Mutex::new(Vec::new()),
             reject_with: None,
+            busy_for: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -62,6 +67,14 @@ impl FakeEmbedder {
         let mut e = Self::new(8);
         e.reject_with = Some(msg.to_string());
         e
+    }
+
+    /// An endpoint behind a limiter: the first `n` calls are shed, the rest
+    /// answered. What a burst of keystrokes meets on a shared server, and what
+    /// a cold model answers while it loads.
+    pub fn busy_for_the_first(self, n: usize) -> Self {
+        self.busy_for.store(n, std::sync::atomic::Ordering::Relaxed);
+        self
     }
 
     pub fn calls(&self) -> usize {
@@ -86,6 +99,22 @@ impl Embedder for FakeEmbedder {
             return Err(Error::InferenceRejected {
                 role: "embed",
                 detail: m.clone(),
+            });
+        }
+        // Counted as a call before it is refused, because it was one: the
+        // limiter is in front of the endpoint and the request reached it.
+        if self
+            .busy_for
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |n| n.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(Error::InferenceBusy {
+                role: "embed",
+                detail: "HTTP 429 Too Many Requests".into(),
             });
         }
         Ok(texts

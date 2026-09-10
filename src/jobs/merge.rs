@@ -438,7 +438,9 @@ mod tests {
             &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
         )
         .await;
-        let older = write(&core, &draft("a text and b text"), &ids).await.unwrap();
+        let older = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
         let newer = write(&core, &draft("a text and b text, restated"), &ids)
             .await
             .unwrap();

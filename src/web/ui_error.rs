@@ -82,6 +82,13 @@ impl UiError {
                 "The model endpoint refused that".into(),
                 format!("The {role} role answered: {detail}"),
             ),
+            Error::InferenceBusy { role, .. } => (
+                "The model endpoint is busy".into(),
+                format!(
+                    "The {role} role asked us to come back — it is rate limited, or still \
+                     loading. Nothing was lost, and the next try is likely to land."
+                ),
+            ),
             Error::Vector(_) => (
                 "The vector store is not answering".into(),
                 "Search and capture need it; what is already stored is untouched. \

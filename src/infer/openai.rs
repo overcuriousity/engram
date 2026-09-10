@@ -53,6 +53,24 @@ pub fn permanent_upstream_status(status: reqwest::StatusCode) -> bool {
         )
 }
 
+/// A status that means "not now" rather than "not ever" or "something broke".
+///
+/// Both of these come from an endpoint that is up and understood the request.
+/// 429 is a limiter in front of it — the shape a shared proxy sheds load in,
+/// and what a burst of keystrokes meets first. 503 is the model itself not
+/// being ready: a llama.cpp-style server answers it while it loads, which is
+/// the whole of what "the model is cold" looks like from here.
+///
+/// Kept out of [`permanent_upstream_status`] rather than folded into it: that
+/// predicate answers "will this request ever work", and both of these will.
+/// This one answers the narrower question of whether waiting is the fix, which
+/// is what decides the status a person sees and whether a keystroke's search
+/// gets a second chance.
+pub fn busy_upstream_status(status: reqwest::StatusCode) -> bool {
+    use reqwest::StatusCode as S;
+    matches!(status, S::TOO_MANY_REQUESTS | S::SERVICE_UNAVAILABLE)
+}
+
 /// One configured endpoint: where to post, as whom, and which role a failure
 /// is reported under.
 pub(crate) struct Endpoint {
@@ -229,6 +247,8 @@ impl Endpoint {
             let detail = format!("HTTP {status}: {detail}");
             return Err(if permanent_upstream_status(status) {
                 Error::InferenceRejected { role, detail }
+            } else if busy_upstream_status(status) {
+                Error::InferenceBusy { role, detail }
             } else {
                 Error::Inference { role, detail }
             });
@@ -1973,12 +1993,15 @@ mod tests {
         ));
     }
 
+    /// A 500 is the endpoint breaking, which is not the same claim as the
+    /// endpoint being busy — nothing promises that waiting fixes it, only that
+    /// trying again is allowed to.
     #[tokio::test]
     async fn upstream_5xx_is_a_retryable_inference_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(503))
+            .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
         let c = HttpSynthesizer::new(&synthesize_cfg(server.uri()));
@@ -1990,19 +2013,49 @@ mod tests {
         assert!(e.retryable());
     }
 
+    /// The two ways an endpoint says "not now", against the one way it says
+    /// "not ever" and the one way it says "I broke". A cold model answers 503
+    /// while it loads and a limiter in front of a shared server answers 429,
+    /// and neither is a bad gateway — which is what both used to become.
     #[tokio::test]
-    async fn rate_limit_is_retryable() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/embeddings"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&server)
-            .await;
-        let e = HttpEmbedder::new(&embed_cfg(server.uri()))
-            .embed_raw(&["x".into()])
-            .await
-            .unwrap_err();
-        assert!(e.retryable());
+    async fn a_limiter_and_a_loading_model_are_busy_rather_than_broken() {
+        for status in [429u16, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/embeddings"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let e = HttpEmbedder::new(&embed_cfg(server.uri()))
+                .embed_raw(&["x".into()])
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(e, crate::error::Error::InferenceBusy { role: "embed", .. }),
+                "{status} came back as {e}"
+            );
+            assert!(e.retryable());
+            assert_eq!(
+                e.status(),
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "{status} reached the browser as {}",
+                e.status()
+            );
+        }
+    }
+
+    #[test]
+    fn busy_is_narrower_than_merely_transient() {
+        use reqwest::StatusCode as S;
+        assert!(busy_upstream_status(S::TOO_MANY_REQUESTS));
+        assert!(busy_upstream_status(S::SERVICE_UNAVAILABLE));
+        // Up and broken, or nothing behind the proxy at all. Retryable, but
+        // not a promise that waiting is what fixes it.
+        assert!(!busy_upstream_status(S::INTERNAL_SERVER_ERROR));
+        assert!(!busy_upstream_status(S::BAD_GATEWAY));
+        assert!(!busy_upstream_status(S::GATEWAY_TIMEOUT));
+        // Permanent, and classified before this predicate is consulted.
+        assert!(!busy_upstream_status(S::BAD_REQUEST));
     }
 
     #[tokio::test]
@@ -2732,11 +2785,15 @@ mod tests {
         assert!(body.get("max_completion_tokens").is_none(), "{body}");
     }
 
+    /// 500 rather than 503: this is about which role a failure is reported
+    /// under, so it wants the status whose meaning is unambiguously "the
+    /// endpoint broke". A 503 is the endpoint asking to be asked again, and
+    /// `a_limiter_and_a_loading_model_are_busy_rather_than_broken` owns it.
     #[tokio::test]
     async fn a_describer_error_is_an_inference_error_for_the_vision_role() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("busy"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("broke"))
             .mount(&server)
             .await;
         let mut cfg = vision_cfg(Some(server.uri()));

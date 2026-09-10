@@ -781,7 +781,13 @@ mod tests {
         // The lived path: a prediction, and no run to name.
         let id = store.adopt_generation_lived(&adopted, 0.62).await.unwrap();
         assert!(
-            store.generation(&id).await.unwrap().unwrap().run_id.is_none(),
+            store
+                .generation(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_id
+                .is_none(),
             "a lived adoption names no run, which is the whole trap"
         );
 

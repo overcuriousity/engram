@@ -1464,7 +1464,28 @@ impl Core {
         let vector = match cached {
             Some(v) => v,
             None => {
-                let v = self.embedder.embed_query(q).await?;
+                // Retried only where somebody is waiting, and for the reason
+                // the box is built the way it is: a search is one embedding
+                // call per debounced keystroke, so a burst of typing is a
+                // burst of calls, and the first thing a shared endpoint does
+                // about a burst is shed some of it. One 429 in the middle of a
+                // word used to be a failed search.
+                //
+                // A sweep takes the other road. It runs twenty-one searches
+                // per judged pair over hundreds of pairs, nobody is watching,
+                // and the job layer already owns backoff for it — spending a
+                // budget per search there would turn a rate-limited minute
+                // into a run that never finishes.
+                let v = match waited_on {
+                    true => {
+                        crate::infer::retry::transiently(
+                            crate::infer::retry::INTERACTIVE_BUDGET,
+                            || self.embedder.embed_query(q),
+                        )
+                        .await?
+                    }
+                    false => self.embedder.embed_query(q).await?,
+                };
                 if let Ok(mut c) = self.query_cache.lock() {
                     c.put(key, v.clone());
                 }
@@ -1994,7 +2015,8 @@ mod tests {
         let core = test_core().await;
         core.remember_query_vector("wie mounte ich das image", vec![]);
         assert!(
-            core.cached_query_vector("wie mounte ich das image").is_none(),
+            core.cached_query_vector("wie mounte ich das image")
+                .is_none(),
             "the absence of a vector was cached as a vector"
         );
         // A real one still lands, and still wins over a later empty.
@@ -2385,6 +2407,48 @@ mod tests {
         release.notify_one();
         searching.await.unwrap().unwrap();
         worker.await.unwrap();
+    }
+
+    /// Typing is one embedding call per debounced keystroke, so a burst is a
+    /// burst of calls and a shared endpoint sheds part of it. One 429 in the
+    /// middle of a word used to be a failed search and a wiped rail.
+    ///
+    /// Real time rather than `start_paused`, for the reason the lane test
+    /// above gives: the pool's own timeouts are timers too. One refusal, so
+    /// the test pays at most one jittered gap.
+    #[tokio::test]
+    async fn a_rate_limited_keystroke_is_asked_again() {
+        let mut core = test_core().await;
+        let embedder = std::sync::Arc::new(
+            crate::infer::fake::FakeEmbedder::new(core.embedder.dim()).busy_for_the_first(1),
+        );
+        core.embedder = embedder.clone();
+
+        core.search(&q("mounting an image"), Door::Api)
+            .await
+            .expect("a search met one 429 and gave up");
+        assert_eq!(embedder.calls(), 2, "the keystroke was not asked again");
+    }
+
+    /// And the other road. A sweep is twenty-one searches per judged pair over
+    /// hundreds of pairs with nobody watching; the job layer owns its backoff,
+    /// and a budget spent per search would turn a rate-limited minute into a
+    /// run that never ends.
+    #[tokio::test]
+    async fn a_sweep_does_not_wait_out_a_limiter() {
+        let mut core = test_core().await;
+        let embedder = std::sync::Arc::new(
+            crate::infer::fake::FakeEmbedder::new(core.embedder.dim()).busy_for_the_first(1),
+        );
+        core.embedder = embedder.clone();
+
+        let params = *core.ranking.read().expect("ranking lock");
+        let e = core
+            .search_with_ranking(&q("mounting an image"), params, Door::Judge)
+            .await
+            .expect_err("the sweep waited the limiter out");
+        assert!(matches!(e, Error::InferenceBusy { .. }), "{e}");
+        assert_eq!(embedder.calls(), 1, "the sweep retried");
     }
 
     fn q(text: &str) -> SearchQuery {

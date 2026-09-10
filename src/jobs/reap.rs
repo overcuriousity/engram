@@ -126,8 +126,14 @@ pub async fn run(core: &Core) -> Result<Report> {
                         // An endpoint that merely did not answer says nothing
                         // about the candidate, and the sweep's own cadence is
                         // its retry; standing the row down for it would push
-                        // the whole backlog forward on every outage.
-                        if !matches!(e, crate::error::Error::Inference { .. }) {
+                        // the whole backlog forward on every outage. A busy
+                        // endpoint says even less than a silent one: it is up,
+                        // and it has not so much as looked at this text.
+                        if !matches!(
+                            e,
+                            crate::error::Error::Inference { .. }
+                                | crate::error::Error::InferenceBusy { .. }
+                        ) {
                             step_aside(core, &c.id).await;
                         }
                     }

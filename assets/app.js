@@ -1293,6 +1293,34 @@
   // — an embedder that is down, a vector store that cannot answer, a body over
   // the limit. `textContent`, because an error string is the one payload on
   // this page that went through no sanitizing renderer.
+  // A search whose endpoint was merely busy — rate limited, or a model still
+  // loading. The server has already retried it for as long as a keystroke's
+  // answer is worth retrying (see `infer::retry`), so reaching here means the
+  // limiter is still shedding.
+  //
+  // Not `failedSwap`, because a keystroke's answer is disposable and the rail
+  // under it is not: typing one character into a box that is showing eight
+  // results must not replace them with an error box. The results stay, a line
+  // above them says why they did not move, and the next keystroke tries again
+  // — which is exactly what a person typing is about to do anyway.
+  //
+  // Silence would be the other mistake, and the handler below has a comment
+  // about it: a door that fails invisibly reads as a base with nothing in it.
+  function busyNote(target) {
+    if (!target || target.id !== 'results') return false;
+    // One note however many keystrokes are refused. The next successful search
+    // swaps the rail's innerHTML and takes it away with everything else, so
+    // nothing has to remove it.
+    if (target.querySelector('.flag-busy')) return true;
+    var box = document.createElement('div');
+    box.className = 'flag flag-busy';
+    box.setAttribute('role', 'status');
+    box.textContent =
+      'The model endpoint is busy. This search has not run — the next thing you type will try again.';
+    target.insertBefore(box, target.firstChild);
+    return true;
+  }
+
   function failedSwap(target, xhr) {
     if (!target || !target.id) return;
     var reason = 'engram is unreachable.';
@@ -2863,6 +2891,11 @@
         window.location.assign('/auth/login?go=' + encodeURIComponent(here));
         return;
       }
+      // 503 is the one status that means "ask again" rather than "this is
+      // broken" — `Error::InferenceBusy`, and nothing else in the app answers
+      // with it. Handled before `failedSwap` so a rate-limited keystroke keeps
+      // the rail it was typed over.
+      if (e.detail.xhr.status === 503 && busyNote(e.detail.target)) return;
       failedSwap(e.detail.target, e.detail.xhr);
     });
     // The other half of the same problem. htmx swaps nothing on an error of

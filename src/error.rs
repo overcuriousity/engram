@@ -26,6 +26,18 @@ pub enum Error {
     /// request is sent.
     #[error("inference[{role}] rejected: {detail}")]
     InferenceRejected { role: &'static str, detail: String },
+    /// The endpoint is up, understood the request, and will not do it *now* —
+    /// a rate limit, or a model still loading. The third of the three answers
+    /// an endpoint can give, and the only one that waiting fixes.
+    ///
+    /// Apart from `Inference` because reporting it as a bad gateway was a lie
+    /// twice over: the gateway was fine, and the page told an operator their
+    /// endpoint was not answering while it was answering in milliseconds. A
+    /// person typing into the box meets this one far more than either of the
+    /// others — a search is an embedding call per keystroke — so it is the
+    /// variant the interactive path is shaped around.
+    #[error("inference[{role}] busy: {detail}")]
+    InferenceBusy { role: &'static str, detail: String },
     #[error("vector store: {0}")]
     Vector(String),
     #[error("store: {0}")]
@@ -48,6 +60,7 @@ impl Error {
         matches!(
             self,
             Error::Inference { .. }
+                | Error::InferenceBusy { .. }
                 | Error::Vector(_)
                 | Error::Store(_)
                 | Error::MalformedLlmOutput(_)
@@ -63,6 +76,11 @@ impl Error {
             Error::Inference { .. } | Error::InferenceRejected { .. } | Error::Vector(_) => {
                 StatusCode::BAD_GATEWAY
             }
+            // Not a bad gateway: the gateway answered. 503 is the status whose
+            // meaning is "ask again", and it is what lets the client tell a
+            // blip apart from an outage without reading the body — which is
+            // what keeps a rate-limited keystroke from wiping the rail.
+            Error::InferenceBusy { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Error::Store(_) | Error::MalformedLlmOutput(_) | Error::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -161,6 +179,25 @@ mod tests {
         assert_eq!(
             Error::Store("x".into()).status(),
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// An endpoint answering "too many requests" in two milliseconds is not a
+    /// bad gateway, and a search box that meets one must be able to tell that
+    /// apart from an endpoint that is down — the first is worth waiting out on
+    /// the next keystroke, the second is worth saying out loud.
+    #[test]
+    fn a_busy_endpoint_is_not_a_bad_gateway() {
+        let busy = Error::InferenceBusy {
+            role: "embed",
+            detail: "HTTP 429 Too Many Requests".into(),
+        };
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(busy.retryable(), "waiting is exactly what fixes this one");
+        assert!(
+            busy.client_message().contains("429"),
+            "the caller cannot see what the endpoint said: {}",
+            busy.client_message()
         );
     }
 

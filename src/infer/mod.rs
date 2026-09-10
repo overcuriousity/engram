@@ -5,6 +5,7 @@ pub mod gate;
 pub mod lang;
 pub mod openai;
 pub mod prompt;
+pub mod retry;
 pub mod split;
 pub mod verify;
 
