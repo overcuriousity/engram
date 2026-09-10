@@ -395,13 +395,25 @@ async fn propose(
 ) -> Result<Pass> {
     let started = crate::store::now();
     let (pairs, skipped) = sweep::observation_pairs(core, &live.id).await?;
-    if pairs.is_empty() {
-        return Ok(Pass::default());
-    }
     let tried = core
         .store
         .tried_candidates(&live.embed_recipe, &live.chat_model)
         .await?;
+    if pairs.is_empty() {
+        // No observations under this generation, so the ladder and the flip
+        // have nothing to score — both rank the positives and there are none.
+        //
+        // The two rules below do not read observations at all. `spread_step`
+        // reads what the appended band earned while serving (`band_use`, off
+        // `search_events`), and `review_step` reads the judged bands
+        // (`band_record`, off `artifact_pairs` and `corpus_actions`). Returning
+        // here gated both behind evidence neither of them uses: on a base used
+        // through the dedupe judge but producing no `Cited` or `Opened` rows
+        // under the live generation — a base whose owner reads on one door and
+        // answers the queue on another, and every base for the whole of the
+        // generation after an adoption — `review_min` could never move at all.
+        return spread_step(core, live, current, &tried).await;
+    }
     let grid = sweep::candidates(current, &tried, BUDGET);
     let Some(scored) = sweep::score(core, &pairs, grid, current, false, Some(started)).await?
     else {
@@ -1273,6 +1285,173 @@ mod tests {
             core.ranking.read().unwrap().spread_max,
             5,
             "serving follows"
+        );
+    }
+
+    /// `judged` pairs in a score band, `acted` of them with a dedupe action
+    /// naming the pair — which is what `band_record` counts.
+    async fn judged_band(core: &Core, score: f32, judged: usize, acted: usize) {
+        use crate::store::actions::{Job, Kind, NewAction};
+        use crate::store::pairs::{DecidedBy, PairState};
+        let src = core.store.insert_corpus("band", "web", None).await.unwrap();
+        for i in 0..judged {
+            let rows: Vec<crate::store::artifacts::NewArtifact> = (0..2)
+                .map(|k| crate::store::artifacts::NewArtifact {
+                    ordinal: (i * 2 + k) as i64,
+                    text: format!("band {score} pair {i} side {k}"),
+                    ..Default::default()
+                })
+                .collect();
+            let made = core.store.insert_artifacts(&src.id, &rows).await.unwrap();
+            core.store
+                .record_pair(&made[0].id, &made[1].id, score)
+                .await
+                .unwrap();
+            let pair = core
+                .store
+                .pair_between(&made[0].id, &made[1].id)
+                .await
+                .unwrap()
+                .unwrap()
+                .id;
+            core.store
+                .set_pair_state(pair, PairState::NoConflict, None, DecidedBy::Model)
+                .await
+                .unwrap();
+            if i < acted {
+                core.store
+                    .record_action(&NewAction {
+                        job: Job::Dedupe,
+                        kind: Kind::Supersede,
+                        subject_id: made[0].id.clone(),
+                        survivor_id: Some(made[1].id.clone()),
+                        detail: None,
+                        evidence: serde_json::json!({ "pair_id": pair }),
+                        pair_score: Some(score),
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    /// The review threshold's rule does not read observations, and is no longer
+    /// gated on them.
+    ///
+    /// `propose` returned as soon as `observation_pairs` came back empty, which
+    /// is right for the ladder and the flip — both rank the positives, and
+    /// there are none. This rule reads the judged bands off `artifact_pairs`
+    /// and `corpus_actions`: how often the lowest band it admits leads
+    /// anywhere, against the band above it. Nothing in that is an observation.
+    ///
+    /// So a base worked through the dedupe queue but whose searching produced
+    /// no `Cited` or `Opened` rows under the live generation could never move
+    /// `review_min` — held behind evidence the rule does not use, which is also
+    /// why nothing but `next_review_min`'s arithmetic was ever tested.
+    #[tokio::test]
+    async fn the_review_threshold_moves_with_no_observations_under_the_live_generation() {
+        let (core, order) = seeded().await;
+        let _ = order;
+        let mut core = core;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let live = generation_for(&core).await;
+        assert_eq!(
+            core.ranking.read().unwrap().review_min,
+            0.88,
+            "the shipped rung"
+        );
+        assert!(
+            crate::eval::sweep::observation_pairs(&core, &live)
+                .await
+                .unwrap()
+                .0
+                .is_empty(),
+            "this generation must carry no observations"
+        );
+
+        // The lowest admitted band acts 8 in 10; the band above it 9 in 10 —
+        // within one decision of each other, so the line is drawn too high.
+        judged_band(&core, 0.90, 10, 8).await;
+        judged_band(&core, 0.93, 10, 9).await;
+
+        run(&core).await.unwrap().expect("the threshold steps down");
+        assert_eq!(
+            core.ranking.read().unwrap().review_min,
+            0.84,
+            "the rung below 0.88"
+        );
+    }
+
+    /// The first spread rung is offered once, and a revert is what remembers
+    /// it — not the rule, which offers it unconditionally from zero.
+    ///
+    /// From `spread_max = 0` there is no band to measure, so `next_spread` has
+    /// nothing to read and hands back the first rung every time it is asked.
+    /// What stops that becoming a cycle — adopt, watch, revert, adopt again,
+    /// with `pass` returning early for the whole of every watch and no other
+    /// axis ever getting a turn — is `tried_candidates`, which reads the
+    /// `reverted` state off the row. This test is that claim, exercised through
+    /// an actual revert rather than a fabricated list.
+    #[tokio::test]
+    async fn the_first_spread_rung_is_not_offered_again_once_it_has_been_taken_back() {
+        let (mut core, _) = seeded_with_nothing_to_gain().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        // A base sitting at the off rung, live and recorded as such.
+        core.ranking.write().unwrap().spread_max = 0;
+        // Read into a local: a guard living inside the call expression is held
+        // across the await, and the future is then not `Send`.
+        let at_zero_params = *core.ranking.read().unwrap();
+        let at_zero = core
+            .store
+            .adopt_generation_lived(
+                &NewGeneration {
+                    params: at_zero_params.into(),
+                    embed_recipe: "recipe-a".into(),
+                    chat_model: "qwen".into(),
+                    ..Default::default()
+                },
+                0.0,
+            )
+            .await
+            .unwrap();
+        rehearsed_once(&core, &at_zero).await;
+
+        let first = run(&core)
+            .await
+            .unwrap()
+            .expect("the first rung is offered");
+        assert_eq!(
+            core.store
+                .live_generation()
+                .await
+                .unwrap()
+                .unwrap()
+                .params
+                .spread_max,
+            1,
+            "from zero the first rung is tried"
+        );
+
+        // The watch's verdict, applied directly: the band earned nothing.
+        core.store.revert_generation(&first).await.unwrap();
+        let back = core.store.live_generation().await.unwrap().unwrap();
+        *core.ranking.write().unwrap() = back.params.into();
+        assert_eq!(
+            back.params.spread_max, 0,
+            "the revert put the off rung back"
+        );
+
+        let again = run(&core).await.unwrap();
+        assert_eq!(
+            core.store
+                .live_generation()
+                .await
+                .unwrap()
+                .unwrap()
+                .params
+                .spread_max,
+            0,
+            "the rung that was just taken back was offered again: {again:?}"
         );
     }
 

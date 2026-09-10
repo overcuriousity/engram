@@ -536,6 +536,9 @@ pub(crate) async fn rule_one(
                 query_vec: Some(o.query_vec),
                 priming: None,
                 served_rank: o.rank,
+                // Rule 1 reads `served_rank` directly and never asks the
+                // rerank axis anything, so this is only ever false here.
+                served_reranked: false,
             };
             // Measured where the replay beside it is measured; see
             // `sweep::served_at`.

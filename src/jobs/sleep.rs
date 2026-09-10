@@ -204,7 +204,10 @@ pub(crate) async fn pair_of(
         satisfies: crate::eval::satisfied_by(core, &r.artifact_id).await,
         query_vec: Some(r.query_vec.clone()),
         priming: None,
+        // A probe was never served to anybody, so there is no served rank and
+        // no list the reranker could have ordered.
         served_rank: None,
+        served_reranked: false,
     }
 }
 

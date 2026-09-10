@@ -280,6 +280,22 @@ pub(crate) struct Pair {
     /// of its way to gather, so the axis could not accumulate the evidence it
     /// needs to offer a flip.
     pub(crate) served_rank: Option<i64>,
+    /// Whether the list `served_rank` is a place in was ordered by the
+    /// reranker — which is what makes it a baseline the rerank axis can be
+    /// scored against.
+    ///
+    /// Not every positive observation is. `Opened` is a place in a search
+    /// result list and `Cited` is a position in an answer's excerpt list, and
+    /// `rerank.apply` scopes the two doors separately: under
+    /// `apply = ["search"]` an ask never reranks, so a cited rank comes from a
+    /// pipeline the flip is not about. Scored as though it did, the replay —
+    /// which reranks — reads its own ordering as a change the flip caused, and
+    /// counts it for or against a setting that had nothing to do with it.
+    ///
+    /// Nothing writes `Cited` observations today, so no live base can have
+    /// such a row; this is the rule stated where the assumption lives, rather
+    /// than a bug being fixed. A citation path is an obvious thing to add.
+    pub(crate) served_reranked: bool,
 }
 
 impl Pair {
@@ -442,6 +458,8 @@ async fn pairs_to_replay(core: &Core) -> Result<(Vec<Pair>, i64)> {
                     query_vec: None,
                     priming: None,
                     served_rank: None,
+                    // No served rank at all, so nothing for the flip to read.
+                    served_reranked: false,
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -543,6 +561,12 @@ pub(crate) async fn observation_pairs(
                     query_vec: Some(o.query_vec),
                     priming,
                     served_rank: o.rank,
+                    // Which door's list this rank is a place in, against the
+                    // scope the reranker is configured for.
+                    served_reranked: match o.source {
+                        crate::store::observations::Source::Cited => core.reranks_ask(),
+                        _ => core.reranks_search(),
+                    },
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -765,7 +789,15 @@ pub(crate) async fn rerank_flip(
     // Every pair that came from an observation with a rank on it, deep ones
     // included: a place past `LIMIT` is a miss the base has to be charged
     // with, not a row to leave out of the sample.
-    let with_served: Vec<&Pair> = pairs.iter().filter(|p| p.served_rank.is_some()).collect();
+    //
+    // And only ranks from a list the reranker actually ordered — see
+    // `Pair::served_reranked`. This axis is scored against what was served,
+    // so a rank from a door the reranker does not serve is not a baseline for
+    // it: the replay reranks, and the difference it would read is its own.
+    let with_served: Vec<&Pair> = pairs
+        .iter()
+        .filter(|p| p.served_rank.is_some() && p.served_reranked)
+        .collect();
     if with_served.is_empty() {
         return Ok(FlipOffer::Held);
     }
@@ -1219,6 +1251,7 @@ mod tests {
             query_vec: None,
             priming: None,
             served_rank: Some(served as i64 + 1),
+            served_reranked: true,
         }
     }
 
@@ -1271,6 +1304,7 @@ mod tests {
             query_vec: None,
             priming: None,
             served_rank: Some(LIMIT as i64 + 3),
+            served_reranked: true,
         };
         let pairs = vec![deep(0), deep(1)];
         assert!(
@@ -1791,6 +1825,7 @@ mod tests {
                 due: Default::default(),
             }),
             served_rank: None,
+            served_reranked: false,
         };
         let without = Pair {
             priming: None,
@@ -1838,6 +1873,7 @@ mod tests {
                 due: Default::default(),
             }),
             served_rank: None,
+            served_reranked: false,
         };
         let off = RankingParams {
             prime_lift: 2,
@@ -1875,6 +1911,7 @@ mod tests {
                 due: Default::default(),
             }),
             served_rank: None,
+            served_reranked: false,
         };
         let off = RankingParams {
             prime_lift: 0,
