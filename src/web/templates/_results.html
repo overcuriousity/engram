@@ -7,10 +7,15 @@
    what it should do. See `Store::record_search`. #}
 <span hx-swap-oob="innerHTML:#fold-of">{% if let Some(ev) = event_id %}<input type="hidden" name="fold" value="{{ ev }}">{% endif %}</span>
 {% if results.is_empty() && associated.is_empty() %}
+  {# While a capture is read the answer may be in it: no gap is offered. #}
+  {% if reading %}
+  <p class="muted">No matches yet · still reading</p>
+  {% else %}
   <p class="muted">No matches.</p>
   {% if let Some(ev) = event_id %}
   <p><button class="btn btn-sm" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
              hx-target="this" hx-swap="outerHTML">Nothing here has it</button></p>
+  {% endif %}
   {% endif %}
 {% else %}
 <div data-terms="{{ terms }}">
@@ -40,9 +45,11 @@
       {# The deck's "gap" key, moved to where the person is when they know.
          A verdict on the whole list, so it sits with the line about the whole
          list rather than under any one row. #}
+      {% if !reading %}
       {% if let Some(ev) = event_id %}
       <p><button class="btn btn-sm" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
                  hx-target="this" hx-swap="outerHTML">Nothing here has it</button></p>
+      {% endif %}
       {% endif %}
     </div>
   </div>

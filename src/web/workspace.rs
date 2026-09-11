@@ -44,6 +44,8 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/capture", get(capture_door).post(capture_submit))
         // The held-state regions, out of band. See `held_regions`.
         .route("/ui/held", get(held_regions))
+        // The line under an idle box, polling itself while a capture is read.
+        .route("/ui/idle-foot", get(idle_line))
         // The ask door, and the two-request stream behind it: the POST parks
         // the question and hands back an id, and an `EventSource` spends it.
         .route("/ui/ask", get(ask_door).post(ask_submit))
@@ -170,6 +172,9 @@ struct WorkspaceTemplate {
     /// the one that can, and the rest appears when there is something for it
     /// to act on.
     held: bool,
+    /// Whether the base is young enough for the list of what a paste becomes.
+    /// See `TEACH_UNTIL_SOURCES`.
+    teach: bool,
     /// The two example phrasings under the box, in the reader's language. See
     /// `moments::examples_for`: they are the classifier's own prototypes, so
     /// what the page teaches and what the base recognises cannot drift apart.
@@ -222,6 +227,8 @@ struct HeldTemplate {
     /// True by definition: this fragment exists only for the transition into
     /// it. The field is here because the partials branch on it.
     held: bool,
+    /// See `WorkspaceTemplate`: `_box_hint.html` leaves its chips to the list.
+    teach: bool,
     /// True by definition, for the same reason.
     oob: bool,
 }
@@ -241,9 +248,23 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResul
         example_journal,
         example_lang,
         held: true,
+        teach: corpora < TEACH_UNTIL_SOURCES,
         oob: true,
     })
     .into_response())
+}
+
+/// Below this many sources the idle column lists what a paste becomes. A
+/// person's first few captures are when that is not yet known.
+const TEACH_UNTIL_SOURCES: i64 = 5;
+
+/// The idle line alone, for its own poll. Not the full idle fragment: that
+/// also empties the echo and the rail heading, and a poll can land while
+/// someone types.
+async fn idle_line(tenant: Tenant) -> UiResult<Response> {
+    let mut t = crate::web::ui::idle_foot(&tenant, false).await?;
+    t.line_only = true;
+    Ok(HtmlTemplate(t).into_response())
 }
 
 /// Everything every door renders, before the door says what it opened for.
@@ -332,6 +353,7 @@ async fn base_template(
         example_journal,
         example_lang,
         held: corpora > 0,
+        teach: corpora < TEACH_UNTIL_SOURCES,
         oob: false,
     })
 }
@@ -1204,7 +1226,7 @@ async fn ask_door(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::test_support::{app_with_cookie, body_of};
+    use crate::web::test_support::{app_with_cookie, body_of, get_body};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -1344,6 +1366,112 @@ mod tests {
         assert!(
             html.contains("kept exactly as you wrote it"),
             "the pane says what will happen to the first thing pasted"
+        );
+    }
+
+    /// Nothing on an empty base shows a capture becoming a reminder or an
+    /// entry, so the list says it.
+    #[tokio::test]
+    async fn an_empty_base_shows_what_a_paste_becomes() {
+        let html = workspace("/ui").await;
+        assert!(html.contains(r#"id="teach""#), "{html}");
+        assert_eq!(
+            html.matches(r#"class="chip-example""#).count(),
+            2,
+            "the two phrasings the reader recognises, pressable: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_list_of_what_a_paste_becomes_goes_at_five_sources() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let texts = [
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "The NAS backup runs every Monday at 02:00 from the old cron box.",
+            "PUID is Microsoft's per-user identifier in the consumer directory.",
+            "Qdrant answers REST on 6333 and gRPC on 6334.",
+            "The workshop moved from the fourth floor to the annex.",
+        ];
+        for t in &texts[..4] {
+            core.ingest_capture(crate::core::ingest::Capture::new(*t, "ui"))
+                .await
+                .unwrap();
+        }
+        let four = get_body(&app, &cookie, "/ui").await;
+        assert!(four.contains(r#"id="teach""#), "four sources: {four}");
+        assert_eq!(
+            four.matches(r#"class="chip-example""#).count(),
+            2,
+            "the chips stand in the list, not twice: {four}"
+        );
+
+        core.ingest_capture(crate::core::ingest::Capture::new(texts[4], "ui"))
+            .await
+            .unwrap();
+        let five = get_body(&app, &cookie, "/ui").await;
+        assert!(!five.contains(r#"id="teach""#), "five sources: {five}");
+        assert_eq!(
+            five.matches(r#"class="chip-example""#).count(),
+            2,
+            "and are back under the box: {five}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_idle_line_says_reading_while_a_capture_is_read() {
+        let core = crate::core::test_support::test_core().await;
+        core.ingest_capture(crate::core::ingest::Capture::new(
+            "LevelDB tombstones survive compaction longer than the manual admits.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let reading = get_body(&app, &cookie, "/ui/search/results?q=").await;
+        assert!(reading.contains("reading…"), "{reading}");
+        assert!(
+            reading.contains(r#"hx-get="/ui/idle-foot""#),
+            "and polls until it is done: {reading}"
+        );
+
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            core.store.control.complete_job(j.id).await.unwrap();
+        }
+        let done = get_body(&app, &cookie, "/ui/search/results?q=").await;
+        assert!(!done.contains("reading…"), "{done}");
+        assert!(
+            !done.contains(r#"hx-get="/ui/idle-foot""#),
+            "nothing left to poll for: {done}"
+        );
+    }
+
+    /// The poll lands while someone may be typing, so it carries the line and
+    /// nothing else: the full idle fragment also empties the echo and the
+    /// rail's heading.
+    #[tokio::test]
+    async fn the_idle_line_refreshes_alone() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/idle-foot")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let line = body_of(res).await;
+        assert!(line.contains(r#"id="idle-foot""#), "{line}");
+        assert!(!line.contains("rail-head"), "{line}");
+        assert!(!line.contains("intent-echo"), "{line}");
+        assert!(
+            !line.contains("fold-of"),
+            "nor forget the search the box is folding into: {line}"
         );
     }
 

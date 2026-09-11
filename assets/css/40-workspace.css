@@ -1199,6 +1199,14 @@ html:not(.typing) .regions-rail-focus-source .region-bar { max-width: 46rem; }
   color: inherit; display: inline-block; max-width: 20rem; vertical-align: bottom;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* What a paste becomes: a term and its gloss, two columns. */
+.teach {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.125rem 0.75rem; margin: 0.75rem 0 0; font-size: var(--text-xs);
+}
+.teach dt { color: var(--color-fg-primary); }
+.teach dd { margin: 0; color: var(--color-fg-secondary); }
+.teach .chip-example { text-align: left; }
 
 /* The chip row is revealed by app.js on the first keystroke. `display: contents`
    so the wrapper adds no box of its own: the label and the chips go on being

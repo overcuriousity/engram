@@ -344,6 +344,22 @@
      a hidden parent that is revealed later. #}
   <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
        hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
+  {# What a paste becomes, and the two words the line below counts in. Only
+     while the base is young; see `TEACH_UNTIL_SOURCES`. Rendered with the
+     page, so the fifth capture retires it on the next load. #}
+  {% if teach %}
+  <dl id="teach" class="teach">
+    <dt>note</dt><dd>anything you keep</dd>
+    <dt>reminder</dt><dd><button type="button" class="chip-example" lang="{{ example_lang }}"
+        data-example="{{ example_remind }}">&ldquo;{{ example_remind }}&rdquo;</button></dd>
+    <dt>entry</dt><dd><button type="button" class="chip-example" lang="{{ example_lang }}"
+        data-example="{{ example_journal }}">&ldquo;{{ example_journal }}&rdquo;</button></dd>
+    <dt>event</dt><dd>a date, nothing asked</dd>
+    <dt>link</dt><dd>made on its own</dd>
+    <dt>source</dt><dd>what you pasted, unchanged</dd>
+    <dt>artifact</dt><dd>a passage search returns</dd>
+  </dl>
+  {% endif %}
   {{ idle|safe }}
 </div>
 {% include "_keyhint.html" %}

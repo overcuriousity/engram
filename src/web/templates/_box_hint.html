@@ -14,11 +14,12 @@
    front of you and fires the echo below it, which is the whole loop in one
    press — and a press is still yours to make.
 
-   With nothing held there is no phrasing worth teaching yet: two of the three
-   verbs cannot work on an empty base, and what a person actually wants to know
-   before pasting their own notes onto a server is whose base this is. #}
+   While the base is young (`teach`) the two chips stand in the idle column's
+   list of what a paste becomes, and not here as well. With nothing held this
+   line says whose base this is, which is what a person wants to know before
+   pasting their own notes onto a server. #}
 <p id="box-hint" class="muted hint"{% if oob %} hx-swap-oob="true"{% endif %}>
-  {%- if held -%}
+  {%- if held && !teach -%}
   {# `lang` on each, because these two are the only part of the page that is
      not English. On a browser asking for German the interface stays English
      and these come back in German — correctly, since they are the words that
@@ -31,6 +32,8 @@
   <button type="button" class="chip-example" lang="{{ example_lang }}"
           data-example="{{ example_journal }}">&ldquo;{{ example_journal }}&rdquo;</button>
   &mdash; or paste a whole paragraph; a sentence finds more than keywords do.
+  {%- else if held -%}
+  Paste a whole paragraph &mdash; a sentence finds more than keywords do.
   {%- else -%}
   Paste anything worth keeping &mdash; a note, an article, a chunk of a chat.
   engram finds it again by meaning, and nobody else can search this base.

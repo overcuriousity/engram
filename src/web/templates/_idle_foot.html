@@ -17,6 +17,10 @@
    and left standing it is the heading the *next* act's results arrive under.
    Cleared here, so whichever fragment fills the rail is the one that names
    it. #}
+{# Neither swap rides the line's own poll (`line_only`), which can land while
+   someone types: it would empty the heading over their results and forget the
+   search they are folding into. #}
+{% if !line_only %}
 <div class="rail-act" hx-swap-oob="innerHTML:#rail-head"></div>
 {# The search the box was folding into, forgotten. Nothing was searched for
    this answer — the box is empty, or holds a paste too long to be a query —
@@ -24,7 +28,11 @@
    there, and a Capture pressed now would send it as this text's first draft.
    A named search closes its gap without a distance check. #}
 <span hx-swap-oob="innerHTML:#fold-of"></span>
-<p id="idle-foot" class="idle-foot muted" hx-swap-oob="true">
+{% endif %}
+{# While a capture is read the line polls itself. `hx-swap="none"`: the answer
+   is this same paragraph, out of band. #}
+<p id="idle-foot" class="idle-foot muted" hx-swap-oob="true"
+   {%- if reading %} hx-get="/ui/idle-foot" hx-trigger="every 3s" hx-swap="none"{% endif %}>
 {%- if !held %}
   {# Nothing. No counts to print and no last capture to name, and the sentence
      that used to stand here was the third copy of one thought: the placeholder
@@ -33,7 +41,7 @@
      branch stays because the paragraph is the out-of-band swap target, and it
      renders empty — `.idle-foot:empty` takes the margin with it. #}
 {%- else %}
-  <span class="mono">{{ artifacts }}</span> artifact{% if artifacts != 1 %}s{% endif %}
+  {% if reading %}reading… &middot; {% endif %}<span class="mono">{{ artifacts }}</span> artifact{% if artifacts != 1 %}s{% endif %}
   from <span class="mono">{{ corpora }}</span> source{% if corpora != 1 %}s{% endif %}
   {%- if let Some(r) = recent.first() %} &middot; last kept
   <a href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>

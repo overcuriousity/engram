@@ -401,6 +401,9 @@ struct ResultsTemplate {
     /// later one into the same row before the button is pressed. See
     /// `Store::gap_event`.
     q: String,
+    /// A capture is still being read, asked only where the rail would offer a
+    /// gap: the answer may be in it, so no gap is offered.
+    reading: bool,
 }
 
 /// Test-only, for the same reason `ResultsTemplate`'s is: a row has twenty
@@ -449,6 +452,7 @@ impl Default for ResultsTemplate {
             event_id: None,
             echo: String::new(),
             q: String::new(),
+            reading: false,
         }
     }
 }
@@ -490,6 +494,11 @@ pub(crate) struct IdleFootTemplate {
     /// two `id="intent-echo"` elements — of which htmx would only ever resolve
     /// the first.
     pub(crate) echo: String,
+    /// A capture is still being read. The line says so and polls itself
+    /// until it is not.
+    pub(crate) reading: bool,
+    /// The line alone, for that poll: no echo, no rail heading.
+    pub(crate) line_only: bool,
 }
 
 pub(crate) struct IdleRecentRow {
@@ -557,6 +566,16 @@ pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemp
         corpora,
         recent,
         held: corpora > 0,
+        // Best-effort, like the due band's own read of it: a line that cannot
+        // tell is a line that does not poll.
+        reading: corpora > 0
+            && tenant
+                .core
+                .store
+                .foreground_work_in_flight()
+                .await
+                .unwrap_or(false),
+        line_only: false,
         echo: if oob {
             render_echo(&IntentEchoTemplate {
                 kind: "",
@@ -1217,14 +1236,25 @@ pub(crate) async fn search_results(
         .map(|h| render_hit(0, h, &titles, explain))
         .collect();
     let echo = render_echo(&fate_echo(&tenant.core, &q, lang));
+    // Only when *every* result is loose. One weak hit at the bottom of a good
+    // list is ordinary — it is the tail of any ranking — and saying "nothing
+    // matches" over a list that plainly does would train the operator to
+    // ignore the warning. Computed from `results` only: an association is not
+    // an answer to the query and cannot make the answer look better or worse
+    // than it was.
+    let all_weak = !results.is_empty() && results.iter().all(|r| r.weak);
+    // Read only where the rail would offer a gap, so a good search pays
+    // nothing for it.
+    let reading = ((results.is_empty() && associated.is_empty()) || all_weak)
+        && tenant
+            .core
+            .store
+            .foreground_work_in_flight()
+            .await
+            .unwrap_or(false);
     let mut res = HtmlTemplate(ResultsTemplate {
-        // Only when *every* result is loose. One weak hit at the bottom of a
-        // good list is ordinary — it is the tail of any ranking — and saying
-        // "nothing matches" over a list that plainly does would train the
-        // operator to ignore the warning. Computed from `results` only: an
-        // association is not an answer to the query and cannot make the
-        // answer look better or worse than it was.
-        all_weak: !results.is_empty() && results.iter().all(|r| r.weak),
+        all_weak,
+        reading,
         results,
         associated,
         terms,
@@ -6916,6 +6946,47 @@ mod tests {
             .fetch_one(&handle.store.pool)
             .await
             .expect("the search the rail was filled by")
+    }
+
+    /// A gap recorded against a capture that is still being read is a false
+    /// one: the answer may be in it.
+    #[tokio::test]
+    async fn a_search_while_a_capture_is_read_offers_no_gap() {
+        let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        handle
+            .store
+            .enqueue(crate::store::jobs::Stage::Synthesize, "corpus", "c-1")
+            .await
+            .unwrap();
+        let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
+        assert!(rail.contains("still reading"), "{rail}");
+        assert!(!rail.contains("Nothing here has it"), "{rail}");
+    }
+
+    /// The loose list carries its own gap button, and the same capture still
+    /// being read withholds it there too.
+    #[test]
+    fn a_loose_list_while_a_capture_is_read_offers_no_gap() {
+        let rail = |reading: bool| {
+            askama::Template::render(&ResultsTemplate {
+                results: vec![RenderedResult {
+                    weak: true,
+                    snippet: "a loose one".into(),
+                    ..Default::default()
+                }],
+                all_weak: true,
+                event_id: Some("ev-1".into()),
+                reading,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        assert!(rail(false).contains("Nothing here has it"));
+        assert!(
+            !rail(true).contains("Nothing here has it"),
+            "{}",
+            rail(true)
+        );
     }
 
     #[tokio::test]

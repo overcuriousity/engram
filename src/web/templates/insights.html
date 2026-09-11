@@ -32,7 +32,7 @@
     <p class="measure-sub">artifacts, from {{ held.corpora }} source{% if held.corpora != 1 %}s{% endif %}</p>
     {# The thesis of the application, as a number: rewriting is earned, so
        most of what is held should be the operator's own words. #}
-    <p class="measure-sub">{{ held.synthesized }} written by a model · {{ held.segments }} segments</p>
+    <p class="measure-sub">{{ held.synthesized }} written by a model · {{ held.segments }} segments <span class="gloss">— slices the model reads</span></p>
   </div>
 
   <div class="measure">
@@ -57,8 +57,8 @@
        searches actually gave. A test query written while looking at an
        artifact reuses its wording and every system passes it — these come
        from questions asked in earnest, before anything came back. #}
-    <p class="measure-row"><span>recall@10</span><span class="mono">{{ f.recall_at_10 }}</span></p>
-    <p class="measure-row"><span>MRR</span><span class="mono">{{ f.mrr }}</span></p>
+    <p class="measure-row"><span>recall@10 <span class="gloss">— right result in the top 10</span></span><span class="mono">{{ f.recall_at_10 }}</span></p>
+    <p class="measure-row"><span>MRR <span class="gloss">— how high it ranked</span></span><span class="mono">{{ f.mrr }}</span></p>
     <p class="measure-sub">from {{ f.judged }} judged search{% if f.judged != 1 %}es{% endif %}{% if f.pending > 0 %}, {{ f.pending }} waiting{% endif %}</p>
     {% else %}
     {# Nothing judged yet. A 0.00 here would read as a score rather than as an
@@ -69,14 +69,14 @@
        row of three and answered with three lines of prose where the other two
        had figures, so the row read as one broken card rather than as three
        measures, one of which has nothing to say yet. #}
-    <p class="measure-row"><span>recall@10</span><span class="mono">—</span></p>
-    <p class="measure-row"><span>MRR</span><span class="mono">—</span></p>
+    <p class="measure-row"><span>recall@10 <span class="gloss">— right result in the top 10</span></span><span class="mono">—</span></p>
+    <p class="measure-row"><span>MRR <span class="gloss">— how high it ranked</span></span><span class="mono">—</span></p>
     <p class="measure-sub">nothing judged yet, from {{ f.captured }} recorded — answer
       <em>Was this what you were looking for?</em> under a result</p>
     {% endif %}
     {% else %}
-    <p class="measure-row"><span>recall@10</span><span class="mono">—</span></p>
-    <p class="measure-row"><span>MRR</span><span class="mono">—</span></p>
+    <p class="measure-row"><span>recall@10 <span class="gloss">— right result in the top 10</span></span><span class="mono">—</span></p>
+    <p class="measure-row"><span>MRR <span class="gloss">— how high it ranked</span></span><span class="mono">—</span></p>
     <p class="measure-sub">not recording searches, so there is nothing to measure</p>
     {% endif %}
   </div>

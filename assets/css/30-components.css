@@ -158,6 +158,8 @@ table.grid tr:hover td { background: var(--color-bg-hover); }
 /* A line of guidance under the field it belongs to: smaller than the label it
    follows, and close enough to it to read as part of the same control. */
 .hint { margin: 0.375rem 0 0; font-size: var(--text-sm); line-height: 1.45; }
+/* A term's few-word gloss, beside the term. */
+.gloss { color: var(--color-fg-secondary); font-size: var(--text-xs); font-weight: normal; }
 /* Wrapped, and that is the whole of the rule. Every button in a row is
    `white-space: nowrap` above, and a flex item's automatic minimum size is its
    own content — so a row of four labelled controls that did not fit simply ran
