@@ -1558,8 +1558,10 @@ impl Store {
 
     /// Artifacts currently hidden by consolidation, newest first.
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
+        // Not a buried row: the graveyard lists those, with the one undo that
+        // can put the text back. See `artifacts_by_status`.
         let rows = sqlx::query(
-            "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL
+            "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL AND reaped_at IS NULL
               ORDER BY created_at DESC LIMIT ?",
         )
         .bind(limit)
@@ -1576,8 +1578,13 @@ impl Store {
         status: ArtifactStatus,
         limit: i64,
     ) -> Result<Vec<Chunk>> {
+        // Not a buried row. `bury` keeps the status, because what hid the
+        // artifact is still true, so a buried stub still reads `deprecated` —
+        // and Insights listed it twice: once here as hidden and still at its
+        // own link, once from the graveyard as out of the index.
         let rows = sqlx::query(
-            "SELECT * FROM artifacts WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM artifacts WHERE status = ? AND reaped_at IS NULL
+              ORDER BY created_at DESC LIMIT ?",
         )
         .bind(status.as_str())
         .bind(limit)

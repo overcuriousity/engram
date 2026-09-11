@@ -142,38 +142,64 @@ impl Store {
     /// One transaction: a base with two live generations is a base whose
     /// searches cannot say which settings produced them.
     pub async fn record_generation(&self, g: &NewGeneration) -> Result<String> {
-        self.insert_live(g, None, None).await
+        self.insert_live(g, None, None, false)
+            .await?
+            .ok_or_else(|| Error::Store("generations: an unconditional write was refused".into()))
     }
 
     /// Record a generation adopted on lived evidence rather than a replay:
     /// no run to name, and `predicted` is the rate that argued for it.
+    ///
+    /// `None`, and nothing written, where the parent is no longer live — see
+    /// `adopt_generation`.
     pub async fn adopt_generation_lived(
         &self,
         g: &NewGeneration,
         predicted: f64,
-    ) -> Result<String> {
-        self.insert_live(g, None, Some(predicted)).await
+    ) -> Result<Option<String>> {
+        self.insert_live(g, None, Some(predicted), true).await
     }
 
     /// Record a generation the idle pass chose, carrying the run that chose it
     /// and what it promised, and make it live.
+    ///
+    /// Only on top of the generation it was measured against. `None`, and
+    /// nothing written, where `g.parent_id` is no longer the live one: the pass
+    /// reads the live generation when it starts and adopts when it ends, and a
+    /// person's Apply in between has made another one live. Superseding that
+    /// unread put the loop's candidate back over the person's choice.
     pub async fn adopt_generation(
         &self,
         g: &NewGeneration,
         run_id: &str,
         predicted: f64,
-    ) -> Result<String> {
-        self.insert_live(g, Some(run_id), Some(predicted)).await
+    ) -> Result<Option<String>> {
+        self.insert_live(g, Some(run_id), Some(predicted), true)
+            .await
     }
 
+    /// `over_parent`: write only if `g.parent_id`, where it names one, is the
+    /// live generation — read under the same write lock as the write.
     async fn insert_live(
         &self,
         g: &NewGeneration,
         run_id: Option<&str>,
         predicted: Option<f64>,
-    ) -> Result<String> {
+        over_parent: bool,
+    ) -> Result<Option<String>> {
         let id = new_id();
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
+        if over_parent && let Some(parent) = &g.parent_id {
+            let live: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM generations WHERE state = 'live'
+                  ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+            if live.as_ref() != Some(parent) {
+                return Ok(None);
+            }
+        }
         sqlx::query("UPDATE generations SET state = 'superseded' WHERE state = 'live'")
             .execute(&mut *tx)
             .await?;
@@ -194,7 +220,7 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(id)
+        Ok(Some(id))
     }
 
     /// A candidate the ladder chose and rehearsal refused. Never live; a row
@@ -227,14 +253,20 @@ impl Store {
 
     /// Take a generation back: it becomes `reverted` and its parent is live
     /// again. Returns the parent, or `None` — and changes nothing — for a
-    /// generation with nowhere to go back to.
+    /// generation with nowhere to go back to, or one that is no longer live.
     ///
     /// Cheap and complete because a generation is a row. Nothing in the corpus
     /// was touched by adopting it, so nothing has to be untouched here.
+    ///
+    /// The second `None` is a person's Apply landing while the idle pass was
+    /// measuring the generation it now takes back. Unchecked, the parent was
+    /// made live beside the generation the Apply had just minted — two live
+    /// rows — and every later pass stopped at the check that the live
+    /// generation describes the running parameters, until a restart.
     pub async fn revert_generation(&self, id: &str) -> Result<Option<Generation>> {
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         let parent: Option<String> =
-            sqlx::query_scalar("SELECT parent_id FROM generations WHERE id = ?")
+            sqlx::query_scalar("SELECT parent_id FROM generations WHERE id = ? AND state = 'live'")
                 .bind(id)
                 .fetch_optional(&mut *tx)
                 .await?
@@ -421,8 +453,26 @@ const FILE_PARAMS_SEEN: &str = "evolve.file_params";
 /// or a `review_min` the loop had chosen was indistinguishable from one
 /// somebody typed, and turning autonomy off — which is documented as the way
 /// back to the file, exactly — did not bring those knobs back.
-fn loop_moved(g: &Generation) -> bool {
-    g.run_id.is_some() || (g.parent_id.is_some() && g.predicted.is_some())
+///
+/// And asked of the generation that set the knobs, which is not always the
+/// live one. A model change mints a generation that copies its parent's
+/// parameters and names neither a run nor a prediction — nothing proposed it
+/// and nothing watches it — so read where it stands it looked like a person's
+/// Apply, and switching autonomy off after an embedder change kept every knob
+/// the loop had moved. A generation whose models changed and whose parameters
+/// did not moved nothing, so the question passes to its parent.
+async fn loop_moved(store: &Store, g: &Generation) -> Result<bool> {
+    let mut g = g.clone();
+    while g.run_id.is_none()
+        && g.predicted.is_none()
+        && let Some(parent_id) = g.parent_id.clone()
+        && let Some(parent) = store.generation(&parent_id).await?
+        && parent.params == g.params
+        && (parent.embed_recipe != g.embed_recipe || parent.chat_model != g.chat_model)
+    {
+        g = parent;
+    }
+    Ok(g.run_id.is_some() || (g.parent_id.is_some() && g.predicted.is_some()))
 }
 
 pub async fn boot_generation(
@@ -437,7 +487,7 @@ pub async fn boot_generation(
         None => None,
     };
     let mut live = ensure_generation(store, file, embed_recipe, chat_model).await?;
-    let file_wins = seen != Some(file) || (!autonomous && loop_moved(&live));
+    let file_wins = seen != Some(file) || (!autonomous && loop_moved(store, &live).await?);
     if live.params != file && file_wins {
         tracing::info!(
             recency_weight = file.recency_weight,
@@ -610,7 +660,8 @@ mod tests {
         let second_id = store
             .adopt_generation(&second, "run-1", 0.04)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("the parent is live");
 
         let back = store
             .revert_generation(&second_id)
@@ -638,7 +689,8 @@ mod tests {
         let id = store
             .adopt_generation(&second, "run-1", 0.04)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("the parent is live");
         store.revert_generation(&id).await.unwrap();
 
         let tried = store
@@ -674,7 +726,8 @@ mod tests {
         let id = store
             .adopt_generation(&sample(), "run-1", 0.04)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("nothing names a parent");
         let live = store.live_generation().await.unwrap().unwrap();
         assert_eq!(live.id, id);
         assert_eq!(live.predicted, Some(0.04));
@@ -704,7 +757,8 @@ mod tests {
         let id = store
             .adopt_generation(&adopted, "run-1", 0.04)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("the parent is live");
         (store, id)
     }
 
@@ -779,7 +833,11 @@ mod tests {
         adopted.params = p(0.25, Some(3));
         adopted.embed_recipe = "recipe-a".into();
         // The lived path: a prediction, and no run to name.
-        let id = store.adopt_generation_lived(&adopted, 0.62).await.unwrap();
+        let id = store
+            .adopt_generation_lived(&adopted, 0.62)
+            .await
+            .unwrap()
+            .expect("the parent is live");
         assert!(
             store
                 .generation(&id)
@@ -814,7 +872,11 @@ mod tests {
         adopted.parent_id = Some(first.id);
         adopted.params = p(0.25, Some(3));
         adopted.embed_recipe = "recipe-a".into();
-        let id = store.adopt_generation_lived(&adopted, 0.62).await.unwrap();
+        let id = store
+            .adopt_generation_lived(&adopted, 0.62)
+            .await
+            .unwrap()
+            .expect("the parent is live");
 
         let g = boot_generation(&store, file, "recipe-a", "qwen", true)
             .await
@@ -869,6 +931,91 @@ mod tests {
             .unwrap();
         assert_eq!(n, 2, "the first boot's and the adoption, nothing more");
         assert_eq!(store.live_generation().await.unwrap().unwrap().id, adopted);
+    }
+
+    /// The era a model change starts copies the loop's knobs and names no run
+    /// and no prediction. Switching autonomy off still has to find who moved
+    /// them, or the way back to the file stops at the first embedder change.
+    #[tokio::test]
+    async fn switching_autonomy_off_after_a_model_change_still_returns_the_base_to_the_file() {
+        let (store, _) = moved_by_the_loop(true).await;
+        let era = boot_generation(&store, p(0.05, Some(3)), "recipe-b", "qwen", true)
+            .await
+            .unwrap();
+        assert!(era.run_id.is_none() && era.predicted.is_none());
+        assert_eq!(era.params, p(0.25, Some(3)));
+
+        let g = boot_generation(&store, p(0.05, Some(3)), "recipe-b", "qwen", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            g.params,
+            p(0.05, Some(3)),
+            "the loop's knobs outlived the switch that is the way back to the file"
+        );
+    }
+
+    /// And a person's Apply carried across a model change is still theirs.
+    #[tokio::test]
+    async fn a_persons_apply_carried_across_a_model_change_survives_autonomy_off() {
+        let store = Store::memory().await.unwrap();
+        let file = p(0.05, Some(3));
+        let first = boot_generation(&store, file, "recipe-a", "qwen", false)
+            .await
+            .unwrap();
+        restate_generation(&store, &first, p(0.25, Some(3)))
+            .await
+            .unwrap();
+        let g = boot_generation(&store, file, "recipe-b", "qwen", false)
+            .await
+            .unwrap();
+        assert_eq!(g.embed_recipe, "recipe-b");
+        assert_eq!(g.params, p(0.25, Some(3)));
+    }
+
+    /// The idle pass reads the live generation when it starts and writes when
+    /// it ends. A person's Apply in between is the newer fact, and neither a
+    /// revert nor an adoption measured against the generation it replaced may
+    /// write over it.
+    #[tokio::test]
+    async fn a_revert_or_an_adoption_over_a_generation_no_longer_live_changes_nothing() {
+        let (store, adopted) = moved_by_the_loop(true).await;
+        let watched = store.generation(&adopted).await.unwrap().unwrap();
+        let applied = restate_generation(&store, &watched, p(0.5, Some(3)))
+            .await
+            .unwrap();
+
+        assert!(
+            store.revert_generation(&adopted).await.unwrap().is_none(),
+            "a generation the Apply superseded was taken back over it"
+        );
+        let mut child = sample();
+        child.parent_id = Some(adopted.clone());
+        child.params = p(0.75, Some(3));
+        assert!(
+            store
+                .adopt_generation_lived(&child, 0.5)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .adopt_generation(&child, "run-2", 0.1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generations WHERE state = 'live'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(live, 1, "two generations live at once");
+        assert_eq!(
+            store.live_generation().await.unwrap().unwrap().id,
+            applied.id
+        );
     }
 
     #[tokio::test]

@@ -13,7 +13,9 @@
 {% block content %}
 <div class="empty">
   <h1>{{ heading }}</h1>
-  <p class="muted">{{ detail }}</p>
+  {# Marked, because a failed htmx swap shows this sentence in place of the
+     fragment it did not get — `reasonOf` in app.js reads it by this. #}
+  <p class="muted" data-error-detail>{{ detail }}</p>
   <p><a class="btn btn-ghost btn-sm" href="/ui">Back to the box</a></p>
 </div>
 {% endblock %}

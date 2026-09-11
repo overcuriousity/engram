@@ -358,7 +358,7 @@ impl Core {
             .ok()
             .and_then(|v| v.get("version").and_then(|n| n.as_i64()))
             .ok_or_else(|| Error::Store("a condense row names its version".into()))?;
-        self.store.restore_version(&a.subject_id, n).await?;
+        self.store.restore_version(&a.subject_id, n, &a.id).await?;
         self.store
             .undo_action_on(
                 &a.subject_id,

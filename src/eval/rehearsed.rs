@@ -51,6 +51,30 @@ impl Rehearsed {
     }
 }
 
+/// Whether a probe replay can tell `a` from `b` at all.
+///
+/// A replay goes through `Door::Judge` with no priming recorded, which is what
+/// keeps a probe a measurement of the ranking rather than of whoever searched
+/// last. It also means four knobs never reach it: the appended band
+/// (`spread_max`), both halves of priming (`prime_lift`, `sitting_prime`), and
+/// the review threshold, which search does not read. Two parameter sets that
+/// differ only there replay identically, so `indistinguishable` says nothing
+/// about them and `loses_to` can never be true.
+///
+/// Stated as what is blanked rather than what is kept, so a knob added later
+/// counts as visible until somebody says otherwise — which is what every
+/// replay assumed of every knob before this.
+pub fn probes_tell_apart(a: RankingParams, b: RankingParams) -> bool {
+    let seen = |p: RankingParams| RankingParams {
+        spread_max: 0,
+        prime_lift: 0,
+        sitting_prime: false,
+        review_min: 0.0,
+        ..p
+    };
+    seen(a) != seen(b)
+}
+
 /// The probes with a retained result under `live_id` — the ones the lap has
 /// reached — at most `OBSERVATION_LIMIT`.
 pub async fn probe_set(core: &Core, live_id: &str) -> Result<Vec<Rehearsal>> {
@@ -133,6 +157,47 @@ mod tests {
             !r(0, 0.0).loses_to(&r(20, 0.9)),
             "an empty side says nothing"
         );
+    }
+
+    #[test]
+    fn a_replay_sees_the_ranking_knobs_and_not_the_band_priming_or_review() {
+        let p = RankingParams::default();
+        for unseen in [
+            RankingParams {
+                spread_max: p.spread_max + 1,
+                ..p
+            },
+            RankingParams {
+                prime_lift: p.prime_lift + 1,
+                ..p
+            },
+            RankingParams {
+                sitting_prime: !p.sitting_prime,
+                ..p
+            },
+            RankingParams {
+                review_min: p.review_min + 0.02,
+                ..p
+            },
+        ] {
+            assert!(!probes_tell_apart(p, unseen), "{unseen:?}");
+        }
+        for seen in [
+            RankingParams {
+                recency_weight: p.recency_weight + 0.1,
+                ..p
+            },
+            RankingParams {
+                candidate_multiplier: p.candidate_multiplier + 1,
+                ..p
+            },
+            RankingParams {
+                rerank: !p.rerank,
+                ..p
+            },
+        ] {
+            assert!(probes_tell_apart(p, seen), "{seen:?}");
+        }
     }
 
     #[test]

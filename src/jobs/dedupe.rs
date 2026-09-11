@@ -121,6 +121,15 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         core.store.clear_pair_synthesis(p.id).await?;
         return Ok(());
     }
+    // A press the pair has outlived: something answered it while the unit
+    // waited. The press is taken as the verdict below, without asking the
+    // state again, so a pair dismissed after it was pressed would be merged
+    // anyway. `ask_pair_synthesis` refuses the press on such a pair; this is
+    // the answer that lands after it.
+    if p.synthesis_asked && !crate::store::pairs::AWAITING_REVIEW.contains(&p.state) {
+        core.store.clear_pair_synthesis(p.id).await?;
+        return Ok(());
+    }
     // The week's budget, read before the judge call: a verdict this unit may
     // not act on is a call spent for nothing. The pair stays pending and the
     // next arming asks again once the window has moved. Only under "full";
@@ -628,15 +637,15 @@ async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk
         Ok(m) => {
             let act = format!("merged into {} from {} sources", m.id, sources.len());
             for source in &sources {
-                core.store
-                    .record_action(&action(
-                        Kind::Merge,
-                        p,
-                        source,
-                        Some(&m.id),
-                        Some(act.as_str()),
-                    ))
-                    .await?;
+                let mut row = action(Kind::Merge, p, source, Some(&m.id), Some(act.as_str()));
+                // Marked as asked for. `Store::band_record` reads this job's
+                // rows as what the judge's verdicts led to, and a press is not
+                // a verdict: counted, it raised the lowest band's action rate
+                // and argued the review threshold down.
+                if let Some(evidence) = row.evidence.as_object_mut() {
+                    evidence.insert("asked_by".into(), serde_json::json!("operator"));
+                }
+                core.store.record_action(&row).await?;
             }
             core.store
                 .set_pair_merged(
@@ -1458,6 +1467,30 @@ mod tests {
             PairState::Pending,
             "reactivating the survivor left the duplicate buried"
         );
+    }
+
+    /// A synthesis asked for and then overtaken: the pair was answered while
+    /// the unit waited. The press is not a standing order.
+    #[tokio::test]
+    async fn a_synthesis_asked_for_a_pair_answered_since_writes_nothing() {
+        let core = test_core().await;
+        let ids = disagreeing(&core).await;
+        let pair_id = queue_pair(&core, &ids[0], &ids[1]).await;
+        assert!(core.store.ask_pair_synthesis(pair_id).await.unwrap());
+        core.store
+            .set_pair_state(pair_id, PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        run(&core, &pair_id.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair_id).await.unwrap();
+        assert!(p.merged_into.is_none(), "a dismissed pair was merged");
+        assert!(!p.synthesis_asked, "the card still promises a synthesis");
+        assert_eq!(p.state, PairState::Dismissed);
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
     }
 
     #[tokio::test]

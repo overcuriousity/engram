@@ -18,6 +18,12 @@
    Cleared here, so whichever fragment fills the rail is the one that names
    it. #}
 <div class="rail-act" hx-swap-oob="innerHTML:#rail-head"></div>
+{# The search the box was folding into, forgotten. Nothing was searched for
+   this answer — the box is empty, or holds a paste too long to be a query —
+   so the id `_results.html` handed over last is about text that is no longer
+   there, and a Capture pressed now would send it as this text's first draft.
+   A named search closes its gap without a distance check. #}
+<span hx-swap-oob="innerHTML:#fold-of"></span>
 <p id="idle-foot" class="idle-foot muted" hx-swap-oob="true">
 {%- if !held %}
   {# Nothing. No counts to print and no last capture to name, and the sentence

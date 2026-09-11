@@ -34,23 +34,7 @@ use axum::routing::post;
 /// the cap strands nothing — there is no second page to go and find the rest
 /// on, which is the point: Housekeeping is reference, not work.
 pub(crate) const PAIR_LIMIT: usize = 5;
-const PAIR_STATES: [crate::store::pairs::PairState; 5] = [
-    crate::store::pairs::PairState::Contradiction,
-    crate::store::pairs::PairState::Superseded,
-    // The judge read both and found one artifact should hold what both say. A
-    // proposal rather than a merge already applied: see `PairState::Duplicate`
-    // for the measurements that took the action off this verdict. The card
-    // renders it through the same branch a pending pair uses — "these two cover
-    // the same ground" — and the Synthese button is the press that acts on it.
-    crate::store::pairs::PairState::Duplicate,
-    // Only ever rows an older base filed: a vacuous verdict is now carried
-    // out where it is found (`jobs::dedupe::discard_both`) and its pair
-    // settles `Dismissed`. Still listed, because those rows are a
-    // recommendation nobody has pressed yet, and without this key they are on
-    // no queue at all.
-    crate::store::pairs::PairState::Vacuous,
-    crate::store::pairs::PairState::Pending,
-];
+const PAIR_STATES: [crate::store::pairs::PairState; 5] = crate::store::pairs::AWAITING_REVIEW;
 
 #[derive(serde::Deserialize)]
 struct ResolveForm {
@@ -251,7 +235,15 @@ async fn ask_pair_synthesis_ui(
         )
         .into());
     }
-    tenant.core.store.ask_pair_synthesis(pid).await?;
+    // Only on a pair still waiting for an answer, asked in the write itself. A
+    // card left open keeps its buttons after the pair behind it was answered,
+    // and `dedupe::run` reads a press as the verdict: a Synthese from a stale
+    // page merged a pair the operator had already dismissed.
+    if !tenant.core.store.ask_pair_synthesis(pid).await? {
+        return Err(
+            crate::error::Error::Validation("this pair has already been answered".into()).into(),
+        );
+    }
     // Idle-only, like `consolidate` arms it: re-arming a queued unit winds its
     // attempts back to zero.
     tenant
@@ -1691,6 +1683,45 @@ mod tests {
         // The card stops offering the answers and says what is pending.
         let html = get_body(&app, &cookie, "/ui/insights").await;
         assert!(html.contains("A synthesis was asked for"));
+    }
+
+    /// A card left open still carries its buttons after the pair behind it
+    /// was answered, and a press on it is as real as any other.
+    #[tokio::test]
+    async fn pressing_synthesize_on_a_pair_already_answered_asks_for_nothing() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pairs_by_state(crate::store::pairs::PairState::Pending, 10)
+            .await
+            .unwrap()
+            .remove(0);
+        core.store
+            .set_pair_state(
+                pair.id,
+                crate::store::pairs::PairState::Dismissed,
+                None,
+                crate::store::pairs::DecidedBy::Operator,
+            )
+            .await
+            .unwrap();
+
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/pairs/{}/synthesize", pair.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(res.status().is_client_error(), "{}", res.status());
+        assert!(
+            !core.store.get_pair(pair.id).await.unwrap().synthesis_asked,
+            "a dismissed pair was queued to be merged"
+        );
     }
 
     /// A verdict is a recommendation on the card, never an action taken. So

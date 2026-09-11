@@ -160,6 +160,7 @@ mod tests {
             )
             .await
             .unwrap()
+            .expect("the parent is live")
     }
 
     async fn observe(core: &Core, generation: &str, source: Source) {

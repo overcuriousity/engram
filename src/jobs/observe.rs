@@ -34,13 +34,18 @@ const EVENTS_AFTER: &str = "observe.gave_up_after";
 pub async fn run(core: &Core) -> Result<usize> {
     let window = core.evolve.give_up_window_secs;
     if window <= 0 {
+        // Off, and the watermark still moves with the clock. Returning before
+        // it did left the stamp wherever the rule was switched off, so turning
+        // it back on read every unopened search made in between — a month of
+        // them, with no `LIMIT` under the query — and wrote each one down as a
+        // negative. That is the backfill the first pass below refuses,
+        // arriving by the switch instead. A search made while the rule was off
+        // was not read against the one after it then, and is not read later.
+        core.store
+            .meta_set(EVENTS_AFTER, &crate::store::now().to_string())
+            .await?;
         return Ok(0);
     }
-    let Some(generation) = core.store.live_generation().await? else {
-        // The boot path that names a generation runs in the background. Until
-        // it has, there is nothing for an observation to be evidence about.
-        return Ok(0);
-    };
 
     let cutoff = crate::store::now() - window;
     let stamped: Option<i64> = core
@@ -55,8 +60,8 @@ pub async fn run(core: &Core) -> Result<usize> {
         // this rule did meant one pass over the entire search history with no
         // `LIMIT` under it. Every historic search nobody happened to open
         // became a `-0.25` observation — and stamped with the generation that
-        // is live *now*, because that is the only generation an observation can
-        // be written under, though not one of those searches was ever served by
+        // was live when the pass ran, because nothing then recorded which one
+        // had served them, though not one of those searches was ever served by
         // it. `eval::lived` sums them into that generation's account and the
         // next watch reverts a generation that did nothing wrong, while
         // `jobs::retract` replays the same rows as evidence to exhume buried
@@ -103,13 +108,21 @@ pub async fn run(core: &Core) -> Result<usize> {
         return Ok(0);
     }
     let holes = vec!["?"; doors.len()].join(", ");
+    //
+    // A search with no generation beside it was recorded before anything
+    // wrote one down, and there is nothing honest to charge it to. A search
+    // already written down is not written down again: the watermark moves
+    // only after the whole pass, so a pass that failed between its inserts and
+    // its stamp handed the next one the same searches, and `eval::lived`
+    // counted each of those negatives twice.
     let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT e.id AS id, e.query AS query, e.query_vec AS query_vec,
-                e.embed_model AS embed_model
+                e.embed_model AS embed_model, e.generation_id AS generation_id
            FROM search_events e
           WHERE e.opened_at IS NULL
             AND e.judged_at IS NULL
             AND e.scope IS NOT NULL
+            AND e.generation_id IS NOT NULL
             AND e.door IN ({holes})
             AND e.created_at > ?
             AND e.created_at <= ?
@@ -118,6 +131,8 @@ pub async fn run(core: &Core) -> Result<usize> {
                            AND later.scope = e.scope
                            AND later.created_at > e.created_at
                            AND later.created_at <= e.created_at + ?)
+            AND NOT EXISTS (SELECT 1 FROM observations o
+                             WHERE o.event_id = e.id AND o.source = ?)
           ORDER BY e.created_at"
     )));
     for d in &doors {
@@ -127,16 +142,28 @@ pub async fn run(core: &Core) -> Result<usize> {
         .bind(after)
         .bind(cutoff)
         .bind(window)
+        .bind(Source::GaveUp.as_str())
         .fetch_all(&core.store.pool)
         .await?;
 
+    // One transaction for the whole batch, so a store error part way through
+    // leaves none of it behind. The `NOT EXISTS` above covers the other gap,
+    // between the commit and the stamp.
     let mut written = 0;
+    let mut tx = core.store.pool.begin().await?;
     for r in &rows {
         // No artifact and no rank: the claim is that the list did not answer,
         // not that anything in it was wrong to be there.
-        core.store
-            .record_observation(&NewObservation {
-                generation_id: generation.id.clone(),
+        crate::store::observations::insert(
+            &mut *tx,
+            &NewObservation {
+                // The generation that drew the list, not the one live now.
+                // This runs a window after the search at the earliest and
+                // hours after it on a quiet base; charged to whatever was live
+                // by then, an Apply or a restated file in between handed the
+                // new generation negatives for lists it never drew, and the
+                // watch reverted it on them.
+                generation_id: r.get("generation_id"),
                 query: r.get("query"),
                 query_vec: crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
                 embed_model: r.get("embed_model"),
@@ -144,10 +171,12 @@ pub async fn run(core: &Core) -> Result<usize> {
                 rank: None,
                 source: Source::GaveUp,
                 event_id: Some(r.get("id")),
-            })
-            .await?;
+            },
+        )
+        .await?;
         written += 1;
     }
+    tx.commit().await?;
 
     core.store
         .meta_set(EVENTS_AFTER, &cutoff.to_string())
@@ -423,6 +452,99 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// A window of zero is the rule switched off, and the watermark goes on
+    /// moving while it is. Left where it was, switching the rule back on read
+    /// every search made in between and wrote each unopened one down.
+    #[tokio::test]
+    async fn switching_the_rule_off_and_on_again_does_not_read_what_happened_while_it_was_off() {
+        let (core, generation) = base().await;
+        record_at(&core, "loop device", 4_000).await;
+        record_at(&core, "mount loop image", 3_940).await;
+
+        let mut core = core;
+        core.evolve.give_up_window_secs = 0;
+        assert_eq!(run(&core).await.unwrap(), 0);
+        core.evolve.give_up_window_secs = 300;
+        assert_eq!(
+            run(&core).await.unwrap(),
+            0,
+            "the searches made while the rule was off were read"
+        );
+        assert!(
+            core.store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Charged to the generation that drew the list. The sweep reads a search
+    /// a window after it at the earliest, and an Apply in between is ordinary.
+    #[tokio::test]
+    async fn a_give_up_is_charged_to_the_generation_that_served_the_search() {
+        let (core, served) = base().await;
+        record_at(&core, "loop device", 4_000).await;
+        record_at(&core, "mount loop image", 3_940).await;
+        let applied = core
+            .store
+            .record_generation(&NewGeneration {
+                params: GenerationParams {
+                    recency_weight: 0.3,
+                    ..Default::default()
+                },
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: Some(served.clone()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(run(&core).await.unwrap(), 1);
+        assert_eq!(
+            core.store
+                .observations_for_generation(&served, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            core.store
+                .observations_for_generation(&applied, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a generation was charged for a list it never drew"
+        );
+    }
+
+    /// The watermark moves only after the whole pass, so a pass that stopped
+    /// between its inserts and its stamp hands the next one the same searches.
+    #[tokio::test]
+    async fn a_search_already_written_down_is_not_written_down_twice() {
+        let (core, generation) = base().await;
+        record_at(&core, "loop device", 4_000).await;
+        record_at(&core, "mount loop image", 3_940).await;
+        assert_eq!(run(&core).await.unwrap(), 1);
+
+        // The stamp a pass that failed after its inserts would have left.
+        core.store
+            .meta_set(EVENTS_AFTER, &(crate::store::now() - 100_000).to_string())
+            .await
+            .unwrap();
+        assert_eq!(run(&core).await.unwrap(), 0);
+        assert_eq!(
+            core.store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "one give-up, counted twice"
         );
     }
 

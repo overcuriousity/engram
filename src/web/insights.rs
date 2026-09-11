@@ -1442,6 +1442,64 @@ async fn tune_fragment(tenant: &Tenant, line: &str) -> UiResult<Response> {
     .into_response())
 }
 
+/// What an Apply writes: the running parameters, with every knob the run moved
+/// set to what it recommends.
+///
+/// Not the run's `best_params` whole. A run stores the knobs that existed when
+/// it was written, and a row from before a knob joined the ladder reads that
+/// knob back as the shipped default — on both sides, which is how it says the
+/// knob did not move. Applied whole, those defaults went into `config.toml`
+/// over whatever the operator had set, for knobs the line above the button
+/// never named. Moved is decided the way `moved_knobs` decides it for that
+/// line, and the fields are destructured so a knob added later has to be
+/// answered for here.
+fn applied_over(
+    current: crate::core::ranking::RankingParams,
+    run: &crate::store::eval_runs::EvalRun,
+) -> crate::core::ranking::RankingParams {
+    let base = run.base_params;
+    let crate::store::generations::GenerationParams {
+        recency_weight,
+        per_source_cap,
+        candidate_multiplier,
+        recency_half_life_days,
+        prime_lift,
+        spread_max,
+        rerank,
+        review_min,
+        sitting_prime,
+    } = run.best_params;
+    let mut p = current;
+    if base.recency_weight != recency_weight {
+        p.recency_weight = recency_weight;
+    }
+    if base.per_source_cap != per_source_cap {
+        p.per_source_cap = per_source_cap;
+    }
+    if base.candidate_multiplier != candidate_multiplier {
+        p.candidate_multiplier = candidate_multiplier;
+    }
+    if base.recency_half_life_days != recency_half_life_days {
+        p.recency_half_life_days = recency_half_life_days;
+    }
+    if base.prime_lift != prime_lift {
+        p.prime_lift = prime_lift;
+    }
+    if base.spread_max != spread_max {
+        p.spread_max = spread_max;
+    }
+    if base.rerank != rerank {
+        p.rerank = rerank;
+    }
+    if base.review_min != review_min {
+        p.review_min = review_min;
+    }
+    if base.sitting_prime != sitting_prime {
+        p.sitting_prime = sitting_prime;
+    }
+    p
+}
+
 /// Apply the open recommendation: the file first, then the running parameters,
 /// then the stamp.
 ///
@@ -1471,7 +1529,8 @@ async fn tune_apply(
         .await;
     }
 
-    let params: crate::core::ranking::RankingParams = run.best_params.into();
+    let current = *tenant.core.ranking.read().expect("ranking lock");
+    let params = applied_over(current, &run);
     if let Err(e) = crate::config::write_ranking(&st.config_path, &params) {
         // Said here rather than raised: a read-only config file is an ordinary
         // thing to find out about, and the operator is looking at the button
@@ -2133,6 +2192,41 @@ mod tests {
         assert!(core.store.open_recommendation().await.unwrap().is_none());
     }
 
+    /// A run from before a knob joined the ladder reads that knob back as the
+    /// shipped default on both sides. Applying it moves what it moved, and
+    /// leaves what an operator set by hand where they set it.
+    #[tokio::test]
+    async fn applying_an_older_run_leaves_the_knobs_it_never_measured_alone() {
+        let (app, cookie, core, run, path) = tune_app(true).await;
+        // The row as a sweep that knew two knobs wrote it.
+        sqlx::query("UPDATE eval_runs SET base_params = ?, best_params = ? WHERE id = ?")
+            .bind(r#"{"recency_weight":0.05,"per_source_cap":3}"#)
+            .bind(r#"{"recency_weight":0.1,"per_source_cap":null}"#)
+            .bind(&run)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        {
+            let mut r = core.ranking.write().unwrap();
+            r.review_min = 0.84;
+            r.spread_max = 5;
+        }
+
+        let res = post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let live = *core.ranking.read().unwrap();
+        assert_eq!(live.recency_weight, 0.1);
+        assert_eq!(live.per_source_cap, None);
+        assert_eq!(
+            live.review_min, 0.84,
+            "a knob the run never measured was reset to its default"
+        );
+        assert_eq!(live.spread_max, 5);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("review_min = 0.84"), "{written}");
+    }
+
     #[tokio::test]
     async fn insights_names_the_live_generation_and_whether_it_is_watched() {
         let (core, parent) = crate::jobs::tune::test_support::adopted_and_watching().await;
@@ -2305,6 +2399,15 @@ mod tests {
         let body = insights(core).await;
         // The section heading became the row's own word. See `QueueRow`.
         assert!(body.contains(">buried<"), "{body}");
+        // Once, as buried. The burial keeps the artifact's status, and the
+        // hidden list read the status alone, so the same artifact was also
+        // listed as hidden and "still at its own link".
+        assert_eq!(
+            body.matches(&format!("/ui/ops/artifacts/{id}/reactivate"))
+                .count(),
+            1,
+            "{body}"
+        );
         assert!(body.contains("Old note"), "{body}");
         assert!(body.contains("nothing new in it"), "{body}");
         assert!(

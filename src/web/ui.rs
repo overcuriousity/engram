@@ -6956,6 +6956,20 @@ mod tests {
         );
     }
 
+    /// An answer that searched nothing takes back the id the last one handed
+    /// the box. Left standing, a Capture pressed over a long paste named that
+    /// earlier search as its first draft and closed its gap unmeasured.
+    #[tokio::test]
+    async fn an_answer_that_searched_nothing_forgets_the_search_the_box_was_folding_into() {
+        let (app, cookie, _handle) = app_session_and_core_with_feedback().await;
+        get_body(&app, &cookie, "/ui/search/results?q=fat32").await;
+        let idle = get_body(&app, &cookie, "/ui/search/results?q=").await;
+        assert!(
+            idle.contains(r#"<span hx-swap-oob="innerHTML:#fold-of"></span>"#),
+            "{idle}"
+        );
+    }
+
     #[tokio::test]
     async fn the_rail_hands_the_box_the_search_it_should_fold_into() {
         // The box types into one event by naming it, not by being the most

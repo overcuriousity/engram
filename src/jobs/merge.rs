@@ -322,6 +322,15 @@ pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
         // here. Nothing is stranded any more.
         return Ok(());
     }
+    // The ordering above is about a merge's *first* embed. One that has
+    // already hidden its roots landed, and an embed it waits on now is a later
+    // one — `jobs::condense` rewrites merged artifacts too — so the safety
+    // argument does not reach it: deprecated, it takes what it replaced out of
+    // results with it. `stranded_merges` refuses it; this is the same question
+    // asked again at the moment of acting.
+    if !core.store.artifacts_superseded_by(&m.id).await?.is_empty() {
+        return Ok(());
+    }
     core.deprecate(&m.id).await?;
     let reopened = core
         .store

@@ -264,6 +264,15 @@ pub async fn rehearse(
     // observation agreeing with itself: interference files a pair, condense
     // arms a rewrite, and neither has the second measurement it says it has.
     let held: std::collections::HashSet<String> = batch.iter().map(|r| r.id.clone()).collect();
+    // Where the lap ends, taken before the overlap is dropped. The cursor
+    // below moves only over probes the loop measures, so a lap whose every
+    // probe past the cursor was also fragile filtered to nothing and the
+    // cursor stood still: the next pass fetched the same lap, dropped it the
+    // same way, and the probes behind the cursor were never walked again.
+    let lap_end = lap.last().map(|r| crate::store::Cursor {
+        at: r.created_at,
+        id: r.id.clone(),
+    });
     let lap: Vec<_> = lap.into_iter().filter(|r| !held.contains(&r.id)).collect();
     let lap_start = batch.len();
     batch.extend(lap);
@@ -366,6 +375,11 @@ pub async fn rehearse(
                 outranked_by: above,
             })
             .await?;
+    }
+    // The whole lap was walked, including what the fragile half took out of
+    // it, so the next one starts after all of it.
+    if let Some(end) = lap_end {
+        cursor = end;
     }
     core.store
         .meta_set(REHEARSED_AFTER, &cursor.encode())
@@ -967,6 +981,56 @@ mod tests {
         rehearse(&core, &live, crate::store::now()).await.unwrap();
         let after = core.store.results_of(&pid, 100).await.unwrap().len();
         assert_eq!(after - before, 1, "one pass is one measurement");
+    }
+
+    /// The cursor moves past what the fragile half took out of the lap. Every
+    /// probe past it being fragile used to leave it where it was for good, and
+    /// the probes behind it were never walked again.
+    #[tokio::test]
+    async fn a_lap_the_fragile_half_emptied_still_moves_the_cursor_on() {
+        let (core, _a1, _a2, _b) = two_corpora().await;
+        let live = live_generation(&core).await;
+        integrate(&core, crate::store::now()).await.unwrap();
+        let probes = core
+            .store
+            .rehearsals_after(&crate::store::Cursor::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(probes.len(), 2);
+        // The last pass stopped after the first probe, and the second one's
+        // results disagree, which puts it in the fragile half.
+        let first = crate::store::Cursor {
+            at: probes[0].created_at,
+            id: probes[0].id.clone(),
+        };
+        core.store
+            .meta_set(REHEARSED_AFTER, &first.encode())
+            .await
+            .unwrap();
+        for rank in [Some(1), Some(3)] {
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: probes[1].id.clone(),
+                    generation_id: live.id.clone(),
+                    rank,
+                    outranked_by: vec![],
+                })
+                .await
+                .unwrap();
+        }
+
+        rehearse(&core, &live, crate::store::now()).await.unwrap();
+        let at = core
+            .store
+            .meta_get(REHEARSED_AFTER)
+            .await
+            .unwrap()
+            .map(|s| crate::store::Cursor::parse(&s))
+            .expect("a cursor");
+        assert_eq!(
+            at.id, probes[1].id,
+            "the cursor stood still behind a lap the fragile half had emptied"
+        );
     }
 
     /// A capture probe whose artifact has not been re-embedded yet is left

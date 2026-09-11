@@ -1324,13 +1324,7 @@
   function failedSwap(target, xhr) {
     if (!target || !target.id) return;
     var reason = 'engram is unreachable.';
-    if (xhr) {
-      try {
-        reason = JSON.parse(xhr.responseText).error || ('engram answered ' + xhr.status + '.');
-      } catch (err) {
-        reason = 'engram answered ' + xhr.status + '.';
-      }
-    }
+    if (xhr) reason = reasonOf(xhr) || ('engram answered ' + xhr.status + '.');
     var box = document.createElement('div');
     box.className = 'flag';
     box.setAttribute('role', 'status');
@@ -1351,6 +1345,26 @@
     // The heading names the act that filled the rail, and nothing filled it.
     var head = document.getElementById('rail-head');
     if (head && target.id === 'results') head.textContent = '';
+  }
+
+  // What the server said went wrong, out of whichever body it sent. The API
+  // answers `{"error": …}`; a `/ui` route answers with the error page, which
+  // marks its one sentence of what happened with `data-error-detail`
+  // (`error.html`, `not_found.html`). Reading only the first shape turned
+  // every `/ui` failure into a bare status code once those routes started
+  // answering with a page — "chunk text is empty" became "engram answered 400".
+  function reasonOf(xhr) {
+    var type = xhr.getResponseHeader('content-type') || '';
+    try {
+      if (type.indexOf('application/json') !== -1) {
+        return JSON.parse(xhr.responseText).error || null;
+      }
+      var page = new DOMParser().parseFromString(xhr.responseText, 'text/html');
+      var said = page.querySelector('[data-error-detail]');
+      return said ? said.textContent.trim() : null;
+    } catch (err) {
+      return null;
+    }
   }
 
   // The two example phrasings under the box. A chip fills the box and stops
@@ -2134,6 +2148,12 @@
         // citations — for words the operator typed themselves.
         var kept = document.getElementById('kept-from');
         if (kept && kept.parentNode) kept.parentNode.removeChild(kept);
+        // The same for the search this text was typed into: it has had its
+        // answer. Left standing, the next paste too long to be searched went
+        // out naming it, and a named search closes its gap with no distance
+        // check. The idle answer below clears it too; this does not wait on it.
+        var foldOf = document.getElementById('fold-of');
+        if (foldOf) foldOf.textContent = '';
         box.value = '';
         box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
         refreshRail();

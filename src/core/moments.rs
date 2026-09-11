@@ -1118,6 +1118,75 @@ mod tests {
     ///
     /// The NULL is written directly here because nothing in the app can
     /// produce one any more, which is exactly why the case needs a test.
+    /// The same, with more than one row from before the column. Every one of
+    /// them carries NULL, and adopting only the row being completed left the
+    /// occurrences already done outside the series the count now reads.
+    #[tokio::test]
+    async fn a_counted_recurrence_with_several_rows_from_before_the_column_stops_on_its_count() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Feed the cat", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let rule = "FREQ=DAILY;COUNT=3";
+        let mut rows = Vec::new();
+        for day in [30, 31] {
+            rows.push(
+                core.store
+                    .insert_moment(&NewMoment {
+                        artifact_id: aid.clone(),
+                        kind: Kind::Due,
+                        at: Some(
+                            berlin()
+                                .with_ymd_and_hms(2026, 8, day, 9, 0, 0)
+                                .unwrap()
+                                .timestamp(),
+                        ),
+                        tz: "Europe/Berlin".into(),
+                        rule: Some(rule.into()),
+                        source: Source::Cue,
+                        span: None,
+                        series_id: None,
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        // Both from before the column, and the first already done.
+        sqlx::query("UPDATE moments SET series_id = NULL WHERE artifact_id = ?")
+            .bind(&aid)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE moments SET done_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 86_400)
+            .bind(&rows[0])
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        core.complete_moment(&rows[1]).await.unwrap();
+        let third = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(third.len(), 1, "the third occurrence is armed");
+        core.complete_moment(&third[0].moment.id).await.unwrap();
+
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "three of three, and a fourth was armed"
+        );
+    }
+
     #[tokio::test]
     async fn a_counted_recurrence_on_an_upgraded_base_still_stops() {
         use crate::store::moments::{Kind, NewMoment, Source};

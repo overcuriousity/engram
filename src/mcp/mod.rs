@@ -828,8 +828,8 @@ type TenantServices = std::sync::Mutex<(
 /// rather than held until the service is evicted.
 const SESSION_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-fn session_manager()
--> rmcp::transport::streamable_http_server::session::local::LocalSessionManager {
+fn session_manager() -> rmcp::transport::streamable_http_server::session::local::LocalSessionManager
+{
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     let mut manager = LocalSessionManager::default();
     manager.session_config.keep_alive = Some(SESSION_KEEP_ALIVE);

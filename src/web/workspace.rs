@@ -1981,14 +1981,24 @@ mod tests {
             .split_once("function failedSwap(")
             .expect("the driver has no failedSwap()")
             .1;
+        let f = &f[..f.find("\n  }\n").expect("failedSwap() ends")];
         assert!(
-            f.contains("JSON.parse(xhr.responseText).error"),
+            f.contains("reasonOf(xhr)"),
             "the reason the server gave is thrown away"
         );
         assert!(
             f.contains("textContent"),
             "an error string is the one payload here that went through no renderer"
         );
+        // Both shapes a reason arrives in: the API's JSON, and the error page
+        // a `/ui` route answers with.
+        let r = js
+            .split_once("function reasonOf(")
+            .expect("the driver has no reasonOf()")
+            .1;
+        let r = &r[..r.find("\n  }\n").expect("reasonOf() ends")];
+        assert!(r.contains("JSON.parse(xhr.responseText).error"), "{r}");
+        assert!(r.contains("[data-error-detail]"), "{r}");
     }
 
     /// A result click must never swap away the ask and capture targets: they

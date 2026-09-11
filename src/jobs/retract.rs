@@ -387,6 +387,37 @@ async fn take_back(core: &Core, a: &crate::store::actions::Action, reason: &str)
     }
 }
 
+/// One probe's last result at or before `at` against its last result after
+/// it, both measured under the same generation — the latest such pair the
+/// probe has.
+///
+/// A rank is a measurement at one set of ranking parameters, so results from
+/// either side of a generation boundary compare the knobs rather than the
+/// artifact. Taking the last result on each side whatever it was measured
+/// under, rule 1 read an adoption as the condensation's doing: one that had
+/// lost nothing was taken back for what the new settings moved, and — since
+/// `condense_candidates` refuses anything once taken back — never offered
+/// again.
+fn spanning(
+    results: &[crate::store::rehearsals::RehearsalResult],
+    at: i64,
+) -> Option<(
+    &crate::store::rehearsals::RehearsalResult,
+    &crate::store::rehearsals::RehearsalResult,
+)> {
+    results
+        .iter()
+        .filter(|t| t.at > at)
+        .filter_map(|t| {
+            results
+                .iter()
+                .filter(|b| b.at <= at && b.generation_id == t.generation_id)
+                .max_by_key(|b| b.at)
+                .map(|b| (b, t))
+        })
+        .max_by_key(|(_, t)| t.at)
+}
+
 /// Rule 1: a survivor must still be found.
 ///
 /// For every merge and supersession not yet taken back, the observations that
@@ -469,9 +500,9 @@ pub(crate) async fn rule_one(
             // case hid a real regression.
             //
             // So the pairing is per probe — its last result before the
-            // condensation against its last result after — and a probe missing
-            // either side sits the round out, because there is nothing to
-            // compare it with.
+            // condensation against its last result after, both under one
+            // generation (see `spanning`) — and a probe missing either side
+            // sits the round out, because there is nothing to compare it with.
             let mut before = Vec::new();
             let mut after = Vec::new();
             for p in core.store.rehearsals_of(&a.subject_id).await? {
@@ -482,19 +513,9 @@ pub(crate) async fn rule_one(
                 let rank = |r: &crate::store::rehearsals::RehearsalResult| {
                     r.rank.map(|n| (n - 1).max(0) as usize)
                 };
-                let last_before = results
-                    .iter()
-                    .filter(|r| r.at <= a.at)
-                    .max_by_key(|r| r.at)
-                    .map(&rank);
-                let last_after = results
-                    .iter()
-                    .filter(|r| r.at > a.at)
-                    .max_by_key(|r| r.at)
-                    .map(&rank);
-                if let (Some(b), Some(t)) = (last_before, last_after) {
-                    before.push(b);
-                    after.push(t);
+                if let Some((b, t)) = spanning(&results, a.at) {
+                    before.push(rank(b));
+                    after.push(rank(t));
                 }
             }
             if before.is_empty() {
@@ -734,6 +755,48 @@ mod tests {
                 .action_was_undone(&id, Kind::Condense)
                 .await
                 .unwrap()
+        );
+    }
+
+    /// Before and after under one generation. Across an adoption the two
+    /// sides are measured at two sets of parameters, and a miss after it says
+    /// what the new settings did, not what the condensation lost.
+    #[tokio::test]
+    async fn a_condensation_is_not_judged_across_a_generation_boundary() {
+        let (mut core, order) = seeded().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let g = generation_for(&core).await;
+        let id = order[0].clone();
+        let text = core.store.get_artifact(&id).await.unwrap().text;
+        let probes = probes_on(&core, &id, &g, 3).await;
+        let (action, _) = core
+            .store
+            .condense_artifact(&id, None, "shorter", None, &[], serde_json::json!({}))
+            .await
+            .unwrap()
+            .expect("no revision was pinned");
+        let at = core.store.action(&action).await.unwrap().unwrap().at;
+        for p in &probes {
+            result_at(&core, p, &g, Some(1), at - 10).await;
+        }
+        // The tuner adopts, and under what it adopted every probe misses.
+        let adopted = generation_under(&core, "recipe-a").await;
+        for p in &probes {
+            result_at(&core, p, &adopted, None, at + 10).await;
+        }
+
+        let (reconsidered, undone, _) = rule_one(&core, &adopted, crate::store::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            (reconsidered, undone),
+            (0, 0),
+            "a rank under one generation was compared with a rank under another"
+        );
+        assert_ne!(
+            core.store.get_artifact(&id).await.unwrap().text,
+            text,
+            "the condensation stands"
         );
     }
 

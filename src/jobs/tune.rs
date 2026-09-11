@@ -295,9 +295,19 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         // probe set, now. A generation that loses on probes is taken back
         // with no observations at all, and two that cannot be told apart on
         // enough probes end the watch on a base nobody searches.
+        //
+        // Only where a replay can see the difference at all. Probes replay
+        // through `Door::Judge` with no priming, so a move of the band, the
+        // lift, the sitting or the review threshold replays identically on
+        // both sides by construction — and ten identical replays are
+        // `indistinguishable`. That ended the watch on a `spread_max` or
+        // `review_min` move on the first pass after it was adopted, before a
+        // single lived observation, and let a child be adopted on top of it.
         let mut rehearsal_lost = false;
         let mut rehearsal_settled = false;
-        if !probes.is_empty() {
+        if !probes.is_empty()
+            && crate::eval::rehearsed::probes_tell_apart(live.params.into(), parent.params.into())
+        {
             // Reranked only where the two generations disagree about it. Held
             // constant it cancels out of the verdict and costs a reranker call
             // per probe to do so; where it *is* what separates them, replaying
@@ -365,11 +375,12 @@ async fn revert(
     old: &crate::eval::lived::Lived,
 ) -> Result<Pass> {
     let Some(back) = core.store.revert_generation(&live.id).await? else {
-        // Checked above; a parent that vanished between the two reads is a
-        // base with nowhere to go back to, which stays where it is.
+        // Nowhere to go back to, or not live any more: a person's Apply made
+        // another generation live while this pass was measuring the one it
+        // was about to take back. Either way the base stays where it is.
         return Ok(Pass::default());
     };
-    *core.ranking.write().expect("ranking lock") = back.params.into();
+    swap_ranking(core, live.params.into(), back.params.into());
     tracing::info!(
         reverted = %live.id,
         live = %back.id,
@@ -548,7 +559,27 @@ async fn propose(
             }
         }
     }
-    adopt(core, live, winner, &run_id, predicted, pairs.len()).await
+    adopt(core, live, current, winner, &run_id, predicted, pairs.len()).await
+}
+
+/// Serve under `to`, if the base is still serving under `from`.
+///
+/// The generation writes beside every call are conditional in the store; this
+/// is the same condition on the running parameters, which an Apply swaps
+/// before it journals. The guard in `propose` reads them long before the write,
+/// so an Apply landing after that read and before this one had its parameters
+/// replaced by the loop's.
+fn swap_ranking(
+    core: &Core,
+    from: crate::core::ranking::RankingParams,
+    to: crate::core::ranking::RankingParams,
+) {
+    let mut running = core.ranking.write().expect("ranking lock");
+    if *running == from {
+        *running = to;
+    } else {
+        tracing::info!("the ranking changed while the idle pass ran; it was left as it is");
+    }
 }
 
 /// The spread rule. Grow when the band was used more than the ranked tail
@@ -593,7 +624,9 @@ async fn spread_step(
         0 => 0.0,
         n => use_.band_used as f64 / n as f64,
     };
-    let id = adopt_lived(core, live, candidate, predicted).await?;
+    let Some(id) = adopt_lived(core, live, current, candidate, predicted).await? else {
+        return Ok(Pass::default());
+    };
     tracing::info!(
         generation = %id,
         spread_max = next,
@@ -699,7 +732,9 @@ async fn review_step(
         0 => 0.0,
         n => low.acted as f64 / n as f64,
     };
-    let id = adopt_lived(core, live, candidate, predicted).await?;
+    let Some(id) = adopt_lived(core, live, current, candidate, predicted).await? else {
+        return Ok(Pass::default());
+    };
     tracing::info!(
         generation = %id,
         review_min = next,
@@ -715,14 +750,16 @@ async fn review_step(
 }
 
 /// Make `candidate` live on lived evidence: no run to name, `predicted` the
-/// rate that argued for it.
+/// rate that argued for it. `None` where `live` stopped being live while the
+/// pass ran — see `Store::adopt_generation`.
 async fn adopt_lived(
     core: &Core,
     live: &Generation,
+    current: crate::core::ranking::RankingParams,
     candidate: crate::core::ranking::RankingParams,
     predicted: f64,
-) -> Result<String> {
-    let id = core
+) -> Result<Option<String>> {
+    let Some(id) = core
         .store
         .adopt_generation_lived(
             &NewGeneration {
@@ -733,9 +770,16 @@ async fn adopt_lived(
             },
             predicted,
         )
-        .await?;
-    *core.ranking.write().expect("ranking lock") = candidate;
-    Ok(id)
+        .await?
+    else {
+        tracing::info!(
+            generation = %live.id,
+            "the live generation changed while the idle pass ran; nothing adopted"
+        );
+        return Ok(None);
+    };
+    swap_ranking(core, current, candidate);
+    Ok(Some(id))
 }
 
 async fn judged_count(core: &Core) -> Result<i64> {
@@ -746,12 +790,13 @@ async fn judged_count(core: &Core) -> Result<i64> {
 async fn adopt(
     core: &Core,
     live: &Generation,
+    current: crate::core::ranking::RankingParams,
     winner: crate::core::ranking::RankingParams,
     run_id: &str,
     predicted: f64,
     pairs: usize,
 ) -> Result<Pass> {
-    let id = core
+    let Some(id) = core
         .store
         .adopt_generation(
             &NewGeneration {
@@ -763,8 +808,19 @@ async fn adopt(
             run_id,
             predicted,
         )
-        .await?;
-    *core.ranking.write().expect("ranking lock") = winner;
+        .await?
+    else {
+        // An Apply landed after the guard in `propose` and before this write.
+        // The run's baseline is no longer what runs, so it does not stand as
+        // the open recommendation either.
+        core.store.withdraw_eval_run(run_id).await?;
+        tracing::info!(
+            generation = %live.id,
+            "the live generation changed while the idle pass ran; its candidate was discarded"
+        );
+        return Ok(Pass::default());
+    };
+    swap_ranking(core, current, winner);
     // Stamped, or the insights page would offer an Apply button for settings
     // that are already running.
     core.store.mark_eval_run_applied(run_id).await?;
@@ -1413,7 +1469,8 @@ mod tests {
                 0.0,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .expect("nothing names a parent");
         rehearsed_once(&core, &at_zero).await;
 
         let first = run(&core)
@@ -1718,6 +1775,112 @@ mod tests {
             .fetch_one(&core.store.pool)
             .await
             .unwrap()
+    }
+
+    /// An Apply pressed while the pass was measuring is not written over by
+    /// what the pass decided from that measurement.
+    #[tokio::test]
+    async fn an_apply_that_lands_while_the_pass_measures_is_not_written_over() {
+        let (core, parent) = adopted_and_watching().await;
+        observe_badly_under_live(&core, 16).await;
+        let watched = core.store.live_generation().await.unwrap().unwrap();
+        let new = lived(&core, &watched.id).await.unwrap();
+        let old = lived(&core, &parent).await.unwrap();
+        assert!(
+            !holds_up(&new, &old),
+            "a generation the pass would take back"
+        );
+
+        // The Apply, the way `insights::tune_apply` makes it: the running
+        // parameters first, then the journal.
+        let was: crate::core::ranking::RankingParams = watched.params.into();
+        let applied_params = crate::core::ranking::RankingParams {
+            recency_weight: was.recency_weight + 0.3,
+            ..was
+        };
+        *core.ranking.write().unwrap() = applied_params;
+        let applied = crate::store::generations::restate_generation(
+            &core.store,
+            &watched,
+            applied_params.into(),
+        )
+        .await
+        .unwrap();
+
+        // What the pass does next, on what it read before the press.
+        let p = revert(&core, &watched, &new, &old).await.unwrap();
+        assert!(p.reverted.is_none(), "{p:?}");
+        let wider = crate::core::ranking::RankingParams {
+            spread_max: crate::core::ranking::SPREADS
+                .iter()
+                .copied()
+                .find(|s| *s != was.spread_max)
+                .unwrap(),
+            ..was
+        };
+        assert!(
+            adopt_lived(&core, &watched, was, wider, 0.5)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generations WHERE state = 'live'")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(live, 1, "two generations live at once");
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            applied.id
+        );
+        let running = *core.ranking.read().unwrap();
+        assert_eq!(
+            running, applied_params,
+            "the Apply's parameters were replaced"
+        );
+    }
+
+    /// A move the probes cannot see is not settled by them. The band is not
+    /// replayed on `Door::Judge`, so a `spread_max` move replays identically on
+    /// both sides, and identical replays over enough probes used to end the
+    /// watch on the first pass — before anything had been observed under it.
+    #[tokio::test]
+    async fn a_band_move_is_not_settled_by_probes_that_replay_without_the_band() {
+        let (mut core, parent) = seeded_with_observations().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let order = crate::eval::sweep::test_support::ranks_order(&core).await;
+        assert_eq!(probes_the_cap_buries(&core, &parent, &order[2]).await, 30);
+        let live = core.store.generation(&parent).await.unwrap().unwrap();
+        let current = *core.ranking.read().unwrap();
+        let wider = crate::core::ranking::RankingParams {
+            spread_max: crate::core::ranking::SPREADS
+                .iter()
+                .copied()
+                .find(|s| *s != current.spread_max)
+                .unwrap(),
+            ..current
+        };
+        let child = adopt_lived(&core, &live, current, wider, 0.5)
+            .await
+            .unwrap()
+            .expect("the parent is live");
+        // Less observed under the move than under its parent, and no
+        // difference between the two: the lived half cannot settle it yet.
+        observe(&core, &child, &order[3], 4).await;
+        let runs = eval_runs(&core).await;
+
+        let p = pass(&core).await.unwrap();
+        assert!(p.adopted.is_none() && p.refused.is_none(), "{p:?}");
+        assert_eq!(
+            eval_runs(&core).await,
+            runs,
+            "the watch ended and the pass went looking for the next move"
+        );
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            child
+        );
     }
 
     #[tokio::test]

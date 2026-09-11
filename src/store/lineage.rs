@@ -234,6 +234,12 @@ impl Store {
     /// for or the candidates run out. The set being walked is merges that are
     /// not embedded *yet*, which empties itself as they embed, so the loop is
     /// bounded by work in flight rather than by the size of the base.
+    ///
+    /// Only merges that have hidden nothing. One whose roots are already
+    /// superseded onto it landed once, and an embed it is waiting on now is a
+    /// later one: `jobs::condense` rewrites a merged artifact like any other
+    /// and queues it again. Retiring that merge took what it replaced out of
+    /// results with it, behind a deprecated row nothing restores.
     pub async fn stranded_merges(&self, limit: i64) -> Result<Vec<String>> {
         const PAGE: i64 = 500;
         let want = limit.max(0) as usize;
@@ -246,6 +252,7 @@ impl Store {
                     AND a.status = 'active'
                     AND a.superseded_by IS NULL
                     AND a.embed_state != 'embedded'
+                    AND NOT EXISTS (SELECT 1 FROM artifacts r WHERE r.superseded_by = a.id)
                     AND a.id > ?
                   ORDER BY a.id
                   LIMIT ?",

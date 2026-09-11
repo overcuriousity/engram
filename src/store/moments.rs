@@ -622,13 +622,33 @@ impl Store {
     /// and `occurrences_in_series` counts the occurrence that has just
     /// happened rather than starting from the next one.
     ///
-    /// `COALESCE` rather than an overwrite: a row that already belongs to a
-    /// series keeps it, so this is safe to call without asking first.
+    /// A row that already belongs to a series keeps it, and so do its
+    /// siblings, so this is safe to call without asking first.
+    ///
+    /// And every earlier row of the same recurrence joins with it. Every row
+    /// written before the column carries NULL, not only the one being
+    /// completed: adopting that one alone moved the count onto the series,
+    /// where the occurrences already done were not, and a `COUNT=3` whose
+    /// first two predated the column fired four times. The siblings are found
+    /// the way `occurrences_of_rule` has always counted them — the due rows on
+    /// this artifact under this rule — which is the count the series replaces.
     pub async fn adopt_into_own_series(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE moments SET series_id = COALESCE(series_id, id) WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE moments SET series_id = ?
+              WHERE series_id IS NULL
+                AND (id = ?
+                     OR (kind = 'due'
+                         AND artifact_id = (SELECT artifact_id FROM moments
+                                             WHERE id = ? AND series_id IS NULL)
+                         AND rule = (SELECT rule FROM moments
+                                      WHERE id = ? AND series_id IS NULL)))",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

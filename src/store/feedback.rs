@@ -464,9 +464,14 @@ impl Store {
                     // a brand-new question invisible to `pending_count` for
                     // ever. `unjudge` was fixed for exactly this; the fold
                     // path is the other door into it.
+                    //
+                    // The generation goes with them: the list is drawn again,
+                    // under whatever is live now.
                     "UPDATE search_events
                      SET query = ?, filters = ?, query_vec = ?, vec_dim = ?,
-                         embed_model = ?, created_at = ?, answered = ?, skips = 0
+                         embed_model = ?, created_at = ?, answered = ?, skips = 0,
+                         generation_id = (SELECT id FROM generations WHERE state = 'live'
+                                           ORDER BY created_at DESC, id DESC LIMIT 1)
                      WHERE id = ?",
                 )
                 .bind(&ev.query)
@@ -492,10 +497,15 @@ impl Store {
             None => {
                 let id = new_id();
                 sqlx::query(
+                    // The live generation read in the same statement, and so
+                    // under the same write lock, as the row it stamps. See
+                    // `search_events.generation_id`.
                     "INSERT INTO search_events
                        (id, query, door, scope, filters, query_vec, vec_dim, embed_model,
-                        created_at, answered)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        created_at, answered, generation_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                             (SELECT id FROM generations WHERE state = 'live'
+                               ORDER BY created_at DESC, id DESC LIMIT 1))",
                 )
                 .bind(&id)
                 .bind(&ev.query)

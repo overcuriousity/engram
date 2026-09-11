@@ -137,16 +137,44 @@ impl Store {
     }
 
     /// Put version `n` back as the live text; bumps `embed_rev`. The caller
-    /// stamps the journal row. The version row stays: nothing is deleted.
-    pub async fn restore_version(&self, artifact_id: &str, n: i64) -> Result<()> {
+    /// stamps the journal row. Nothing is deleted: the version row stays, and
+    /// the text being replaced becomes a version of its own first, retired by
+    /// `action_id` — the journal row this restore takes back.
+    ///
+    /// That second half was missing. A condensation keeps what it replaced,
+    /// and nothing kept what came after it: an edit made to the condensed text
+    /// lived only in `artifacts`, and restoring the version the condensation
+    /// retired wrote straight over it. Rule 1 restores on its own, so the edit
+    /// could be gone for good without anyone having pressed anything.
+    pub async fn restore_version(&self, artifact_id: &str, n: i64, action_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         let row = sqlx::query(
             "SELECT text, title, caveats FROM artifact_versions WHERE artifact_id = ? AND n = ?",
         )
         .bind(artifact_id)
         .bind(n)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or(Error::NotFound)?;
+        let current = sqlx::query("SELECT text, title, caveats FROM artifacts WHERE id = ?")
+            .bind(artifact_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NotFound)?;
+        sqlx::query(
+            "INSERT INTO artifact_versions (artifact_id, n, text, title, caveats, created_at, action_id)
+             SELECT ?, COALESCE(MAX(n), 0) + 1, ?, ?, ?, ?, ?
+               FROM artifact_versions WHERE artifact_id = ?",
+        )
+        .bind(artifact_id)
+        .bind(current.get::<String, _>("text"))
+        .bind(current.get::<Option<String>, _>("title"))
+        .bind(current.get::<String, _>("caveats"))
+        .bind(now())
+        .bind(action_id)
+        .bind(artifact_id)
+        .execute(&mut *tx)
+        .await?;
         let res = sqlx::query(
             "UPDATE artifacts SET text = ?, title = ?, caveats = ?,
                     embed_state = 'pending', embed_model = NULL,
@@ -158,11 +186,12 @@ impl Store {
         .bind(row.get::<String, _>("caveats"))
         .bind(now())
         .bind(artifact_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -234,15 +263,42 @@ mod tests {
             .expect("no revision pinned");
         assert_eq!(n2, 2);
 
-        store.restore_version(&id, 1).await.unwrap();
+        store.restore_version(&id, 1, &action).await.unwrap();
         let back = store.get_artifact(&id).await.unwrap();
         assert_eq!(back.text, before.text);
         assert_eq!(back.title, before.title);
         assert_eq!(back.caveats, before.caveats);
         assert_eq!(
             store.versions_of(&id).await.unwrap().len(),
-            2,
-            "nothing deleted"
+            3,
+            "nothing deleted, including the text the restore replaced"
+        );
+    }
+
+    /// An edit made to the condensed text survives the condensation being
+    /// taken back. Nothing else had a copy of it.
+    #[tokio::test]
+    async fn restoring_a_version_keeps_the_text_it_replaces() {
+        let store = Store::memory().await.unwrap();
+        let id = one(&store).await;
+        let before = store.get_artifact(&id).await.unwrap();
+        let (action, n) = store
+            .condense_artifact(&id, None, "1.21.4", None, &[], serde_json::json!({}))
+            .await
+            .unwrap()
+            .expect("no revision pinned");
+        store
+            .update_artifact_text(&id, "1.21.4, and only on ext4")
+            .await
+            .unwrap();
+
+        store.restore_version(&id, n, &action).await.unwrap();
+        assert_eq!(store.get_artifact(&id).await.unwrap().text, before.text);
+        let kept = store.versions_of(&id).await.unwrap();
+        assert!(
+            kept.iter()
+                .any(|v| v.text == "1.21.4, and only on ext4" && v.action_id == action),
+            "the edit was written over and kept nowhere: {kept:?}"
         );
     }
 }

@@ -2266,6 +2266,62 @@ pub(crate) mod tests {
         );
     }
 
+    /// A merge that landed and was condensed since is not stranded when the
+    /// condensed text will not embed. Its roots are already behind it, so
+    /// retiring it would hide them behind a row nothing restores.
+    #[tokio::test]
+    async fn a_condensed_merge_whose_new_embed_fails_keeps_what_it_replaced() {
+        use crate::store::artifacts::NewMerged;
+        let core = test_core().await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let m = core
+            .store
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "both".into(),
+                    ..Default::default()
+                },
+                &[ids[0].clone(), ids[1].clone()],
+            )
+            .await
+            .unwrap();
+        for id in &ids {
+            core.store.set_superseded_by(id, Some(&m.id)).await.unwrap();
+        }
+        // Condensed since: the text waits on an embed again, and that one has
+        // run out of attempts.
+        core.store
+            .enqueue(crate::store::jobs::Stage::Embed, "artifact", &m.id)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET attempts = ? WHERE target_id = ?")
+            .bind(crate::store::jobs::MAX_ATTEMPTS)
+            .bind(&m.id)
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        assert_eq!(
+            core.store.get_artifact(&m.id).await.unwrap().status,
+            ArtifactStatus::Active,
+            "a merge that had landed was retired as though it never had"
+        );
+        for id in &ids {
+            assert_eq!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .as_deref(),
+                Some(m.id.as_str()),
+                "what it replaced is still behind it"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_merge_that_can_never_embed_is_reaped_and_its_pairs_reopened() {
         // The pairs are settled the moment the merge is written. If the embed

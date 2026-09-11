@@ -36,6 +36,28 @@ const COMPONENT_WINDOW: i64 = 5_000;
 #[cfg(test)]
 const COMPONENT_WINDOW: i64 = 3;
 
+/// The states a review card is drawn for, in the order the queue lists them —
+/// and so the only states a press on a card can still be answering.
+/// `web::ops` renders these; `ask_pair_synthesis` and `jobs::dedupe::run`
+/// refuse a Synthese press on anything else.
+pub const AWAITING_REVIEW: [PairState; 5] = [
+    PairState::Contradiction,
+    PairState::Superseded,
+    // The judge read both and found one artifact should hold what both say. A
+    // proposal rather than a merge already applied: see `PairState::Duplicate`
+    // for the measurements that took the action off this verdict. The card
+    // renders it through the same branch a pending pair uses — "these two cover
+    // the same ground" — and the Synthese button is the press that acts on it.
+    PairState::Duplicate,
+    // Only ever rows an older base filed: a vacuous verdict is now carried
+    // out where it is found (`jobs::dedupe::discard_both`) and its pair
+    // settles `Dismissed`. Still listed, because those rows are a
+    // recommendation nobody has pressed yet, and without this key they are on
+    // no queue at all.
+    PairState::Vacuous,
+    PairState::Pending,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairState {
@@ -462,37 +484,40 @@ impl Store {
     /// outcomes rather than how often it leads anywhere. The pair is named in
     /// the row's own evidence.
     ///
-    /// `decided_by` admits `evidence` alongside `model` for the same reason:
-    /// the only thing that writes it is `merge::undo` taking one of these very
-    /// actions back, so dropping those rows would shrink the denominator every
-    /// time the base retracts something while leaving the numerator alone —
-    /// an undo would push the threshold down, when it is the one event that
-    /// most clearly argues for pushing it up.
+    /// And all three are counted over one set of pairs, so that `acted` and
+    /// `undone` can never name a pair `judged` left out. A pair is in the set
+    /// where a verdict settled it — `decided_by` is `model`, or `evidence`,
+    /// which only `merge::undo` taking one of these actions back writes — or
+    /// where the judge's verdict led to a journal row. The second half is for
+    /// an operator's undo, which rewrites `decided_by` to `operator`: read off
+    /// `decided_by` alone, the pair left `judged` while its row went on
+    /// counting as acted and undone, and every undo inflated the band's action
+    /// rate. A row an operator asked for — Synthese, marked `asked_by` — is
+    /// not a verdict's doing and is not counted at all.
     pub async fn band_record(&self, lo: f32, hi: f32) -> Result<BandRecord> {
-        let judged: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM artifact_pairs
-              WHERE score >= ? AND score < ? AND state <> 'pending'
-                AND decided_by IN ('model', 'evidence')",
-        )
-        .bind(lo)
-        .bind(hi)
-        .fetch_one(&self.pool)
-        .await?;
         let r = sqlx::query(
-            "SELECT COUNT(*) AS acted,
-                    COALESCE(SUM(undone), 0) AS undone
-               FROM (SELECT MAX(undone_at IS NOT NULL) AS undone
-                       FROM corpus_actions
-                      WHERE job = 'dedupe' AND pair_score >= ? AND pair_score < ?
-                        AND json_extract(evidence_json, '$.pair_id') IS NOT NULL
-                      GROUP BY json_extract(evidence_json, '$.pair_id'))",
+            "WITH acts AS (
+               SELECT json_extract(evidence_json, '$.pair_id') AS pair_id,
+                      MAX(undone_at IS NOT NULL) AS undone
+                 FROM corpus_actions
+                WHERE job = 'dedupe'
+                  AND json_extract(evidence_json, '$.pair_id') IS NOT NULL
+                  AND json_extract(evidence_json, '$.asked_by') IS NULL
+                GROUP BY json_extract(evidence_json, '$.pair_id'))
+             SELECT COUNT(*) AS judged,
+                    COUNT(acts.pair_id) AS acted,
+                    COALESCE(SUM(acts.undone), 0) AS undone
+               FROM artifact_pairs p
+               LEFT JOIN acts ON acts.pair_id = p.id
+              WHERE p.score >= ? AND p.score < ? AND p.state <> 'pending'
+                AND (p.decided_by IN ('model', 'evidence') OR acts.pair_id IS NOT NULL)",
         )
         .bind(lo)
         .bind(hi)
         .fetch_one(&self.pool)
         .await?;
         Ok(BandRecord {
-            judged: judged as usize,
+            judged: r.get::<i64, _>("judged") as usize,
             acted: r.get::<i64, _>("acted") as usize,
             undone: r.get::<i64, _>("undone") as usize,
         })
@@ -641,12 +666,20 @@ impl Store {
     /// artifacts about the same veterinary practice, the judge wrote the same
     /// reasoning every time and labelled it `distinct` nine times and
     /// `duplicate` three.
-    pub async fn ask_pair_synthesis(&self, id: i64) -> Result<()> {
-        sqlx::query("UPDATE artifact_pairs SET synthesis_asked = 1 WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    ///
+    /// Only on a pair still awaiting review, and `false` — nothing written —
+    /// on one that is not. Asked in the statement rather than read first, so
+    /// an answer landing between the read and the write cannot slip past.
+    pub async fn ask_pair_synthesis(&self, id: i64) -> Result<bool> {
+        let holes = vec!["?"; AWAITING_REVIEW.len()].join(", ");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE artifact_pairs SET synthesis_asked = 1 WHERE id = ? AND state IN ({holes})"
+        )))
+        .bind(id);
+        for state in AWAITING_REVIEW {
+            q = q.bind(state.as_str());
+        }
+        Ok(q.execute(&self.pool).await?.rows_affected() == 1)
     }
 
     /// Clear it. Called when the merge path refuses the draft, so the card
@@ -1617,6 +1650,70 @@ mod tests {
                 acted: 1,
                 undone: 0
             }
+        );
+    }
+
+    /// One set of pairs under all three counts, whoever touched a pair last.
+    #[tokio::test]
+    async fn a_band_record_counts_an_operators_undo_and_not_an_operators_press() {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        let s = Store::memory().await.unwrap();
+        let mut ids = Vec::new();
+        for score in [0.84f32, 0.85] {
+            let (a, b) = two_artifacts(&s).await;
+            s.record_pair(&a, &b, score).await.unwrap();
+            let id = s
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|p| (p.score - score).abs() < 1e-6)
+                .unwrap()
+                .id;
+            ids.push(id);
+        }
+        let row = |subject: &str, evidence: serde_json::Value| NewAction {
+            job: Job::Dedupe,
+            kind: Kind::Supersede,
+            subject_id: subject.to_string(),
+            survivor_id: None,
+            detail: None,
+            evidence,
+            pair_score: Some(0.84),
+        };
+        // The judge acted on the first, and a person took it back — which
+        // settles the pair again, in their name.
+        s.set_pair_state(ids[0], PairState::Superseded, None, DecidedBy::Model)
+            .await
+            .unwrap();
+        s.record_action(&row("judged", serde_json::json!({ "pair_id": ids[0] })))
+            .await
+            .unwrap();
+        s.undo_action_on("judged", Kind::Supersede, UndoneBy::Operator, "back")
+            .await
+            .unwrap();
+        s.set_pair_state(ids[0], PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        // A person asked for the second to be written as one.
+        s.set_pair_state(ids[1], PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        s.record_action(&row(
+            "asked",
+            serde_json::json!({ "pair_id": ids[1], "asked_by": "operator" }),
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            s.band_record(0.80, 0.88).await.unwrap(),
+            BandRecord {
+                judged: 1,
+                acted: 1,
+                undone: 1
+            },
+            "the undone pair left `judged` and the press counted as an action"
         );
     }
     use crate::store::Store;

@@ -135,3 +135,24 @@ impl IntoResponse for UiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The page marks the sentence that says what went wrong, which is what
+    /// a failed htmx swap shows in place of the fragment. Unmarked, the
+    /// driver had nothing to read out of a page and showed the status code.
+    #[tokio::test]
+    async fn the_error_page_marks_its_reason_for_a_failed_swap_to_show() {
+        let res = UiError(Error::Validation("chunk text is empty".into())).into_response();
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            html.contains("data-error-detail>chunk text is empty</p>"),
+            "{html}"
+        );
+    }
+}

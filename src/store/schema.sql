@@ -323,7 +323,12 @@ CREATE TABLE IF NOT EXISTS search_events (
   dismissed_at INTEGER,
   -- A synthesized artifact led the list above `weak_below`: the base
   -- answered, and the pursuit this lands in closes satisfied.
-  answered    INTEGER NOT NULL DEFAULT 0
+  answered    INTEGER NOT NULL DEFAULT 0,
+  -- The generation live when this list was drawn, and what a give-up on it is
+  -- charged to. The give-up sweep reads a search a window later at the
+  -- earliest, and whatever is live by then need not be what served it. NULL
+  -- on a row recorded before the column, which nothing can charge.
+  generation_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON search_events(judged_at, skips, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_verdict ON search_events(verdict);
@@ -853,6 +858,10 @@ CREATE INDEX IF NOT EXISTS idx_observations_generation
   ON observations(generation_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_observations_artifact
   ON observations(artifact_id) WHERE artifact_id IS NOT NULL;
+-- The give-up sweep asks, of every search it reads, whether that search has
+-- already been written down (`jobs::observe`).
+CREATE INDEX IF NOT EXISTS idx_observations_event
+  ON observations(event_id) WHERE event_id IS NOT NULL;
 -- The anchor check reads observations by the query they were recorded under,
 -- twice per verdict, for up to 500 verdicts a pass (`eval::anchor::agreement`).
 -- Without this that is a thousand full scans of the largest table a busy base
