@@ -2306,6 +2306,60 @@ mod tests {
         assert_eq!(left[0].text, "window zero");
     }
 
+    /// A chunk with no window is swept with whichever window is being
+    /// replaced; a note with no window is not.
+    ///
+    /// The `OR segment_idx IS NULL` half of `artifact_ids_for_segment`, which
+    /// had no test of its own. It was covered only by a pipeline test that
+    /// manufactured a pre-window database by nulling the column and deleting
+    /// the segment rows, and that test rotted with the 2026-09 capture
+    /// reshape and was permanently ignored. The rule it was guarding is a
+    /// property of this one query, so it is asked of the query directly and
+    /// cannot rot with a pipeline again.
+    ///
+    /// Both halves matter and they pull opposite ways. Without the sweep a
+    /// re-segmentation appends a second copy of every window-less chunk beside
+    /// the first. With it and no note exemption, the first window sees the
+    /// corpus as already written and skips every passage, so a captured file
+    /// carrying an annotation is never chunked at all.
+    #[tokio::test]
+    async fn a_windowless_chunk_is_swept_with_the_window_and_a_note_is_not() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let mut owned = nc(0, "written for window one");
+        owned.segment_idx = Some(1);
+        let mut elsewhere = nc(1, "written for window two");
+        elsewhere.segment_idx = Some(2);
+        // No window: written before the column existed.
+        let orphan = nc(2, "written before windows existed");
+        s.insert_artifacts(&src.id, &[owned, elsewhere, orphan])
+            .await
+            .unwrap();
+        // A note belongs to no window because it belongs to the capture.
+        s.insert_artifacts_with_provenance(
+            &src.id,
+            &[nc(3, "what the person said about the file")],
+            Provenance::Note,
+        )
+        .await
+        .unwrap();
+
+        let swept = s.artifact_ids_for_segment(&src.id, 1).await.unwrap();
+        let mut got = Vec::new();
+        for id in &swept {
+            got.push(s.get_artifact(id).await.unwrap().text);
+        }
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "written before windows existed".to_string(),
+                "written for window one".to_string(),
+            ],
+            "the note or another window's chunk was swept"
+        );
+    }
+
     #[tokio::test]
     async fn renumbering_orders_by_window_then_position() {
         let s = Store::memory().await.unwrap();

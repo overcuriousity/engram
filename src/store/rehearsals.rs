@@ -13,6 +13,32 @@ use super::{Cursor, Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
 
+/// Distinct probes an owner's retained results have to come from before they
+/// are an agreement rather than one observation counted twice.
+///
+/// The rehearsal lap wraps, so on an unchanged base the same probe is replayed
+/// on consecutive nights and writes identical rows. Two rows off one probe is
+/// one reading repeated; two probes is two questions somebody asked that both
+/// landed on the artifact, which is what `sleep::interferers` and
+/// `sleep::condense_candidates` claim to have when they act.
+pub const MIN_AGREEING_PROBES: usize = 2;
+
+/// Results kept per probe, the oldest dropped as newer ones are written.
+///
+/// Rows per probe rather than days is the bound this table needs: storage
+/// becomes a function of how many probes exist instead of how long the base
+/// has been running. A pass writes up to `OBSERVATION_LIMIT` rows, each
+/// carrying a JSON list of ids, and every pass runs window functions
+/// (`fragile_rehearsals`, `latest_results_under`) over all of them.
+///
+/// Ten, from what reads back further than the last row. `fragile_rehearsals`
+/// compares the last two under a generation; `retract::spanning` pairs a
+/// probe's last result before a condensation against its first after, so the
+/// older side has to survive the passes between one lap and the next. Past
+/// that nothing looks, and `MIN_AGREEING_PROBES` counts probes rather than
+/// rows, so keeping more history buys it nothing at all.
+const KEEP_PER_PROBE: usize = 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     Capture,
@@ -231,6 +257,23 @@ impl Store {
         .bind(serde_json::to_string(&r.outranked_by).unwrap_or_else(|_| "[]".into()))
         .execute(&self.pool)
         .await?;
+        // And everything this probe has past `KEEP_PER_PROBE`, here rather
+        // than on a sweep. Retention only runs on `feedback.retain_days`,
+        // which ships at "keep for ever" — so the table grew by up to
+        // `OBSERVATION_LIMIT` JSON-carrying rows a pass with nothing ever
+        // taking any of them out, and every pass ran window functions over
+        // the lot.
+        sqlx::query(
+            "DELETE FROM rehearsal_results
+              WHERE rehearsal_id = ? AND id NOT IN (
+                    SELECT id FROM rehearsal_results WHERE rehearsal_id = ?
+                     ORDER BY at DESC, id DESC LIMIT ?)",
+        )
+        .bind(&r.rehearsal_id)
+        .bind(&r.rehearsal_id)
+        .bind(KEEP_PER_PROBE as i64)
+        .execute(&self.pool)
+        .await?;
         Ok(id)
     }
 
@@ -427,6 +470,11 @@ impl Store {
 
     /// Results older than `retain_days`. Zero keeps for ever, as it does for
     /// the observations this shares a clock with.
+    ///
+    /// Not the bound on this table — `KEEP_PER_PROBE` is, and it holds at the
+    /// shipped zero. This is the operator's separate wish that nothing older
+    /// than a window be kept anywhere, and the rehearsal results are part of
+    /// "anywhere".
     pub async fn expire_rehearsal_results(&self, retain_days: i64) -> Result<u64> {
         if retain_days <= 0 {
             return Ok(0);

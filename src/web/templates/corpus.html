@@ -36,11 +36,16 @@
        model to re-derive them from their own text. Nothing to re-segment. An
        image with no reading yet has nothing to re-segment either, and neither
        does a PDF with no extraction yet. #}
+    {# Each gloss beside the button it is about. There was one, after
+       Re-segment, saying "read again" — which is Re-read's job. On an image or
+       a PDF the two buttons stand side by side, so the sentence sat between
+       them describing the wrong one. Re-segment re-splits text that has
+       already been read; Re-read goes back to the picture. #}
     {% if !restored && !unread %}
     <form method="post" action="/ui/corpora/{{ id }}/reprocess">
       <button class="btn btn-sm" type="submit">Re-segment</button>
     </form>
-    <span class="gloss">read again, artifacts replaced</span>
+    <span class="gloss">split again, artifacts replaced</span>
     {% endif %}
     {% if image %}
     <form method="post" action="/ui/corpora/{{ id }}/reprocess"
@@ -48,6 +53,7 @@
       <input type="hidden" name="stage" value="describe">
       <button class="btn btn-sm" type="submit">Re-read</button>
     </form>
+    <span class="gloss">read the photo again, artifacts replaced</span>
     {% endif %}
     {% if pdf %}
     <a class="btn btn-sm" href="/api/v1/corpora/{{ id }}/file">Original PDF</a>

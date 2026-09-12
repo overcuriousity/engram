@@ -33,12 +33,19 @@ use crate::web::ui_error::UiResult;
 /// The two figures arrive as `f64` and are rendered to two places here rather
 /// than in the markup: every decision this page makes is made in Rust, so the
 /// template holds no logic and a change of precision touches one line.
+///
+/// Not an `Option`, and the em dash is resolved here. There are three states —
+/// measured, recording but nothing judged, not recording — and the card says
+/// the same two rows in all three. As an `Option` with a branch inside it the
+/// template carried four copies of the label-and-gloss markup, so the wording
+/// of a gloss was a four-place edit.
 struct Retrieval {
     recall_at_10: String,
     mrr: String,
-    judged: i64,
-    pending: i64,
-    captured: i64,
+    /// The line under the two figures: which of the three states this is, in
+    /// words. Rendered `|safe` — it is built here and its only variable part
+    /// is a count.
+    note: String,
 }
 
 /// The old door. It takes an `Identity` like every other `/ui` route: a
@@ -180,16 +187,16 @@ struct InsightsTemplate {
     /// it is work on it, which is what this page is.
     pairs: Vec<crate::web::ops::PairCluster>,
     /// How many more are behind the ones shown. Said once under the list, so a
-    /// short list does not read as an empty queue when it is a capped one.
+    /// short list does not read as an empty one when it is a capped one.
     more_pairs: i64,
     /// How much is held, and how densely.
     held: crate::store::insights::Held,
     /// How much use is standing on the base, bucketed in units of an open.
     used: Vec<crate::store::insights::Bucket>,
-    /// recall@10 and MRR, read from the ranks judged searches actually gave.
-    /// `None` where nothing is being recorded — an empty measure is worse than
-    /// no measure, because a zero reads as a score.
-    retrieval: Option<Retrieval>,
+    /// recall@10 and MRR, read from the ranks judged searches actually gave,
+    /// with an em dash where nothing is being recorded — an empty measure is
+    /// worse than no measure, because a zero reads as a score.
+    retrieval: Retrieval,
     /// What the sweeps have to say, rendered beside the retrieval figures the
     /// sweep replays. `None` for a user who could not press its button: the
     /// apply route is behind `CanJudge`, and a block offering what a press
@@ -209,13 +216,13 @@ struct InsightsTemplate {
     artifact_count: i64,
     vector_count: u64,
     retrying: Vec<RetryingRow>,
-    /// Everything the base has set aside, in one list. See [`QueueRow`] for
+    /// Everything the base has set aside, in one list. See [`SetAsideRow`] for
     /// what this replaced and why.
-    queue: Vec<QueueRow>,
-    /// Any of the reads behind the queue hit its cap, so there are rows this
+    set_aside: Vec<SetAsideRow>,
+    /// Any of the reads behind the list hit its cap, so there are rows this
     /// page is not showing. Said out loud, because a list that stops without
     /// saying so reads as a list of everything there is.
-    queue_capped: bool,
+    set_aside_capped: bool,
     /// `None` when nothing is being learned, which renders nothing at all: a
     /// count of links on a base that records no searches is a line about a
     /// feature that is switched off.
@@ -298,7 +305,7 @@ pub(crate) struct MergedRow {
 /// cap — and this is the fold. `kind` is what the row is called; `why` is the
 /// sentence that used to be the section's paragraph, said per row because it
 /// differs per row.
-pub(crate) struct QueueRow {
+pub(crate) struct SetAsideRow {
     href: String,
     title: String,
     /// See `ui::RowLabel::named`. A label that is the artifact's own opening
@@ -316,11 +323,11 @@ pub(crate) struct QueueRow {
     beside: Vec<crate::web::ui::SourceRow>,
     /// A note under the row for the one thing that is not simply reversible.
     caveat: Option<String>,
-    actions: Vec<QueueAction>,
+    actions: Vec<SetAsideAction>,
 }
 
-/// One button on a queue row.
-pub(crate) struct QueueAction {
+/// One button on a set-aside row.
+pub(crate) struct SetAsideAction {
     action: String,
     label: &'static str,
     /// The name/value pair the three-way park decision posts. Empty for every
@@ -332,7 +339,7 @@ pub(crate) struct QueueAction {
     hint: &'static str,
 }
 
-impl QueueAction {
+impl SetAsideAction {
     fn new(action: String, label: &'static str, hint: &'static str) -> Self {
         Self {
             action,
@@ -659,10 +666,10 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     // a parked capture is blocked until it is answered, an unverified artifact
     // is a question, and the rest are the base's own work with the undo left
     // where it can be found.
-    let queue_capped = more_merged || more_superseded || more_deprecated || more_reaped;
-    let mut queue: Vec<QueueRow> = Vec::new();
+    let set_aside_capped = more_merged || more_superseded || more_deprecated || more_reaped;
+    let mut set_aside: Vec<SetAsideRow> = Vec::new();
     for p_ in parked {
-        queue.push(QueueRow {
+        set_aside.push(SetAsideRow {
             href: format!("/ui/corpora/{}", p_.id),
             // A corpus label is always a name: `corpus_label` falls back to
             // "document" or the opening rather than to nothing.
@@ -680,19 +687,19 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             }],
             caveat: None,
             actions: vec![
-                QueueAction {
+                SetAsideAction {
                     action: format!("/ui/ops/corpora/{}/resolve", p_.id),
                     label: "Replace the old one",
                     field: Some(("action", "replace")),
                     hint: "Keep this capture and retire the one beside it",
                 },
-                QueueAction {
+                SetAsideAction {
                     action: format!("/ui/ops/corpora/{}/resolve", p_.id),
                     label: "Keep both",
                     field: Some(("action", "keep_both")),
                     hint: "Read this one too; both stay in the base",
                 },
-                QueueAction {
+                SetAsideAction {
                     action: format!("/ui/ops/corpora/{}/resolve", p_.id),
                     label: "Discard this",
                     field: Some(("action", "discard")),
@@ -702,7 +709,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         });
     }
     for s in stale {
-        queue.push(QueueRow {
+        set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", s.id),
             named: s.named,
             title: s.title,
@@ -715,12 +722,12 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             beside: Vec::new(),
             caveat: None,
             actions: vec![
-                QueueAction::new(
+                SetAsideAction::new(
                     format!("/ui/ops/artifacts/{}/verify", s.id),
                     "Still accurate",
                     "Confirm this is still accurate — it resets the artifact's age, which search reads",
                 ),
-                QueueAction::new(
+                SetAsideAction::new(
                     format!("/ui/ops/artifacts/{}/deprecate", s.id),
                     "Hide",
                     "Hide from results — the artifact is kept, and this can be undone",
@@ -730,7 +737,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     }
     for m in merged {
         let n = m.sources.len();
-        queue.push(QueueRow {
+        set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", m.id),
             named: m.named,
             title: m.title,
@@ -746,7 +753,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             caveat: m
                 .orphaned
                 .then(|| "a source has since been deleted".to_string()),
-            actions: vec![QueueAction::new(
+            actions: vec![SetAsideAction::new(
                 format!("/ui/ops/merges/{}/undo", m.id),
                 "Undo",
                 "Put the sources back in results and retire this merge",
@@ -754,7 +761,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         });
     }
     for g in generated {
-        queue.push(QueueRow {
+        set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", g.id),
             named: g.named,
             title: g.title,
@@ -773,7 +780,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             },
             beside: g.sources,
             caveat: None,
-            actions: vec![QueueAction::new(
+            actions: vec![SetAsideAction::new(
                 format!("/ui/ops/artifacts/{}/deprecate", g.id),
                 "Hide",
                 "Take it out of results and keep it",
@@ -781,7 +788,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         });
     }
     for s in superseded {
-        queue.push(QueueRow {
+        set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", s.id),
             named: s.named,
             title: s.title,
@@ -801,7 +808,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                 corpus_id: String::new(),
             }],
             caveat: None,
-            actions: vec![QueueAction::new(
+            actions: vec![SetAsideAction::new(
                 format!("/ui/ops/artifacts/{}/unsupersede", s.id),
                 "Undo",
                 "Return it to results",
@@ -809,7 +816,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         });
     }
     for d in deprecated {
-        queue.push(QueueRow {
+        set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", d.id),
             named: d.named,
             title: d.title,
@@ -818,7 +825,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             why: "flagged stale with no replacement named — search skips it and Ask does not read it, and it is still at its own link".to_string(),
             beside: Vec::new(),
             caveat: None,
-            actions: vec![QueueAction::new(
+            actions: vec![SetAsideAction::new(
                 format!("/ui/ops/artifacts/{}/reactivate", d.id),
                 "Reactivate",
                 "Return it to results",
@@ -826,7 +833,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         });
     }
     for g in reaped {
-        queue.push(QueueRow {
+        set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", g.id),
             named: g.named,
             title: g.title,
@@ -844,7 +851,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             },
             beside: Vec::new(),
             caveat: None,
-            actions: vec![QueueAction::new(
+            actions: vec![SetAsideAction::new(
                 format!("/ui/ops/artifacts/{}/reactivate", g.id),
                 "Restore",
                 "Return it to results and embed it again",
@@ -880,22 +887,42 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                     .store
                     .feedback_stats(tenant.core.weak_below())
                     .await?;
-                Some(Retrieval {
-                    recall_at_10: format!("{:.2}", f.recall_at_10),
-                    mrr: format!("{:.2}", f.mrr),
-                    judged: f.judged,
-                    pending: f.pending,
-                    captured: f.captured,
-                })
+                match f.judged {
+                    0 => Retrieval {
+                        recall_at_10: "—".into(),
+                        mrr: "—".into(),
+                        note: format!(
+                            "nothing judged yet, from {} recorded — answer \
+                             <em>Was this what you were looking for?</em> under a result",
+                            f.captured
+                        ),
+                    },
+                    judged => Retrieval {
+                        recall_at_10: format!("{:.2}", f.recall_at_10),
+                        mrr: format!("{:.2}", f.mrr),
+                        note: format!(
+                            "from {judged} judged search{}{}",
+                            if judged == 1 { "" } else { "es" },
+                            match f.pending {
+                                0 => String::new(),
+                                p => format!(", {p} waiting"),
+                            }
+                        ),
+                    },
+                }
             }
-            false => None,
+            false => Retrieval {
+                recall_at_10: "—".into(),
+                mrr: "—".into(),
+                note: "not recording searches, so there is nothing to measure".into(),
+            },
         },
         pairs,
         more_pairs,
         gaps,
         retrying,
-        queue,
-        queue_capped,
+        set_aside,
+        set_aside_capped,
         job_counts: tenant.core.store.job_counts().await?,
         oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,
         artifact_count,
@@ -1130,7 +1157,7 @@ struct SleepView {
 }
 
 /// One sleep as a sentence chain. Every number a person can act on has a
-/// page: conflicts are on the pair queue, adoptions and undos on the evolve
+/// page: conflicts are on the pair set_aside, adoptions and undos on the evolve
 /// block below this one.
 fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
     let mut s = format!("{} — ", ago(r.started));
@@ -1141,25 +1168,30 @@ fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
         "budget" => s.push_str("budget spent. "),
         _ => {}
     }
+    // No conflict count. Nothing writes conflicts any more — the detector was
+    // deleted after it misfired — so the number was always zero and "waiting
+    // for you" pointed at a list that would never hold anything.
     s.push_str(&format!(
-        "Integrated {} — {} new, {} known, {} conflict{} waiting for you. Rehearsed {} probe{}, {} found.",
+        "Integrated {} — {} new, {} known. Rehearsed {} probe{}, {} found.",
         r.integrated,
         r.novel,
         r.known,
-        r.conflicts,
-        if r.conflicts == 1 { "" } else { "s" },
         r.rehearsed,
         if r.rehearsed == 1 { "" } else { "s" },
         r.found
     ));
-    if let Some(a) = &r.adopted {
-        s.push_str(&format!(" Adopted {}.", short(a)));
+    // What it did to the ranking, without the id. A ULID tail is not something
+    // a person can act on or look up — the generation it names is spelled out
+    // in full one block below, under Ranking, which is where somebody who
+    // wants the parameters is going anyway.
+    if r.adopted.is_some() {
+        s.push_str(" Adopted a new ranking — see Ranking below.");
     }
-    if let Some(a) = &r.reverted {
-        s.push_str(&format!(" Took back {}.", short(a)));
+    if r.reverted.is_some() {
+        s.push_str(" Took the ranking back to what it was.");
     }
-    if let Some(a) = &r.refused {
-        s.push_str(&format!(" Refused {} on the base's own probes.", short(a)));
+    if r.refused.is_some() {
+        s.push_str(" Refused a proposed ranking on the base's own probes.");
     }
     if r.undone + r.restored > 0 {
         s.push_str(&format!(
@@ -1171,7 +1203,7 @@ fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
     }
     if r.interference > 0 {
         // "Saw", not "Filed". The rule files nothing: retrieval competition is
-        // a fact about ranking, and the queue this used to write to makes
+        // a fact about ranking, and the list this used to write to makes
         // claims about meaning. A sentence promising pairs sent a reader to a
         // page that would never show them.
         s.push_str(&format!(
@@ -1224,6 +1256,10 @@ async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
 struct EvolveView {
     /// Why the loop is not moving, when it is not. Said before anything else.
     suspended: Option<String>,
+    /// Which mode the base is in, in every mode. `standing` below says it only
+    /// where autonomy is *not* moving the ranking, so the default — "ranking"
+    /// — was the one setting the page never named.
+    mode: String,
     /// The generation in force, and how long it has been.
     live: String,
     /// Its parameters, as one line of `name value` pairs.
@@ -1358,12 +1394,35 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
                 )
             }
         }
-        _ if !core.evolve.autonomous.moves_ranking() => format!(
-            "autonomy is {}: the file is in force, and the base proposes nothing on its own.",
-            core.evolve.autonomous.as_str()
-        ),
         _ => "set by hand or at boot; the base may propose a change when it has been quiet."
             .to_string(),
+    };
+    // Said in every mode, including the default. The block only ever spoke
+    // when autonomy was *not* moving the ranking, so the one setting a reader
+    // is most likely to be on — "ranking", the default — was the one the page
+    // never named, and there was nothing on screen to tell it from "off".
+    let mode = format!(
+        "Autonomy is {}: {}",
+        core.evolve.autonomous.as_str(),
+        match core.evolve.autonomous.moves_ranking() {
+            true => "the base may propose a ranking of its own and adopt it once it has earned it.",
+            false => "the file is in force, and the base proposes nothing on its own.",
+        }
+    );
+    // Three modes, and the difference between the last two is the one an
+    // operator has to be able to see: only "full" moves the review threshold
+    // and acts on the corpus, and neither of those is undone by taking a
+    // generation back. "ranking" is the reversible half, and now actually is.
+    let mode = match (
+        core.evolve.autonomous.moves_ranking(),
+        core.evolve.autonomous.acts_on_corpus(),
+    ) {
+        (true, true) => format!(
+            "{mode} It may also merge, hide and shorten artifacts, and move the review \
+             threshold. Those are not undone by taking a generation back."
+        ),
+        (true, false) => format!("{mode} It changes nothing in the corpus."),
+        _ => mode,
     };
     let rehearsed = crate::eval::rehearsed::rehearsed_live(core, &live.id).await?;
     let rehearsed = if rehearsed.probes == 0 {
@@ -1420,6 +1479,7 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
         actions,
         rules,
         suspended,
+        mode,
         live: format!(
             "Live generation {} · since {}",
             short(&live.id),
@@ -2340,13 +2400,14 @@ mod tests {
             .unwrap();
         let body = insights(core).await;
         assert!(body.contains("Last night"), "{body}");
-        assert!(
-            body.contains("Integrated 12 — 3 new, 8 known, 1 conflict waiting for you."),
-            "{body}"
-        );
+        assert!(body.contains("Integrated 12 — 3 new, 8 known."), "{body}");
         assert!(body.contains("Rehearsed 340 probes, 300 found."), "{body}");
         assert!(
-            body.contains("Refused abcd1234 on the base&#39;s own probes."),
+            !body.contains("conflict"),
+            "nothing writes conflicts, so the section must not count them: {body}"
+        );
+        assert!(
+            body.contains("Refused a proposed ranking on the base&#39;s own probes."),
             "{body}"
         );
         // Six artifacts, one probed by the fixture, two opened by the
@@ -2397,7 +2458,7 @@ mod tests {
             .unwrap();
 
         let body = insights(core).await;
-        // The section heading became the row's own word. See `QueueRow`.
+        // The section heading became the row's own word. See `SetAsideRow`.
         assert!(body.contains(">buried<"), "{body}");
         // Once, as buried. The burial keeps the artifact's status, and the
         // hidden list read the status alone, so the same artifact was also
@@ -2447,7 +2508,7 @@ mod tests {
             .await
             .unwrap();
         let body = insights(core).await;
-        assert!(body.contains("autonomy is off"), "{body}");
+        assert!(body.contains("Autonomy is off"), "{body}");
         assert!(!body.contains("under watch"), "{body}");
     }
 

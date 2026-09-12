@@ -100,14 +100,21 @@ pub fn candidates(
         |v| *v < current.prime_lift,
         |v| *v == current.prime_lift,
     );
-    // The sitting shares the lift's budget, so below a non-zero lift the flip
-    // is a guaranteed tie and offering it would burn a rank per pair every
-    // quiet period, forever, on a question the arithmetic already answers. Not
-    // offered where it can do nothing, the way `rerank` is not offered where no
-    // reranker is configured. The practical effect is an order: the lift ladder
-    // is walked first, and the sitting is asked about only once there is a
-    // budget for it to share.
-    let sittings: Vec<bool> = match current.prime_lift > 0 {
+    // The sitting shares the lift's budget, so below a non-zero lift turning
+    // it *on* is a guaranteed tie, and offering it would burn a rank per pair
+    // every quiet period, forever, on a question the arithmetic already
+    // answers. Not offered where it can do nothing, the way `rerank` is not
+    // offered where no reranker is configured. The practical effect is an
+    // order: the lift ladder is walked first, and the sitting is asked about
+    // only once there is a budget for it to share.
+    //
+    // Turning it *off* is offered whatever the lift, and that asymmetry is the
+    // whole point. Adopt the flip, then let the lift ladder walk back to zero,
+    // and the rule above withdrew the axis: the generation row, the file an
+    // Apply writes and the Insights parameter string all went on saying the
+    // sitting was on while it did nothing, and nothing could ever propose
+    // saying otherwise. A knob that cannot be turned off is not on the ladder.
+    let sittings: Vec<bool> = match current.sitting_prime || current.prime_lift > 0 {
         true => SITTING_PRIMES
             .iter()
             .copied()
@@ -207,6 +214,25 @@ fn better(cand: Option<usize>, base: Option<usize>) -> bool {
     }
 }
 
+/// Replayed pairs a recommendation needs behind it, whatever it scores. Ten,
+/// the same floor as `lived::MIN_OBSERVATIONS`, `rehearsed::MIN_PROBES` and
+/// `tune::MIN_BAND`, and here it is the one the design already claimed to
+/// have: "a base with four observations adopts nothing" was not true of the
+/// arithmetic below. Two net better pairs out of four is two opens that each
+/// moved up one place under a neighbouring rung — a whole generation adopted,
+/// and a watch begun, on that. At ten the same two net pairs are a fifth of
+/// the sample rather than the whole of it.
+///
+/// Applied by `score` and `rerank_flip` rather than inside `recommend`,
+/// because `recommend` is arithmetic two callers share and only one of them is
+/// making a recommendation: `jobs::retract` asks it whether one corpus action's
+/// own record beats its replay, over the observations naming that one
+/// artifact. A floor there would not raise the bar on a recommendation, it
+/// would stop the corpus rules taking a merge or a condensation back at all on
+/// any base that has not been used a great deal — a different decision, and
+/// nobody's here to make.
+pub const MIN_PAIRS: usize = 10;
+
 /// The gate, and the reason the whole feature is safe to run automatically.
 ///
 /// An aggregate delta can be a single flipped pair wearing a percentage: on
@@ -216,6 +242,10 @@ fn better(cand: Option<usize>, base: Option<usize>) -> bool {
 /// operator did not ask for from being presented as an improvement. Ties keep
 /// the current values, always: a knob that moves nothing should keep its
 /// default.
+///
+/// The arithmetic only. How big a sample it takes before the answer is worth
+/// acting on is the caller's question, because the callers are asking
+/// different ones — see `MIN_PAIRS`.
 pub fn recommend(base: &[Option<usize>], cand: &[Option<usize>]) -> bool {
     let improved = base
         .iter()
@@ -296,6 +326,19 @@ pub(crate) struct Pair {
     /// such a row; this is the rule stated where the assumption lives, rather
     /// than a bug being fixed. A citation path is an obvious thing to add.
     pub(crate) served_reranked: bool,
+    /// Artifacts that must not count as results for this pair.
+    ///
+    /// A capture probe's query *is* an artifact's text, so that artifact
+    /// answers it at cosine 1.0 and a perfect lexical match and stands at rank
+    /// one of every replay, whatever the parameters are. Left in, it caps a
+    /// probe's reciprocal rank at one half — which is half the range
+    /// `Rehearsed::noise` is calibrated over, so the refuse gate was twice as
+    /// lenient as it reads — and makes the source an interferer of its own
+    /// owner in every rehearsal. Removed before the rank is read, so a probe
+    /// measures where the *owner* landed among everything else.
+    ///
+    /// Empty for an observation pair: a person's query is not an artifact.
+    pub(crate) exclude: Vec<String>,
 }
 
 impl Pair {
@@ -368,9 +411,19 @@ pub(crate) async fn rank_of(
         origin = origin.primed_as(p.clone());
     }
     let (results, _) = core.search_with_ranking(&q, params, origin).await?;
-    Ok(results
+    Ok(kept(pair, &results).position(|id| pair.satisfies.iter().any(|s| s == id)))
+}
+
+/// The results a pair is scored over: everything the search returned, minus
+/// what the pair excludes. See `Pair::exclude`.
+fn kept<'a>(
+    pair: &'a Pair,
+    results: &'a [crate::core::search::SearchResult],
+) -> impl Iterator<Item = &'a String> {
+    results
         .iter()
-        .position(|r| pair.satisfies.iter().any(|id| id == &r.artifact_id)))
+        .map(|r| &r.artifact_id)
+        .filter(|id| !pair.exclude.iter().any(|e| &e == id))
 }
 
 /// Where the answer landed, 0-based, and every artifact above it in order —
@@ -397,13 +450,14 @@ pub(crate) async fn rank_and_above(
     };
     let origin = crate::store::feedback::Origin::from(crate::store::feedback::Door::Judge);
     let (results, _) = core.search_with_ranking(&q, params, origin).await?;
-    let rank = results
+    let kept: Vec<&String> = kept(pair, &results).collect();
+    let rank = kept
         .iter()
-        .position(|r| pair.satisfies.iter().any(|id| id == &r.artifact_id));
-    let above = results
+        .position(|id| pair.satisfies.iter().any(|s| &s == id));
+    let above = kept
         .iter()
-        .take(rank.unwrap_or(results.len()))
-        .map(|r| r.artifact_id.clone())
+        .take(rank.unwrap_or(kept.len()))
+        .map(|id| (*id).clone())
         .collect();
     Ok((rank, above))
 }
@@ -460,6 +514,7 @@ async fn pairs_to_replay(core: &Core) -> Result<(Vec<Pair>, i64)> {
                     served_rank: None,
                     // No served rank at all, so nothing for the flip to read.
                     served_reranked: false,
+                    exclude: Vec::new(),
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -567,6 +622,7 @@ pub(crate) async fn observation_pairs(
                         crate::store::observations::Source::Cited => core.reranks_ask(),
                         _ => core.reranks_search(),
                     },
+                    exclude: Vec::new(),
                 });
             }
             Err(crate::error::Error::NotFound) => skipped += 1,
@@ -647,6 +703,19 @@ pub(crate) async fn score(
         .position(|p| *p == current)
         .expect("the grid carries the running configuration");
     let base = &ranks[base_at];
+
+    // The sample floor. The run is still journalled — a quiet sweep is a fact
+    // about the base — but nothing under `MIN_PAIRS` pairs stands as a
+    // recommendation, here or through `tune::propose`, which adopts whatever
+    // this picks.
+    if base.len() < MIN_PAIRS {
+        return Ok(Some(Scored {
+            grid,
+            ranks,
+            base_at,
+            best: None,
+        }));
+    }
 
     let mut best: Option<usize> = None;
     for cand in (0..grid.len()).filter(|i| *i != base_at) {
@@ -798,7 +867,10 @@ pub(crate) async fn rerank_flip(
         .iter()
         .filter(|p| p.served_rank.is_some() && p.served_reranked)
         .collect();
-    if with_served.is_empty() {
+    // Before the replay, not after it: the same sample floor `score` applies,
+    // and here it also saves one reranker call per pair on a base that could
+    // not have been offered the flip whatever the calls came back with.
+    if with_served.len() < MIN_PAIRS {
         return Ok(FlipOffer::Held);
     }
     let served: Vec<Option<usize>> = with_served.iter().map(|p| p.served()).collect();
@@ -1252,6 +1324,7 @@ mod tests {
             priming: None,
             served_rank: Some(served as i64 + 1),
             served_reranked: true,
+            exclude: Vec::new(),
         }
     }
 
@@ -1264,7 +1337,10 @@ mod tests {
             rerank: true,
             ..*core.ranking.read().unwrap()
         };
-        let pairs = vec![served_pair(&order, 0, 5), served_pair(&order, 1, 4)];
+        // Five of each: the gate wants `MIN_PAIRS` behind a recommendation.
+        let pairs: Vec<Pair> = (0..5)
+            .flat_map(|_| [served_pair(&order, 0, 5), served_pair(&order, 1, 4)])
+            .collect();
         let flip = rerank_flip(&core, &pairs, current, None)
             .await
             .unwrap()
@@ -1305,8 +1381,9 @@ mod tests {
             priming: None,
             served_rank: Some(LIMIT as i64 + 3),
             served_reranked: true,
+            exclude: Vec::new(),
         };
-        let pairs = vec![deep(0), deep(1)];
+        let pairs: Vec<Pair> = (0..5).flat_map(|_| [deep(0), deep(1)]).collect();
         assert!(
             pairs.iter().all(|p| p.served().is_none()),
             "narrowed to the window, both are misses — which is the point"
@@ -1327,8 +1404,11 @@ mod tests {
             rerank: true,
             ..*core.ranking.read().unwrap()
         };
-        // Served where the vector order already puts them: a tie.
-        let pairs = vec![served_pair(&order, 0, 0), served_pair(&order, 1, 1)];
+        // Served where the vector order already puts them: a tie, read over
+        // enough pairs that the tie is what holds it rather than the floor.
+        let pairs: Vec<Pair> = (0..5)
+            .flat_map(|_| [served_pair(&order, 0, 0), served_pair(&order, 1, 1)])
+            .collect();
         assert!(matches!(
             rerank_flip(&core, &pairs, current, None).await.unwrap(),
             FlipOffer::Held
@@ -1346,7 +1426,9 @@ mod tests {
             ..*core.ranking.read().unwrap()
         };
         // The same pairs that offer a flip when nothing interrupts.
-        let pairs = vec![served_pair(&order, 0, 5), served_pair(&order, 1, 4)];
+        let pairs: Vec<Pair> = (0..5)
+            .flat_map(|_| [served_pair(&order, 0, 5), served_pair(&order, 1, 4)])
+            .collect();
         let started = crate::store::now();
         judge(&core, &order[0]).await;
         assert!(
@@ -1379,14 +1461,16 @@ mod tests {
             rerank: false,
             ..*core.ranking.read().unwrap()
         };
-        let mut pairs: Vec<Pair> = (0..3).map(|i| served_pair(&order, i, i)).collect();
+        let mut pairs: Vec<Pair> = (0..MIN_PAIRS)
+            .map(|i| served_pair(&order, i % 3, i % 3))
+            .collect();
         pairs.push(Pair {
             served_rank: None,
             ..served_pair(&order, 3, 3)
         });
         let before = reranker.calls();
         let _ = rerank_flip(&core, &pairs, current, None).await.unwrap();
-        assert_eq!(reranker.calls() - before, 3);
+        assert_eq!(reranker.calls() - before, MIN_PAIRS);
     }
 
     #[tokio::test]
@@ -1394,13 +1478,17 @@ mod tests {
         let (core, order) = seeded().await;
         // The second source's first two chunks: buried behind the leading
         // source uncapped, promoted the moment a cap displaces its tail.
-        judge(&core, &order[3]).await;
-        judge(&core, &order[4]).await;
+        // Five judgements of each: the gate wants `MIN_PAIRS` behind a
+        // recommendation, and two pairs are two opens wearing a percentage.
+        for _ in 0..5 {
+            judge(&core, &order[3]).await;
+            judge(&core, &order[4]).await;
+        }
 
         run_sweep(&core).await.unwrap();
 
         let run = core.store.latest_eval_run().await.unwrap().unwrap();
-        assert_eq!(run.pairs_used, 2);
+        assert_eq!(run.pairs_used, 10);
         assert_eq!(run.pairs_skipped, 0);
         assert!(run.recommended, "a strictly better candidate was refused");
         assert!(
@@ -1410,8 +1498,8 @@ mod tests {
         assert!(run.best_mrr > run.base_mrr);
         assert_eq!(
             run.diff.len(),
-            2,
-            "both pairs moved, and the diff is what a person reads"
+            10,
+            "every pair moved, and the diff is what a person reads"
         );
         assert!(
             run.diff.iter().all(|d| d.new < d.base),
@@ -1429,8 +1517,10 @@ mod tests {
         // the strength of a result about caps.
         let (core, order) = seeded().await;
         core.ranking.write().unwrap().recency_weight = 0.05;
-        judge(&core, &order[3]).await;
-        judge(&core, &order[4]).await;
+        for _ in 0..5 {
+            judge(&core, &order[3]).await;
+            judge(&core, &order[4]).await;
+        }
 
         run_sweep(&core).await.unwrap();
 
@@ -1631,6 +1721,31 @@ mod tests {
         );
     }
 
+    /// Two net better pairs out of four is two judgements that each moved up
+    /// one place. A recommendation stood on that, and `tune::propose` adopts
+    /// whatever the same call picks — while the design said a base with four
+    /// observations adopts nothing.
+    #[tokio::test]
+    async fn a_sample_under_the_floor_recommends_nothing_however_well_it_scores() {
+        let (core, order) = seeded().await;
+        // One short of the floor, and the cap lifts every one of them.
+        for _ in 0..4 {
+            judge(&core, &order[3]).await;
+            judge(&core, &order[4]).await;
+        }
+        judge(&core, &order[3]).await;
+
+        run_sweep(&core).await.unwrap();
+
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!(run.pairs_used, (MIN_PAIRS - 1) as i64);
+        assert!(!run.recommended, "nine pairs are not a sample");
+        assert!(
+            core.store.open_recommendation().await.unwrap().is_none(),
+            "and nothing is offered under Apply"
+        );
+    }
+
     #[test]
     fn the_running_configuration_is_always_among_the_candidates() {
         let current = RankingParams {
@@ -1742,6 +1857,22 @@ mod tests {
         // the widest grid is the one the budget has to cover.
         let at_zero = candidates(RankingParams::default(), &[], usize::MAX);
         assert_eq!(at_zero.len(), crate::jobs::tune::BUDGET - 1, "{at_zero:?}");
+        // The other widest grid, and the reason the budget is not `BUDGET - 1`:
+        // a base at a zero lift whose sitting is on is offered the flip that
+        // turns it off.
+        let primed_at_zero = candidates(
+            RankingParams {
+                sitting_prime: true,
+                ..RankingParams::default()
+            },
+            &[],
+            usize::MAX,
+        );
+        assert_eq!(
+            primed_at_zero.len(),
+            crate::jobs::tune::BUDGET,
+            "{primed_at_zero:?}"
+        );
         let lifted_base = RankingParams {
             prime_lift: 2,
             ..RankingParams::default()
@@ -1787,6 +1918,19 @@ mod tests {
             grid.iter().all(|c| !c.sitting_prime),
             "no sitting flip at a lift of zero"
         );
+
+        // Turning it off is another matter. The lift ladder can walk back to
+        // zero under an adopted `sitting_prime = true`, and there the base was
+        // stuck saying the sitting was on while it did nothing.
+        let primed = RankingParams {
+            sitting_prime: true,
+            ..current
+        };
+        let grid = candidates(primed, &[], crate::jobs::tune::BUDGET);
+        assert!(
+            grid.iter().any(|c| !c.sitting_prime),
+            "a knob that cannot be turned off is not on the ladder: {grid:?}"
+        );
     }
 
     #[test]
@@ -1826,6 +1970,7 @@ mod tests {
             }),
             served_rank: None,
             served_reranked: false,
+            exclude: Vec::new(),
         };
         let without = Pair {
             priming: None,
@@ -1874,6 +2019,7 @@ mod tests {
             }),
             served_rank: None,
             served_reranked: false,
+            exclude: Vec::new(),
         };
         let off = RankingParams {
             prime_lift: 2,
@@ -1912,6 +2058,7 @@ mod tests {
             }),
             served_rank: None,
             served_reranked: false,
+            exclude: Vec::new(),
         };
         let off = RankingParams {
             prime_lift: 0,

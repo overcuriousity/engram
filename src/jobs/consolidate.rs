@@ -477,13 +477,13 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
-    // The week's budget, before anything is armed. `dedupe::run` reads it too
-    // and returns with the pair still `Pending` — correct for the unit, but it
-    // meant this pass re-armed the same pairs every interval for the rest of
-    // the week and reported `armed = n` each time, so the empty-run backoff
-    // that exists to stop exactly this treadmill never engaged. Arming nothing
-    // is what lets it engage.
-    if !core.may_act().await? {
+    // Dedupe's own week, before anything is armed. `dedupe::run` reads the
+    // same budget and returns with the pair still `Pending` — correct for the
+    // unit, but it meant this pass re-armed the same pairs every interval for
+    // the rest of the week and reported `armed = n` each time, so the
+    // empty-run backoff that exists to stop exactly this treadmill never
+    // engaged. Arming nothing is what lets it engage.
+    if !core.may_act(crate::store::actions::Job::Dedupe).await? {
         tracing::info!("budget spent; no pairs armed until the window moves");
         return Ok(0);
     }

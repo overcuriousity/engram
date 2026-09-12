@@ -22,6 +22,11 @@ pub struct RenderedResult {
     /// Empty where the artifact has no title of its own. The rail then renders
     /// no heading at all — see `render_hit`.
     pub title: String,
+    /// Where in its source this text sits: the section a passage was cut from,
+    /// or the note it was typed into. A qualifier under the snippet, never a
+    /// heading over it — see `render_hit`. Empty where there is none, or where
+    /// it would only repeat the snippet.
+    pub section: String,
     /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
     pub html: String,
     /// Markup-free preview for the rail, where rendered HTML would not fit.
@@ -404,6 +409,9 @@ struct ResultsTemplate {
     /// A capture is still being read, asked only where the rail would offer a
     /// gap: the answer may be in it, so no gap is offered.
     reading: bool,
+    /// Whether the base holds anything, asked in the same place and for the
+    /// same button. See `gap`.
+    held: bool,
 }
 
 /// Test-only, for the same reason `ResultsTemplate`'s is: a row has twenty
@@ -414,6 +422,7 @@ impl Default for RenderedResult {
         Self {
             artifact_id: String::new(),
             title: String::new(),
+            section: String::new(),
             html: String::new(),
             snippet: String::new(),
             category: None,
@@ -453,6 +462,7 @@ impl Default for ResultsTemplate {
             echo: String::new(),
             q: String::new(),
             reading: false,
+            held: true,
         }
     }
 }
@@ -464,6 +474,19 @@ impl ResultsTemplate {
     /// than carried, so it cannot disagree with the rows it counts.
     fn loose(&self) -> usize {
         self.results.iter().filter(|r| r.weak).count()
+    }
+
+    /// The search a gap may be recorded against, where one may. Two conditions
+    /// and one answer, because the template asked them at two sites and had to
+    /// duplicate the paragraph hosting the button to do it.
+    ///
+    /// Withheld while a capture is being read — the answer may be in it —
+    /// and on a base holding nothing, where "nothing here has it" is true of
+    /// every search and says nothing about the base.
+    fn gap(&self) -> Option<&str> {
+        (!self.reading && self.held)
+            .then_some(self.event_id.as_deref())
+            .flatten()
     }
 }
 
@@ -494,11 +517,23 @@ pub(crate) struct IdleFootTemplate {
     /// two `id="intent-echo"` elements — of which htmx would only ever resolve
     /// the first.
     pub(crate) echo: String,
+    /// The two example phrasings and the language they are in, for the list of
+    /// what a paste becomes. The list lives here rather than in the page
+    /// because the page is built once: it stood until a reload after the fifth
+    /// capture, and a base that reached five by another door — MCP, the CLI, a
+    /// second tab — showed four chips at once. See `workspace::examples`.
+    pub(crate) example_remind: &'static str,
+    pub(crate) example_journal: &'static str,
+    pub(crate) example_lang: &'static str,
     /// A capture is still being read. The line says so and polls itself
     /// until it is not.
     pub(crate) reading: bool,
-    /// The line alone, for that poll: no echo, no rail heading.
-    pub(crate) line_only: bool,
+    /// Whether this rendering is a swap rather than the first paint. The
+    /// rail-head and fold-of clears ride only on a swap: htmx reads
+    /// out-of-band attributes only on a swapped response, so they are inert on
+    /// first paint, and the line's own poll must not carry them — it can land
+    /// while someone types, and would empty the heading over their results.
+    pub(crate) oob: bool,
 }
 
 pub(crate) struct IdleRecentRow {
@@ -536,18 +571,54 @@ pub(crate) fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &
     })
 }
 
+/// Below this many sources the idle column lists what a paste becomes. A
+/// person's first few captures are when that is not yet known.
+const TEACH_UNTIL_SOURCES: i64 = 5;
+
+impl IdleFootTemplate {
+    /// Whether the base is young enough for the list of what a paste becomes.
+    /// Derived rather than carried: it used to be a flag computed in two
+    /// handlers and threaded through two other templates, and the page it was
+    /// rendered on is built once — so the fifth capture left the list standing
+    /// until a reload.
+    fn teach(&self) -> bool {
+        self.corpora < TEACH_UNTIL_SOURCES
+    }
+}
+
+/// Is a capture still being read? Best-effort, in one place.
+///
+/// Three surfaces ask it — the idle line, the rail's gap offer and the due
+/// band's poll rate — and all three want the same answer to a store that
+/// cannot say: no. A line that cannot tell is a line that does not poll, a
+/// rail that cannot tell offers the gap, and a band that cannot tell falls
+/// back to its idle rate. Written once so the three cannot drift.
+pub(crate) async fn reading_a_capture(store: &crate::store::Store) -> bool {
+    store.capture_being_read().await.unwrap_or(false)
+}
+
 /// Two counts and the last few captures, off the slimmest reads there are:
 /// the idle rail is on the most-opened screen, re-renders on every box-clear,
 /// and must cost nothing.
 /// `oob` says which of the two renderings this is: the swap that returns the
-/// page to idle carries the emptied echo, the inline first paint does not.
-pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemplate> {
-    let (corpora, artifacts) = tenant.core.store.held_brief().await?;
-    let recent = tenant
-        .core
-        .store
-        .recent_captures(5)
-        .await?
+/// page to idle carries the emptied echo and the rail clears, the inline first
+/// paint does not.
+///
+/// The three reads run together. This fragment is on a three-second poll while
+/// a capture is read, per open tab, and sequentially it was two round trips to
+/// one pool and one to another for a line of text.
+pub(crate) async fn idle_foot(
+    tenant: &Tenant,
+    oob: bool,
+    headers: &axum::http::HeaderMap,
+) -> Result<IdleFootTemplate> {
+    let (brief, recent, in_flight) = tokio::join!(
+        tenant.core.store.held_brief(),
+        tenant.core.store.recent_captures(5),
+        reading_a_capture(&tenant.core.store),
+    );
+    let (corpora, artifacts) = brief?;
+    let recent = recent?
         .into_iter()
         .map(
             |(id, title_hint, origin, created_at, opening)| IdleRecentRow {
@@ -561,21 +632,24 @@ pub(crate) async fn idle_foot(tenant: &Tenant, oob: bool) -> Result<IdleFootTemp
             },
         )
         .collect();
+    let (example_remind, example_journal, example_lang) = crate::web::workspace::examples(headers);
+    // Said once. `reading` used to restate it four lines below `held`, and a
+    // guard that is a copy of another guard is a guard that comes to disagree.
+    //
+    // `ingest_capture` writes the corpus row before it enqueues the first job,
+    // so on a base that holds anything this only ever agrees with the probe —
+    // it saves the query on an empty base and says nothing else.
+    let held = corpora > 0;
     Ok(IdleFootTemplate {
         artifacts,
         corpora,
         recent,
-        held: corpora > 0,
-        // Best-effort, like the due band's own read of it: a line that cannot
-        // tell is a line that does not poll.
-        reading: corpora > 0
-            && tenant
-                .core
-                .store
-                .foreground_work_in_flight()
-                .await
-                .unwrap_or(false),
-        line_only: false,
+        held,
+        example_remind,
+        example_journal,
+        example_lang,
+        reading: held && in_flight,
+        oob,
         echo: if oob {
             render_echo(&IntentEchoTemplate {
                 kind: "",
@@ -1127,7 +1201,7 @@ pub(crate) async fn search_results(
     // limit is on the door rather than in app.js because it is the embedder's
     // bill either way, whatever the client was.
     if p.q.trim().is_empty() || p.q.chars().count() > MAX_QUERY_CHARS {
-        let mut t = idle_foot(&tenant, true).await?;
+        let mut t = idle_foot(&tenant, true, &headers).await?;
         // A box holding a whole document is not searched, but its fate is
         // still worth a line: this is exactly the paste the size fork will
         // store verbatim, and the echo is what says so before Capture.
@@ -1244,17 +1318,31 @@ pub(crate) async fn search_results(
     // than it was.
     let all_weak = !results.is_empty() && results.iter().all(|r| r.weak);
     // Read only where the rail would offer a gap, so a good search pays
-    // nothing for it.
-    let reading = ((results.is_empty() && associated.is_empty()) || all_weak)
-        && tenant
-            .core
-            .store
-            .foreground_work_in_flight()
-            .await
-            .unwrap_or(false);
+    // nothing for either.
+    let (reading, held) = if (results.is_empty() && associated.is_empty()) || all_weak {
+        (
+            reading_a_capture(&tenant.core.store).await,
+            // "Nothing here has it" is true of every search against a base
+            // with nothing in it, and the example chips under the box fire one
+            // — so the button was there to collect a verdict about the base
+            // being empty. The event is still recorded: the first capture is
+            // typically the answer to it, and `gaps::cover` closes the search
+            // a capture was typed from.
+            tenant
+                .core
+                .store
+                .held_brief()
+                .await
+                .map(|(c, _)| c > 0)
+                .unwrap_or(true),
+        )
+    } else {
+        (false, true)
+    };
     let mut res = HtmlTemplate(ResultsTemplate {
         all_weak,
         reading,
+        held,
         results,
         associated,
         terms,
@@ -1326,6 +1414,7 @@ pub(crate) fn render_hit(
     // ranked hit either way — the flag gates rendering and nothing else.
     explain: bool,
 ) -> RenderedResult {
+    let snippet = markdown::snippet(&h.text, 140);
     RenderedResult {
         artifact_id: h.artifact_id,
         // Empty, never "Untitled" and never a borrowed heading: a passage has
@@ -1334,10 +1423,27 @@ pub(crate) fn render_hit(
         // would say something. The row shows its snippet.
         title: match h.borrowed_name {
             true => String::new(),
-            false => h.title.unwrap_or_default(),
+            false => h.title.clone().unwrap_or_default(),
+        },
+        // The same borrowed name, below the snippet and prefixed, where it is
+        // context instead of a claim about what this text is called. Emptying
+        // the name slot took the *whereabouts* with it: a passage row said
+        // nothing at all about where in its source it sits. A qualifier can
+        // repeat down a chapter's worth of passages without lying, which a
+        // heading standing as a title could not.
+        //
+        // Dropped where it would say what the snippet already says — a note
+        // named by how its text opens — which is the duplication the empty
+        // slot was fixing.
+        section: match h.borrowed_name {
+            true => h
+                .title
+                .filter(|t| !snippet.starts_with(t.as_str()))
+                .unwrap_or_default(),
+            false => String::new(),
         },
         html: markdown::render(&h.text),
-        snippet: markdown::snippet(&h.text, 140),
+        snippet,
         category: h.category,
         tags: h.tags,
         corpus_id: h.corpus_id,
@@ -3751,6 +3857,7 @@ mod tests {
             why_ranked: None,
             artifact_id: id.into(),
             title: String::new(),
+            section: String::new(),
             html: String::new(),
             snippet: String::new(),
             category: None,
@@ -3905,6 +4012,7 @@ mod tests {
             why_ranked: None,
             artifact_id: "a1".into(),
             title: "The one that was recalled".into(),
+            section: String::new(),
             html: String::new(),
             snippet: "a snippet".into(),
             category: None,
@@ -4036,8 +4144,21 @@ mod tests {
         }
         .render()
         .unwrap();
-        assert!(!body.contains("Wiederherstellung"), "{body}");
+        assert!(
+            !body.contains(r#"<span class="rail-title">"#),
+            "the borrowed name stands where a name goes: {body}"
+        );
         assert!(body.contains("Der Vorgang setzt voraus"), "{body}");
+        // Not gone from the row, though — under the snippet and prefixed,
+        // where it says where the passage sits rather than what it is called.
+        // Dropping it entirely left a passage row with no account of where in
+        // its source it came from.
+        assert!(
+            body.contains(
+                r#"<p class="rail-where">in Wiederherstellung geloeschter Eintraege</p>"#
+            ),
+            "{body}"
+        );
         // The greyed "from" form goes with it: a class with no renderer left
         // is a rule nobody can reach.
         let css = include_str!("../../assets/app.css");
@@ -4139,6 +4260,7 @@ mod tests {
             why_ranked: None,
             artifact_id: "r1".into(),
             title: "The ranked hit".into(),
+            section: String::new(),
             html: String::new(),
             snippet: "a snippet".into(),
             category: None,
@@ -5479,11 +5601,18 @@ mod tests {
         let title = page
             .find("Speicherorte der MS Mail App")
             .expect("a title is on the card");
-        let verdict = page
-            .find("cover the same ground")
-            .expect("the verdict is on the card");
+        // Not "these two cover the same ground": nothing has judged this pair,
+        // and that sentence is a finding. The sweep put it here on a cosine
+        // score, so the score is all the card may claim.
         assert!(
-            title < verdict,
+            !page.contains("cover the same ground"),
+            "an unjudged pair was given a verdict nobody reached: {page}"
+        );
+        let said = page
+            .find("nothing has read these two yet")
+            .expect("the card still says where the pair came from");
+        assert!(
+            title < said,
             "the titles are the content and lead the sentence: {page}"
         );
     }
@@ -6950,14 +7079,14 @@ mod tests {
 
     /// A gap recorded against a capture that is still being read is a false
     /// one: the answer may be in it.
+    ///
+    /// A real capture with its jobs still pending, not a job armed for a corpus
+    /// that does not exist: the state the rail has to read is the one a paste
+    /// leaves behind, and an orphan row is not that state.
     #[tokio::test]
     async fn a_search_while_a_capture_is_read_offers_no_gap() {
         let (app, cookie, handle) = app_session_and_core_with_feedback().await;
-        handle
-            .store
-            .enqueue(crate::store::jobs::Stage::Synthesize, "corpus", "c-1")
-            .await
-            .unwrap();
+        crate::web::test_support::hold_something(&handle).await;
         let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
         assert!(rail.contains("still reading"), "{rail}");
         assert!(!rail.contains("Nothing here has it"), "{rail}");
@@ -6989,10 +7118,39 @@ mod tests {
         );
     }
 
+    /// The chips under the box fire a search on a base that holds nothing, and
+    /// "nothing here has it" is true of every one of those — a verdict about
+    /// the base being empty, recorded as a hole in its coverage.
+    ///
+    /// The event is still recorded. It is what the first capture closes: the
+    /// box carries the id forward, and `gaps::cover` closes the search a
+    /// capture was typed from.
+    #[tokio::test]
+    async fn an_empty_base_records_the_search_and_offers_no_gap() {
+        let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
+        assert!(rail.contains("No matches."), "{rail}");
+        assert!(!rail.contains("Nothing here has it"), "{rail}");
+        let event = newest_event(&handle).await;
+        assert!(
+            rail.contains(&format!(r#"value="{event}""#)),
+            "the box still holds the search, so the first capture can answer it: {rail}"
+        );
+    }
+
     #[tokio::test]
     async fn the_rail_offers_a_gap_where_nothing_matches() {
         // The deck's `N` key, moved to where the person is when they know.
+        //
+        // Over a base that holds something and has finished reading it. Both
+        // are conditions of the button: "nothing here has it" says nothing
+        // about a base with nothing in it, and while a capture is still being
+        // read the answer may be in it. See `ResultsTemplate::gap`.
         let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        crate::web::test_support::hold_something(&handle).await;
+        while let Some(j) = handle.store.claim_job().await.unwrap() {
+            handle.store.complete_job(j.id).await.unwrap();
+        }
         let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
         assert!(rail.contains("No matches."), "{rail}");
         assert!(rail.contains("Nothing here has it"), "{rail}");
@@ -7086,6 +7244,12 @@ mod tests {
         // back naming its own search whatever was typed — and the button
         // carries an id rather than the words.
         let (app, cookie, handle) = app_session_and_core_with_feedback().await;
+        // Held and read: both are conditions of the button. See
+        // `ResultsTemplate::gap`.
+        crate::web::test_support::hold_something(&handle).await;
+        while let Some(j) = handle.store.claim_job().await.unwrap() {
+            handle.store.complete_job(j.id).await.unwrap();
+        }
         let rail = get_body(
             &app,
             &cookie,

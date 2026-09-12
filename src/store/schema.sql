@@ -350,6 +350,21 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   -- shown, at the rank after the pool, and an open on it is an observation
   -- like any other; the spread rule reads how often that happens.
   band        INTEGER NOT NULL DEFAULT 0,
+  -- Where this artifact would have stood, 0-based, had the search not
+  -- explored. NULL on every row of an ordinary search, and on every row but
+  -- one of an exploring search.
+  --
+  -- The one thing the tuner could never learn on its own. A positive
+  -- observation exists only for an artifact the live ranking put on screen, so
+  -- a replay can reward reordering what was already shown and can never
+  -- discover what was hidden: widening the pool can never be shown to help,
+  -- and recency ratchets upward because people click among the recency-boosted
+  -- rows they were given. An exploring search lifts the top unshown candidate
+  -- into the last visible row, which is the only way an artifact the ranking
+  -- hid can ever earn an open. This column is what keeps the evidence honest
+  -- afterwards: the observation is charged to the rank the ranking actually
+  -- chose, not to the row the exploration lent it. See `Core::explores`.
+  explored_from INTEGER,
   PRIMARY KEY (event_id, rank)
 );
 -- `dealable!` asks two things of this table for every unjudged event, and the
@@ -758,9 +773,10 @@ CREATE TABLE IF NOT EXISTS graveyard (
 CREATE TABLE IF NOT EXISTS corpus_actions (
   id            TEXT PRIMARY KEY,
   at            INTEGER NOT NULL,
-  -- dedupe | reap | promote | judgement
+  -- dedupe | reap | promote | judgement | sleep
+  -- Also the unit the weekly budget is counted over: see `actions_since`.
   job           TEXT NOT NULL,
-  -- merge | supersede | discard | reap | promote | moment
+  -- merge | supersede | discard | reap | promote | moment | condense
   kind          TEXT NOT NULL,
   -- The artifact hidden or buried, the window promoted (`corpus_id#idx`), or
   -- the moment written.

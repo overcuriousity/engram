@@ -303,8 +303,14 @@ pub struct Core {
     pub tuning: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Corpus actions the base has taken in the last seven days, against the
-/// week's cap. A bound on the blast radius, not a rate limit on finding.
+/// What the idle pass has written to the corpus on its own in the last seven
+/// days, against the week's cap. A bound on the blast radius, not a rate limit
+/// on finding.
+///
+/// The pass's own writes and no others — see `sleep_actions_since`. Dedupe,
+/// reap and promotion were autonomous before this budget existed and keep
+/// their own gates; charging them here meant condense, which runs last in the
+/// pass, found the week already spent in every week the base had been used.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
     pub used: u32,
@@ -318,10 +324,11 @@ impl Budget {
 }
 
 impl Core {
-    pub async fn budget(&self) -> crate::error::Result<Budget> {
+    /// One job's week: what it has written, and what it may.
+    pub async fn budget(&self, job: crate::store::actions::Job) -> crate::error::Result<Budget> {
         let used = self
             .store
-            .actions_since(crate::store::now() - 7 * 86_400)
+            .actions_since(job, crate::store::now() - 7 * 86_400)
             .await?;
         Ok(Budget {
             used: used.clamp(0, u32::MAX as i64) as u32,
@@ -329,14 +336,21 @@ impl Core {
         })
     }
 
-    /// Whether a corpus action may be taken now. Only under `"full"` is the
-    /// budget consulted: the stages below it do not budget the sweeps that
-    /// were autonomous before the stages existed.
-    pub async fn may_act(&self) -> crate::error::Result<bool> {
+    /// Whether `job` may write to the corpus now: it is permitted to act at
+    /// all, and it has not spent its own week.
+    ///
+    /// Per job, because a shared count meant four independent units spent one
+    /// another's allowance and the one that ran last never had any — see
+    /// `Store::actions_since`. Each caller names itself, so nothing here has
+    /// to guess which budget a write belongs to.
+    ///
+    /// Only under `"full"`: below it the sweeps that were autonomous before
+    /// these stages existed are held by their own switches, as they were.
+    pub async fn may_act(&self, job: crate::store::actions::Job) -> crate::error::Result<bool> {
         if !self.evolve.autonomous.acts_on_corpus() {
             return Ok(true);
         }
-        Ok(!self.budget().await?.spent())
+        Ok(!self.budget(job).await?.spent())
     }
 
     /// Put the version a condensation retired back, and stamp the row. One

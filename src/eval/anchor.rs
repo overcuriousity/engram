@@ -24,6 +24,15 @@ use sqlx::Row;
 /// first: the question is whether agreement holds *now*.
 const VERDICT_LIMIT: i64 = 500;
 
+/// How far back a verdict still counts. Ninety days, and the reason is the
+/// same as the limit's read the other way: a bound on work says nothing about
+/// age, so on a base judged a dozen times a year every verdict ever given was
+/// in the sample forever. Two disagreements from eighteen months ago then
+/// suspended the loop for the life of the base, with no way back except more
+/// judging — and suspension is a state the base is supposed to be able to
+/// leave. What an old verdict is about is an old corpus.
+const VERDICT_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Agreement {
     pub agreed: usize,
@@ -33,11 +42,14 @@ pub struct Agreement {
 /// How often the self-generated evidence and the human verdicts say the same
 /// thing. `None` where no judged search has an observation to compare with.
 ///
-/// One tally per distinct query, and the newest verdict is the one that counts.
+/// Bounded three ways: one tally per distinct query, the newest verdict is the
+/// one that counts, and nothing older than `VERDICT_WINDOW_SECS` is read at
+/// all.
+///
 /// The evidence side of the comparison is looked up *by query text* — every
-/// positive observation ever recorded for that query, whichever search event
-/// produced it — so a query somebody judged thirty times contributed thirty
-/// identical comparisons to a sample of five hundred. That is not thirty
+/// positive observation this era recorded for that query, whichever search
+/// event produced it — so a query somebody judged thirty times contributed
+/// thirty identical comparisons to a sample of five hundred. That is not thirty
 /// pieces of evidence, it is one, weighted thirty times: a single query
 /// somebody kept re-judging could carry six percent of the anchor on its own,
 /// and one stray verdict on it then moved `trustworthy` and suspended the
@@ -45,14 +57,26 @@ pub struct Agreement {
 /// agreement holds *now*, and a query re-judged is somebody correcting
 /// themselves.
 pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
+    // The era, and without it the comparison is not one. A verdict is weighed
+    // against every positive observation ever recorded for its query, and the
+    // observations that answer it were produced by whatever configuration was
+    // live at the time — including ones from before an embedder change, whose
+    // ranking has nothing to do with this one's. Scoped to the models the base
+    // runs under now, which is the same line `tried_candidates` draws and for
+    // the same reason: evidence gathered under other models is not evidence
+    // about these.
+    let Some(live) = core.store.live_generation().await? else {
+        return Ok(None);
+    };
     let verdicts = sqlx::query(
         "SELECT query, verdict, expect_id FROM (
            SELECT query, verdict, expect_id, judged_at, id,
                   ROW_NUMBER() OVER (PARTITION BY query ORDER BY judged_at DESC, id DESC) AS n
-             FROM search_events WHERE verdict IN ('hit', 'gap')
+             FROM search_events WHERE verdict IN ('hit', 'gap') AND judged_at >= ?
          ) WHERE n = 1
           ORDER BY judged_at DESC, id DESC LIMIT ?",
     )
+    .bind(crate::store::now() - VERDICT_WINDOW_SECS)
     .bind(VERDICT_LIMIT)
     .fetch_all(&core.store.pool)
     .await?;
@@ -65,18 +89,26 @@ pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
     for v in &verdicts {
         let query: String = v.get("query");
         let positives: Vec<String> = sqlx::query_scalar(
-            "SELECT artifact_id FROM observations
-              WHERE query = ? AND strength > 0 AND artifact_id IS NOT NULL
-                AND excluded_at IS NULL",
+            "SELECT o.artifact_id FROM observations o
+               JOIN generations g ON g.id = o.generation_id
+              WHERE o.query = ? AND o.strength > 0 AND o.artifact_id IS NOT NULL
+                AND o.excluded_at IS NULL
+                AND g.embed_recipe = ? AND g.chat_model = ?",
         )
         .bind(&query)
+        .bind(&live.embed_recipe)
+        .bind(&live.chat_model)
         .fetch_all(&core.store.pool)
         .await?;
         let negative: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM observations
-              WHERE query = ? AND strength < 0 AND excluded_at IS NULL",
+            "SELECT COUNT(*) FROM observations o
+               JOIN generations g ON g.id = o.generation_id
+              WHERE o.query = ? AND o.strength < 0 AND o.excluded_at IS NULL
+                AND g.embed_recipe = ? AND g.chat_model = ?",
         )
         .bind(&query)
+        .bind(&live.embed_recipe)
+        .bind(&live.chat_model)
         .fetch_one(&core.store.pool)
         .await?;
 
@@ -312,6 +344,61 @@ mod tests {
                 disagreed: 1
             })
         );
+    }
+
+    /// A verdict is only weighed against observations a comparable
+    /// configuration produced. Looked up by query text alone, the positives
+    /// answering it could come from before an embedder change — a ranking this
+    /// era's parameters had nothing to do with — and the anchor would suspend
+    /// the loop over a disagreement between two different systems.
+    #[tokio::test]
+    async fn an_observation_from_another_era_is_not_what_a_verdict_is_weighed_against() {
+        let (core, g) = base().await;
+        observed(&core, &g, "mount the image", Some("art-9"), Source::Cited).await;
+        judged(&core, "mount the image", Verdict::Hit, Some("art-1")).await;
+        assert_eq!(
+            agreement(&core).await.unwrap(),
+            Some(Agreement {
+                agreed: 0,
+                disagreed: 1
+            }),
+            "this era's own observation disagrees"
+        );
+
+        // The models change: a new era, and the old observation belongs to the
+        // one that ended.
+        core.store
+            .record_generation(&NewGeneration {
+                params: GenerationParams::default(),
+                embed_recipe: "recipe-b".into(),
+                chat_model: "qwen".into(),
+                parent_id: Some(g),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            agreement(&core).await.unwrap(),
+            None,
+            "nothing this era observed about that query"
+        );
+    }
+
+    /// An old disagreement stops suspending a base eventually. Without a
+    /// window the sample is every verdict ever given, and two from years ago
+    /// held the loop suspended for the life of the base.
+    #[tokio::test]
+    async fn a_verdict_older_than_the_window_is_not_read() {
+        let (core, g) = base().await;
+        observed(&core, &g, "mount the image", Some("art-9"), Source::Cited).await;
+        judged(&core, "mount the image", Verdict::Hit, Some("art-1")).await;
+        assert!(agreement(&core).await.unwrap().is_some());
+
+        sqlx::query("UPDATE search_events SET judged_at = ?")
+            .bind(crate::store::now() - VERDICT_WINDOW_SECS - 1)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(agreement(&core).await.unwrap(), None);
     }
 
     #[tokio::test]

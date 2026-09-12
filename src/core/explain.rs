@@ -72,6 +72,14 @@ pub struct HitExplanation {
     pub prime: Option<StageEffect>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
+    /// Set for the one row an exploring search lifted into the window: from
+    /// the rank the ranking gave it, to the row it was lent.
+    ///
+    /// The only place in a result list where the order is not the ranking's
+    /// answer, so it is the one place that has to say so out loud. See
+    /// `Core::explore_swap`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explored: Option<StageEffect>,
     /// Set for a hit the association stage appended. Every other field is then
     /// absent: it never competed for a place, so there is no ranking story to
     /// tell.

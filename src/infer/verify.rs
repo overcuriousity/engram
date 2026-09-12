@@ -154,6 +154,43 @@ pub fn missing_machine_literals(
     )
 }
 
+/// Every number a text states, as it is written.
+///
+/// A digit run with whatever a reader would retype attached to it: `1.22.0`,
+/// `8080`, `64-bit`, `3,5%`, `2026-09-05`. Deliberately not "a token
+/// containing a digit" — that catches `SHA256` and every identifier, and a
+/// guard whose misses are mostly noise gets read past.
+pub fn extract_numbers(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in text.split_whitespace() {
+        let t = token.trim_matches(|c: char| TRIM.contains(&c));
+        // A digit somewhere, and nothing but digits and the punctuation that
+        // belongs inside a number, a version or a date.
+        if t.chars().any(|c| c.is_ascii_digit())
+            && t.chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | ':' | '-' | '/' | '%'))
+        {
+            out.push(t.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Numbers present in the artifact and absent from a rewrite of it.
+///
+/// The guard `condense` needs and `missing_machine_literals` does not give it.
+/// A condensation is the same artifact in the same language with less prose,
+/// so "requires 1.22.0 or later" losing its version is a silent change of
+/// meaning — and a bare version in prose is neither fenced, backticked nor
+/// path-shaped, so nothing else here looks at it. Not asked of a merge, where
+/// two artifacts' numbers are being brought together rather than carried
+/// across.
+pub fn missing_numbers(artifact_text: &str, caveats: &[String], rewritten: &str) -> Vec<String> {
+    absent(extract_numbers, artifact_text, caveats, rewritten)
+}
+
 fn absent(
     extract: fn(&str) -> Vec<String>,
     artifact_text: &str,

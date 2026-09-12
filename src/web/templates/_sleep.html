@@ -1,13 +1,25 @@
-{# What the base did while nobody was there, newest first, in words. Every
-   number a person can act on has a page: conflicts are on the pair queue,
-   adoptions, condensations and undos on the evolve block below. #}
+{# What the base did while nobody was there, newest first, in words.
+
+   Sentences and not ids. The lines used to name the generation a sleep adopted
+   or took back as an eight-character ULID tail, which is not something anybody
+   can look up, act on or even read aloud — the generation is spelled out with
+   its parameters one block below, under Ranking, and that is where a reader
+   who wants it is going. The conflict count went for a harder reason: nothing
+   writes conflicts any more, so "N conflicts waiting for you" was always zero
+   and pointed at a queue that will never hold anything.
+
+   What is left either says something a person would act on — how much was new,
+   how the rehearsal went, that the ranking moved and where to look — or, in
+   the list below, links to the artifact it is about. #}
 {% if let Some(s) = sleep %}
 <div id="sleep" class="judge-tune">
   <h3>Last night</h3>
   {% if s.runs.is_empty() %}
   <p class="muted hint">The base has not slept yet: it sleeps after {{ s.idle_mins }} quiet minutes, on the retention sweep's tick.</p>
   {% else %}
-  <ul class="mono">
+  {# Not `mono`. These are sentences now that the ids are gone, and a
+     proportional face is what a sentence is read in. #}
+  <ul>
     {% for r in s.runs %}<li>{{ r }}</li>{% endfor %}
   </ul>
   {% endif %}

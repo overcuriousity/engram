@@ -1052,6 +1052,92 @@ impl Core {
     /// past it hands back exactly the rows they asked not to see. `links_from`
     /// already excludes anything not active and not live, so what is left to
     /// re-check here is what the caller typed.
+    /// Lift the top candidate that just missed the window into the last
+    /// visible row, on `feedback.explore` of the searches that are recorded.
+    ///
+    /// Returns the artifact that was lifted and the 0-based rank it held
+    /// before, or `None` when this search did not explore. The caller carries
+    /// that rank onto the candidate row, and `open_event` charges an open to
+    /// it rather than to the row the exploration lent — which is the whole
+    /// point. Without it the loop records only what it already believed.
+    ///
+    /// Only where the evidence is worth gathering: a door that records opens,
+    /// capture switched on, a window of at least two rows, and something
+    /// actually below the cut. A one-row answer has no "last row" to spend.
+    ///
+    /// Which searches explore is decided by hashing the event this one folds
+    /// into, falling back to the query text. Not a coin flip per keystroke: a
+    /// typing burst folds into one event and one piece of evidence, and a list
+    /// whose bottom row appeared and vanished as somebody typed would be a
+    /// worse thing to read than anything this buys.
+    fn explore_swap(
+        &self,
+        results: &mut [SearchResult],
+        q: &str,
+        limit: usize,
+        door: crate::store::feedback::Door,
+        origin: &Origin,
+    ) -> Option<(String, usize)> {
+        if !self.learn.enabled
+            || !door.records_opens()
+            || self.feedback.explore <= 0.0
+            || limit < 2
+            || results.len() <= limit
+            // The lifted row has to be inside the pool that gets recorded, or
+            // it is a row on screen with no candidate row behind it — and an
+            // open on it is refused for not being in the pool, which throws
+            // away the one observation the exploration was spent to buy.
+            || limit >= self.feedback.candidates
+        {
+            return None;
+        }
+        // The event where the door names one, so a whole typing burst answers
+        // the same way. Where it does not — the API and MCP, which name
+        // nothing — the query and the hour: a fixed seed per query would
+        // explore on the same questions for ever and never on the others,
+        // which is a sample of the base rather than of the searching.
+        let hourly;
+        let seed: &str = match origin.fold_onto.as_deref() {
+            Some(ev) => ev,
+            None => {
+                hourly = format!("{q}:{}", crate::store::now() / 3_600);
+                &hourly
+            }
+        };
+        // FNV-1a. A hash rather than a random number because there is no
+        // randomness in this process to draw on and one coin flip does not
+        // earn a dependency — and because a decision that is a function of the
+        // event is one a later reader of the journal can reproduce.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in seed.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let share = (self.feedback.explore.clamp(0.0, 1.0) * 1000.0) as u64;
+        if h % 1000 >= share {
+            return None;
+        }
+        // The top of what the window cut off, into the bottom of the window.
+        // The displaced row keeps its place in the pool and simply stops being
+        // shown, so nothing about it is misrecorded.
+        let natural = limit;
+        let lifted = results[natural].artifact_id.clone();
+        results.swap(limit - 1, natural);
+        if let Some(e) = results[limit - 1].explanation.as_mut() {
+            e.explored = Some(crate::core::explain::StageEffect {
+                from: Some(natural),
+                to: Some(limit - 1),
+                delta: None,
+            });
+        }
+        tracing::debug!(
+            artifact = %lifted,
+            from = natural,
+            "an exploring search lifted a hidden candidate into the last row"
+        );
+        Some((lifted, natural))
+    }
+
     async fn associated(
         &self,
         results: &[SearchResult],
@@ -1825,6 +1911,14 @@ impl Core {
         // was already going to be dropped, and the sink has nothing to say
         // about it.
 
+        // The one row of this search the ranking did not choose.
+        //
+        // Before the window is fixed, so the lifted candidate goes through the
+        // same sinking and cliff-marking as everything else a person is shown,
+        // and before the capture below, so `shown` records what was actually
+        // on screen. Its own rank is carried separately: see `explored_from`.
+        let explored = self.explore_swap(&mut results, q, limit, door, &origin);
+
         let visible = limit.min(results.len());
         sink_retired_and_mark_the_cliff(&mut results[..visible], reranked);
 
@@ -1859,6 +1953,10 @@ impl Core {
                     similarity: sims.get(&r.artifact_id).copied().flatten(),
                     shown: i < limit,
                     band: false,
+                    explored_from: explored
+                        .as_ref()
+                        .filter(|(id, _)| *id == r.artifact_id)
+                        .map(|(_, natural)| *natural as i64),
                 })
                 .collect();
             candidates.extend(
@@ -1870,6 +1968,7 @@ impl Core {
                         similarity: None,
                         shown: true,
                         band: true,
+                        explored_from: None,
                     }),
             );
             let event = crate::store::feedback::NewEvent {
@@ -4548,6 +4647,96 @@ mod tests {
     /// The id of the artifact whose text is exactly this. Ordering from
     /// `list_all_artifact_ids` is not promised, and a test that assumed one
     /// would pass or fail on which row SQLite happened to return first.
+    /// A base of `n` artifacts, learning on, everything embedded.
+    async fn explorable(explore: f32, n: usize) -> crate::core::Core {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        core.feedback.explore = explore;
+        for i in 0..n {
+            let raw = format!("src{i}");
+            let text = format!("mount the loop device image {i}");
+            seed_from(&core, &raw, &[(text.as_str(), "note", &[])]).await;
+        }
+        reembed_all(&core).await;
+        core
+    }
+
+    /// Every candidate the last search recorded, in pool order: the artifact,
+    /// whether it was shown, and the rank it would have held.
+    async fn pool_with_exploration(core: &crate::core::Core) -> Vec<(String, i64, Option<i64>)> {
+        sqlx::query_as(
+            "SELECT artifact_id, shown, explored_from
+               FROM search_candidates WHERE band = 0 ORDER BY rank",
+        )
+        .fetch_all(&core.store.pool)
+        .await
+        .unwrap()
+    }
+
+    /// The hole the whole feature exists to close: without exploration nothing
+    /// below the window is ever shown, so nothing below the window can ever be
+    /// opened, so the tuner can only ever learn about rows it already chose.
+    #[tokio::test]
+    async fn an_exploring_search_shows_one_row_the_ranking_hid() {
+        let core = explorable(1.0, 8).await;
+        let mut query = q("mount the loop device image");
+        query.limit = 3;
+        let out = core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(out.len(), 3, "the window is still the window");
+        let pool = pool_with_exploration(&core).await;
+        let lifted: Vec<_> = pool.iter().filter(|(_, _, e)| e.is_some()).collect();
+        assert_eq!(lifted.len(), 1, "exactly one row is lent, not a shuffle");
+        let (id, shown, from) = lifted[0];
+        assert_eq!(*shown, 1, "a lifted row nobody sees is worth nothing");
+        assert_eq!(
+            *from,
+            Some(3),
+            "charged to the rank the ranking gave it, which is the first one it cut"
+        );
+        assert!(
+            out.iter().any(|r| &r.artifact_id == id),
+            "the lifted artifact is in the answer the searcher was handed"
+        );
+        // And the row it displaced is still in the pool, simply not shown.
+        assert_eq!(
+            pool.iter().filter(|(_, shown, _)| *shown == 1).count(),
+            3,
+            "the window did not grow"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_explores_when_the_knob_is_off_or_there_is_no_room() {
+        let core = explorable(0.0, 8).await;
+        let mut query = q("mount the loop device image");
+        query.limit = 3;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+        assert!(
+            pool_with_exploration(&core)
+                .await
+                .iter()
+                .all(|(_, _, e)| e.is_none()),
+            "explore = 0 explores"
+        );
+
+        // Nothing below the cut: there is no hidden candidate to lend a row to.
+        let core = explorable(1.0, 2).await;
+        let mut query = q("mount the loop device image");
+        query.limit = 10;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+        assert!(
+            pool_with_exploration(&core)
+                .await
+                .iter()
+                .all(|(_, _, e)| e.is_none()),
+            "a window wider than the base explored anyway"
+        );
+    }
+
     async fn id_of(core: &crate::core::Core, text: &str) -> String {
         sqlx::query_scalar("SELECT id FROM artifacts WHERE text = ?")
             .bind(text)

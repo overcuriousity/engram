@@ -40,7 +40,7 @@ const COMPONENT_WINDOW: i64 = 3;
 /// and so the only states a press on a card can still be answering.
 /// `web::ops` renders these; `ask_pair_synthesis` and `jobs::dedupe::run`
 /// refuse a Synthese press on anything else.
-pub const AWAITING_REVIEW: [PairState; 5] = [
+pub const AWAITING_REVIEW: [PairState; 6] = [
     PairState::Contradiction,
     PairState::Superseded,
     // The judge read both and found one artifact should hold what both say. A
@@ -55,6 +55,10 @@ pub const AWAITING_REVIEW: [PairState; 5] = [
     // recommendation nobody has pressed yet, and without this key they are on
     // no queue at all.
     PairState::Vacuous,
+    // An operator asked for one artifact and the writing was refused. Their
+    // reading is not overturned by that; what is left is the same decision
+    // they were making before they pressed, minus the one answer that failed.
+    PairState::Unmergeable,
     PairState::Pending,
 ];
 
@@ -65,6 +69,18 @@ pub enum PairState {
     Pending,
     /// The fact-token prefilter or the judge found nothing to disagree about.
     NoConflict,
+    /// An operator pressed the synthesis button and the writing was refused —
+    /// a member's lineage names stored source text a merge may not rewrite, or
+    /// the draft would have dropped a value one of them states.
+    ///
+    /// Its own state because `Contradiction` was carrying it, and the card
+    /// draws that as "these two disagree". So the operator read both, said
+    /// they cover the same ground, pressed, and the card came back telling
+    /// them they disagree — the exact overload of `Contradiction` the decide
+    /// queue's own design set out to remove, re-created by the button that
+    /// design added. The judgement stands; only the automatic writing of it
+    /// was refused, and the detail says which of the two reasons it was.
+    Unmergeable,
     /// The judge found a detail the two artifacts state differently, with no
     /// clear direction — both readings could still be current.
     Contradiction,
@@ -150,6 +166,7 @@ impl PairState {
             PairState::Pending => "pending",
             PairState::NoConflict => "no_conflict",
             PairState::Contradiction => "contradiction",
+            PairState::Unmergeable => "unmergeable",
             PairState::Superseded => "superseded",
             PairState::Dismissed => "dismissed",
             PairState::NearIdentical => "near_identical",
@@ -163,6 +180,7 @@ impl PairState {
         match s {
             "no_conflict" => PairState::NoConflict,
             "contradiction" => PairState::Contradiction,
+            "unmergeable" => PairState::Unmergeable,
             "superseded" => PairState::Superseded,
             "dismissed" => PairState::Dismissed,
             "near_identical" => PairState::NearIdentical,

@@ -26,20 +26,18 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
     // The week's budget, asked before anything is armed — as dedupe, reap,
     // consolidate and sleep all ask it.
     //
-    // This unit writes a `Kind::Promote` row and `actions_since` counts every
-    // row it finds, so promotions were spending a budget they never checked.
-    // And they arrive on ordinary use rather than on a sweep: `maybe_promote`
-    // runs from `mark_artifact_opened` and `mark_artifacts_cited`, so ten
-    // promotions in a week — a person reading their own base attentively —
-    // exhausted the default cap of ten and stood the *other* units down
-    // silently. That is the starvation `actions_since`'s own doc comment
-    // describes for `moment` rows, arriving through a different door.
+    // Promotion's own week, and only its own. It is counted rather than
+    // exempt — a promotion is the base acting on the corpus unasked, which is
+    // what the cap bounds — but these arrive on ordinary use rather than on a
+    // sweep: `maybe_promote` runs from `mark_artifact_opened` and
+    // `mark_artifacts_cited`. Against one shared count, ten promotions in a
+    // week (a person reading their own base attentively) exhausted the default
+    // cap and stood dedupe, reap and condense down until the window moved,
+    // silently. Per job, it can only ever exhaust its own.
     //
-    // Counted rather than excluded: a promotion is the base acting on the
-    // corpus unasked, which is exactly what the budget is a bound on. The
-    // window is simply read again once the window moves — nothing is lost,
-    // and the passages keep the activation that armed this.
-    if !core.may_act().await? {
+    // Nothing is lost when it does: the window is read again once the week
+    // moves, and the passages keep the activation that armed this.
+    if !core.may_act(crate::store::actions::Job::Promote).await? {
         tracing::info!("a window is over the promotion line, but the week's budget is spent");
         return Ok(0);
     }
@@ -644,12 +642,12 @@ mod tests {
     /// against the week's budget — so it has to read the budget, which is the
     /// one thing it never did.
     ///
-    /// The row it writes is a `Kind::Promote`, and `actions_since` counts
-    /// whatever it finds. So promotions spent a budget they never checked, and
-    /// they arrive on ordinary reading rather than on a sweep: ten of them in a
-    /// week is a person going carefully through their own base, and it stood
-    /// dedupe, reap, condense and `arm_dedupe` down for the rest of the week
-    /// without a word.
+    /// The row it writes is a `Kind::Promote`, counted against `Job::Promote`
+    /// and nothing else. It reads its own week because these arrive on
+    /// ordinary reading rather than on a sweep — ten in a week is a person
+    /// going carefully through their own base — and, before the count was
+    /// split per job, that also stood dedupe, reap, condense and `arm_dedupe`
+    /// down for the rest of the week without a word.
     #[tokio::test]
     async fn a_spent_budget_arms_no_promotion() {
         let (mut core, corpus, p) = earned_with_one_passage().await;

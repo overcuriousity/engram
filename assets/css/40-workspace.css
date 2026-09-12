@@ -689,6 +689,7 @@ body { overflow-x: hidden; }
   .regions.reading .rail-title,
   .regions.reading .rail-snippet,
   .regions.reading .rail-why,
+  .regions.reading .rail-where,
   .regions.reading .badge { display: none; }
   .regions.reading .rail-item {
     padding: 0.5rem 0; text-align: center;
@@ -715,10 +716,13 @@ body { overflow-x: hidden; }
 .regions.hide-source .split { grid-template-columns: minmax(0, 1fr); }
 .regions.hide-source .split > :nth-child(2) { display: none; }
 
-/* Why a result arrived, under the snippet that shows what it says. Quieter
-   than the snippet: this explains the row, it is not the row. Gone in reading
-   mode with everything else but the rank. */
-.rail-why { margin: 0.25rem 0 0; font-size: var(--text-xs); color: var(--color-fg-muted); }
+/* Why a result arrived, and — one line further down — where in its source it
+   sits, both under the snippet that shows what it says. Quieter than the
+   snippet: these explain the row, they are not the row. Two names and one
+   rule, because they are two statements, one about the ranking and one about
+   the document, rendered the same way. Gone in reading mode with everything
+   else but the rank. */
+.rail-why, .rail-where { margin: 0.25rem 0 0; font-size: var(--text-xs); color: var(--color-fg-muted); }
 /* Accented rather than muted like `.rail-why` above it: that line explains
    something that already happened to the ordering, this one is an offer. */
 .rail-continues { margin: 0.25rem 0 0; font-size: var(--text-xs); color: var(--color-accent); }
@@ -1207,6 +1211,10 @@ html:not(.typing) .regions-rail-focus-source .region-bar { max-width: 46rem; }
 .teach dt { color: var(--color-fg-primary); }
 .teach dd { margin: 0; color: var(--color-fg-secondary); }
 .teach .chip-example { text-align: left; }
+/* The list retires by coming back empty: an out-of-band swap can only replace
+   an element the response carries, so the fragment renders the `<dl>` in every
+   state and fills it in only while the base is young. */
+.teach:empty { display: none; }
 
 /* The chip row is revealed by app.js on the first keystroke. `display: contents`
    so the wrapper adds no box of its own: the label and the chips go on being

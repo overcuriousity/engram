@@ -45,9 +45,12 @@ pub async fn run(core: &Core) -> Result<Report> {
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
     for c in &cands {
-        // The week's budget, before the judge call: a burial is the one
-        // action here that destroys text, and the cap is on taking it.
-        if !core.may_act().await? {
+        // Reap's own week, before the judge call: a burial is the one action
+        // here that destroys text, and the cap is on taking it. Its own,
+        // because a shared count meant a week of condensations could quietly
+        // remove the ceiling's meaning here — and, the other way round, a week
+        // of burials could stop the idle pass shortening anything.
+        if !core.may_act(crate::store::actions::Job::Reap).await? {
             tracing::info!("budget spent; the rest of the nominees wait for the window to move");
             break;
         }

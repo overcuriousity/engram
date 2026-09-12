@@ -283,34 +283,36 @@ impl Store {
         .transpose()
     }
 
-    /// Whether an action of this kind on this subject was ever taken back —
-    /// the memory an action site reads before acting again.
-    /// Every action taken after `at`, undone or not. The budget's read: an
-    /// action counts because it was taken, whoever took it back.
+    /// What one job wrote to the corpus on its own after `at`, undone or not:
+    /// an action counts because it was taken, whoever took it back.
     ///
-    /// `moment` rows excepted, and they are the one exception. The budget is a
-    /// bound on how much of the corpus the base may rearrange without being
-    /// asked — merges, supersessions, burials, promotions, condensations, each
-    /// one a write to somebody's text with an undo beside it. A reminder read
-    /// out of a capture is none of that: it is the reading itself, filed by
-    /// `judgement::journal` so the corpus journal can show what the base made
-    /// of a note, and it never consults `may_act` because there is nothing
-    /// there to permit.
+    /// Per job, and that is the whole of the fix. One shared count over every
+    /// row but `moment` made four independent autonomous units spend one
+    /// another's allowance: ten promotions — a person reading their own base
+    /// attentively for a week — stood dedupe, reap and condense down until the
+    /// window moved, and condense, which runs last in the idle pass, found the
+    /// week already spent in every week anything else had happened. A budget
+    /// whose meaning depends on what some other job did is not a bound anybody
+    /// can reason about, and its failure is silent: a spent budget is an
+    /// ordinary state that logs at info and waits.
     ///
-    /// Counted, it made the two features eat each other. Ten dated captures in
-    /// a week reach the default cap of ten, and then dedupe, reap, condense
-    /// and the sleep pass's corpus half all stand down for the rest of the
-    /// window — silently, because a spent budget is an ordinary state that
-    /// logs at info and waits.
-    pub async fn actions_since(&self, at: i64) -> Result<i64> {
+    /// So each job carries its own week. `Job::Promote` is still counted
+    /// rather than exempt — a promotion is the base acting on the corpus
+    /// unasked, which is exactly what the cap is a bound on — but it can now
+    /// only ever exhaust its own.
+    pub async fn actions_since(&self, job: Job, at: i64) -> Result<i64> {
         Ok(sqlx::query_scalar(
-            "SELECT COUNT(*) FROM corpus_actions WHERE at > ? AND kind != 'moment'",
+            "SELECT COUNT(*) FROM corpus_actions
+              WHERE at > ? AND job = ? AND kind != 'moment'",
         )
         .bind(at)
+        .bind(job.as_str())
         .fetch_one(&self.pool)
         .await?)
     }
 
+    /// Whether an action of this kind on this subject was ever taken back —
+    /// the memory an action site reads before acting again.
     pub async fn action_was_undone(&self, subject_id: &str, kind: Kind) -> Result<bool> {
         Ok(sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM corpus_actions
@@ -392,45 +394,81 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn the_budget_counts_every_action_in_the_window_undone_or_not() {
+    async fn a_job_s_budget_counts_its_own_writes_in_the_window_undone_or_not() {
         let store = Store::memory().await.unwrap();
-        store.record_action(&merge_of("a", "m")).await.unwrap();
-        store.record_action(&merge_of("b", "m")).await.unwrap();
+        store.record_action(&condense_of("a")).await.unwrap();
+        store.record_action(&condense_of("b")).await.unwrap();
         store
-            .undo_actions_under("m", UndoneBy::Evidence, "gone")
+            .undo_action_on("a", Kind::Condense, UndoneBy::Evidence, "back")
             .await
             .unwrap();
-        assert_eq!(store.actions_since(0).await.unwrap(), 2);
-        assert_eq!(store.actions_since(i64::MAX).await.unwrap(), 0);
+        assert_eq!(store.actions_since(Job::Sleep, 0).await.unwrap(), 2);
+        assert_eq!(store.actions_since(Job::Sleep, i64::MAX).await.unwrap(), 0);
     }
 
-    /// A reminder read out of a capture is not a corpus rearrangement, and the
-    /// cap on rearranging the corpus must not be spent by reading notes. Ten
-    /// dated captures in a week used to reach the default cap of ten and stand
-    /// dedupe, reap, condense and the sleep pass down for the rest of it.
+    /// Each job carries its own week, so none of them can stand another down.
+    ///
+    /// One shared count over every row but `moment` is what this replaces.
+    /// Ten of anything reached the default cap: ten promotions is a person
+    /// reading their own base attentively, and it silently stopped dedupe,
+    /// reap and condense for the rest of the week. Condense, which runs last
+    /// in the idle pass, therefore found the week already spent in every week
+    /// the base had been used at all.
     #[tokio::test]
-    async fn reading_a_reminder_out_of_a_note_does_not_spend_the_week_s_budget() {
+    async fn one_job_s_writes_never_spend_another_job_s_week() {
         let store = Store::memory().await.unwrap();
-        store.record_action(&merge_of("a", "m")).await.unwrap();
-        for i in 0..20 {
+        store.record_action(&condense_of("a")).await.unwrap();
+        for (i, (job, kind)) in [
+            (Job::Dedupe, Kind::Merge),
+            (Job::Dedupe, Kind::Supersede),
+            (Job::Judgement, Kind::Discard),
+            (Job::Reap, Kind::Reap),
+            (Job::Promote, Kind::Promote),
+            // A reminder read out of a note is the reading itself, not the
+            // base rearranging anything, and it is exempt in every job.
+            (Job::Judgement, Kind::Moment),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             store
                 .record_action(&NewAction {
-                    job: Job::Judgement,
-                    kind: Kind::Moment,
-                    subject_id: format!("moment-{i}"),
+                    job,
+                    kind,
+                    subject_id: format!("other-{i}"),
                     survivor_id: None,
-                    detail: Some("due".into()),
-                    evidence: serde_json::json!({ "artifact": "a" }),
+                    detail: None,
+                    evidence: serde_json::json!({}),
                     pair_score: None,
                 })
                 .await
                 .unwrap();
         }
-        assert_eq!(
-            store.actions_since(0).await.unwrap(),
-            1,
-            "only the merge is a corpus action"
-        );
+        for (job, expected) in [
+            (Job::Sleep, 1),
+            (Job::Dedupe, 2),
+            (Job::Reap, 1),
+            (Job::Promote, 1),
+            (Job::Judgement, 1),
+        ] {
+            assert_eq!(
+                store.actions_since(job, 0).await.unwrap(),
+                expected,
+                "{job:?} was charged for somebody else's work"
+            );
+        }
+    }
+
+    fn condense_of(subject: &str) -> NewAction {
+        NewAction {
+            job: Job::Sleep,
+            kind: Kind::Condense,
+            subject_id: subject.into(),
+            survivor_id: Some(subject.into()),
+            detail: Some("version 1 retired".into()),
+            evidence: serde_json::json!({ "version": 1 }),
+            pair_score: None,
+        }
     }
 
     fn merge_of(subject: &str, survivor: &str) -> NewAction {

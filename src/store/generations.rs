@@ -320,14 +320,27 @@ impl Store {
     /// Keyed on the models rather than on a date, because that is what makes
     /// a candidate eligible again: evidence gathered under other models is not
     /// evidence about these, and neither is a failure.
+    ///
+    /// And on the corpus, which is the other thing a failure was about. A ban
+    /// for the life of an era is a ban forever on a base whose models never
+    /// change — a cap refused when there were two hundred artifacts stayed
+    /// refused at twenty thousand, though "one source may supply three
+    /// results" is a different question at each size. So a ban lapses once
+    /// more artifacts have arrived since the candidate was tried than existed
+    /// when it was tried: the corpus has more than doubled, and the base the
+    /// setting was measured on is not the base it would run on now. Counted
+    /// rather than dated, because growth is what the argument is about and a
+    /// quiet year is not growth.
     pub async fn tried_candidates(
         &self,
         embed_recipe: &str,
         chat_model: &str,
     ) -> Result<Vec<GenerationParams>> {
         sqlx::query_scalar::<_, String>(
-            "SELECT params FROM generations
-              WHERE state IN ('reverted', 'refused') AND embed_recipe = ? AND chat_model = ?",
+            "SELECT params FROM generations g
+              WHERE state IN ('reverted', 'refused') AND embed_recipe = ? AND chat_model = ?
+                AND (SELECT COUNT(*) FROM artifacts WHERE created_at > g.created_at) * 2
+                    <= (SELECT COUNT(*) FROM artifacts)",
         )
         .bind(embed_recipe)
         .bind(chat_model)
@@ -706,6 +719,67 @@ mod tests {
                 .is_empty(),
             "a failure under other models is not a failure under these"
         );
+    }
+
+    /// A refusal is about the corpus it was measured on, and stops being
+    /// about the one the base has once that corpus has more than doubled.
+    /// Without this a cap refused at two hundred artifacts stayed refused at
+    /// twenty thousand, for the life of an era nothing ever ends.
+    #[tokio::test]
+    async fn a_candidate_refused_on_a_much_smaller_corpus_is_asked_again() {
+        let store = Store::memory().await.unwrap();
+        let first = store.record_generation(&sample()).await.unwrap();
+        let mut second = sample();
+        second.parent_id = Some(first);
+        second.params.recency_weight = 0.25;
+        let id = store
+            .adopt_generation(&second, "run-1", 0.04)
+            .await
+            .unwrap()
+            .expect("the parent is live");
+        store.revert_generation(&id).await.unwrap();
+
+        // Two artifacts stood there when it was refused, and the row is
+        // stamped after them.
+        let corpus = store.insert_corpus("x", "web", None).await.unwrap();
+        grow(&store, &corpus.id, 2, 100).await;
+        sqlx::query("UPDATE generations SET created_at = 200 WHERE id = ?")
+            .bind(&id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let tried = || store.tried_candidates(&second.embed_recipe, &second.chat_model);
+        assert!(
+            !tried().await.unwrap().is_empty(),
+            "the corpus has not grown at all"
+        );
+
+        // Two more: the corpus doubled, which is not yet more than doubled.
+        grow(&store, &corpus.id, 2, 300).await;
+        assert!(!tried().await.unwrap().is_empty(), "doubled is not enough");
+        grow(&store, &corpus.id, 1, 300).await;
+        assert!(
+            tried().await.unwrap().is_empty(),
+            "past that it is a different base, and the question is open again"
+        );
+    }
+
+    /// `n` artifacts stamped as having arrived at `at`.
+    async fn grow(store: &Store, corpus_id: &str, n: usize, at: i64) {
+        let rows: Vec<crate::store::artifacts::NewArtifact> = (0..n)
+            .map(|i| crate::store::artifacts::NewArtifact {
+                ordinal: at + i as i64,
+                text: format!("artifact {at} {i}"),
+                ..Default::default()
+            })
+            .collect();
+        store.insert_artifacts(corpus_id, &rows).await.unwrap();
+        sqlx::query("UPDATE artifacts SET created_at = ? WHERE created_at > ?")
+            .bind(at)
+            .bind(at)
+            .execute(&store.pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

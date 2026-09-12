@@ -32,7 +32,12 @@
     <span class="decide-opening">{{ p.a_opening }}</span>{% endif %} vs
     <a href="/ui/artifacts/{{ p.b_id }}">{{ p.b_title }}</a>{% if !p.b_opening.is_empty() %}
     <span class="decide-opening">{{ p.b_opening }}</span>{% endif %} —
-    <b>{% if p.vacuous %}neither of these says anything{% elif p.contradiction %}these two disagree{% else %}these two cover the same ground{% endif %}</b>{% if p.via_link %}, no similarity was measured{% else %}, {{ p.percent }}% alike{% endif %}.
+    {#- What the headline may claim depends on who has looked. A pending pair
+        was put here by a cosine score and nothing else, so it gets the
+        measurement and no finding; saying "these two cover the same ground"
+        over it is a judgement nobody made. A refused synthesis is not a
+        disagreement either — see `PairState::Unmergeable`. #}
+    <b>{% if p.vacuous %}neither of these says anything{% elif p.contradiction %}these two disagree{% elif p.unmergeable %}these could not be written as one{% elif p.unjudged %}nothing has read these two yet{% else %}these two cover the same ground{% endif %}</b>{% if p.via_link %}, no similarity was measured{% else %}, {{ p.percent }}% alike{% endif %}.
   </div>
   {% if let Some(d) = p.detail %}<div class="decide-finding">{{ d }}</div>{% endif %}
   {# Both sides, readable where the decision is made. Closed by default: the
@@ -94,7 +99,10 @@
     <form method="post" action="/ui/ops/pairs/{{ p.id }}/synthesize"
           data-a="{{ p.a_title }}" data-b="{{ p.b_title }}"
           onsubmit="return confirm('Write one artifact from “' + this.dataset.a + '” and “' + this.dataset.b + '”, and hide both behind it? You can undo this from Insights.')">
-      <button class="btn btn-sm" type="submit">Synthese</button>
+      {#- English, like the three buttons beside it. The page is `lang="en"`;
+          the language setting picks what the model reads and writes, not what
+          the doors are labelled in. #}
+      <button class="btn btn-sm" type="submit">Write one</button>
     </form>
     {% endif %}
     {# The third answer, and the only one that ends with both artifacts gone.

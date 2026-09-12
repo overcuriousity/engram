@@ -1,8 +1,9 @@
 //! Condense: one artifact, one shorter version of itself, losing no literal.
 //!
 //! Armed by `sleep::condense_candidates` under "full" and the budget; one
-//! generation. The reply is checked by `merge::losses` with the artifact as
-//! its own root, and a draft that would lose a value or a machine literal is
+//! generation. The reply is checked twice — `merge::losses` for the machine
+//! literals, `verify::missing_numbers` for the numbers `merge::losses`
+//! deliberately does not look at — and a draft that would lose either is
 //! refused without writing. Condensation may cost prose. Never a number —
 //! and that is the one line on which this differs from biological gist, on
 //! purpose.
@@ -89,7 +90,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         );
         return Ok(());
     }
-    if !core.may_act().await? {
+    if !core.may_act(crate::store::actions::Job::Sleep).await? {
         tracing::info!(
             artifact_id,
             "budget spent; the condensation waits for the window to move"
@@ -135,11 +136,30 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         caveats: g.caveats.clone(),
     };
     let lost = crate::jobs::merge::losses(std::slice::from_ref(&c), &draft);
-    if !lost.is_empty() {
+    // And the numbers, which `merge::losses` does not check and must not: a
+    // merge brings two artifacts' numbers together across a rewrite, routinely
+    // between languages, and refusing one for renumbering a list is what that
+    // half was dropped for. A condensation is the same artifact in the same
+    // language with less prose around the same facts, so "requires 1.22.0 or
+    // later" coming back as "requires a recent version" is a silent change of
+    // meaning — and a bare version in prose is neither fenced, backticked nor
+    // path-shaped, so nothing in `losses` looks at it at all.
+    //
+    // Against the caveats as well as the text, for the reason `losses` reads
+    // both: a number demoted to a caveat is stored, rendered and recoverable,
+    // and this checks for loss, not for prominence.
+    let mut kept = g.text.clone();
+    for cav in &g.caveats {
+        kept.push(' ');
+        kept.push_str(cav);
+    }
+    let numbers = crate::infer::verify::missing_numbers(&c.text, &c.caveats, &kept);
+    if !lost.is_empty() || !numbers.is_empty() {
         tracing::info!(
             artifact_id,
             ?lost,
-            "the rewrite would lose a value or a literal; refused"
+            ?numbers,
+            "the rewrite would lose a literal or a number; refused"
         );
         return Ok(());
     }
@@ -189,6 +209,10 @@ mod tests {
     use std::sync::Arc;
 
     async fn synthesized(core: &Core) -> String {
+        synthesized_with(core, "A long explanation of why the loop mount needs `mount -o loop /dev/loop0` and how it was found after three dead ends.").await
+    }
+
+    async fn synthesized_with(core: &Core, text: &str) -> String {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let passage = core
             .store
@@ -206,7 +230,7 @@ mod tests {
         core.store
             .insert_synthesized_artifact(
                 &NewSynthesized {
-                    text: "A long explanation of why the loop mount needs `mount -o loop /dev/loop0` and how it was found after three dead ends.".into(),
+                    text: text.into(),
                     title: Some("Loop mounts".into()),
                     category: None,
                     tags: vec![],
@@ -250,6 +274,31 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A version in prose is not fenced, backticked or path-shaped, so
+    /// `merge::losses` — written for a merge, where the numbers of two
+    /// artifacts are being brought together across languages — sees nothing
+    /// wrong with a rewrite that drops it. This is the same artifact in the
+    /// same language, and "requires 1.22.0 or later" coming back as "requires
+    /// a recent version" is a silent change of meaning.
+    #[tokio::test]
+    async fn a_rewrite_that_drops_a_number_out_of_prose_is_refused_without_writing() {
+        let (core, writer) = core_with(vec![reply(
+            "The loop mount needs a recent kernel and `mount -o loop /dev/loop0`.",
+        )])
+        .await;
+        let id = synthesized_with(
+            &core,
+            "The loop mount requires 1.22.0 or later and is done with `mount -o loop /dev/loop0`, after three dead ends.",
+        )
+        .await;
+        run(&core, &id).await.unwrap();
+        assert_eq!(writer.calls(), 1);
+        assert!(
+            core.store.versions_of(&id).await.unwrap().is_empty(),
+            "the version number went missing and the rewrite was written anyway"
         );
     }
 

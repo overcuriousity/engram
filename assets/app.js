@@ -1210,6 +1210,11 @@
     show('kind-row', false);
     var due = document.getElementById('due');
     if (due) htmx.trigger(due, 'refresh');
+    // The idle line's poll is filtered on the column being visible, so while
+    // the column was hidden it fired nothing. What the reader comes back to
+    // would otherwise be however old the last tick left it.
+    var foot = document.getElementById('idle-foot');
+    if (foot && foot.getAttribute('hx-get')) htmx.trigger(foot, 'refresh');
   }
 
   function show(id, on) {
@@ -2530,6 +2535,33 @@
     return !!(params && params.rerank === 'true');
   }
 
+  // Was this the idle line's own poll? Same question as `wasRefine` and for the
+  // same reason: nobody asked for this request. It fires every three seconds
+  // while a capture is read, so a 500 wrote "That did not work" into the
+  // paragraph on every tick, and an expired session navigated a reader to the
+  // login page from a timer, mid-sentence.
+  function wasIdlePoll(e) {
+    var cfg = e.detail && e.detail.requestConfig;
+    return String((cfg && cfg.path) || '').indexOf('/ui/idle-foot') === 0;
+  }
+
+  // The read landed. The rail may be standing at "No matches yet · still
+  // reading", which is a dead end: the search that drew it ran against a base
+  // that was still taking the answer in, and nothing re-ran it. The idle line's
+  // last poll — the one that reports the reading over — fires this.
+  //
+  // Only from that state, and only over a box that is not mid-request: a search
+  // somebody is in the middle of typing is already on its way, and re-running
+  // it would be a second one for the same keystroke.
+  function rerunAfterRead() {
+    document.body.addEventListener('engram:read-landed', function () {
+      if (!document.querySelector('#results .still-reading')) return;
+      var form = document.getElementById('box-form');
+      if (!form || form.classList.contains('htmx-request')) return;
+      htmx.trigger(form, 'submit');
+    });
+  }
+
   // The rail's selected row, recomputed from the URL. Run after any swap that
   // repaints the list while an artifact is open: the fragment renders every
   // row `aria-selected="false"`, and the open artifact's highlight must
@@ -2886,6 +2918,7 @@
     micButton();
     askDriver();
     refinePass();
+    rerunAfterRead();
     trackDwell();
     window.addEventListener('pagehide', flushDwell);
     document.addEventListener('visibilitychange', function () {
@@ -2905,7 +2938,7 @@
       // typing must not replace their results with an error box — and an
       // expired session must not navigate them to a login mid-read; the next
       // thing they actually do will land here and redirect with intent.
-      if (wasRefine(e)) return;
+      if (wasRefine(e) || wasIdlePoll(e)) return;
       if (e.detail.xhr.status === 401) {
         var here = window.location.pathname + window.location.search;
         window.location.assign('/auth/login?go=' + encodeURIComponent(here));
@@ -2927,8 +2960,9 @@
     document.body.addEventListener('htmx:sendError', function (e) {
       if (!e.detail) return;
       // Same exemption as above: a refine that never reached the server
-      // leaves the list it was refining alone.
-      if (wasRefine(e)) return;
+      // leaves the list it was refining alone, and so does a poll nobody asked
+      // for.
+      if (wasRefine(e) || wasIdlePoll(e)) return;
       failedSwap(e.detail.target, null);
     });
     // Out-of-band content arrives on its own event, and the day link is only

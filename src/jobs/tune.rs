@@ -140,7 +140,7 @@ async fn journal(core: &Core, started: i64, p: &Pass) -> Result<()> {
         return Ok(());
     };
     let budget = if core.evolve.autonomous.acts_on_corpus() {
-        core.budget().await?
+        core.budget(crate::store::actions::Job::Sleep).await?
     } else {
         crate::core::Budget { used: 0, cap: 0 }
     };
@@ -332,7 +332,18 @@ pub async fn pass(core: &Core) -> Result<Pass> {
             match (r_new, r_old) {
                 (Some(n), Some(o)) => {
                     rehearsal_lost = n.loses_to(&o);
-                    rehearsal_settled = n.indistinguishable(&o) || o.loses_to(&n);
+                    // And only once the live evidence has said something at
+                    // all. `indistinguishable` is true whenever two parameter
+                    // sets score within noise on the probes, which is the
+                    // ordinary case for a one-rung move — so on any base with
+                    // ten probes the watch ended on the very next idle pass,
+                    // with zero observations under the new generation, and the
+                    // next proposal followed immediately. Probes saying "these
+                    // two are the same" is not the live evidence having spoken.
+                    // The same asymmetry as everywhere else here: probes refuse
+                    // and revert, they do not license the next move.
+                    rehearsal_settled =
+                        new.observations > 0 && (n.indistinguishable(&o) || o.loses_to(&n));
                 }
                 _ => {
                     out.stopped = "activity";
@@ -340,7 +351,16 @@ pub async fn pass(core: &Core) -> Result<Pass> {
                 }
             }
         }
-        if !holds_up(&new, &old) || rehearsal_lost {
+        // The third side: what the generation said it would do. Nothing read
+        // `predicted` at all, and the two halves Insights printed beside each
+        // other are not the same quantity — an MRR delta over replayed pairs
+        // against a rate over observations — so a generation adopted on a
+        // promised gain that delivered none ended its watch looking like a tie.
+        let Some(delivered) = promise_kept(core, &live, &parent, started).await? else {
+            out.stopped = "activity";
+            return Ok(out);
+        };
+        if !holds_up(&new, &old) || rehearsal_lost || !delivered {
             let p = revert(core, &live, &new, &old).await?;
             out.reverted = p.reverted;
             return Ok(out);
@@ -359,6 +379,60 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         out.stopped = p.stopped;
     }
     Ok(out)
+}
+
+/// Whether the generation under watch delivered what it promised, measured in
+/// the units the promise was made in.
+///
+/// `predicted` is an MRR delta over replayed pairs. The lived watch is a rate
+/// over observations, and the probe anchor is an MRR over probes — neither is
+/// the promise, and nothing was checking it. The commensurable test is the
+/// same replay the adoption was made on, run again over the *new* generation's
+/// own observations: if its parent would clear the adoption gate on the
+/// evidence the new generation itself gathered, the move did not do what it
+/// said it would. Biased in the generation's favour, if anything — those are
+/// the results its own ranking put in front of somebody — which is what makes
+/// failing it worth acting on.
+///
+/// Asked only where the promise came from a replay. A lived adoption's
+/// `predicted` is a rate off the band or the judged bands, and its knob is one
+/// a replay cannot see at all. `None` where somebody came back.
+async fn promise_kept(
+    core: &Core,
+    live: &Generation,
+    parent: &Generation,
+    started: i64,
+) -> Result<Option<bool>> {
+    if live.run_id.is_none() {
+        return Ok(Some(true));
+    }
+    let (pairs, _) = sweep::observation_pairs(core, &live.id).await?;
+    if pairs.len() < sweep::MIN_PAIRS {
+        // It has not earned enough of its own evidence to be asked yet. The
+        // lived watch and the probes go on either way.
+        return Ok(Some(true));
+    }
+    let new: crate::core::ranking::RankingParams = live.params.into();
+    let old: crate::core::ranking::RankingParams = parent.params.into();
+    // The reranker only where the two disagree about it, as everywhere else:
+    // held constant it cancels out and costs a call per pair to do so.
+    let axis = new.rerank != old.rerank;
+    let Some(scored) = sweep::score(core, &pairs, vec![new, old], new, axis, Some(started)).await?
+    else {
+        return Ok(None);
+    };
+    if scored.winner() != Some(old) {
+        return Ok(Some(true));
+    }
+    tracing::info!(
+        generation = %live.id,
+        predicted = live.predicted,
+        shortfall = scored.predicted(),
+        pairs = pairs.len(),
+        "a generation's own observations replay better under its parent; \
+         what it promised was not delivered"
+    );
+    Ok(Some(false))
 }
 
 /// Put the predecessor back, and remember the candidate that failed.
@@ -584,13 +658,21 @@ fn swap_ranking(
 
 /// The spread rule. Grow when the band was used more than the ranked tail
 /// beside it by more than one event could account for; shrink on the same
-/// rule the other way; hold otherwise. From zero there is no band to
-/// measure, so the first rung is offered once and the watch decides.
+/// rule the other way; hold otherwise.
+///
+/// From zero there is no band, so the same rule is asked of the tail alone —
+/// two opens of the last hit the list showed, which is the only sign a base
+/// with no band can give that its lists end too soon. Offered unconditionally,
+/// as it was, the first rung was adopted on no evidence whatever and then
+/// watched by lived rates the band barely moves. Requiring the evidence is the
+/// smaller of the two fixes; the other way round is teaching the probe replay
+/// to see the band, and a probe goes through `Door::Judge`, which appends no
+/// band by construction.
 pub fn next_spread(current: usize, use_: crate::store::feedback::BandUse) -> Option<usize> {
     use crate::core::ranking::SPREADS;
     let at = SPREADS.iter().position(|s| *s == current)?;
     if current == 0 {
-        return SPREADS.get(1).copied();
+        return SPREADS.get(1).copied().filter(|_| use_.tail_used >= 2);
     }
     let net = use_.band_used as i64 - use_.tail_used as i64;
     if net >= 2 {
@@ -609,7 +691,14 @@ async fn spread_step(
     current: crate::core::ranking::RankingParams,
     tried: &[GenerationParams],
 ) -> Result<Pass> {
-    let use_ = core.store.band_use(&live.id, current.spread_max).await?;
+    // At the off rung there is no band, and no tail of the band's width
+    // either: `band_use` reads the last `spread_max` hits shown, which at zero
+    // is nobody. Read one hit wide there, so `next_spread` has the one signal
+    // that rung can be argued for on.
+    let use_ = core
+        .store
+        .band_use(&live.id, current.spread_max.max(1))
+        .await?;
     let Some(next) = next_spread(current.spread_max, use_) else {
         return review_step(core, live, current, tried).await;
     };
@@ -700,6 +789,17 @@ async fn review_step(
     tried: &[GenerationParams],
 ) -> Result<Pass> {
     use crate::core::ranking::REVIEW_MINS;
+    // Under "full" only, and it is the one ladder rung that is not part of the
+    // reversible half. Stepping the threshold down widens what the dedupe
+    // judge considers, and the merges and supersessions that follow are corpus
+    // writes `revert_generation` does not undo — so moving it under "ranking"
+    // made the config's claim that "ranking" is the reversible half false.
+    // Its `wrong` signal reads `undone` rows besides, which only the corpus
+    // rules produce, so under the default the ladder could only ever have
+    // walked one way: down.
+    if !core.evolve.autonomous.acts_on_corpus() {
+        return Ok(Pass::default());
+    }
     let Some(at) = REVIEW_MINS
         .iter()
         .position(|r| (r - current.review_min).abs() < 1e-6)
@@ -1097,7 +1197,17 @@ mod tests {
     pub(crate) async fn seeded_with_observations() -> (Core, String) {
         let (core, order) = seeded().await;
         let generation = generation_for(&core).await;
-        observe(&core, &generation, &order[3], 4).await;
+        // Ten, because `sweep::MIN_PAIRS` is what a recommendation needs
+        // behind it and two opens are two opens. Nine of the first excerpt
+        // and one of the second, rather than five each: `jobs::retract`'s
+        // pass-level tests supersede whatever stands third *after* this base
+        // has adopted — which is this second excerpt — and weigh three fresh
+        // observations of it at rank 1 against what it has here. How many of
+        // those there are is a fact about this fixture. The cap lifts both, so
+        // the gate this fixture exists for reads the same either way.
+        for _ in 0..9 {
+            observe(&core, &generation, &order[3], 4).await;
+        }
         observe(&core, &generation, &order[4], 5).await;
         (core, generation)
     }
@@ -1122,8 +1232,10 @@ mod tests {
             "a configured reranker starts on"
         );
         let generation = generation_for(&core).await;
-        observe(&core, &generation, &order[0], 6).await;
-        observe(&core, &generation, &order[1], 5).await;
+        for _ in 0..5 {
+            observe(&core, &generation, &order[0], 6).await;
+            observe(&core, &generation, &order[1], 5).await;
+        }
         (core, generation)
     }
 
@@ -1190,8 +1302,10 @@ mod tests {
         let (core, order, reranker) =
             crate::eval::sweep::test_support::seeded_with_reranker().await;
         let generation = generation_for(&core).await;
-        observe(&core, &generation, &order[3], 3).await;
-        observe(&core, &generation, &order[4], 2).await;
+        for _ in 0..5 {
+            observe(&core, &generation, &order[3], 3).await;
+            observe(&core, &generation, &order[4], 2).await;
+        }
         let mut core = core;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         let before = reranker.calls();
@@ -1236,8 +1350,13 @@ mod tests {
         );
         assert_eq!(
             next_spread(0, u(0, 0)),
+            None,
+            "from zero, with nothing reaching the end of a list, nothing moves"
+        );
+        assert_eq!(
+            next_spread(0, u(0, 2)),
             Some(1),
-            "from zero, the first rung is tried once"
+            "two opens of the last hit shown is a list that ends too soon"
         );
         assert_eq!(
             next_spread(4, u(9, 0)),
@@ -1439,11 +1558,11 @@ mod tests {
     }
 
     /// The first spread rung is offered once, and a revert is what remembers
-    /// it — not the rule, which offers it unconditionally from zero.
+    /// it — not the rule, which would hand it back every time it is asked.
     ///
-    /// From `spread_max = 0` there is no band to measure, so `next_spread` has
-    /// nothing to read and hands back the first rung every time it is asked.
-    /// What stops that becoming a cycle — adopt, watch, revert, adopt again,
+    /// From `spread_max = 0` there is no band to measure, so `next_spread`
+    /// reads the tail alone and offers the first rung for as long as the last
+    /// hit shown goes on being opened. What stops that becoming a cycle — adopt, watch, revert, adopt again,
     /// with `pass` returning early for the whole of every watch and no other
     /// axis ever getting a turn — is `tried_candidates`, which reads the
     /// `reverted` state off the row. This test is that claim, exercised through
@@ -1472,6 +1591,13 @@ mod tests {
             .unwrap()
             .expect("nothing names a parent");
         rehearsed_once(&core, &at_zero).await;
+        // Two opens of the last hit the list showed. Without them the off rung
+        // has nothing arguing for it and the pass offers nothing at all — the
+        // first rung used to be adopted on no evidence whatever.
+        let ranked: Vec<&str> = order_of(&core).await;
+        for _ in 0..2 {
+            captured_and_opened(&core, &ranked[..3], &[], ranked[2]).await;
+        }
 
         let first = run(&core)
             .await
@@ -1944,13 +2070,22 @@ mod tests {
         // the life of the base.
         let (mut core, order) = seeded().await;
         let generation = generation_for(&core).await;
-        observe(&core, &generation, &order[3], 4).await;
-        observe(&core, &generation, &order[4], 5).await;
+        for _ in 0..5 {
+            observe(&core, &generation, &order[3], 4).await;
+            observe(&core, &generation, &order[4], 5).await;
+        }
         core.evolve.autonomous = crate::config::Autonomy::Full;
         run(&core).await.unwrap().expect("a candidate cleared");
         let live = core.store.live_generation().await.unwrap().unwrap().id;
-        for artifact in &order[..3] {
-            observe(&core, &live, artifact, 1).await;
+        // As many observations as the record it is measured against, on the
+        // two excerpts the move did not touch: the leading source's own top
+        // two, which sit where they sat under either parameter set. So the
+        // parent does not clear the gate on the new generation's own
+        // evidence — the promise was kept — and the ladder has nothing left
+        // to lift either.
+        for _ in 0..5 {
+            observe(&core, &live, &order[0], 1).await;
+            observe(&core, &live, &order[1], 2).await;
         }
         let runs = eval_runs(&core).await;
 

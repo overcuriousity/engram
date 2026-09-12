@@ -362,12 +362,13 @@ async fn render(
         .collect();
     // What the band is waiting for: a capture still being read, or the next
     // change to what is due — whichever is sooner.
-    let queue_active = tenant
-        .core
-        .store
-        .foreground_work_in_flight()
-        .await
-        .unwrap_or(false);
+    //
+    // The same narrowed probe the idle line asks, not the broader "is any
+    // foreground row in the queue". What the band is waiting for is a reminder,
+    // and a reminder is written by the window job — a reading stage. A promoted
+    // background sweep or a crashed process's stale claim moves nothing the
+    // band shows, and both used to pin it at two seconds.
+    let queue_active = crate::web::ui::reading_a_capture(&tenant.core.store).await;
     let next_at = tenant
         .core
         .store

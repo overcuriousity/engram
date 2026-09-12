@@ -7,15 +7,16 @@
    what it should do. See `Store::record_search`. #}
 <span hx-swap-oob="innerHTML:#fold-of">{% if let Some(ev) = event_id %}<input type="hidden" name="fold" value="{{ ev }}">{% endif %}</span>
 {% if results.is_empty() && associated.is_empty() %}
-  {# While a capture is read the answer may be in it: no gap is offered. #}
-  {% if reading %}
-  <p class="muted">No matches yet · still reading</p>
-  {% else %}
-  <p class="muted">No matches.</p>
-  {% if let Some(ev) = event_id %}
+  {# While a capture is read the answer may be in it, so the line says so and
+     no gap is offered. `ResultsTemplate::gap` holds that rule and the one
+     about an empty base; the paragraph is written once either way. #}
+  {# `still-reading` is what app.js looks for before re-running the search when
+     the read lands: this line is the dead end that needs re-running, and a
+     rail showing anything else does not. #}
+  <p class="muted{% if reading %} still-reading{% endif %}">{% if reading %}No matches yet &middot; still reading{% else %}No matches.{% endif %}</p>
+  {% if let Some(ev) = self.gap() %}
   <p><button class="btn btn-sm" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
              hx-target="this" hx-swap="outerHTML">Nothing here has it</button></p>
-  {% endif %}
   {% endif %}
 {% else %}
 <div data-terms="{{ terms }}">
@@ -45,11 +46,9 @@
       {# The deck's "gap" key, moved to where the person is when they know.
          A verdict on the whole list, so it sits with the line about the whole
          list rather than under any one row. #}
-      {% if !reading %}
-      {% if let Some(ev) = event_id %}
+      {% if let Some(ev) = self.gap() %}
       <p><button class="btn btn-sm" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
                  hx-target="this" hx-swap="outerHTML">Nothing here has it</button></p>
-      {% endif %}
       {% endif %}
     </div>
   </div>
@@ -144,6 +143,16 @@
          rail heavy enough to need a scrollbar of its own. The facets above
          narrow by tag, which is what the chips were being read for. #}
       <div class="rail-snippet">{{ r.snippet }}</div>
+      {# Where in its source this sits, under the snippet and prefixed, not
+         over it as a name. A passage carries the heading of the section it was
+         cut from, and emptying the name slot for that heading took the row's
+         only statement of whereabouts with it — a passage row said nothing at
+         all about where it came from. A qualifier can stand on every passage
+         of a chapter without claiming each of them is called that, which is
+         what the heading in the title slot was doing. See `render_hit`. #}
+      {% if !r.section.is_empty() %}
+      <p class="rail-where">in {{ r.section }}</p>
+      {% endif %}
       {# The badges above say what a result *is*. This says why it is *here* —
          one quiet line rather than a row of chips, because "moved up because
          you opened this more" is a sentence and `primed` is a word you have

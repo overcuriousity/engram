@@ -2442,24 +2442,34 @@ async fn interference_is_counted_and_filed_nowhere_for_a_fixture_built_to_produc
         now,
     )
     .await;
-    core.store
-        .record_rehearsal(&engram::store::rehearsals::NewRehearsal {
-            class: engram::store::rehearsals::Class::Cue,
-            query: "how do I loop mount".into(),
-            query_vec: vec![1.0, 0.0, 0.0, 0.0],
-            embed_model: core.embedder.model().to_string(),
-            artifact_id: owner.clone(),
-            source_id: None,
-        })
-        .await
-        .unwrap()
-        .unwrap();
+    // Two probes, not one probe replayed twice.
+    //
+    // The fixture used to record one and rehearse it on two passes, which is
+    // the same measurement counted twice: an unchanged base replays a probe to
+    // the identical row every night, and two identical rows are not two
+    // artifacts agreeing about anything. `interferers` counts distinct probes
+    // now, so a fixture meaning to demonstrate interference has to give the
+    // owner two independent ways of being asked for.
+    for q in ["how do I loop mount", "mounting an image read only"] {
+        core.store
+            .record_rehearsal(&engram::store::rehearsals::NewRehearsal {
+                class: engram::store::rehearsals::Class::Cue,
+                query: q.into(),
+                query_vec: vec![1.0, 0.0, 0.0, 0.0],
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: owner.clone(),
+                source_id: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+    }
     let live = live_generation(&core).await;
     for _ in 0..2 {
         let r = engram::jobs::sleep::rehearse(&core, &live, now)
             .await
             .unwrap();
-        assert_eq!((r.rehearsed, r.found), (1, 1), "{r:?}");
+        assert_eq!(r.found, r.rehearsed, "{r:?}");
     }
     let (observed, stopped) = engram::jobs::sleep::interference(&core, &live, now)
         .await

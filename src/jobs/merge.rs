@@ -267,9 +267,7 @@ pub async fn undo(
         )
         .await?;
     tracing::info!(merged = %m.id, restored = restored.len(), "undid a merge");
-    Ok(Undone::TakenApart {
-        restored: restored.len(),
-    })
+    Ok(Undone::TakenApart)
 }
 
 /// What [`undo`] did — which is not always "undid it".
@@ -284,8 +282,13 @@ pub async fn undo(
 pub enum Undone {
     /// The merge was taken apart: what it hid is active again, it is
     /// deprecated, and the pairs behind it are dismissed so the sweep does not
-    /// simply redo it. Carries how many artifacts came back.
-    TakenApart { restored: usize },
+    /// simply redo it.
+    ///
+    /// Carried a count of what came back, which nothing ever read — the same
+    /// number is on the `info` line above, where the one reader it has is
+    /// looking. `HiddenBehind` keeps its payload because the undo route does
+    /// read that one.
+    TakenApart,
     /// Nothing was done. A later merge subsumed this one and holds its
     /// supersession, so taking this one apart would mean overruling a decision
     /// the press did not name. Carries the merge now standing in front of it.
@@ -296,7 +299,7 @@ impl Undone {
     /// Whether the base changed, and so whether the journal rows that recorded
     /// this merge may be stamped undone.
     pub fn happened(&self) -> bool {
-        matches!(self, Undone::TakenApart { .. })
+        matches!(self, Undone::TakenApart)
     }
 }
 

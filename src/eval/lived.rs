@@ -55,6 +55,16 @@ pub async fn lived(core: &Core, generation_id: &str) -> Result<Lived> {
     })
 }
 
+/// Observations the newer generation needs before this may take it back. Ten,
+/// the same floor as `rehearsed::MIN_PROBES` and `tune::MIN_BAND` and for the
+/// same reason: the noise term is `2/n` a side, so at ten it is a fifth of the
+/// rate range and the two records have to be genuinely far apart to clear it.
+/// Below that a revert is arithmetic on a handful of events — two give-ups
+/// against a parent with forty positives cleared the gate outright, which is
+/// exactly the disproportion "weak evidence may only revert" was meant to
+/// prevent.
+pub const MIN_OBSERVATIONS: usize = 10;
+
 /// The watch gate: whether the adopted generation keeps its place against the
 /// one it replaced.
 ///
@@ -70,7 +80,20 @@ pub async fn lived(core: &Core, generation_id: &str) -> Result<Lived> {
 /// observations it moves the rate by `2 / n` — and it could have happened in
 /// either record. Thin evidence therefore resolves to the branch that changes
 /// nothing: one observation cannot separate anything from anything.
+///
+/// Not corrected for repeated testing, and that is a known weakness rather
+/// than an oversight. Every idle pass asks this again of a growing record, so
+/// the chance that *some* pass in a watch clears the gate is well above what
+/// one reading suggests. A correction would need to know how many times this
+/// generation has been asked about, which is a number nothing keeps; what
+/// stands in for it is `MIN_OBSERVATIONS` and the fact that a false revert is
+/// cheap — the row remembers the candidate, the base goes back to a
+/// configuration it had already measured, and the next pass walks a different
+/// rung.
 pub fn holds_up(new: &Lived, old: &Lived) -> bool {
+    if new.observations < MIN_OBSERVATIONS {
+        return true;
+    }
     let (Some(new_rate), Some(old_rate)) = (new.rate(), old.rate()) else {
         return true;
     };
@@ -197,9 +220,9 @@ mod tests {
     #[test]
     fn a_generation_that_lost_ground_does_not_hold_up() {
         let new = Lived {
-            positives: 3,
-            negatives: 6.0,
-            observations: 9,
+            positives: 4,
+            negatives: 8.0,
+            observations: 12,
         };
         let old = Lived {
             positives: 9,
@@ -212,29 +235,41 @@ mod tests {
     #[test]
     fn a_tie_keeps_the_newer_generation() {
         let a = Lived {
-            positives: 5,
-            negatives: 2.0,
-            observations: 7,
+            positives: 9,
+            negatives: 3.0,
+            observations: 12,
         };
         assert!(holds_up(&a, &a), "reverting is a change too");
     }
 
     #[test]
     fn too_few_observations_hold_up_rather_than_revert() {
-        // Not a floor anybody chose: one observation cannot clear a gate in
-        // either direction, and the one that fires on no evidence must be the
-        // one that changes nothing.
-        let new = Lived {
-            positives: 0,
-            negatives: 1.0,
-            observations: 1,
-        };
         let old = Lived {
             positives: 40,
             negatives: 0.0,
             observations: 40,
         };
-        assert!(holds_up(&new, &old), "one observation decides nothing");
+        let one = Lived {
+            positives: 0,
+            negatives: 1.0,
+            observations: 1,
+        };
+        assert!(holds_up(&one, &old), "one observation decides nothing");
+        // And nine do not either. The arithmetic alone would have taken the
+        // generation back on two give-ups against forty positives, which is
+        // the disproportion the floor exists to refuse.
+        let nine = Lived {
+            positives: 0,
+            negatives: 9.0,
+            observations: 9,
+        };
+        assert!(holds_up(&nine, &old), "under the floor nothing is decided");
+        let ten = Lived {
+            positives: 0,
+            negatives: 10.0,
+            observations: 10,
+        };
+        assert!(!holds_up(&ten, &old), "and at the floor the record speaks");
     }
 
     #[test]

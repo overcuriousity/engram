@@ -130,11 +130,12 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         core.store.clear_pair_synthesis(p.id).await?;
         return Ok(());
     }
-    // The week's budget, read before the judge call: a verdict this unit may
+    // Dedupe's own week, read before the judge call: a verdict this unit may
     // not act on is a call spent for nothing. The pair stays pending and the
     // next arming asks again once the window has moved. Only under "full";
-    // below it this sweep is under its own switch, as it was.
-    if !core.may_act().await? {
+    // below it this sweep is under its own switch, as it was. Counted per job,
+    // so a week of promotions or condensations cannot close this one.
+    if !core.may_act(crate::store::actions::Job::Dedupe).await? {
         tracing::info!(
             pair = id,
             "budget spent; the pair waits for the window to move"
@@ -237,7 +238,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             provenance = r.provenance.as_str(),
             "a member's lineage names something a merge may not rewrite; handing the pair to a person"
         );
-        // A person may have pressed Synthese on a lineage that has changed
+        // A person may have pressed "Write one" on a lineage that has changed
         // under them since the card was drawn. The ask is cleared rather than
         // left standing, because the card reads it as "the writing is queued"
         // and nothing is going to write this one.
@@ -247,16 +248,18 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         return settle(
             core,
             &p,
-            PairState::Contradiction,
+            PairState::Unmergeable,
             Some(
-                "These cannot be merged automatically: what one of them is made of is \
-                 stored source text, and a merge must not rewrite that. Resolve by hand.",
+                "These cannot be written as one automatically: what one of them is made of \
+                 is stored source text, and a merge must not rewrite that. That they cover \
+                 the same ground is not in question — keeping one, or discarding both, still \
+                 answers this.",
             ),
         )
         .await;
     }
 
-    // An operator pressed Synthese. The verdict is not asked for, because it
+    // An operator pressed "Write one". The verdict is not asked for, because it
     // has been given: they read both sides and decided these cover the same
     // ground. Asking the model to decide again invites it to answer `distinct`
     // and leave the press with nothing to show for it — and it does not decide
@@ -623,10 +626,11 @@ async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk
         return settle(
             core,
             p,
-            PairState::Contradiction,
+            PairState::Unmergeable,
             Some(
-                "These could not be written as one: the draft would have dropped a value \
-                 one of them states. Which is current is the judgement this hands over.",
+                "These could not be written as one: every draft so far dropped a value one \
+                 of them states. That they cover the same ground is not in question — which \
+                 value is current is the part a person has to say.",
             ),
         )
         .await;
@@ -691,14 +695,38 @@ async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk
 fn synthesis_prompt(members: &[Chunk]) -> String {
     let mut s = String::new();
     for m in members {
-        let title = crate::web::ui::row_label(m).text;
-        s.push_str(&format!(
-            "----- ARTIFACT -----\nTitle: {title}\n\n{}\n",
-            m.text
-        ));
+        s.push_str("----- ARTIFACT -----\n");
+        // Where there is a name. This used to call `web::ui::row_label`, which
+        // is the page's rule for a table cell — a ranking job reaching into an
+        // HTTP page module for a string, the dependency commit 21e55f9 removed
+        // from `fmt` and this one reintroduced.
+        //
+        // It is also the wrong rule here. `row_label` stands the first sixty
+        // characters of the body in for a missing name, so a passage arrived
+        // as "Title: <its own opening>" directly above that same opening in
+        // full — the model was shown one artifact and told the first line of
+        // it was what it is called. A passage has no name; the body says
+        // everything the body says.
+        if let Some(name) = prompt_name(m) {
+            s.push_str(&format!("Title: {name}\n"));
+        }
+        s.push_str(&format!("\n{}\n", m.text));
     }
     s.push_str("----- END -----");
     s
+}
+
+/// What to call an artifact in a prompt, where a writer named it.
+///
+/// `Provenance::names_its_own_text` is the same rule `web::ui::title_of`
+/// applies before anything else, asked here at the layer it belongs to: a
+/// passage and a note carry a heading that names the section they were cut
+/// from, not the artifact.
+fn prompt_name(c: &Chunk) -> Option<&str> {
+    if !c.provenance.names_its_own_text() {
+        return None;
+    }
+    c.title.as_deref().map(str::trim).filter(|t| !t.is_empty())
 }
 
 async fn apply(core: &Core, s: Settlement) -> Result<()> {
@@ -1061,7 +1089,7 @@ mod tests {
         let read = core.store.get_pair(pair).await.unwrap();
         assert_eq!(
             read.state,
-            PairState::Contradiction,
+            PairState::Unmergeable,
             "the pair was left for `arm_dedupe` to buy again"
         );
     }
@@ -1085,7 +1113,7 @@ mod tests {
         assert_eq!(judge.calls(), 0, "a passage pair was sent to the judge");
         assert_eq!(
             core.store.get_pair(pair).await.unwrap().state,
-            PairState::Contradiction
+            PairState::Unmergeable
         );
     }
 
@@ -2256,7 +2284,7 @@ mod tests {
     /// The press has to work on the card it is actually offered on.
     ///
     /// `Relation::Duplicate` settles the pair `PairState::Duplicate` and waits
-    /// for a person; the Synthese button is drawn on that card, and by then the
+    /// for a person; the "Write one" button is drawn on that card, and by then the
     /// pair is not `Pending`. The unit's opening guard sent every one of those
     /// presses home having done nothing — and `_decide.html` had already
     /// replaced all four answer buttons, so the card was frozen for good on the
@@ -2366,7 +2394,11 @@ mod tests {
             p.merged_into.is_none(),
             "a draft that drops a command was written anyway"
         );
-        assert_eq!(p.state, PairState::Contradiction, "handed to a person");
+        assert_eq!(
+            p.state,
+            PairState::Unmergeable,
+            "handed to a person, and not as a disagreement"
+        );
         assert!(!p.synthesis_asked, "the card stops promising it");
         for id in &ids {
             assert!(

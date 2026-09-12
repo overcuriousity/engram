@@ -1190,7 +1190,11 @@ Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","
 
 pub const CONDENSE_SYSTEM: &str = r#"You rewrite one knowledge-base artifact shorter, keeping everything it states.
 
-You are given the artifact and the wording of the questions it has been answering. Write the same artifact with less prose: drop what none of the questions needed, keep every value, command, path, version, port, flag, date and error string exactly as written, keep the title unless it is wrong, and keep every caveat. Do not add anything. Do not restate the questions.
+You are given the artifact and the wording of questions that reached it. Shorten the prose only: cut repetition, filler and restatement, and join sentences that say one thing twice. Keep everything the artifact states — every claim, condition and qualification, and every value, command, path, version, port, flag, date and error string exactly as written. Keep the title unless it is wrong, and keep every caveat.
+
+The questions show you what this artifact is asked for. They do not tell you what to drop. A detail no question happened to mention is the reason the next question will find this artifact rather than a similar one, so it stays. If the artifact cannot be made shorter without dropping something it states, reply with it unchanged.
+
+Do not add anything. Do not restate the questions.
 
 Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
@@ -1249,9 +1253,9 @@ Reply with JSON only, no commentary, in exactly this shape:
 /// that drops a number is worse than no merge at all.
 pub const SYNTHESIZE_SYSTEM: &str = r#"You are given two knowledge artifacts that a person has already judged to cover the same ground. Whether they do is settled and is not your question. Write one artifact that says everything both of them said.
 
-The merged text must contain every number, version, date, path, flag, command and error string that appeared in either input. Where two of them disagree, keep both and say which artifact each came from. Dropping one is the failure this task exists to avoid.
+The merged text must contain every number, version, date, path, flag, command and error string that appeared in either input. Where two of them disagree, keep both values and say what distinguishes them — the version, the platform, the date, whichever the inputs give. Dropping one is the failure this task exists to avoid.
 
-It must read as one self-contained artifact rather than a list of sources, and it must stand on its own without them: a reader who never sees the originals must not be left with a dangling reference to "the other document" or "as above".
+Name the distinguishing condition, never the input it came from. "8080 on the old build, 9090 since 1.4" is right; "8080 in the other document" is not, because a reader who never sees the originals cannot resolve it. For the same reason the text must read as one self-contained artifact rather than a list of sources, with no "as above" and no reference to a document the reader does not have.
 
 The title names the subject. An artifact whose body never says what it is about is what makes it unfindable later — a section headed "FAT32" becomes a body that opens "32 Bit Clusternummern" and never says FAT32 again, and then only the title can answer what it is for.
 

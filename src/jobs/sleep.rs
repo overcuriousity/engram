@@ -2,8 +2,19 @@
 //!
 //! Four phases, in `tune::run_if_quiet`'s order: integrate (here), rehearse
 //! (here), reorganise (the corpus rules), wake (the journal). This module
-//! holds the two that read the base and write evidence; nothing in it spends
-//! a generation.
+//! holds the two that read the base and write evidence, and two of the corpus
+//! rules that read back what they left: `interference`, which counts what
+//! outranks a probe's owner and files nothing at all, and
+//! `condense_candidates`, which arms a rewrite. Nothing in it spends a
+//! generation.
+//!
+//! Integration files each new artifact as novel or known and mints a capture
+//! probe per near hit. There is no third tag: `Tag::Conflict` has no detector
+//! any more and nothing here produces one. `tag_for` says why — a token
+//! heuristic filed 130 pairs of lecture slides as contradictions on their
+//! footer dates, and whether two artifacts disagree is not a question
+//! anything that splits on whitespace can be asked. The variant survives so
+//! the rows written before it was deleted still read back as what they were.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -44,8 +55,10 @@ pub fn tag_for(review_min: f32, nearest: Option<f32>) -> Tag {
 /// Every new artifact, run once against the rest of the base.
 ///
 /// Same-corpus hits are structure, not knowledge — the reason `relate` skips
-/// passages — applied as a filter so passages are integrated too. A conflict
-/// files a pair for a person; a known artifact files nothing here, because
+/// passages — applied as a filter so passages are integrated too. The
+/// integration row is the whole of what this files: novel or known, what it
+/// landed on, how near. No pair is filed for a person here or anywhere else in
+/// this module. A known artifact files nothing further either, because
 /// `relate` already does for model-written ones and verbatim text waits for
 /// promotion. Every near hit gets a probe: this text is a question somebody
 /// asked that the near artifact answers.
@@ -208,6 +221,13 @@ pub(crate) async fn pair_of(
         // no list the reranker could have ordered.
         served_rank: None,
         served_reranked: false,
+        // The artifact whose text is the query. It answers itself at cosine
+        // one and a perfect lexical match, so left in the results it stands
+        // above the owner in every replay whatever the parameters are — which
+        // caps a probe's reciprocal rank at one half, makes the source an
+        // interferer of its own owner, and halves the margin the refuse gate
+        // thinks it is asking for. See `Pair::exclude`.
+        exclude: r.source_id.iter().cloned().collect(),
     }
 }
 
@@ -259,10 +279,12 @@ pub async fn rehearse(
     // live probe like any other, so the lap walks straight over the ones
     // already in hand — and on a base whose probes all fit in one lap, that is
     // every one of them. `rehearsal_results` has no uniqueness, so a probe
-    // measured twice in one pass writes two rows off a single reading, and
-    // every test spelled "at least two retained results" then passes on one
-    // observation agreeing with itself: interference files a pair, condense
-    // arms a rewrite, and neither has the second measurement it says it has.
+    // measured twice in one pass writes two rows off a single reading — a
+    // second search spent to learn nothing, and a pair of rows that
+    // `fragile_rehearsals` then reads as its last two results agreeing. The
+    // rules downstream count distinct probes now (`MIN_AGREEING_PROBES`) and
+    // are no longer fooled into reading one reading as two, but the wasted
+    // search is reason enough on its own.
     let held: std::collections::HashSet<String> = batch.iter().map(|r| r.id.clone()).collect();
     // Where the lap ends, taken before the overlap is dropped. The cursor
     // below moves only over probes the loop measures, so a lap whose every
@@ -477,9 +499,24 @@ async fn remint(
         .is_some())
 }
 
-/// Ids that stood above the owner in **every** retained result — at least
-/// two — and are from another corpus. One result is not a pattern; a
+/// How many distinct probes these results came from. Two rows are two
+/// observations only if two probes wrote them; see `interferers`.
+fn probes_behind(results: &[crate::store::rehearsals::RehearsalResult]) -> usize {
+    results
+        .iter()
+        .map(|r| r.rehearsal_id.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+/// Ids that stood above the owner in **every** retained result, from at least
+/// `MIN_AGREEING_PROBES` distinct probes, and from another corpus. A
 /// same-corpus neighbour is structure.
+///
+/// Probes and not rows. The rehearsal lap wraps, so an unchanged base replays
+/// the same probe on consecutive nights and writes identical rows: counting
+/// rows, "at least two retained results" was one reading agreeing with itself,
+/// which is not the agreement between two questions the rule claims to have.
 ///
 /// Nothing at all where any retained result missed the owner, which is the
 /// same guard `condense_candidates` carries and for a sharper reason here.
@@ -500,7 +537,9 @@ pub fn interferers<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    if results.len() < 2 || results.iter().any(|r| r.rank.is_none()) {
+    if probes_behind(results) < crate::store::rehearsals::MIN_AGREEING_PROBES
+        || results.iter().any(|r| r.rank.is_none())
+    {
         return vec![];
     }
     let mut out = Vec::new();
@@ -567,8 +606,9 @@ pub async fn interference(
         // Every retained result of every live probe of this owner, together —
         // under the live generation and no other. A rank is a measurement made
         // at one set of ranking parameters, so results either side of a
-        // generation boundary are two different measurements, and nothing
-        // expires them at the shipped default of `retain_days = 0`.
+        // generation boundary are two different measurements, and what a probe
+        // keeps reaches back `KEEP_PER_PROBE` passes whatever generation wrote
+        // them.
         let mut results = Vec::new();
         for p in core.store.rehearsals_of(&owner.id).await? {
             results.extend(
@@ -584,19 +624,30 @@ pub async fn interference(
         // artifact a burial or a merge has since taken away — a missing row
         // and a row with no corpus are two different answers, and reading
         // both as `None` conflated them.
+        //
+        // Only the ids that could still be an answer, which is the first
+        // result's list narrowed to what every other result also carries.
+        // `outranked_by` is a whole top ten, so resolving all of it cost ten
+        // lookups per result of every probe of every owner to decide a
+        // question about the handful that stood above the owner in all of
+        // them. `interferers` asks the same of the same ids below.
         let mut gone: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for r in &results {
-            for x in &r.outranked_by {
-                if !corpora.contains_key(x) {
-                    match core.store.get_artifact(x).await {
-                        Ok(a) => {
-                            corpora.insert(x.clone(), a.corpus_id);
-                        }
-                        Err(_) => {
-                            gone.insert(x.clone());
-                            corpora.insert(x.clone(), None);
-                        }
-                    }
+        for x in results
+            .first()
+            .map(|r| &r.outranked_by)
+            .into_iter()
+            .flatten()
+        {
+            if corpora.contains_key(x) || !results.iter().all(|r| r.outranked_by.contains(x)) {
+                continue;
+            }
+            match core.store.get_artifact(x).await {
+                Ok(a) => {
+                    corpora.insert(x.clone(), a.corpus_id);
+                }
+                Err(_) => {
+                    gone.insert(x.clone());
+                    corpora.insert(x.clone(), None);
                 }
             }
         }
@@ -632,10 +683,11 @@ pub async fn interference(
 
 /// A stable owner dragging one competitor, with use behind it: arm a
 /// condensation. Three things, each already measured: model-written and in
-/// results; found in every retained result of at least two, with one id
-/// standing above it in every one — the measurable half of "the same
-/// competitor trails or leads it", since what trails is not in the results
-/// table; and engagement at or above `promote.activation_above`. Returns
+/// results; found in every retained result of at least
+/// `MIN_AGREEING_PROBES` distinct probes, with one id standing above it in
+/// every one — the measurable half of "the same competitor trails or leads
+/// it", since what trails is not in the results table; and engagement at or
+/// above `promote.activation_above`. Returns
 /// (units armed, stopped early).
 pub async fn condense_candidates(
     core: &Core,
@@ -690,7 +742,12 @@ pub async fn condense_candidates(
                     .await?,
             );
         }
-        if results.len() < 2 || results.iter().any(|r| r.rank.is_none()) {
+        // Distinct probes, not rows: the lap wraps, so the same probe replayed
+        // on two nights writes two identical rows, and a rewrite armed on that
+        // is armed on one reading agreeing with itself.
+        if probes_behind(&results) < crate::store::rehearsals::MIN_AGREEING_PROBES
+            || results.iter().any(|r| r.rank.is_none())
+        {
             continue;
         }
         let same_company = results[0]
@@ -717,7 +774,7 @@ pub async fn condense_candidates(
         if earned < core.promote.activation_above {
             continue;
         }
-        if !core.may_act().await? {
+        if !core.may_act(crate::store::actions::Job::Sleep).await? {
             return Ok((armed, false));
         }
         crate::jobs::condense::arm(core, &owner.id).await?;
@@ -857,6 +914,51 @@ mod tests {
         );
     }
 
+    /// Two probes on one owner: two questions that both landed on it, which is
+    /// what `MIN_AGREEING_PROBES` asks for. One probe replayed twice is one
+    /// observation however many rows the wrapping lap leaves behind it.
+    async fn two_probes_on(core: &crate::core::Core, owner: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for q in ["q", "and another"] {
+            out.push(
+                core.store
+                    .record_rehearsal(&NewRehearsal {
+                        class: Class::Cue,
+                        query: q.into(),
+                        query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
+                        embed_model: core.embedder.model().to_string(),
+                        artifact_id: owner.to_string(),
+                        source_id: None,
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        out
+    }
+
+    /// One result per probe, all naming the same ids above the owner.
+    /// Hand-written, so the fake embedder's ordering stays out of it.
+    async fn outranked(
+        core: &crate::core::Core,
+        pids: &[String],
+        generation: &str,
+        above: &[String],
+    ) {
+        for pid in pids {
+            core.store
+                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                    rehearsal_id: pid.clone(),
+                    generation_id: generation.to_string(),
+                    rank: Some(2),
+                    outranked_by: above.to_vec(),
+                })
+                .await
+                .unwrap();
+        }
+    }
+
     pub(crate) async fn live_generation(
         core: &crate::core::Core,
     ) -> crate::store::generations::Generation {
@@ -897,10 +999,12 @@ mod tests {
     }
 
     #[test]
-    fn an_interferer_stands_above_in_every_result_at_least_twice_and_from_another_corpus() {
-        let res = |above: &[&str]| crate::store::rehearsals::RehearsalResult {
+    fn an_interferer_stands_above_in_every_result_of_two_probes_and_is_from_another_corpus() {
+        // Which probe wrote the row is the whole of what makes two rows two
+        // observations, so every row here names one.
+        let res = |probe: &str, above: &[&str]| crate::store::rehearsals::RehearsalResult {
             id: String::new(),
-            rehearsal_id: String::new(),
+            rehearsal_id: probe.to_string(),
             generation_id: String::new(),
             at: 0,
             rank: Some(2),
@@ -914,28 +1018,51 @@ mod tests {
             })
         };
         assert!(
-            interferers(&[res(&["x"])], Some("mine"), corpus).is_empty(),
+            interferers(&[res("p", &["x"])], Some("mine"), corpus).is_empty(),
             "one result is not a pattern"
         );
+        // The lap wraps, so an unchanged base replays one probe night after
+        // night and writes the same row again. Counted as rows, that was the
+        // agreement the rule acted on.
+        assert!(
+            interferers(&[res("p", &["x"]), res("p", &["x"])], Some("mine"), corpus).is_empty(),
+            "one probe agreeing with itself is one observation"
+        );
         assert_eq!(
-            interferers(&[res(&["x", "y"]), res(&["x"])], Some("mine"), corpus),
+            interferers(
+                &[res("p", &["x", "y"]), res("q", &["x"])],
+                Some("mine"),
+                corpus
+            ),
             vec!["x".to_string()]
         );
-        assert!(interferers(&[res(&["x"]), res(&["y"])], Some("mine"), corpus).is_empty());
         assert!(
-            interferers(&[res(&["twin"]), res(&["twin"])], Some("mine"), corpus).is_empty(),
+            interferers(&[res("p", &["x"]), res("q", &["y"])], Some("mine"), corpus).is_empty()
+        );
+        assert!(
+            interferers(
+                &[res("p", &["twin"]), res("q", &["twin"])],
+                Some("mine"),
+                corpus
+            )
+            .is_empty(),
             "same corpus is structure"
         );
 
         // A result that missed the owner carries the whole top ten as
         // `outranked_by`, so it agrees with anything. One is enough to make
         // the set say nothing.
-        let missed = |above: &[&str]| crate::store::rehearsals::RehearsalResult {
+        let missed = |probe: &str, above: &[&str]| crate::store::rehearsals::RehearsalResult {
             rank: None,
-            ..res(above)
+            ..res(probe, above)
         };
         assert!(
-            interferers(&[res(&["x"]), missed(&["x", "y"])], Some("mine"), corpus).is_empty(),
+            interferers(
+                &[res("p", &["x"]), missed("q", &["x", "y"])],
+                Some("mine"),
+                corpus
+            )
+            .is_empty(),
             "a replay that did not find the owner is not evidence about what displaced it"
         );
     }
@@ -946,10 +1073,11 @@ mod tests {
     /// A fragile probe is a live probe like any other, so `rehearsals_after`
     /// returns it too — and on any base whose probes fit in one lap, that is
     /// every one of them. `rehearsal_results` has no uniqueness, so measured
-    /// twice in one pass a probe wrote two rows off a single reading, and
-    /// "at least two retained results" then read as agreement between two
-    /// observations where there was only ever one. Interference files a pair
-    /// on that and condense arms a rewrite.
+    /// twice in one pass a probe writes two rows off a single reading: a
+    /// second search spent to learn nothing, and a pair of rows
+    /// `fragile_rehearsals` reads as its last two results agreeing. What the
+    /// rules downstream make of a duplicate is `MIN_AGREEING_PROBES`'s
+    /// question now, but the search is spent either way.
     #[tokio::test]
     async fn a_probe_the_fragile_half_took_is_not_measured_a_second_time_by_the_lap() {
         let (core, a1, _a2, _b) = two_corpora().await;
@@ -1110,31 +1238,15 @@ mod tests {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         let live = live_generation(&core).await;
-        let pid = core
-            .store
-            .record_rehearsal(&NewRehearsal {
-                class: Class::Cue,
-                query: "q".into(),
-                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
-                embed_model: core.embedder.model().to_string(),
-                artifact_id: a1.clone(),
-                source_id: None,
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let pids = two_probes_on(&core, &a1).await;
         // One id the base has, one it never had.
-        for _ in 0..2 {
-            core.store
-                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
-                    rehearsal_id: pid.clone(),
-                    generation_id: live.id.clone(),
-                    rank: Some(3),
-                    outranked_by: vec!["a-buried-artifact".into(), b.clone()],
-                })
-                .await
-                .unwrap();
-        }
+        outranked(
+            &core,
+            &pids,
+            &live.id,
+            &["a-buried-artifact".to_string(), b.clone()],
+        )
+        .await;
         let (seen, _) = interference(&core, &live, crate::store::now())
             .await
             .expect("one missing id does not fail the sweep");
@@ -1154,32 +1266,9 @@ mod tests {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         let live = live_generation(&core).await;
-        // A probe for a1 that b — another corpus — has outranked twice.
-        // Hand-written results keep the fake embedder's ordering out of it.
-        let pid = core
-            .store
-            .record_rehearsal(&NewRehearsal {
-                class: Class::Cue,
-                query: "q".into(),
-                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
-                embed_model: core.embedder.model().to_string(),
-                artifact_id: a1.clone(),
-                source_id: None,
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        for _ in 0..2 {
-            core.store
-                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
-                    rehearsal_id: pid.clone(),
-                    generation_id: live.id.clone(),
-                    rank: Some(2),
-                    outranked_by: vec![b.clone()],
-                })
-                .await
-                .unwrap();
-        }
+        // Two probes for a1 that b — another corpus — has outranked in both.
+        let pids = two_probes_on(&core, &a1).await;
+        outranked(&core, &pids, &live.id, std::slice::from_ref(&b)).await;
         let (seen, _) = interference(&core, &live, crate::store::now())
             .await
             .unwrap();
@@ -1209,30 +1298,8 @@ mod tests {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         let live = live_generation(&core).await;
-        let pid = core
-            .store
-            .record_rehearsal(&NewRehearsal {
-                class: Class::Cue,
-                query: "q".into(),
-                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
-                embed_model: core.embedder.model().to_string(),
-                artifact_id: a1.clone(),
-                source_id: None,
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        for _ in 0..2 {
-            core.store
-                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
-                    rehearsal_id: pid.clone(),
-                    generation_id: live.id.clone(),
-                    rank: Some(2),
-                    outranked_by: vec![b.clone()],
-                })
-                .await
-                .unwrap();
-        }
+        let pids = two_probes_on(&core, &a1).await;
+        outranked(&core, &pids, &live.id, std::slice::from_ref(&b)).await;
         interference(&core, &live, crate::store::now())
             .await
             .unwrap();
@@ -1260,30 +1327,8 @@ mod tests {
         core.evolve.autonomous = crate::config::Autonomy::Full;
         core.evolve.max_actions_per_week = 0;
         let live = live_generation(&core).await;
-        let pid = core
-            .store
-            .record_rehearsal(&NewRehearsal {
-                class: Class::Cue,
-                query: "q".into(),
-                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
-                embed_model: core.embedder.model().to_string(),
-                artifact_id: a1.clone(),
-                source_id: None,
-            })
-            .await
-            .unwrap()
-            .unwrap();
-        for _ in 0..2 {
-            core.store
-                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
-                    rehearsal_id: pid.clone(),
-                    generation_id: live.id.clone(),
-                    rank: Some(2),
-                    outranked_by: vec![b.clone()],
-                })
-                .await
-                .unwrap();
-        }
+        let pids = two_probes_on(&core, &a1).await;
+        outranked(&core, &pids, &live.id, std::slice::from_ref(&b)).await;
         assert_eq!(
             interference(&core, &live, crate::store::now())
                 .await
@@ -1311,24 +1356,12 @@ mod tests {
         core.evolve.autonomous = crate::config::Autonomy::Full;
         core.promote.activation_above = 0.0;
         let old = live_generation(&core).await;
-        let pid = core
-            .store
-            .record_rehearsal(&NewRehearsal {
-                class: Class::Cue,
-                query: "q".into(),
-                query_vec: vec![0.0; crate::core::test_support::TEST_DIM],
-                embed_model: core.embedder.model().to_string(),
-                artifact_id: a1.clone(),
-                source_id: None,
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let pids = two_probes_on(&core, &a1).await;
         // The manufactured miss, under the generation that is about to be
         // superseded.
         core.store
             .record_rehearsal_result(&crate::store::rehearsals::NewResult {
-                rehearsal_id: pid.clone(),
+                rehearsal_id: pids[0].clone(),
                 generation_id: old.id.clone(),
                 rank: None,
                 outranked_by: vec![],
@@ -1336,20 +1369,10 @@ mod tests {
             .await
             .unwrap();
 
-        // A new generation, and two clean results under it.
+        // A new generation, and a clean result from each probe under it.
         let live = live_generation(&core).await;
         assert_ne!(live.id, old.id);
-        for _ in 0..2 {
-            core.store
-                .record_rehearsal_result(&crate::store::rehearsals::NewResult {
-                    rehearsal_id: pid.clone(),
-                    generation_id: live.id.clone(),
-                    rank: Some(2),
-                    outranked_by: vec![b.clone()],
-                })
-                .await
-                .unwrap();
-        }
+        outranked(&core, &pids, &live.id, std::slice::from_ref(&b)).await;
 
         let (armed, _) = condense_candidates(&core, &live, crate::store::now())
             .await

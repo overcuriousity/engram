@@ -253,6 +253,24 @@ pub struct FeedbackConfig {
     pub coalesce_secs: i64,
     /// Days captured searches are kept. `0` keeps them forever.
     pub retain_days: i64,
+    /// The share of recorded searches that explore: lift the top unshown
+    /// candidate into the last visible row. `0.0` turns it off.
+    ///
+    /// The one hole in everything else here. Every positive observation this
+    /// module records is about an artifact the live ranking chose to show, so
+    /// the tuner's replay can reward reordering what was already on screen and
+    /// can never learn about what was hidden. Two consequences follow with no
+    /// way out from inside the loop: widening the candidate pool can never be
+    /// shown to help, because nothing outside the window is ever opened; and
+    /// recency ratchets, because people click among the recency-boosted rows
+    /// they were handed and the replay reads that as recency working.
+    ///
+    /// One row of one search in ten is the price of closing it. The lifted
+    /// candidate is charged to the rank the ranking gave it, not to the row it
+    /// borrowed — see `search_candidates.explored_from` — so an open on it is
+    /// evidence the incumbent could not have produced and cannot take credit
+    /// for.
+    pub explore: f32,
     /// How often the retention sweep runs. Hours rather than minutes because
     /// `retain_days` is the only thing it enforces: a window measured in days
     /// does not need checking more than a few times a day.
@@ -266,6 +284,7 @@ impl Default for FeedbackConfig {
             candidates: 20,
             coalesce_secs: 5,
             retain_days: 0,
+            explore: 0.1,
             sweep_hours: 6,
             tune: TuneConfig::default(),
         }
@@ -478,11 +497,21 @@ pub struct SittingConfig {
     ///
     /// The file's value is the starting rung: it is the only part of the
     /// sitting that moves an order, and the same query ranking differently in
-    /// two sittings is exactly what is disorienting about it — so it ships off,
-    /// the lift is bounded by the same budget activation's is, and rank 0 never
-    /// moves. What the sitting held is recorded whether or not this is on, so
-    /// the idle pass can replay a search with it on and find out whether it
+    /// two sittings is exactly what is disorienting about it — so the lift is
+    /// bounded by the same budget activation's is, and rank 0 never moves.
+    /// What the sitting held is recorded whether or not this is on, so the
+    /// idle pass can replay a search with it on and find out whether it
     /// should be; from there the live value is the generation's, not this.
+    ///
+    /// Two values, and they answer different questions. The compiled default
+    /// below is off, so an existing base that never wrote this key is not
+    /// moved by an upgrade; `config.example.toml` ships it on, so a new
+    /// deployment starts primed and its own watch decides from there. The
+    /// design that argued for measuring the sitting wanted the evidence
+    /// gathered while this was off, which is the clean counterfactual — a
+    /// base that ships primed is not gathering that. What it gathers instead
+    /// is a rung under watch, which the probe anchor and the lived watch may
+    /// take back, and that is the honest name for it.
     pub prime: bool,
 }
 
@@ -601,7 +630,16 @@ pub struct EvolveConfig {
     /// Under `"ranking"` the idle pass adopts a candidate that clears the
     /// sweep's gate as a new generation, watches what it earns while serving,
     /// and reverts it when it does not hold — on observations and on the
-    /// base's own probes both.
+    /// base's own probes both. What it may move there is the recency weight
+    /// and its half-life, the per-source cap, the candidate pool depth, the
+    /// prime lift, the sitting flip, the reranker and the width of the
+    /// associated band.
+    /// `consolidate.review_min` is on the same ladder and is *not* in that
+    /// list: stepping it down widens what the dedupe judge considers, and the
+    /// merges and supersessions that follow are corpus writes reverting the
+    /// generation row does not undo. Its "wrong" signal reads `undone` rows
+    /// that only the corpus rules produce, so under `"ranking"` the ladder
+    /// could only ever have walked one way — down. It moves under `"full"`.
     /// Under `"full"` the corpus rules run too, behind `max_actions_per_week`.
     /// The file is never written; the insights page says which generation is
     /// live. `true` and `false` still read, as `"full"` and `"off"`.

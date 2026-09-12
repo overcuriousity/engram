@@ -6,7 +6,7 @@
 {# A base with nothing in it has nothing to measure, and three panels of
    zeros make a healthy empty base read as a broken full one. Only the
    measures: a gap is a question the base could not answer, which is exactly
-   what an empty base produces, and the sweeps and the queue run whether or not
+   what an empty base produces, and the sweeps and the capture queue run whether or not
    anything has been captured — hiding the page would hide all of that. What is
    noisy rather than absent lives behind the disclosure at the foot. #}
 {% if held.corpora == 0 %}
@@ -32,7 +32,7 @@
     <p class="measure-sub">artifacts, from {{ held.corpora }} source{% if held.corpora != 1 %}s{% endif %}</p>
     {# The thesis of the application, as a number: rewriting is earned, so
        most of what is held should be the operator's own words. #}
-    <p class="measure-sub">{{ held.synthesized }} written by a model · {{ held.segments }} segments <span class="gloss">— slices the model reads</span></p>
+    <p class="measure-sub">{{ held.synthesized }} written by a model · {{ held.segments }} segments — slices the model reads</p>
   </div>
 
   <div class="measure">
@@ -51,34 +51,28 @@
 
   <div class="measure">
     <div class="label pane-label">Retrieval</div>
-    {% if let Some(f) = retrieval %}
-    {% if f.judged > 0 %}
     {# Not a proxy score: recall@10 and MRR read off the positions those
        searches actually gave. A test query written while looking at an
        artifact reuses its wording and every system passes it — these come
-       from questions asked in earnest, before anything came back. #}
-    <p class="measure-row"><span>recall@10 <span class="gloss">— right result in the top 10</span></span><span class="mono">{{ f.recall_at_10 }}</span></p>
-    <p class="measure-row"><span>MRR <span class="gloss">— how high it ranked</span></span><span class="mono">{{ f.mrr }}</span></p>
-    <p class="measure-sub">from {{ f.judged }} judged search{% if f.judged != 1 %}es{% endif %}{% if f.pending > 0 %}, {{ f.pending }} waiting{% endif %}</p>
-    {% else %}
-    {# Nothing judged yet. A 0.00 here would read as a score rather than as an
-       absence, which is the one thing this figure must never do — and an
-       em dash is not a number at all.
+       from questions asked in earnest, before anything came back.
 
-       The rows rather than a paragraph in their place: this card stood in a
-       row of three and answered with three lines of prose where the other two
-       had figures, so the row read as one broken card rather than as three
-       measures, one of which has nothing to say yet. #}
-    <p class="measure-row"><span>recall@10 <span class="gloss">— right result in the top 10</span></span><span class="mono">—</span></p>
-    <p class="measure-row"><span>MRR <span class="gloss">— how high it ranked</span></span><span class="mono">—</span></p>
-    <p class="measure-sub">nothing judged yet, from {{ f.captured }} recorded — answer
-      <em>Was this what you were looking for?</em> under a result</p>
-    {% endif %}
-    {% else %}
-    <p class="measure-row"><span>recall@10 <span class="gloss">— right result in the top 10</span></span><span class="mono">—</span></p>
-    <p class="measure-row"><span>MRR <span class="gloss">— how high it ranked</span></span><span class="mono">—</span></p>
-    <p class="measure-sub">not recording searches, so there is nothing to measure</p>
-    {% endif %}
+       Two rows and a line, in every state. The figure is resolved in Rust —
+       an em dash where there is nothing to say, because a 0.00 here would read
+       as a score rather than as an absence, which is the one thing this
+       measure must never do — and `note` says which absence it is. The three
+       states used to be three branches with the label-and-gloss markup copied
+       into each, so the wording of "right result in the top 10" was a
+       four-place edit.
+
+       The rows rather than a paragraph in their place: this card stands in a
+       row of three, and three lines of prose where the other two have figures
+       read as one broken card rather than as a measure with nothing to say
+       yet. #}
+    <p class="measure-row"><span>recall@10 <span class="gloss">— right result in the top 10</span></span><span class="mono">{{ retrieval.recall_at_10 }}</span></p>
+    <p class="measure-row"><span>MRR <span class="gloss">— how high it ranked</span></span><span class="mono">{{ retrieval.mrr }}</span></p>
+    {# `safe`: the note is built in Rust and its only variable part is a count.
+       See `Retrieval::note`. #}
+    <p class="measure-sub">{{ retrieval.note|safe }}</p>
   </div>
 </div>
 
@@ -127,7 +121,7 @@
    one sentence that points back up at the gap list. It says it beside the list
    it points at instead. No table: a run that ended unsatisfied is a hole and
    is already on that list, one that ended satisfied needs nobody, and one that
-   was written up is in the queue below under `generated`. #}
+   was written up is in the set-aside list below under `generated`. #}
 {# Only when there is something to say. "No run of searches has gone quiet
    yet" is a sentence about a thing that has not happened, and with no gap list
    above it to belong to it stood alone between two sections under no heading
@@ -169,16 +163,16 @@
    own categories; the reason belongs on the row, because that is where it
    differs.
 
-   The reads are untouched, each with its own cap. `web::insights::QueueRow`
+   The reads are untouched, each with its own cap. `web::insights::SetAsideRow`
    is the fold. #}
-{% if !queue.is_empty() %}
+{% if !set_aside.is_empty() %}
 <h2>Set aside for you</h2>
 <p class="muted">What the base did on its own and left an undo for, and what it
   is waiting to be told. Nothing here is urgent.</p>
 <table class="grid set-aside">
   <thead><tr><th>What</th><th>Why it is here</th><th>Beside it</th><th></th></tr></thead>
   <tbody>
-  {% for r in queue %}
+  {% for r in set_aside %}
     <tr>
       <td>
         {# A label that is the artifact's own opening rather than a name it was
@@ -223,7 +217,7 @@
   {% endfor %}
   </tbody>
 </table>
-{% if queue_capped %}
+{% if set_aside_capped %}
 <p class="muted">Some of these lists are capped — the rest appear as these are cleared.</p>
 {% endif %}
 {% endif %}
@@ -349,7 +343,7 @@
 
 {# One sentence for everything that is empty. Five headings each answered
    "None." made a base with nothing wrong with it look like a backlog. #}
-{% if queue.is_empty() && retrying.is_empty() %}
+{% if set_aside.is_empty() && retrying.is_empty() %}
 <p class="muted">Nothing set aside, and nothing retrying.</p>
 {% endif %}
 {% endblock %}

@@ -1394,50 +1394,19 @@ Then run sync.";
         assert!(cov > 0.0 && cov <= 1.0);
     }
 
-    #[tokio::test]
-    #[ignore = "pre-window databases predate the 2026-09 reshape; the legacy re-segmentation path is no longer maintained"]
-    async fn re_segmenting_replaces_chunks_written_before_windows_existed() {
-        // Chunks from before the window column was added carry no window, so
-        // the per-window delete could not see them and a re-segmentation
-        // appended a second copy of the whole source beside the first.
-        let core = test_core().await;
-        let out = core
-            .ingest("one para\n\ntwo para", "web", None)
-            .await
-            .unwrap();
-        segment_all(&core, &out.id).await;
-        let before = core
-            .store
-            .artifacts_for_corpus(&out.id)
-            .await
-            .unwrap()
-            .len();
-
-        // What an older database holds: chunks with no window, and no window
-        // rows to resume from.
-        sqlx::query("UPDATE artifacts SET segment_idx = NULL WHERE corpus_id = ?")
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM segments WHERE corpus_id = ?")
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-
-        segment_all(&core, &out.id).await;
-
-        assert_eq!(
-            core.store
-                .artifacts_for_corpus(&out.id)
-                .await
-                .unwrap()
-                .len(),
-            before,
-            "the pre-window chunks were left in place and duplicated"
-        );
-    }
+    // `re_segmenting_replaces_chunks_written_before_windows_existed` stood
+    // here. It manufactured a pre-window database — nulling `segment_idx` and
+    // deleting the segment rows — and asserted a re-segmentation did not
+    // duplicate the source. The 2026-09 capture reshape changed the shape of a
+    // small capture, so the count it compares moved and the test was marked
+    // ignored rather than fixed; ignored, it then failed silently for a month.
+    //
+    // Deleted rather than repaired. Nothing can reach that state any more: no
+    // writer leaves `segment_idx` null except a note and a merge, and the
+    // migration path that could have produced one was removed in August. What
+    // is worth keeping is the rule underneath it, which is a property of one
+    // query — see `store::artifacts`,
+    // `a_windowless_chunk_is_swept_with_the_window_and_a_note_is_not`.
 
     #[tokio::test]
     async fn a_second_run_does_not_re_segment_windows_that_finished() {

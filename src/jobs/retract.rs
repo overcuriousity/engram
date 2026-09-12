@@ -8,10 +8,13 @@
 //! back through the same `Core` method the operator's button calls, and
 //! stamps the journal row as taken back on evidence.
 //!
-//! Nothing here is a tuned constant. Rule 1 is `recommend` pointed the other
-//! way: the subject's own record is the candidate and the survivor's replay is
-//! the base, and an action is taken back when the record clears the gate.
-//! Rule 2 is a comparison of two similarities from one search.
+//! Rule 1 is `recommend` pointed the other way: the subject's own record is
+//! the candidate and the survivor's replay is the base, and an action is taken
+//! back when the record clears the gate; nothing in it is a tuned constant.
+//! Rule 2 is a comparison of two similarities from one search, over the base's
+//! own measured line and one margin — `RESTORE_MARGIN`, the only tuned number
+//! in the file, and it says there why beating a weak best by nothing is not
+//! evidence.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -23,6 +26,20 @@ use crate::store::pairs::DecidedBy;
 /// Rows one pass will reconsider. A bound on work, like `OBSERVATION_LIMIT`:
 /// every subject costs one vector read per observation naming it.
 const ACTION_LIMIT: usize = 200;
+
+/// How much better than the best live hit a hidden artifact has to be before
+/// its hiding counts as having cost an answer.
+///
+/// A give-up is a search with nothing opened followed by another search inside
+/// five minutes, which is mostly a query being refined — so the live best it
+/// is measured against is usually a weak number, and over dense vectors a
+/// superseded near-duplicate sits within a hundredth of its survivor on half
+/// the queries near them. "Any amount more similar" therefore restores on a
+/// coin toss. Getting that wrong is not free and not reversible by the base:
+/// `dedupe` routes any repeat verdict on a taken-back action to a person, so
+/// one noise-triggered restore permanently converts an automatic decision into
+/// human queue work.
+const RESTORE_MARGIN: f32 = 0.05;
 
 /// What the corpus half of one pass did. Flat counts, so `jobs::did_work`
 /// reads them.
@@ -98,10 +115,11 @@ pub const LAST_RUN: &str = "evolve.retract.last";
 ///
 /// Every give-up since the last pass is searched once more with hidden hits
 /// included, and the graveyard is compared by cosine over what was buried by
-/// the same model. When the best hidden hit the base itself hid is more
-/// similar than the best live hit, the hiding cost an answer, and the base
-/// restores it through the method the operator's button calls. An artifact a
-/// person hid has no row and is not the base's to restore.
+/// the same model. When the best hidden hit the base itself hid clears both
+/// the measured relevance line and `RESTORE_MARGIN` over the best live hit,
+/// the hiding cost an answer, and the base restores it through the method the
+/// operator's button calls. An artifact a person hid has no row and is not the
+/// base's to restore.
 ///
 /// Returns (artifacts restored, stopped early).
 pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)> {
@@ -178,11 +196,19 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
         else {
             continue;
         };
+        // What a hidden artifact has to reach, which is two bars in one.
+        // `weak_below` is the base's own measured line for "this is not about
+        // what was asked", and a refinement that matched nothing well leaves
+        // `best_live` well under it: beating a weak best is not the same as
+        // being an answer, and without the floor a judge-discarded artifact
+        // came back on a search that found nothing. The margin is the other
+        // half — see `RESTORE_MARGIN`.
+        let bar = (best_live + RESTORE_MARGIN).max(core.weak_below());
         // The best hidden hit the base itself hid, with the row that says so.
         let mut best_hidden: Option<(f32, crate::store::actions::Action)> = None;
         for h in hits.iter().filter(|h| is_hidden(h)) {
             let Some(sim) = h.similarity else { continue };
-            if sim <= best_live || best_hidden.as_ref().is_some_and(|(b, _)| sim <= *b) {
+            if sim < bar || best_hidden.as_ref().is_some_and(|(b, _)| sim <= *b) {
                 continue;
             }
             for kind in [Kind::Discard, Kind::Supersede, Kind::Merge] {
@@ -198,7 +224,7 @@ pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)>
         }
         for (id, vec) in buried.iter().flatten() {
             let sim = crate::vector::cosine(&o.query_vec, vec);
-            if sim <= best_live || best_hidden.as_ref().is_some_and(|(b, _)| sim <= *b) {
+            if sim < bar || best_hidden.as_ref().is_some_and(|(b, _)| sim <= *b) {
                 continue;
             }
             if let Some(a) = core.store.open_action_on(id, Kind::Reap).await? {
@@ -560,6 +586,8 @@ pub(crate) async fn rule_one(
                 // Rule 1 reads `served_rank` directly and never asks the
                 // rerank axis anything, so this is only ever false here.
                 served_reranked: false,
+                // A person's query, not an artifact's text.
+                exclude: Vec::new(),
             };
             // Measured where the replay beside it is measured; see
             // `sweep::served_at`.

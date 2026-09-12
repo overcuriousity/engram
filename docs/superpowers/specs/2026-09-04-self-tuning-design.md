@@ -168,6 +168,46 @@ So search evidence is structurally weaker than ask evidence, and the design
 treats it that way rather than pretending otherwise. Weaker evidence is enough
 to stop something, never enough to start it.
 
+### The blind spot, and the one row that answers it
+
+Everything above is implicit feedback, and implicit feedback has a hole that no
+amount of care in the scoring can close: **an open or a citation can only ever
+happen to an artifact the live ranking already put on screen.** Replay those
+observations under a different setting and you learn how that setting would
+have reordered what was shown. You learn nothing at all about what was hidden.
+
+Two consequences follow, and neither is visible from inside the loop:
+
+- **A wider candidate pool can never be measured as an improvement.** Nothing
+  outside the window is ever opened, so widening it produces no positive
+  evidence and the axis is frozen in practice.
+- **Recency ratchets.** People click among the recency-boosted rows they were
+  handed; the replay reads those clicks back as recency working, and the ladder
+  walks up.
+
+So the design gives up one row. On a share of recorded searches —
+`feedback.explore`, one in ten — the top candidate that just missed the window
+is lifted into the **last visible row**, and the row it displaces stops being
+shown. The last row because it is where a reader is least likely to be
+interrupted; the top of what was cut because that is the boundary the ranking
+actually drew, and the most informative place to ask whether it drew it right.
+
+The half that makes it worth anything is the bookkeeping.
+`search_candidates.explored_from` records the rank the ranking gave that
+artifact, and `open_event` charges an open on it to **that** rank rather than to
+the row it borrowed. Otherwise the ranking would be recorded as having surfaced
+at rank ten something it had in fact hidden at rank eleven, and the loop would
+read its own intervention back as proof it was already right.
+
+An open on an explored row is therefore the only positive observation in the
+system whose served rank can be a *miss*. It is the one piece of evidence the
+incumbent could not have produced and cannot take credit for, and it is the
+first thing a widened pool could ever win on.
+
+Disclosed rather than hidden: the row carries `explored` in its explanation,
+beside `prime` and `rerank`, so the one place in a result list where the order
+is not the ranking's answer says so.
+
 ### Scoring
 
 Not "what fraction of what was shown got used". That ratio is maximised by
@@ -436,8 +476,9 @@ remains a key, and a key written in the file wins.
 
 ## Out of scope
 
-- **Serving exploration.** No live A/B, no per-request variation. One
-  generation is live and the same query ranks the same way twice.
+- **Live A/B between generations.** One generation is live at a time. The
+  exploration described in Part 2 varies one row of one search in ten; it does
+  not run two rankings side by side.
 - **Tuning the embedding recipe.** It cannot be swept at runtime; it belongs to
   the cargo harness, which re-embeds a frozen corpus for exactly this reason.
 - **Prompt evolution.** The generator's prompts are inside the measurement, not

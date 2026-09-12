@@ -34,7 +34,7 @@ use axum::routing::post;
 /// the cap strands nothing — there is no second page to go and find the rest
 /// on, which is the point: Housekeeping is reference, not work.
 pub(crate) const PAIR_LIMIT: usize = 5;
-const PAIR_STATES: [crate::store::pairs::PairState; 5] = crate::store::pairs::AWAITING_REVIEW;
+const PAIR_STATES: [crate::store::pairs::PairState; 6] = crate::store::pairs::AWAITING_REVIEW;
 
 #[derive(serde::Deserialize)]
 struct ResolveForm {
@@ -237,7 +237,7 @@ async fn ask_pair_synthesis_ui(
     }
     // Only on a pair still waiting for an answer, asked in the write itself. A
     // card left open keeps its buttons after the pair behind it was answered,
-    // and `dedupe::run` reads a press as the verdict: a Synthese from a stale
+    // and `dedupe::run` reads a press as the verdict: a "Write one" from a stale
     // page merged a pair the operator had already dismissed.
     if !tenant.core.store.ask_pair_synthesis(pid).await? {
         return Err(
@@ -475,6 +475,14 @@ pub struct PairRow {
     /// both" the way `keeps_a` accents a Keep — a recommendation about which
     /// button to press, not a third thing to do.
     pub vacuous: bool,
+    /// Nothing has read these two yet. The sweep put them here on a cosine
+    /// score alone, so the card must not say what a judge would have said:
+    /// "these two cover the same ground" is a finding, and on a pending row it
+    /// is a claim made by nobody.
+    pub unjudged: bool,
+    /// An operator asked for one artifact and the writing was refused. Not a
+    /// disagreement — see `PairState::Unmergeable`.
+    pub unmergeable: bool,
     /// Every root of both members is `Captured`, so `insert_merged_artifact`
     /// will accept a merge over them.
     ///
@@ -484,7 +492,7 @@ pub struct PairRow {
     /// fails it — which is the common case and exactly the one worth not
     /// offering.
     pub mergeable: bool,
-    /// An operator has already pressed Synthese and the writing is queued. The
+    /// An operator has already pressed "Write one" and the writing is queued. The
     /// row says so instead of offering the answers again.
     pub synthesis_asked: bool,
 }
@@ -524,7 +532,7 @@ fn pair_side(c: &crate::store::artifacts::Chunk) -> (String, String) {
 ///
 /// The lineage check `jobs::dedupe` makes at admission (`dedupe.rs`), asked in
 /// two places for two reasons: the card uses it to decide whether to draw the
-/// Synthese button at all, and the route uses it to refuse a press that arrives
+/// "Write one" button at all, and the route uses it to refuse a press that arrives
 /// anyway. Hiding a button is not a check — a page drawn before an artifact was
 /// merged still has the button on it, and the POST it sends is as real as any
 /// other.
@@ -660,7 +668,13 @@ pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
                 keeps_a,
                 keeps_b,
                 vacuous: state == crate::store::pairs::PairState::Vacuous,
-                mergeable,
+                unjudged: state == crate::store::pairs::PairState::Pending,
+                unmergeable: state == crate::store::pairs::PairState::Unmergeable,
+                // Not offered again where it has already been refused: both
+                // refusals are properties of the pair rather than of the
+                // draft, so a second press buys a second model call and the
+                // same sentence back.
+                mergeable: mergeable && state != crate::store::pairs::PairState::Unmergeable,
                 synthesis_asked,
             });
             if pairs.len() == PAIR_LIMIT {
@@ -891,6 +905,8 @@ mod tests {
             contradiction: true,
             obsolete_title: None,
             vacuous: false,
+            unjudged: false,
+            unmergeable: false,
             keeps_a: false,
             keeps_b: false,
             mergeable: false,
@@ -1388,7 +1404,7 @@ mod tests {
             .unwrap();
         let html = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
-            html.contains("Synthese"),
+            html.contains("Write one"),
             "a captured pair can become one artifact"
         );
 

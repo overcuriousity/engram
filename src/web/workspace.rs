@@ -172,9 +172,6 @@ struct WorkspaceTemplate {
     /// the one that can, and the rest appears when there is something for it
     /// to act on.
     held: bool,
-    /// Whether the base is young enough for the list of what a paste becomes.
-    /// See `TEACH_UNTIL_SOURCES`.
-    teach: bool,
     /// The two example phrasings under the box, in the reader's language. See
     /// `moments::examples_for`: they are the classifier's own prototypes, so
     /// what the page teaches and what the base recognises cannot drift apart.
@@ -227,8 +224,6 @@ struct HeldTemplate {
     /// True by definition: this fragment exists only for the transition into
     /// it. The field is here because the partials branch on it.
     held: bool,
-    /// See `WorkspaceTemplate`: `_box_hint.html` leaves its chips to the list.
-    teach: bool,
     /// True by definition, for the same reason.
     oob: bool,
 }
@@ -248,23 +243,31 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResul
         example_journal,
         example_lang,
         held: true,
-        teach: corpora < TEACH_UNTIL_SOURCES,
         oob: true,
     })
     .into_response())
 }
 
-/// Below this many sources the idle column lists what a paste becomes. A
-/// person's first few captures are when that is not yet known.
-const TEACH_UNTIL_SOURCES: i64 = 5;
-
-/// The idle line alone, for its own poll. Not the full idle fragment: that
-/// also empties the echo and the rail heading, and a poll can land while
-/// someone types.
-async fn idle_line(tenant: Tenant) -> UiResult<Response> {
-    let mut t = crate::web::ui::idle_foot(&tenant, false).await?;
-    t.line_only = true;
-    Ok(HtmlTemplate(t).into_response())
+/// The idle line alone, for its own poll. Not a swap of the whole idle state
+/// (`oob`): that also empties the echo and the rail heading, and a poll can
+/// land while someone types.
+///
+/// `HX-Trigger` on the way out of the read. The rail may be standing at "No
+/// matches yet · still reading", which is a dead end — nothing re-ran the
+/// search when the reading landed, so the person who pasted a note and looked
+/// for it saw that line until they edited the query. app.js runs the search
+/// again on this, and only from that state.
+async fn idle_line(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Response> {
+    let t = crate::web::ui::idle_foot(&tenant, false, &headers).await?;
+    let reading = t.reading;
+    let mut res = HtmlTemplate(t).into_response();
+    if !reading {
+        res.headers_mut().insert(
+            "HX-Trigger",
+            axum::http::HeaderValue::from_static("engram:read-landed"),
+        );
+    }
+    Ok(res)
 }
 
 /// Everything every door renders, before the door says what it opened for.
@@ -275,7 +278,9 @@ async fn idle_line(tenant: Tenant) -> UiResult<Response> {
 /// The reader's language, off the request. A header that is absent, empty or
 /// unreadable is a reader we know nothing about, and English is what the page
 /// says then.
-fn examples(headers: &axum::http::HeaderMap) -> (&'static str, &'static str, &'static str) {
+pub(crate) fn examples(
+    headers: &axum::http::HeaderMap,
+) -> (&'static str, &'static str, &'static str) {
     let raw = headers
         .get(axum::http::header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok())
@@ -322,7 +327,7 @@ async fn base_template(
     // flicker under a result set that is about to arrive — and a deep link
     // whose box is cleared has to find the line already there, because what
     // comes back from the results endpoint is an out-of-band swap onto it.
-    let idle = crate::web::ui::idle_foot(tenant, false)
+    let idle = crate::web::ui::idle_foot(tenant, false, headers)
         .await?
         .render()
         .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
@@ -353,7 +358,6 @@ async fn base_template(
         example_journal,
         example_lang,
         held: corpora > 0,
-        teach: corpora < TEACH_UNTIL_SOURCES,
         oob: false,
     })
 }
@@ -1374,7 +1378,10 @@ mod tests {
     #[tokio::test]
     async fn an_empty_base_shows_what_a_paste_becomes() {
         let html = workspace("/ui").await;
-        assert!(html.contains(r#"id="teach""#), "{html}");
+        // The list's contents, not merely its element: the `<dl>` is in every
+        // response now — an out-of-band swap can only replace what it carries —
+        // and it retires by coming back empty.
+        assert!(html.contains("<dt>note</dt>"), "{html}");
         assert_eq!(
             html.matches(r#"class="chip-example""#).count(),
             2,
@@ -1386,47 +1393,43 @@ mod tests {
     async fn the_list_of_what_a_paste_becomes_goes_at_five_sources() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        let texts = [
-            "LevelDB tombstones survive compaction longer than the manual admits.",
-            "The NAS backup runs every Monday at 02:00 from the old cron box.",
-            "PUID is Microsoft's per-user identifier in the consumer directory.",
-            "Qdrant answers REST on 6333 and gRPC on 6334.",
-            "The workshop moved from the fourth floor to the annex.",
-        ];
-        for t in &texts[..4] {
-            core.ingest_capture(crate::core::ingest::Capture::new(*t, "ui"))
+        // Distinct texts, because `ingest_capture` dedupes on `corpus_hash` and
+        // the same sentence five times is one source. Nothing else about them
+        // matters — there is no minimum length, only "not empty".
+        let text = |n: i64| format!("source number {n}");
+        for n in 0..4 {
+            core.ingest_capture(crate::core::ingest::Capture::new(text(n), "ui"))
                 .await
                 .unwrap();
         }
         let four = get_body(&app, &cookie, "/ui").await;
-        assert!(four.contains(r#"id="teach""#), "four sources: {four}");
+        assert!(four.contains("<dt>note</dt>"), "four sources: {four}");
         assert_eq!(
             four.matches(r#"class="chip-example""#).count(),
             2,
-            "the chips stand in the list, not twice: {four}"
+            "the chips stand once, under the box: {four}"
         );
 
-        core.ingest_capture(crate::core::ingest::Capture::new(texts[4], "ui"))
+        core.ingest_capture(crate::core::ingest::Capture::new(text(4), "ui"))
             .await
             .unwrap();
         let five = get_body(&app, &cookie, "/ui").await;
-        assert!(!five.contains(r#"id="teach""#), "five sources: {five}");
+        assert!(
+            five.contains(r#"<dl id="teach" class="teach" hx-swap-oob="true"></dl>"#),
+            "the list comes back empty rather than absent, or the swap has \
+             nothing to replace the standing one with: {five}"
+        );
         assert_eq!(
             five.matches(r#"class="chip-example""#).count(),
             2,
-            "and are back under the box: {five}"
+            "and the chips are where they always were: {five}"
         );
     }
 
     #[tokio::test]
     async fn the_idle_line_says_reading_while_a_capture_is_read() {
         let core = crate::core::test_support::test_core().await;
-        core.ingest_capture(crate::core::ingest::Capture::new(
-            "LevelDB tombstones survive compaction longer than the manual admits.",
-            "ui",
-        ))
-        .await
-        .unwrap();
+        crate::web::test_support::hold_something(&core).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
 
         let reading = get_body(&app, &cookie, "/ui/search/results?q=").await;
@@ -1436,15 +1439,70 @@ mod tests {
             "and polls until it is done: {reading}"
         );
 
-        while let Some(j) = core.store.claim_job().await.unwrap() {
-            core.store.control.complete_job(j.id).await.unwrap();
-        }
+        drain(&core).await;
         let done = get_body(&app, &cookie, "/ui/search/results?q=").await;
         assert!(!done.contains("reading…"), "{done}");
         assert!(
             !done.contains(r#"hx-get="/ui/idle-foot""#),
             "nothing left to poll for: {done}"
         );
+    }
+
+    /// Everything the queue holds, closed. Through `Store::complete_job`, the
+    /// forwarder every other drain loop uses, rather than reaching past it into
+    /// the control pool.
+    async fn drain(core: &crate::core::Core) {
+        while let Some(j) = core.store.claim_job().await.unwrap() {
+            core.store.complete_job(j.id).await.unwrap();
+        }
+    }
+
+    /// The poll's own door, on a base with a capture actually in flight. The
+    /// line is the whole answer: the rail's heading and the fold it is holding
+    /// belong to whatever the person is doing, and a tick that lands while they
+    /// type must not touch either.
+    #[tokio::test]
+    async fn the_polled_line_says_reading_and_clears_nothing() {
+        let core = crate::core::test_support::test_core().await;
+        crate::web::test_support::hold_something(&core).await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+
+        let line = get_body(&app, &cookie, "/ui/idle-foot").await;
+        assert!(line.contains("reading…"), "{line}");
+        assert!(
+            line.contains("every 3s"),
+            "and asks again until it is not: {line}"
+        );
+        assert!(
+            !line.contains("rail-head"),
+            "the heading over the rail is not this fragment's to empty: {line}"
+        );
+        assert!(
+            !line.contains("fold-of"),
+            "nor is the search the box is folding into: {line}"
+        );
+
+        // The tick that reports the read over stops the poll and says so, so
+        // app.js can re-run a search that answered "still reading" and has had
+        // no reason to run again since.
+        drain(&core).await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/idle-foot")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.headers().get("HX-Trigger").map(|v| v.to_str().unwrap()),
+            Some("engram:read-landed"),
+            "the rail is never told the read landed"
+        );
+        let done = body_of(res).await;
+        assert!(!done.contains("every 3s"), "the poll stops: {done}");
     }
 
     /// The poll lands while someone may be typing, so it carries the line and

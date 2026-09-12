@@ -576,6 +576,28 @@ retain_days = 0
 # How often retention is enforced. A window measured in days does not need
 # checking more often than this, and the sweep is a single DELETE.
 sweep_hours = 6
+# The share of recorded searches that explore. 0 turns it off.
+#
+# An exploring search lifts the top candidate that just missed the window into
+# the last visible row, and pushes the row it displaced out. One row of one
+# search in ten, at the bottom of the list, where a person is least likely to
+# be interrupted by it.
+#
+# It is there because the self-tuning loop has one blind spot it cannot see out
+# of on its own. Every positive observation is an open or a citation, and both
+# can only happen to an artifact the ranking already put on screen — so
+# replaying those observations under a different setting rewards reordering
+# what was shown and says nothing whatever about what was hidden. Two things
+# follow: a wider candidate pool can never be measured as an improvement,
+# because nothing outside the window is ever opened; and recency weight
+# ratchets upward, because people click among the recency-boosted rows they
+# were given and the replay reads that back as recency working.
+#
+# The lifted row is charged to the rank the ranking gave it and not to the row
+# it borrowed, so opening it is evidence the current setting could not have
+# produced and does not get the credit for. That is the whole mechanism; there
+# is no bandit and no model.
+explore = 0.1
 
 # What judged searches are spent on: a background sweep of recency_weight and
 # per_source_cap over every judged pair, which recommends a better setting when
@@ -809,6 +831,13 @@ month_cycle = 0.0
 #
 # The compiled default is still off, for the reason under `prime_lift`: an
 # existing base that never wrote this key is not moved by an upgrade.
+#
+# Worth saying plainly, because the design that argued for measuring this
+# assumed the opposite: evidence gathered while the sitting is live is not the
+# clean counterfactual that design described. It is a starting rung under
+# watch — what the loop replays is a base that was already primed — and what
+# stands behind it is the base's own probe anchor and lived watch, either of
+# which may take it back. Start from `false` if you want the clean reading.
 prime = true
 
 [time]
@@ -977,15 +1006,22 @@ feed_sweep = false
 #               the per-source cap, the candidate pool depth, the recency
 #               half-life, the prime lift, whether the sitting takes part in
 #               it, whether the configured reranker runs, the width of the
-#               associated band, the review threshold —
+#               associated band —
 #               on what use left behind, and take a move back on the same
 #               evidence. Every move is a row `revert` undoes exactly, and no
 #               move is made where there is nothing to measure it against.
 #   "full"    — everything above, and the corpus rules: taking its own merges,
 #               replacements, discards and burials back where the evidence
-#               says so, filing duplicates it finds by displacement, and
+#               says so, counting what outranks what in its own replays, and
 #               condensing an artifact into a shorter version of itself that
 #               loses no value, command or path — behind `max_actions_per_week`.
+#               `consolidate.review_min` moves here too, and not under
+#               "ranking": stepping it down widens what the dedupe judge
+#               considers, and the merges and supersessions that follow are
+#               corpus writes that reverting the generation row does not undo.
+#               Its "raise it" signal also reads actions taken back, which
+#               only the corpus rules produce, so under "ranking" the ladder
+#               could only ever have walked one way — down.
 #
 # `true` and `false` still read, as "full" and "off".
 #
@@ -1000,7 +1036,9 @@ feed_sweep = false
 # live generation. The base then watches what that generation earns while it is
 # actually serving, compared with what its predecessor earned, and puts the
 # predecessor back when it does not hold. A candidate taken back is not offered
-# again until the models change.
+# again until the models change — or until the corpus has more than doubled
+# since, because a setting refused on the base you had is not refused on the
+# base you have.
 #
 # This file is never written by that loop. It holds your starting point; the
 # database holds what is live, and /ui/insights says which generation that is.

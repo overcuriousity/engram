@@ -214,6 +214,9 @@ pub struct NewCandidate {
     pub shown: bool,
     /// Appended under the ranked list by association rather than ranked.
     pub band: bool,
+    /// Where this artifact would have stood, 0-based, had the search not
+    /// explored. `None` on everything else. See `search_candidates`.
+    pub explored_from: Option<i64>,
 }
 
 /// Test-only, for the reason `NewArtifact`'s is: in production every field
@@ -228,6 +231,7 @@ impl Default for NewCandidate {
             similarity: None,
             shown: false,
             band: false,
+            explored_from: None,
         }
     }
 }
@@ -526,8 +530,8 @@ impl Store {
         for (rank, c) in ev.candidates.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO search_candidates
-                   (event_id, rank, artifact_id, score, similarity, shown, band)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (event_id, rank, artifact_id, score, similarity, shown, band, explored_from)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(rank as i64)
@@ -536,6 +540,7 @@ impl Store {
             .bind(c.similarity)
             .bind(c.shown as i64)
             .bind(c.band as i64)
+            .bind(c.explored_from)
             .execute(&mut *tx)
             .await?;
         }
@@ -880,7 +885,8 @@ impl Store {
                         AND (s.band < c.band
                              OR (s.band = c.band AND s.rank < c.rank))) AS shown_rank,
                     c.shown AS shown,
-                    c.rank AS rank
+                    c.rank AS rank,
+                    c.explored_from AS explored_from
                FROM search_events e
                JOIN search_candidates c
                  ON c.event_id = e.id AND c.artifact_id = ?
@@ -931,11 +937,25 @@ impl Store {
                     // from a list, only reached by a link the pool happens to
                     // name — and there the pool position is still the only
                     // honest answer.
-                    rank: Some(if row.get::<i64, _>("shown") == 1 {
-                        row.get::<i64, _>("shown_rank") + 1
-                    } else {
-                        row.get::<i64, _>("rank") + 1
-                    }),
+                    //
+                    // Except on the one row an exploring search lifted, which
+                    // is charged to where the ranking put it rather than to
+                    // the row it was lent. That is the whole value of the
+                    // exploration: the tuner's replay compares a candidate's
+                    // rank against this number, so crediting the incumbent
+                    // with the screen position it did not choose would throw
+                    // the evidence away at the moment it was finally gathered.
+                    // See `search_candidates.explored_from`.
+                    rank: Some(
+                        match (
+                            row.get::<Option<i64>, _>("explored_from"),
+                            row.get::<i64, _>("shown") == 1,
+                        ) {
+                            (Some(natural), _) => natural + 1,
+                            (None, true) => row.get::<i64, _>("shown_rank") + 1,
+                            (None, false) => row.get::<i64, _>("rank") + 1,
+                        },
+                    ),
                     source: crate::store::observations::Source::Opened,
                     event_id: Some(event_id.to_string()),
                 },
@@ -1571,6 +1591,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(obs[0].rank, Some(3));
+    }
+
+    /// The half of exploration that makes the evidence worth gathering.
+    ///
+    /// An exploring search lends its last visible row to the top candidate the
+    /// ranking cut. If the open were then credited to that row, the ranking
+    /// would be recorded as having surfaced at rank three something it had in
+    /// fact hidden at rank six — and the tuner would read its own intervention
+    /// back as proof that the current settings were right. Charged to
+    /// `explored_from`, the same open says the opposite, which is what it
+    /// actually means.
+    #[tokio::test]
+    async fn an_open_on_an_explored_row_is_charged_to_the_rank_the_ranking_chose() {
+        use crate::store::observations::Source;
+        let (store, generation) = observed_base().await;
+        let mut ev = event_with(&["art-1", "art-2", "art-3"]);
+        // The row the window cut, lent the last visible place.
+        ev.candidates[2].artifact_id = "hidden".into();
+        ev.candidates[2].explored_from = Some(5);
+        let event = store.record_search(ev, 5).await.unwrap();
+
+        assert!(store.open_event(&event, "hidden").await.unwrap());
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs[0].source, Source::Opened);
+        assert_eq!(
+            obs[0].rank,
+            Some(6),
+            "credited to the row it borrowed instead of the rank it held"
+        );
+
+        // And the ordinary rows beside it are untouched.
+        let (store, generation) = observed_base().await;
+        let event = store
+            .record_search(event_with(&["art-1", "art-2", "art-3"]), 5)
+            .await
+            .unwrap();
+        assert!(store.open_event(&event, "art-3").await.unwrap());
+        assert_eq!(
+            store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()[0]
+                .rank,
+            Some(3)
+        );
     }
 
     #[tokio::test]
