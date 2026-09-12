@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod artifacts;
 pub mod asks;
 pub mod attachments;
@@ -8,16 +9,22 @@ pub mod corpora;
 pub mod eval_runs;
 pub mod feedback;
 pub mod gaps;
+pub mod generations;
 pub mod insights;
+pub mod integrations;
 pub mod jobs;
 pub mod lineage;
 pub mod links;
 pub mod moments;
+pub mod observations;
 pub mod pairs;
 pub mod pursuits;
+pub mod rehearsals;
 pub mod segments;
 pub mod shingle;
+pub mod sleep_runs;
 pub mod sweeps;
+pub mod versions;
 
 use crate::error::Result;
 use sqlx::Row;
@@ -108,30 +115,7 @@ impl Store {
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("schema.sql");
 
-        let mut missing = Vec::new();
-        for (table, columns) in schema_columns(SCHEMA) {
-            // The table-valued form of `PRAGMA table_info`, which takes a bind
-            // parameter where the pragma statement would need the name spliced
-            // into the SQL.
-            let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
-                .bind(&table)
-                .fetch_all(&self.pool)
-                .await?
-                .iter()
-                .map(|r| r.get::<String, _>("name"))
-                .collect();
-            // No columns at all means no such table — a fresh base, or a table
-            // this schema adds. That is not a base that is behind; it is one
-            // the statement below is about to create.
-            if have.is_empty() {
-                continue;
-            }
-            for c in columns {
-                if !have.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
-                    missing.push(format!("{table}.{c}"));
-                }
-            }
-        }
+        let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // One exception to "recreate it", and deliberately a list rather than
         // a rule.
         //
@@ -147,7 +131,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 11] = [
+        const ADDITIVE: [(&str, &str, &str); 18] = [
             (
                 "artifacts",
                 "updated_at",
@@ -175,6 +159,14 @@ impl Store {
                 "search_events",
                 "opened_at",
                 "ALTER TABLE search_events ADD COLUMN opened_at INTEGER",
+            ),
+            // Not nullable and defaulted to 0, unlike the columns around it:
+            // the absence of a request is a true statement about every row
+            // that predates the button, because nobody could press it.
+            (
+                "artifact_pairs",
+                "synthesis_asked",
+                "ALTER TABLE artifact_pairs ADD COLUMN synthesis_asked INTEGER NOT NULL DEFAULT 0",
             ),
             // Nullable, no default, and NULL is the truth about every row that
             // predates it: no reminder on that note had been completed,
@@ -225,19 +217,52 @@ impl Store {
                 "origin_corpus_id",
                 "ALTER TABLE moments ADD COLUMN origin_corpus_id TEXT",
             ),
+            // Nullable, no default, and NULL is the truth about every
+            // observation written before it: nothing recorded which search it
+            // came from.
+            (
+                "observations",
+                "event_id",
+                "ALTER TABLE observations ADD COLUMN event_id TEXT",
+            ),
+            // Defaulted, and 0 is the truth about every old row: nothing
+            // appended was ever captured before the column existed.
+            (
+                "search_candidates",
+                "band",
+                "ALTER TABLE search_candidates ADD COLUMN band INTEGER NOT NULL DEFAULT 0",
+            ),
+            // Nullable, no default, and NULL is the truth about every search
+            // recorded before it: nothing wrote down which generation drew the
+            // list, and a give-up with no generation to charge is not charged.
+            (
+                "search_events",
+                "generation_id",
+                "ALTER TABLE search_events ADD COLUMN generation_id TEXT",
+            ),
+            // Both nullable, no default: NULL is the truth about every row
+            // buried before the vector was kept.
+            (
+                "graveyard",
+                "vec",
+                "ALTER TABLE graveyard ADD COLUMN vec BLOB",
+            ),
+            (
+                "graveyard",
+                "embed_model",
+                "ALTER TABLE graveyard ADD COLUMN embed_model TEXT",
+            ),
+            // Nullable, no default, and NULL says what is true of every
+            // coverage written before it: the coverage check measured it. A
+            // capture answering the query it was typed from is the kind that
+            // did not exist yet, so no old row can be one.
+            (
+                "gap_coverage",
+                "covered_by",
+                "ALTER TABLE gap_coverage ADD COLUMN covered_by TEXT",
+            ),
         ];
-        for (table, column, ddl) in ADDITIVE {
-            let key = format!("{table}.{column}");
-            let Some(i) = missing.iter().position(|m| *m == key) else {
-                continue;
-            };
-            sqlx::raw_sql(ddl)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
-            tracing::info!(column = %key, "added a column this schema expects");
-            missing.remove(i);
-        }
+        apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;
 
         if !missing.is_empty() {
             return Err(crate::error::Error::Store(format!(
@@ -295,6 +320,67 @@ impl Store {
 /// column per line, which is what makes this much parsing enough: a line inside
 /// a `CREATE TABLE` block starts with the column's name, unless it starts with a
 /// comment or a table constraint.
+/// The columns a schema names that a database does not have, as `table.column`.
+///
+/// A table with no columns at all is no such table — a fresh base, or one this
+/// schema is about to create — and contributes nothing. Written once and
+/// called twice: the tenant schema and the control schema ask the same
+/// question, and had the same twenty lines each to ask it with.
+pub(crate) async fn missing_columns(pool: &sqlx::SqlitePool, schema: &str) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    for (table, columns) in schema_columns(schema) {
+        // The table-valued form of `PRAGMA table_info`, which takes a bind
+        // parameter where the pragma statement would need the name spliced
+        // into the SQL.
+        let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
+            .bind(&table)
+            .fetch_all(pool)
+            .await?
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        if have.is_empty() {
+            continue;
+        }
+        for c in columns {
+            if !have.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
+                missing.push(format!("{table}.{c}"));
+            }
+        }
+    }
+    Ok(missing)
+}
+
+/// Add the columns a caller has decided are safe to add, striking each off
+/// `missing` as it lands.
+///
+/// What stays in `missing` afterwards is what the caller refuses over, which
+/// is why this takes the list by reference rather than returning a verdict:
+/// the two callers word that refusal differently, and the wording is the
+/// useful part of it.
+/// `'static` on the DDL is sqlx's requirement, not a stylistic one: it refuses
+/// a SQL string whose lifetime does not prove it was written here rather than
+/// assembled from input.
+pub(crate) async fn apply_additive(
+    pool: &sqlx::SqlitePool,
+    additive: &[(&'static str, &'static str, &'static str)],
+    missing: &mut Vec<String>,
+) -> Result<()> {
+    for &(table, column, ddl) in additive {
+        let key = format!("{table}.{column}");
+        let Some(i) = missing.iter().position(|m| *m == key) else {
+            continue;
+        };
+        sqlx::raw_sql(ddl)
+            .execute(pool)
+            .await
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        tracing::info!(column = %key, "added a column the schema expects");
+        missing.remove(i);
+    }
+    Ok(())
+}
+
 fn schema_columns(sql: &str) -> Vec<(String, Vec<String>)> {
     const CONSTRAINTS: [&str; 5] = ["PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"];
     let mut tables: Vec<(String, Vec<String>)> = Vec::new();
@@ -344,6 +430,41 @@ pub fn now() -> i64 {
 
 pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+/// Where a job has read a table up to, kept in `meta` between passes.
+///
+/// A second is the whole clock here, so a bare timestamp is not a position:
+/// when a page's limit cuts inside a group of rows written in the same
+/// second, `created_at > cursor` never returns the rest of that second and
+/// those rows are lost. The row id breaks the tie, and every reader that
+/// takes one of these orders by `(at, id)` to match.
+///
+/// Written as `at|id`. A bare integer reads as `(at, "")` — an older cursor,
+/// or none at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cursor {
+    pub at: i64,
+    pub id: String,
+}
+
+impl Cursor {
+    pub fn parse(s: &str) -> Self {
+        match s.split_once('|') {
+            Some((at, id)) => Cursor {
+                at: at.parse().unwrap_or(0),
+                id: id.to_string(),
+            },
+            None => Cursor {
+                at: s.parse().unwrap_or(0),
+                id: String::new(),
+            },
+        }
+    }
+
+    pub fn encode(&self) -> String {
+        format!("{}|{}", self.at, self.id)
+    }
 }
 
 #[cfg(test)]

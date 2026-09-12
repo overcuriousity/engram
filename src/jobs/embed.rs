@@ -361,6 +361,14 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
             "could not arm the neighbour query; the sweep will find its pairs"
         );
     }
+    // The cues a model-written artifact was written for become probes: an
+    // embedding each, in a unit of its own for the reason `relate` is one.
+    if chunk.provenance != crate::store::artifacts::Provenance::Passage
+        && !chunk.cues.is_empty()
+        && let Err(e) = crate::jobs::probe::arm(core, &chunk.id).await
+    {
+        tracing::warn!(artifact_id = %chunk.id, error = %e, "could not arm the cue probes");
+    }
     // The judged capture reads its own time now — see `jobs::judgement` —
     // so no per-artifact moments stage is armed here any more.
     // A merged artifact hides what it replaced only once it is itself in the
@@ -954,20 +962,25 @@ pub async fn settle_corpus(core: &Core, corpus_id: &str) -> Result<()> {
     } else {
         CorpusStatus::Ready
     };
-    let ready = status == CorpusStatus::Ready;
     core.store.set_corpus_status(corpus_id, status).await?;
-    if ready {
-        // On the background handle, not on this path: the document is stored
-        // and settled either way, and a vector query per open gap is not
-        // something the last chunk's embedding should wait behind.
-        let core = core.clone();
-        let id = corpus_id.to_string();
-        core.clone().background.spawn(async move {
-            if let Err(e) = crate::jobs::gaps::cover(&core, &id).await {
-                tracing::warn!(corpus_id = %id, error = %e, "could not check what this capture answered");
-            }
-        });
-    }
+    // Both settled states, `partial` included. A window the model refused
+    // leaves a hole in the document; it does not make the chunks that *did*
+    // embed unable to answer a question somebody asked. Gated on `ready`, the
+    // whole coverage check — the distance measurement and the link a capture
+    // carries from the box it was typed into — never ran for a corpus that
+    // settled `partial`, which is the case `fix(gaps)` cited as the reason the
+    // link had to exist in the first place.
+    //
+    // On the background handle, not on this path: the document is stored and
+    // settled either way, and a vector query per open gap is not something the
+    // last chunk's embedding should wait behind.
+    let core = core.clone();
+    let id = corpus_id.to_string();
+    core.clone().background.spawn(async move {
+        if let Err(e) = crate::jobs::gaps::cover(&core, &id).await {
+            tracing::warn!(corpus_id = %id, error = %e, "could not check what this capture answered");
+        }
+    });
     Ok(())
 }
 
@@ -1076,12 +1089,8 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i as i64,
                 text: format!("chunk {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
                 segment_idx: Some(i as i64),
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -1114,9 +1123,7 @@ mod tests {
                 &crate::store::artifacts::NewMerged {
                     title: Some("merged".into()),
                     text: "both wordings".into(),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 roots,
             )
@@ -1237,14 +1244,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "a stale instruction".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1288,14 +1290,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: body,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1341,14 +1338,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: body,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1385,14 +1377,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: text.clone(),
-                    corpus_span: None,
                     title: Some(title),
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1455,14 +1443,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: text.clone(),
-                    corpus_span: None,
                     title: Some(title),
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1517,14 +1501,10 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: text.clone(),
-                    corpus_span: None,
                     title: Some(title),
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1564,14 +1544,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1617,14 +1592,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: body,
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1696,12 +1666,9 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i as i64,
                 text: format!("chunk number {i}"),
-                corpus_span: None,
                 title: Some(format!("t{i}")),
-                category: None,
-                tags: vec![],
-                caveats: vec![],
                 segment_idx: Some(0),
+                ..Default::default()
             })
             .collect();
         core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -1941,12 +1908,10 @@ mod tests {
             .map(|(i, t)| NewArtifact {
                 ordinal: i as i64,
                 text: t.to_string(),
-                corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some("reference".into()),
                 tags: vec!["x".into()],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();

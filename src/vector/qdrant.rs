@@ -12,8 +12,8 @@
 
 use super::sparse::SparseVector;
 use super::{
-    FacetCount, Facets, LifecycleRow, SearchFilter, SearchHit, Touch, VectorPayload, VectorPoint,
-    VectorStore,
+    FacetCount, Facets, LifecycleRow, Recency, SearchFilter, SearchHit, Touch, VectorPayload,
+    VectorPoint, VectorStore,
 };
 use crate::config::VectorConfig;
 use crate::error::{Error, Result};
@@ -871,6 +871,36 @@ impl QdrantVectors {
         Ok(facet_counts(res))
     }
 
+    /// One page of a scroll, with the cursor spliced in.
+    ///
+    /// Three callers page through a collection — `reindex`, `all_artifact_ids`
+    /// and `stale_candidates` — and each had written out the same three steps:
+    /// build the body, add `offset` only when there is one, post to
+    /// `points/scroll`. Qdrant rejects an explicit `"offset": null`, which is
+    /// why it is spliced rather than always present, and that is exactly the
+    /// kind of detail that should be true in one place.
+    ///
+    /// The loop itself stays with each caller: what they do with a page and
+    /// when they stop differ, and a shared loop would have to take an async
+    /// closure to hide a difference worth seeing.
+    async fn scroll_page(
+        &self,
+        collection: &str,
+        body: &Value,
+        offset: &Value,
+    ) -> Result<ScrollResult> {
+        let mut body = body.clone();
+        if !offset.is_null() {
+            body["offset"] = offset.clone();
+        }
+        self.call(
+            Method::POST,
+            &format!("/collections/{collection}/points/scroll"),
+            Some(body),
+        )
+        .await
+    }
+
     async fn put_points(&self, collection: &str, points: Vec<Value>) -> Result<()> {
         let _: Value = self
             .call(
@@ -913,20 +943,15 @@ impl QdrantVectors {
         let mut offset = Value::Null;
         let mut copied = 0usize;
         loop {
-            let mut body = json!({
-                "limit": REINDEX_BATCH,
-                "with_payload": true,
-                "with_vector": true,
-            });
-            if !offset.is_null() {
-                body["offset"] = offset.clone();
-            }
-
-            let page: ScrollResult = self
-                .call(
-                    Method::POST,
-                    &format!("/collections/{source}/points/scroll"),
-                    Some(body),
+            let page = self
+                .scroll_page(
+                    &source,
+                    &json!({
+                        "limit": REINDEX_BATCH,
+                        "with_payload": true,
+                        "with_vector": true,
+                    }),
+                    &offset,
                 )
                 .await?;
 
@@ -1446,19 +1471,15 @@ impl VectorStore for QdrantVectors {
         let mut out = Vec::new();
         let mut offset = Value::Null;
         loop {
-            let mut body = json!({
-                "limit": PAGE,
-                "with_payload": ["artifact_id"],
-                "with_vector": false,
-            });
-            if !offset.is_null() {
-                body["offset"] = offset.clone();
-            }
-            let page: ScrollResult = self
-                .call(
-                    Method::POST,
-                    &format!("/collections/{}/points/scroll", self.alias),
-                    Some(body),
+            let page = self
+                .scroll_page(
+                    &self.alias,
+                    &json!({
+                        "limit": PAGE,
+                        "with_payload": ["artifact_id"],
+                        "with_vector": false,
+                    }),
+                    &offset,
                 )
                 .await?;
             if page.points.is_empty() {
@@ -1526,20 +1547,16 @@ impl VectorStore for QdrantVectors {
         let mut found: Vec<VectorPayload> = Vec::new();
         let mut offset = Value::Null;
         while found.len() < STALE_SCAN {
-            let mut body = json!({
-                "filter": filter,
-                "limit": PAGE.min(STALE_SCAN - found.len()),
-                "with_payload": true,
-                "with_vector": false,
-            });
-            if !offset.is_null() {
-                body["offset"] = offset.clone();
-            }
-            let page: ScrollResult = self
-                .call(
-                    Method::POST,
-                    &format!("/collections/{}/points/scroll", self.alias),
-                    Some(body),
+            let page = self
+                .scroll_page(
+                    &self.alias,
+                    &json!({
+                        "filter": filter,
+                        "limit": PAGE.min(STALE_SCAN - found.len()),
+                        "with_payload": true,
+                        "with_vector": false,
+                    }),
+                    &offset,
                 )
                 .await?;
             if page.points.is_empty() {
@@ -1591,8 +1608,17 @@ impl VectorStore for QdrantVectors {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>> {
-        self.search_weighted(vector, sparse, limit, filter, self.recency_weight)
-            .await
+        self.search_weighted(
+            vector,
+            sparse,
+            limit,
+            filter,
+            Recency {
+                weight: self.recency_weight,
+                half_life_days: self.recency_half_life_days,
+            },
+        )
+        .await
     }
 
     /// This is the store `scoring_formula` was written for.
@@ -1606,7 +1632,7 @@ impl VectorStore for QdrantVectors {
         sparse: &SparseVector,
         limit: usize,
         filter: &SearchFilter,
-        recency_weight: f32,
+        recency: Recency,
     ) -> Result<Vec<SearchHit>> {
         let f = build_filter(filter);
 
@@ -1650,7 +1676,7 @@ impl VectorStore for QdrantVectors {
         // Recency and pinning are applied as a final scoring stage over
         // whatever retrieval returned, so they reorder results without
         // changing which ones were retrieved.
-        if recency_weight > 0.0 || self.pinned_boost > 0.0 {
+        if recency.weight > 0.0 || self.pinned_boost > 0.0 {
             let mut prefetch = std::mem::replace(&mut body, Value::Null);
             // The payload is fetched once, by the outer stage. Asking the
             // prefetch for it too would carry every candidate's full text
@@ -1662,8 +1688,8 @@ impl VectorStore for QdrantVectors {
                 "prefetch": [prefetch],
                 "query": scoring_formula(
                     now_secs(),
-                    self.recency_half_life_days as u64 * SECONDS_PER_DAY,
-                    recency_weight,
+                    recency.half_life_days as u64 * SECONDS_PER_DAY,
+                    recency.weight,
                     self.pinned_boost,
                 ),
                 "limit": limit,
@@ -2060,11 +2086,10 @@ impl VectorStore for QdrantVectors {
         // One scroll page: Qdrant's scroll has no random start, and a slowly
         // changing first page is fine for a picture that refreshes every few
         // hours.
-        let page: ScrollResult = self
-            .call(
-                Method::POST,
-                &format!("/collections/{}/points/scroll", self.alias),
-                Some(json!({
+        let page = self
+            .scroll_page(
+                &self.alias,
+                &json!({
                     "limit": limit,
                     // Only `artifact_id` is read below; a full payload would
                     // haul every point's chunk text along for nothing.
@@ -2075,7 +2100,8 @@ impl VectorStore for QdrantVectors {
                     // dropped on the next line. `dense_of` already reads the
                     // object form.
                     "with_vector": [DENSE],
-                })),
+                }),
+                &Value::Null,
             )
             .await?;
         Ok(page
@@ -2189,6 +2215,7 @@ mod tests {
             pinned_boost: 0.15,
             weak_below: 0.35,
             per_source_cap: 3,
+            candidate_multiplier: 3,
         })
         .await
         .unwrap();
@@ -2638,9 +2665,51 @@ mod tests {
             pinned_boost: 0.15,
             weak_below: 0.35,
             per_source_cap: 3,
+            candidate_multiplier: 3,
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_half_life_a_search_is_handed_is_the_one_the_formula_decays_over() {
+        // The half-life used to be fixed when the store connected. The idle
+        // pass ranks the same pairs under several, so it travels with the call
+        // — and this is the request Qdrant actually sees, not our belief about
+        // it.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let decays_over_thirty_days = |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+            body["searches"][0]["query"]["formula"]["sum"][1]["mult"][1]["exp_decay"]["scale"]
+                == json!(30 * SECONDS_PER_DAY)
+        };
+        Mock::given(method("POST"))
+            .and(path("/collections/engram/points/query/batch"))
+            .and(decays_over_thirty_days)
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [ { "points": [] }, { "points": [] } ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        against(&server)
+            .await
+            .search_weighted(
+                &[1.0, 0.0, 0.0],
+                &Default::default(),
+                10,
+                &SearchFilter::default(),
+                Recency {
+                    weight: 0.1,
+                    half_life_days: 30,
+                },
+            )
+            .await
+            .expect("the request carried the half-life it was handed");
     }
 
     #[tokio::test]

@@ -3,11 +3,11 @@
 //! button. No model call anywhere on this page.
 
 use crate::core::moments::{DEFAULT_HOUR, zone};
-use crate::error::Result;
 use crate::store::moments::DueRow;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path};
@@ -60,6 +60,9 @@ struct TzForm {
 pub(crate) struct DueView {
     pub id: String,
     pub artifact_id: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
     pub title: String,
     pub when: String,
     /// The absolute time, always, for the row's tooltip. `when` is the short
@@ -83,6 +86,9 @@ pub(crate) struct DueView {
 
 pub(crate) struct EventView {
     pub artifact_id: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`.
+    pub named: bool,
     pub title: String,
     pub when: String,
     pub span: String,
@@ -96,16 +102,23 @@ pub(crate) struct EventView {
 /// `undo` is the whole path and not a verb appended to the moment's id: "not a
 /// reminder" deletes the moment, so what takes it back is addressed to the
 /// artifact that is still there.
+///
+/// And it is optional, because on one row there is nothing to address it to.
+/// A merged artifact belongs to no corpus, so nothing can re-read a note to
+/// derive the reminder again — `Core::set_reminder` says as much by answering
+/// `false` to `on` there. The row is still deleted; what is withheld is the
+/// button, because an undo that reported success and restored nothing is
+/// worse than no undo at all.
 pub(crate) struct Just {
     pub verb: &'static str,
-    pub undo: String,
+    pub undo: Option<String>,
 }
 
 impl Just {
     fn moment(id: &str, verb: &'static str, undo: &str) -> Self {
         Just {
             verb,
-            undo: format!("/ui/moments/{id}/{undo}"),
+            undo: Some(format!("/ui/moments/{id}/{undo}")),
         }
     }
 }
@@ -278,7 +291,7 @@ async fn render(
     since: i64,
     all: bool,
     head: bool,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let tz = zone(Some(tz_name));
     // The zone as the zone table spells it, never as the form spelled it. It
     // is echoed back into the fragment's `hx-vals` JSON, and Askama's escaping
@@ -312,6 +325,7 @@ async fn render(
             DueView {
                 id: r.moment.id.clone(),
                 artifact_id: r.moment.artifact_id.clone(),
+                named: r.named,
                 title: r.title,
                 when: eff
                     .map(|a| due_words(a, now, tz))
@@ -336,6 +350,7 @@ async fn render(
         .into_iter()
         .map(|r| EventView {
             artifact_id: r.moment.artifact_id,
+            named: r.named,
             title: r.title,
             when: r
                 .moment
@@ -347,12 +362,13 @@ async fn render(
         .collect();
     // What the band is waiting for: a capture still being read, or the next
     // change to what is due — whichever is sooner.
-    let queue_active = tenant
-        .core
-        .store
-        .foreground_work_in_flight()
-        .await
-        .unwrap_or(false);
+    //
+    // The same narrowed probe the idle line asks, not the broader "is any
+    // foreground row in the queue". What the band is waiting for is a reminder,
+    // and a reminder is written by the window job — a reading stage. A promoted
+    // background sweep or a crashed process's stale claim moves nothing the
+    // band shows, and both used to pin it at two seconds.
+    let queue_active = crate::web::ui::reading_a_capture(&tenant.core.store).await;
     let next_at = tenant
         .core
         .store
@@ -374,11 +390,11 @@ async fn render(
     .into_response())
 }
 
-async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> Result<Response> {
+async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> UiResult<Response> {
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
-async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> UiResult<Response> {
     // Only where something was finished. A press that changed nothing — a
     // second click, a button on a page open since a re-read replaced the row —
     // reported "Done" and offered to undo a completion that never happened.
@@ -390,7 +406,11 @@ async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> 
     render(&tenant, &f.tz, just, f.since, f.all == "1", f.head == "1").await
 }
 
-async fn undone(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn undone(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<TzForm>,
+) -> UiResult<Response> {
     tenant.core.uncomplete_moment(&id).await?;
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
@@ -431,7 +451,11 @@ fn local(at: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
     crate::core::moments::resolve_local(at, tz)
 }
 
-async fn snooze(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> Result<Response> {
+async fn snooze(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<TzForm>,
+) -> UiResult<Response> {
     let mut just = None;
     if let Some(until) = snooze_until(&f.until, tenant.core.clock.now(), zone(Some(&f.tz)))
         && tenant.core.store.snooze(&id, until).await?
@@ -446,7 +470,7 @@ async fn unsnooze(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.store.unsnooze(&id).await?;
     tenant.core.store.rearm_remind().await?;
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
@@ -463,7 +487,7 @@ async fn set_date(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let tz = zone(Some(&f.tz));
     let at = chrono::NaiveDateTime::parse_from_str(&f.when, "%Y-%m-%dT%H:%M")
         .ok()
@@ -489,7 +513,7 @@ async fn not_a_reminder(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let Some(m) = tenant.core.store.moment(&id).await? else {
         return render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await;
     };
@@ -497,14 +521,38 @@ async fn not_a_reminder(
     // `set` row is the one source this never removes, and announcing "Not a
     // reminder — undo" over a row still sitting two lines below is the band
     // telling the reader something they can see is untrue.
+    // The undo only where the artifact can honour it: `is_a_reminder` hands
+    // the note back to the judged read, and not every artifact has a note to
+    // hand back. `Core::can_be_a_reminder` is the same predicate that method
+    // decides on — asked here rather than restated, because the corpus is only
+    // the first of its four conditions and checking that one alone offered the
+    // button on a capture of several windows and on one whose promotion an
+    // operator had undone, where pressing it restored nothing. The deletion
+    // still happens; the button does not appear.
+    let takes_it_back = tenant
+        .core
+        .can_be_a_reminder(&m.artifact_id)
+        .await
+        .unwrap_or(false);
     let just = tenant
         .core
         .set_reminder(&m.artifact_id, false)
         .await?
         .then(|| Just {
             verb: "Not a reminder",
-            undo: format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id),
+            undo: takes_it_back.then(|| format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id)),
         });
+    // The reading that filed this moment is the one being contradicted.
+    tenant
+        .core
+        .store
+        .undo_action_on(
+            &id,
+            crate::store::actions::Kind::Moment,
+            crate::store::actions::UndoneBy::Operator,
+            "not a reminder",
+        )
+        .await?;
     render(&tenant, &f.tz, just, f.since, f.all == "1", f.head == "1").await
 }
 
@@ -512,8 +560,17 @@ async fn is_a_reminder(
     tenant: Tenant,
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
-) -> Result<Response> {
-    tenant.core.set_reminder(&id, true).await?;
+) -> UiResult<Response> {
+    // The band only offers this where `can_be_a_reminder` said it would work,
+    // so a `false` here is the window having changed underneath an open page.
+    // Said out loud rather than dropped: the row simply not reappearing is the
+    // symptom, and this is the only place that knows why.
+    if !tenant.core.set_reminder(&id, true).await? {
+        tracing::info!(
+            artifact_id = id,
+            "nothing to hand back to the judged read; the reminder was not restored"
+        );
+    }
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
@@ -567,6 +624,59 @@ mod tests {
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// A due row is a link and its time; there is no snippet beside it. So a
+    /// reminder set on a passage was listed under the heading of the section
+    /// the passage was cut from — a name for a chapter standing over a
+    /// reminder about three sentences of it.
+    #[tokio::test]
+    async fn a_reminder_on_a_passage_is_listed_by_how_its_text_opens() {
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("one\ntwo", "web", None)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    title: Some("Kapitel 3".into()),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        core.store
+            .insert_moment(&NewMoment {
+                artifact_id: p[0].id.clone(),
+                kind: Kind::Due,
+                at: Some(crate::store::now() - 3_600),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Cue,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("Kapitel 3"), "{html}");
+        assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
+        assert!(
+            html.contains("name-opening"),
+            "the opening was set as a name: {html}"
+        );
     }
 
     #[tokio::test]
@@ -901,6 +1011,19 @@ mod tests {
         let core = test_core().await;
         let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        // As the reading that filed it would have journaled it.
+        core.store
+            .record_action(&crate::store::actions::NewAction {
+                job: crate::store::actions::Job::Judgement,
+                kind: crate::store::actions::Kind::Moment,
+                subject_id: id.clone(),
+                survivor_id: None,
+                detail: Some("due".into()),
+                evidence: serde_json::json!({ "artifact": aid }),
+                pair_score: None,
+            })
+            .await
+            .unwrap();
         let (app, cookie) = app_with_cookie(core.clone()).await;
 
         let band = body_of(
@@ -911,7 +1034,7 @@ mod tests {
         )
         .await;
         assert!(
-            band.contains("not a reminder"),
+            band.contains("Not a reminder"),
             "the band offers it on a row it read: {band}"
         );
 
@@ -936,6 +1059,18 @@ mod tests {
             "the row is withdrawn, not completed"
         );
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
+        // The reading that filed it is contradicted, and the journal says so.
+        assert!(
+            core.store
+                .open_action_on(&id, crate::store::actions::Kind::Moment)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            core.store.recent_actions(1).await.unwrap()[0].undone_by,
+            Some(crate::store::actions::UndoneBy::Operator)
+        );
 
         app.oneshot(form(
             &format!("/ui/artifacts/{aid}/is-a-reminder"),
@@ -966,6 +1101,65 @@ mod tests {
         );
     }
 
+    /// `carry_moments` deliberately moves a root's open due row onto the
+    /// merge that folded it in, and a merge belongs to no corpus. Before this,
+    /// `set_reminder` returned at the corpus lookup having done nothing:
+    /// pressing "Not a reminder" gave no banner, no error, deleted nothing and
+    /// recorded no refusal, while the row went on pushing at every rung for
+    /// ever. It deletes now — and offers no undo, because nothing could
+    /// re-read a note that does not exist to derive the row again.
+    #[tokio::test]
+    async fn a_reminder_carried_onto_a_merge_can_still_be_told_it_is_not_one() {
+        let core = test_core().await;
+        let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
+        let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
+        let merge = core
+            .store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "the invoice, and everything else about it".into(),
+                    title: Some("Invoices".into()),
+                    ..Default::default()
+                },
+                std::slice::from_ref(&aid),
+            )
+            .await
+            .unwrap();
+        assert_eq!(core.store.carry_moments(&aid, &merge.id).await.unwrap(), 1);
+        assert!(
+            core.store
+                .get_artifact(&merge.id)
+                .await
+                .unwrap()
+                .corpus_id
+                .is_none(),
+            "a merge belongs to no corpus, which is the whole of this case"
+        );
+
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        let html = body_of(
+            app.clone()
+                .oneshot(form(
+                    &format!("/ui/moments/{id}/not-a-reminder"),
+                    &cookie,
+                    "tz=Europe/Berlin",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("Not a reminder"), "the band says so: {html}");
+        assert!(
+            !html.contains("is-a-reminder"),
+            "and offers no undo it could not honour: {html}"
+        );
+        assert!(
+            core.store.moment(&id).await.unwrap().is_none(),
+            "the row is gone, not merely reported gone"
+        );
+        assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn a_reminder_somebody_set_themselves_is_not_offered_an_un_reading() {
         // Offering it would be offering to undo their own typing.
@@ -993,7 +1187,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(!band.contains("not a reminder"), "{band}");
+        assert!(!band.contains("Not a reminder"), "{band}");
     }
 
     #[tokio::test]
@@ -1467,7 +1661,7 @@ mod tests {
             BAND_ROWS + 4,
             "everything, once asked: {html}"
         );
-        assert!(html.contains("show less"));
+        assert!(html.contains("Show less"));
         assert!(
             html.contains(r#""all": "1""#),
             "the poll asks the same question again: {html}"
@@ -1489,7 +1683,7 @@ mod tests {
             !html.contains("show all"),
             "nothing is being held back: {html}"
         );
-        assert!(!html.contains("show less"));
+        assert!(!html.contains("Show less"));
     }
 
     #[tokio::test]
@@ -1508,7 +1702,7 @@ mod tests {
             "snooze and move are behind a disclosure: {html}"
         );
         assert!(html.contains("<summary>later</summary>"));
-        assert!(html.contains(">done<"), "and done is the one visible verb");
+        assert!(html.contains(">Done<"), "and Done is the one visible verb");
     }
 
     #[tokio::test]
@@ -1526,7 +1720,7 @@ mod tests {
             !html.contains("due-later"),
             "asking for the date is the whole point of the row"
         );
-        assert!(html.contains("set date"));
+        assert!(html.contains("Set date"));
     }
 
     #[tokio::test]

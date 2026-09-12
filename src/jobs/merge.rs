@@ -179,12 +179,52 @@ pub async fn finish(core: &Core, merged_id: &str) -> Result<()> {
 /// handled by `heal_dangling_supersessions`, which restores what it hid — and a
 /// fresh merge is then correct, because the duplication is genuinely back. A
 /// decision may overrule the sweep; a deletion may not.
-pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
+pub async fn undo(
+    core: &Core,
+    merged_id: &str,
+    by: crate::store::pairs::DecidedBy,
+) -> Result<Undone> {
     let m = core.store.get_artifact(merged_id).await?;
     if m.provenance != Provenance::Merged {
         return Err(crate::error::Error::Validation(format!(
             "{merged_id} is not a merged artifact"
         )));
+    }
+
+    // Asked before anything is touched, because the answer is whether this
+    // undo happens at all.
+    //
+    // A merge hidden behind a later one is already out of results — which is
+    // the whole of what the deprecate below is asking for — and
+    // `deprecate_with` refuses it outright: it will not deprecate a row with
+    // `superseded_by` set, on the reasoning that the combination is one
+    // nothing else in the system produces.
+    //
+    // That state is reached legitimately and often: `finish` supersedes an
+    // older merge onto the newer one that subsumes it, while the older merge's
+    // own `corpus_actions` rows stay open. `retract`'s rules read open rows, so
+    // rule 1 replays one of those originals and arrives here.
+    //
+    // What used to happen then was worse than the wedge it was written to
+    // avoid. `finish` has already repointed this merge's roots onto the later
+    // one, so `artifacts_superseded_by` comes back empty: the loop below
+    // restored nothing, the deprecate was skipped, and the function returned
+    // `Ok(())` — on the strength of which every caller stamped the merge's
+    // journal rows undone. The rows are closed now, so rule 1 will never
+    // reconsider them, and Insights reported a retraction that did not happen.
+    // A no-op that reports success is not a safer failure than a loud one.
+    //
+    // So: nothing is done, and the caller is told nothing was done. Not an
+    // `Err`, because rule 1 meets this on ordinary rows and every `?` in its
+    // loop returns before the pass stamps its cursor — an error here would
+    // wedge the idle pass exactly as the deprecate once did.
+    if let Some(later) = m.superseded_by.clone() {
+        tracing::info!(
+            merged = %m.id,
+            later = %later,
+            "the merge is hidden behind a later one; leaving it, and its journal rows, alone"
+        );
+        return Ok(Undone::HiddenBehind { later });
     }
 
     // Everything it hid, not just its roots: an earlier merge it subsumed was
@@ -210,7 +250,7 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
                 crate::store::pairs::PairState::Dismissed,
                 Some("merge undone"),
                 // The undo is the review: a person pressed it.
-                crate::store::pairs::DecidedBy::Operator,
+                by,
             )
             .await?;
     }
@@ -223,11 +263,44 @@ pub async fn undo(core: &Core, merged_id: &str) -> Result<()> {
             &m.id,
             "merge undone",
             // The same press, recorded the same way as the branch above it.
-            crate::store::pairs::DecidedBy::Operator,
+            by,
         )
         .await?;
     tracing::info!(merged = %m.id, restored = restored.len(), "undid a merge");
-    Ok(())
+    Ok(Undone::TakenApart)
+}
+
+/// What [`undo`] did — which is not always "undid it".
+///
+/// A value rather than an error for the second case, and a value rather than
+/// nothing for the first: every caller of `undo` follows it by stamping the
+/// merge's `corpus_actions` rows undone, and that stamp is a claim about the
+/// base that must not be made when the base did not change. Closing those rows
+/// is irreversible in the only sense that matters — rule 1 reads open rows, so
+/// a row closed on a false claim is one no later pass will look at again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Undone {
+    /// The merge was taken apart: what it hid is active again, it is
+    /// deprecated, and the pairs behind it are dismissed so the sweep does not
+    /// simply redo it.
+    ///
+    /// Carried a count of what came back, which nothing ever read — the same
+    /// number is on the `info` line above, where the one reader it has is
+    /// looking. `HiddenBehind` keeps its payload because the undo route does
+    /// read that one.
+    TakenApart,
+    /// Nothing was done. A later merge subsumed this one and holds its
+    /// supersession, so taking this one apart would mean overruling a decision
+    /// the press did not name. Carries the merge now standing in front of it.
+    HiddenBehind { later: String },
+}
+
+impl Undone {
+    /// Whether the base changed, and so whether the journal rows that recorded
+    /// this merge may be stamped undone.
+    pub fn happened(&self) -> bool {
+        matches!(self, Undone::TakenApart)
+    }
 }
 
 /// Retire a merge whose embedding can never arrive, and hand its pairs back
@@ -250,6 +323,15 @@ pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
     {
         // The embed landed (or someone else acted) between the scan and
         // here. Nothing is stranded any more.
+        return Ok(());
+    }
+    // The ordering above is about a merge's *first* embed. One that has
+    // already hidden its roots landed, and an embed it waits on now is a later
+    // one — `jobs::condense` rewrites merged artifacts too — so the safety
+    // argument does not reach it: deprecated, it takes what it replaced out of
+    // results with it. `stranded_merges` refuses it; this is the same question
+    // asked again at the moment of acting.
+    if !core.store.artifacts_superseded_by(&m.id).await?.is_empty() {
         return Ok(());
     }
     core.deprecate(&m.id).await?;
@@ -296,16 +378,23 @@ pub async fn flag_orphans(core: &Core) -> Result<usize> {
     Ok(n)
 }
 
-/// Every value and literal in `roots` that `draft` does not carry.
+/// Every machine literal in `roots` that `draft` does not carry.
 ///
 /// Empty means the merge may be written. Anything else is a merge that would
 /// have lost something, and the caller escalates rather than retrying: the text
 /// is what was wrong, and a person can read what it would have cost.
 ///
-/// Both halves search the draft's text *and* its caveats. A caveat is stored,
-/// rendered and recoverable, so a value demoted there has not been lost — this
-/// checks for loss, not for prominence. Deciding that a value belongs in the
-/// caveats rather than the body is exactly the judgement a merge is for.
+/// The search covers the draft's text *and* its caveats. A caveat is stored,
+/// rendered and recoverable, so a literal demoted there has not been lost —
+/// this checks for loss, not for prominence. Deciding that something belongs
+/// in the caveats rather than the body is exactly the judgement a merge is for.
+///
+/// It used to check values as well — every version, date and port `fact_tokens`
+/// could pick out of a root had to reappear in the draft. That half went with
+/// `infer::facts`: the question it asked was whether two spellings of a number
+/// matched, which is a question about punctuation, and it refused correct
+/// merges for renumbering a list. A literal is quoted from a source and can be
+/// searched for honestly; a value has to be understood first.
 pub fn losses(roots: &[Chunk], draft: &MergedDraft) -> Vec<String> {
     let mut haystack = draft.text.clone();
     for c in &draft.caveats {
@@ -313,19 +402,10 @@ pub fn losses(roots: &[Chunk], draft: &MergedDraft) -> Vec<String> {
         haystack.push_str(c);
     }
 
-    let have = crate::infer::facts::fact_tokens(&haystack);
     let mut out: Vec<String> = Vec::new();
 
     for r in roots {
-        // Values: a version, a timeout, a port. The failure this catches is a
-        // model answering "duplicate" and then quietly picking a side while
-        // writing, which is a conflict resolved by deletion.
-        for tok in crate::infer::facts::fact_tokens(&r.text) {
-            if !have.contains(&tok) {
-                out.push(tok);
-            }
-        }
-        // Literals: commands, paths, flags, error strings. `verify`'s module
+        // Commands, paths, flags, error strings. `verify`'s module
         // header states the stake — a paraphrased command is a command that
         // later gets pasted into a root shell.
         //
@@ -392,6 +472,75 @@ mod tests {
         assert_eq!(m.tags, vec!["pinned", "shared", "runbook"]);
     }
 
+    /// A merge hidden behind a later one does not wedge the idle pass.
+    ///
+    /// It is not undone either — see
+    /// `undoing_a_merge_that_a_later_one_hides_does_nothing_and_says_so` for
+    /// what it reports instead. What this one holds is the older claim: that
+    /// meeting the state costs nothing, and leaves the base exactly as it was.
+    ///
+    /// `finish` supersedes an older merge onto the newer one that subsumes it,
+    /// while the older merge's own `corpus_actions` rows stay open — and
+    /// `retract`'s rules read open rows. So rule 1 replayed one of those
+    /// originals, reactivated the sources here, and died on `core.deprecate`,
+    /// which refuses a row that already carries `superseded_by`. The `?`
+    /// returned before the pass stamped its cursor, so every later pass read
+    /// the same row and died the same way: rule 2, interference, condense and
+    /// ranking adoption all sit behind rule 1 and none of them ran again.
+    #[tokio::test]
+    async fn a_merge_hidden_behind_a_later_one_does_not_wedge_the_idle_pass() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let older = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        let newer = write(&core, &draft("a text and b text, restated"), &ids)
+            .await
+            .unwrap();
+        // What `finish` does when a newer merge subsumes an older one.
+        core.supersede(&older.id, &newer.id).await.unwrap();
+        assert!(
+            core.store
+                .get_artifact(&older.id)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some()
+        );
+
+        undo(&core, &older.id, crate::store::pairs::DecidedBy::Evidence)
+            .await
+            .expect("an already-hidden merge wedged the whole idle pass");
+        // The rows that recorded the merge stay open: rule 1 reads open
+        // rows, and closing them here would be the last time anything
+        // looked at this merge.
+
+        // The supersession stands: hiding it behind the newer merge is a
+        // separate decision, and undoing this merge is not a reason to
+        // overrule it.
+        assert!(
+            core.store
+                .get_artifact(&older.id)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some(),
+            "the later merge's claim on it was thrown away"
+        );
+        // And the merge is not deprecated on top of being superseded — the
+        // combination `deprecate_with` refuses precisely because nothing else
+        // in the system produces it.
+        assert_eq!(
+            core.store.get_artifact(&older.id).await.unwrap().status,
+            ArtifactStatus::Superseded,
+            "it was left in a state the rest of the app cannot render"
+        );
+    }
+
     /// A captured artifact carrying only the text the checks read.
     fn root(text: &str) -> Chunk {
         Chunk {
@@ -436,27 +585,38 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_that_drops_a_value_is_refused() {
+    fn a_merge_that_drops_a_literal_is_refused() {
         // The one way this feature can destroy knowledge without anyone
         // noticing: the model answers "duplicate" and quietly picks a side while
-        // writing. The result reads well, ranks well, and the missing number is
+        // writing. The result reads well, ranks well, and the missing command is
         // gone from the base — a conflict resolved by deletion.
+        let roots = [
+            root("Mount it read-only with `mount -o ro /dev/sdb1 /mnt/case`."),
+            root("Unmount it again with `umount /mnt/case`."),
+        ];
+        let d = draft("Unmount it again with `umount /mnt/case`.");
+        assert!(
+            losses(&roots, &d).contains(&"mount -o ro /dev/sdb1 /mnt/case".to_string()),
+            "{:?}",
+            losses(&roots, &d)
+        );
+    }
+
+    #[test]
+    fn a_dropped_value_is_no_longer_caught_and_that_is_the_trade() {
+        // The cost of retiring `infer::facts`, written down rather than left to
+        // be rediscovered. A merge that keeps one side's timeout and drops the
+        // other's passes this check now. The half that caught it asked whether
+        // two spellings of a number matched — `Win7/8/10` against `Windows 7, 8
+        // und 10` — and answered a question about punctuation, refusing correct
+        // merges for renumbering a list. What guards the merge instead is the
+        // judge: a model that cannot write text keeping both values is told to
+        // answer "conflict" rather than "duplicate" (see `dedupe_prompt`).
         let roots = [
             root("The request timeout is 30s."),
             root("The request timeout is 90s."),
         ];
-        let d = draft("The request timeout is 90s.");
-        assert_eq!(losses(&roots, &d), vec!["30s".to_string()]);
-
-        // Written without its unit, the same drop goes uncaught. `30` alone is
-        // not distinguishable from the third item of a numbered list, and
-        // demanding every bare number survive refused three correct merges —
-        // see `infer::facts::a_port_written_bare_is_the_cost_of_that_rule`.
-        let bare = [
-            root("The request timeout is 30 seconds."),
-            root("The request timeout is 90 seconds."),
-        ];
-        assert!(losses(&bare, &draft("The request timeout is 90 seconds.")).is_empty());
+        assert!(losses(&roots, &draft("The request timeout is 90s.")).is_empty());
     }
 
     #[test]
@@ -867,11 +1027,12 @@ mod tests {
     async fn a_merge_takes_its_roots_verdicts_with_it() {
         use crate::store::pairs::PairState;
         let mut core = crate::core::test_support::test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        // Through the press: a duplicate verdict is a proposal now and writes
+        // nothing on its own, so the writer is what this test needs.
+        core.pair_synthesizer = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"relation":"duplicate","detail":"same claim",
-                "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
-                          "tags":[],"caveats":[]}}"#
+                r#"{"merged":{"title":"Mounting","text":"Mount the filesystem, or attach the volume, before writing.",
+                          "category":"procedure","caveats":[]}}"#
                     .into(),
             ]),
         ));
@@ -913,6 +1074,7 @@ mod tests {
             .unwrap()
             .id;
 
+        core.store.ask_pair_synthesis(dupe).await.unwrap();
         crate::jobs::dedupe::run(&core, &dupe.to_string())
             .await
             .unwrap();
@@ -954,11 +1116,12 @@ mod tests {
         // literally the same bug as
         // reactivating_a_superseded_artifact_survives_the_next_sweep.
         let mut core = crate::core::test_support::test_core().await;
-        core.judge = Some(std::sync::Arc::new(
+        // Through the press: a duplicate verdict is a proposal now and writes
+        // nothing on its own, so the writer is what this test needs.
+        core.pair_synthesizer = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"relation":"duplicate","detail":"same claim",
-                "merged":{"text":"Mount the filesystem, or attach the volume, before writing.",
-                          "tags":[],"caveats":[]}}"#
+                r#"{"merged":{"title":"Mounting","text":"Mount the filesystem, or attach the volume, before writing.",
+                          "category":"procedure","caveats":[]}}"#
                     .into(),
             ]),
         ));
@@ -980,6 +1143,7 @@ mod tests {
             .await
             .unwrap()[0]
             .id;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
         crate::jobs::dedupe::run(&core, &pair.to_string())
             .await
             .unwrap();
@@ -993,7 +1157,9 @@ mod tests {
             .unwrap_or_else(|| panic!("no merge was written"));
         crate::jobs::embed::run(&core, &merged_id).await.unwrap();
 
-        undo(&core, &merged_id).await.unwrap();
+        undo(&core, &merged_id, crate::store::pairs::DecidedBy::Operator)
+            .await
+            .unwrap();
 
         for id in &ids {
             let c = core.store.get_artifact(id).await.unwrap();
@@ -1126,7 +1292,9 @@ mod tests {
             .unwrap();
         // No embed ran: nothing is superseded by m yet.
 
-        undo(&core, &m.id).await.unwrap();
+        undo(&core, &m.id, crate::store::pairs::DecidedBy::Operator)
+            .await
+            .unwrap();
 
         let p = core.store.get_pair(pair).await.unwrap();
         assert_eq!(
@@ -1185,12 +1353,15 @@ mod tests {
         // than two roots behind it. A check that only read the first two would
         // pass a merge that dropped everything the third said.
         let roots = [
-            root("Port 8080/tcp is the default."),
-            root("The timeout is 30s."),
-            root("Retries back off for 5m."),
+            root("The config lives at /etc/engram/config.toml."),
+            root("Pass --dry-run first."),
+            root("The socket is at /run/engram/engram.sock."),
         ];
-        let d = draft("Port 8080/tcp is the default and the timeout is 30s.");
-        assert_eq!(losses(&roots, &d), vec!["5m".to_string()]);
+        let d = draft("The config lives at /etc/engram/config.toml; pass --dry-run first.");
+        assert_eq!(
+            losses(&roots, &d),
+            vec!["/run/engram/engram.sock".to_string()]
+        );
     }
 
     /// C was a duplicate of B; B is now inside M. Without this the question
@@ -1266,6 +1437,67 @@ mod tests {
                 .len(),
             1,
             "a second finish duplicated the question"
+        );
+    }
+
+    /// An undo that cannot happen says so, rather than reporting success for
+    /// having done nothing.
+    ///
+    /// `finish` repoints an older merge's roots onto the newer one that
+    /// subsumes it, so by the time anything asks to undo the older merge,
+    /// `artifacts_superseded_by` comes back empty and there is nothing to put
+    /// back. The old code read that as a completed undo: it restored nothing,
+    /// skipped the deprecate because the row was hidden, returned `Ok(())`,
+    /// and every caller then stamped the merge's journal rows undone — closing
+    /// them to rule 1 for good, and telling the operator on Insights that a
+    /// retraction had happened.
+    #[tokio::test]
+    async fn undoing_a_merge_that_a_later_one_hides_does_nothing_and_says_so() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("a text", [1.0, 0.0]), ("b text", [0.93, 0.37])],
+        )
+        .await;
+        let older = write(&core, &draft("a text and b text"), &ids)
+            .await
+            .unwrap();
+        finish(&core, &older.id).await.unwrap();
+        let newer = write(
+            &core,
+            &draft("all three texts"),
+            std::slice::from_ref(&older.id),
+        )
+        .await
+        .unwrap();
+        finish(&core, &newer.id).await.unwrap();
+
+        let hidden = core.store.get_artifact(&older.id).await.unwrap();
+        assert_eq!(
+            hidden.superseded_by.as_deref(),
+            Some(newer.id.as_str()),
+            "the fixture stopped hiding the older merge behind the newer one"
+        );
+
+        let outcome = undo(&core, &older.id, crate::store::pairs::DecidedBy::Operator)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Undone::HiddenBehind {
+                later: newer.id.clone()
+            },
+            "an undo that changed nothing reported that it had"
+        );
+        assert!(!outcome.happened());
+
+        // And the base is untouched: the later merge still holds the
+        // supersession it made, which is the decision this press did not name.
+        let after = core.store.get_artifact(&older.id).await.unwrap();
+        assert_eq!(after.superseded_by, hidden.superseded_by);
+        assert_eq!(
+            after.status, hidden.status,
+            "the older merge was deprecated by an undo that did nothing else"
         );
     }
 }

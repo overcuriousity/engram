@@ -348,29 +348,8 @@ mod tests {
         crate::core::search::SearchResult {
             artifact_id: id.into(),
             corpus_id: "c".into(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
-            score: 0.0,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            due_at: None,
-            due_in: None,
-            in_sitting: false,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
             via: via.map(str::to_string),
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         }
     }
 

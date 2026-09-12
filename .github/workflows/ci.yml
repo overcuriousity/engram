@@ -73,6 +73,28 @@ jobs:
         env:
           ENGRAM_TEST_QDRANT: http://localhost:6333
 
+  browser:
+    name: browser layout
+    runs-on: ubuntu-latest
+    # The `#[ignore]`d tests in `web::mod`, `web::ui` and `tests/browser_ask`
+    # need a real headless Chrome, so they cannot ride the `check` job. They
+    # were written, wired to `tests/browser/page_width.js`, and then run by
+    # nobody: `cargo test --locked` skips them by name and the only `--ignored`
+    # line in this file names the Qdrant suite. A layout guard that never runs
+    # is a layout guard that is already failing and does not say so.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # `test_support::chrome` looks for playwright's own build under
+      # ~/.cache/ms-playwright, which is what this installs.
+      - run: npx --yes playwright install --with-deps chromium-headless-shell
+      - run: cargo test --locked --lib -- --ignored
+      - run: cargo test --locked --test browser_ask -- --ignored
+
   audit:
     name: security advisories
     runs-on: ubuntu-latest

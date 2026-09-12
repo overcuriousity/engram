@@ -1,12 +1,38 @@
-//! The scoring knobs a sweep may move while the server runs.
+//! The knobs a sweep may move while the server runs.
 //!
 //! Everything else that shapes ranking is read once at startup and threaded
-//! down. These two are different: the tuning sweep ranks the same judged pairs
-//! under a grid of them in one pass, and applying its recommendation has to
+//! down. These are different: the tuning sweep and the idle pass rank the same
+//! pairs under several of them in one pass, and adopting a candidate has to
 //! change the search the *next* request runs. So they live behind
 //! `Core::ranking` rather than being copied into the places that use them.
+//!
+//! Three reorder what retrieval returned (`recency_weight`, `per_source_cap`,
+//! `prime_lift`); two change what is retrieved at all (`candidate_multiplier`,
+//! `recency_half_life_days`). Both kinds cost the idle pass the same thing —
+//! one vector read per pair per candidate — which is what lets them share a
+//! struct and a chooser. Two more sit beside them and are moved on their own
+//! rules: `rerank`, scored against the rank that was served, and
+//! `spread_max`, scored on what the appended band earned while serving.
 
 use crate::config::VectorConfig;
+
+/// The rungs the idle pass may step the pool depth along. Values, not a
+/// threshold: the pass never prefers one over another except by measuring.
+pub const MULTIPLIERS: [usize; 5] = [1, 2, 3, 5, 8];
+/// The rungs for the recency half-life, in days.
+pub const HALF_LIVES: [u32; 5] = [30, 90, 180, 365, 730];
+/// The rungs for `prime_lift`: how many places an accessible hit may climb.
+/// Starts at the shipped zero, because a lift cannot be negative.
+pub const PRIME_LIFTS: [usize; 4] = [0, 1, 2, 4];
+/// The rungs for `sitting_prime`. Two, because it is a switch — the ladder
+/// shape is kept so the chooser can treat it like every other axis.
+pub const SITTING_PRIMES: [bool; 2] = [false, true];
+/// The rungs for `spread_max`: how many linked artifacts hang under the list.
+pub const SPREADS: [usize; 6] = [0, 1, 2, 3, 5, 8];
+/// The rungs for `review_min`: the cosine at which a pair is worth asking the
+/// judge about. A rung at or above `consolidate.auto_supersede` is never
+/// offered.
+pub const REVIEW_MINS: [f32; 4] = [0.80, 0.84, 0.88, 0.92];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RankingParams {
@@ -15,10 +41,58 @@ pub struct RankingParams {
     /// the whole list — which is what `ask` wants, and what the sweep offers as
     /// one of its candidates.
     pub per_source_cap: Option<usize>,
+    /// How many times the answer size retrieval fetches when something
+    /// downstream — the cap or the reranker — will narrow the list. Wider
+    /// costs a bigger vector read and gives the cap more to choose from.
+    pub candidate_multiplier: usize,
+    /// How many days it takes a result's recency term to halve.
+    pub recency_half_life_days: u32,
+    /// How many places priming may lift a hit. Zero is off.
+    pub prime_lift: usize,
+    /// Whether what this sitting has already touched may take part in the
+    /// lift. It shares `prime_lift`'s budget rather than holding one of its
+    /// own, so at a lift of zero this changes nothing.
+    pub sitting_prime: bool,
+    /// How many associated artifacts are appended under the ranked list.
+    pub spread_max: usize,
+    /// Whether the configured reranker runs. Meaningless where none is
+    /// configured: serving treats it as `false` there.
+    pub rerank: bool,
+    /// The cosine at which a pair of artifacts is worth asking the judge
+    /// about. A corpus job's threshold, carried here because the generation
+    /// is the running configuration and `relate.rs` reads it off this lock.
+    pub review_min: f32,
+}
+
+/// The shipped values — the same ones `VectorConfig`'s serde defaults hold,
+/// read from the same functions so the two cannot drift.
+impl Default for RankingParams {
+    fn default() -> Self {
+        Self {
+            recency_weight: crate::config::default_recency_weight(),
+            per_source_cap: Some(crate::config::default_per_source_cap()),
+            candidate_multiplier: crate::config::default_candidate_multiplier(),
+            recency_half_life_days: crate::config::default_recency_half_life_days(),
+            prime_lift: crate::config::default_prime_lift(),
+            sitting_prime: crate::config::default_sitting_prime(),
+            spread_max: crate::config::default_spread_max(),
+            rerank: crate::config::default_rerank_knob(),
+            review_min: crate::config::default_review_min(),
+        }
+    }
 }
 
 impl RankingParams {
-    pub fn from_vector(cfg: &VectorConfig) -> Self {
+    /// The file's starting rungs. `reranker_configured` is whether `[infer]`
+    /// names one: the knob starts on where it can, and there is nothing to
+    /// start where it cannot.
+    pub fn from_config(
+        cfg: &VectorConfig,
+        associate: &crate::config::AssociateConfig,
+        consolidate: &crate::config::ConsolidateConfig,
+        sitting: &crate::config::SittingConfig,
+        reranker_configured: bool,
+    ) -> Self {
         Self {
             recency_weight: cfg.recency_weight,
             // `0` is how a file says "no cap": a setting cannot hold `None`,
@@ -28,6 +102,13 @@ impl RankingParams {
                 0 => None,
                 n => Some(n),
             },
+            candidate_multiplier: cfg.candidate_multiplier.max(1),
+            recency_half_life_days: cfg.recency_half_life_days.max(1),
+            prime_lift: associate.prime_lift,
+            sitting_prime: sitting.prime,
+            spread_max: associate.spread_max,
+            rerank: reranker_configured,
+            review_min: consolidate.review_min,
         }
     }
 }
@@ -46,17 +127,139 @@ mod tests {
             pinned_boost: 0.15,
             weak_below: 0.35,
             per_source_cap,
+            candidate_multiplier: 3,
         }
+    }
+
+    #[test]
+    fn the_retrieval_knobs_are_read_from_the_file_beside_the_ranking_ones() {
+        let p = RankingParams::from_config(
+            &VectorConfig {
+                candidate_multiplier: 5,
+                recency_half_life_days: 90,
+                ..vector_config(3)
+            },
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            false,
+        );
+        assert_eq!(p.candidate_multiplier, 5);
+        assert_eq!(p.recency_half_life_days, 90);
+    }
+
+    #[test]
+    fn the_three_late_knobs_are_read_from_the_file_beside_the_others() {
+        let associate = crate::config::AssociateConfig {
+            prime_lift: 2,
+            spread_max: 5,
+            ..Default::default()
+        };
+        let p = RankingParams::from_config(
+            &vector_config(3),
+            &associate,
+            &Default::default(),
+            &Default::default(),
+            true,
+        );
+        assert_eq!(p.prime_lift, 2);
+        assert_eq!(p.spread_max, 5);
+        assert!(p.rerank);
+        let p = RankingParams::from_config(
+            &vector_config(3),
+            &associate,
+            &Default::default(),
+            &Default::default(),
+            false,
+        );
+        assert!(
+            !p.rerank,
+            "no reranker configured means the knob starts off"
+        );
+    }
+
+    #[test]
+    fn the_sitting_flag_is_read_from_the_file_and_ships_off() {
+        let sitting = crate::config::SittingConfig { prime: true };
+        let p = RankingParams::from_config(
+            &vector_config(3),
+            &Default::default(),
+            &Default::default(),
+            &sitting,
+            false,
+        );
+        assert!(p.sitting_prime, "the file's value is the starting rung");
+        assert!(
+            !RankingParams::default().sitting_prime,
+            "and the shipped rung is off"
+        );
+    }
+
+    #[test]
+    fn the_shipped_prime_lift_and_spread_sit_on_their_ladders() {
+        let p = RankingParams::default();
+        assert!(PRIME_LIFTS.contains(&p.prime_lift));
+        assert!(SPREADS.contains(&p.spread_max));
+        assert!(SITTING_PRIMES.contains(&p.sitting_prime));
+        // Lift cannot be negative, so its ladder starts at the shipped value
+        // and can only be walked up; that is a fact about the knob, not a bias.
+        assert_eq!(PRIME_LIFTS[0], p.prime_lift);
+        assert!(PRIME_LIFTS.windows(2).all(|w| w[0] < w[1]), "ascending");
+        assert!(SPREADS.windows(2).all(|w| w[0] < w[1]), "ascending");
+    }
+
+    #[test]
+    fn the_review_threshold_is_read_from_the_file_and_its_rung_sits_mid_ladder() {
+        let consolidate = crate::config::ConsolidateConfig {
+            review_min: 0.84,
+            ..Default::default()
+        };
+        let p = RankingParams::from_config(
+            &vector_config(3),
+            &Default::default(),
+            &consolidate,
+            &Default::default(),
+            false,
+        );
+        assert_eq!(p.review_min, 0.84);
+        let d = RankingParams::default();
+        assert!(REVIEW_MINS.contains(&d.review_min));
+        assert!(REVIEW_MINS.windows(2).all(|w| w[0] < w[1]), "ascending");
+    }
+
+    #[test]
+    fn the_shipped_values_sit_in_the_middle_of_their_ladders() {
+        // A ladder walked from its end can only go one way; the pass would
+        // then be told the shipped value is an extreme, which nobody decided.
+        let d = RankingParams::default();
+        assert_eq!(MULTIPLIERS[MULTIPLIERS.len() / 2], d.candidate_multiplier);
+        assert_eq!(HALF_LIVES[HALF_LIVES.len() / 2], d.recency_half_life_days);
+        assert!(MULTIPLIERS.windows(2).all(|w| w[0] < w[1]), "ascending");
+        assert!(HALF_LIVES.windows(2).all(|w| w[0] < w[1]), "ascending");
     }
 
     #[test]
     fn a_cap_of_zero_is_no_cap_rather_than_a_search_that_returns_nothing() {
         assert_eq!(
-            RankingParams::from_vector(&vector_config(0)).per_source_cap,
+            RankingParams::from_config(
+                &vector_config(0),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                false
+            )
+            .per_source_cap,
             None
         );
         assert_eq!(
-            RankingParams::from_vector(&vector_config(3)).per_source_cap,
+            RankingParams::from_config(
+                &vector_config(3),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                false
+            )
+            .per_source_cap,
             Some(3)
         );
     }

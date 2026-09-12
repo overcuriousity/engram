@@ -185,6 +185,31 @@ mod tests {
         }
     }
 
+    /// The tokenizer is not an asset and is not served.
+    ///
+    /// It lived in `assets/` and `rust_embed` takes that folder whole, so
+    /// 11 MB of vocabulary was embedded in the binary twice — once by
+    /// `budget.rs`'s `include_bytes!` and once by the asset table — and the
+    /// second copy answered anonymously at `/assets/tokenizer.json` under a
+    /// year-long `max-age`. It is in `vendor/` now, which nothing embeds.
+    #[tokio::test]
+    async fn the_tokenizer_is_not_reachable_through_assets() {
+        let res = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/tokenizer.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert!(
+            Assets::get("tokenizer.json").is_none(),
+            "the tokenizer is embedded in the asset table a second time"
+        );
+    }
+
     #[tokio::test]
     async fn the_manifest_is_served_as_a_manifest() {
         // A manifest sent as text/plain is ignored, and the install prompt

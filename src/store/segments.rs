@@ -573,14 +573,9 @@ mod tests {
             .await
             .unwrap();
         let a = crate::store::artifacts::NewArtifact {
-            ordinal: 0,
             text: "what window 1 produced".into(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(1),
-            caveats: vec![],
+            ..Default::default()
         };
         s.insert_artifacts(&src.id, &[a]).await.unwrap();
 

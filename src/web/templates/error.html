@@ -1,0 +1,21 @@
+{% extends "layout.html" %}
+{% block title %}{{ heading }} — engram{% endblock %}
+{# The page half of `crate::error::Error`. Every `/ui` route used to answer a
+   failure with the API's body — `{"error":"not found"}` as `application/json`,
+   rendered by a browser as that literal line of JSON on a white page, with no
+   nav, no session and no way back. The API keeps that body; this is what a
+   person gets.
+
+   Same shape as `not_found.html`, deliberately: a heading, one line of what
+   happened, and the one link back. A 404 from a handler renders *that* page
+   rather than this one, so the two 404s the app can produce — a route that
+   does not exist, and an id that does not — are one page. #}
+{% block content %}
+<div class="empty">
+  <h1>{{ heading }}</h1>
+  {# Marked, because a failed htmx swap shows this sentence in place of the
+     fragment it did not get — `reasonOf` in app.js reads it by this. #}
+  <p class="muted" data-error-detail>{{ detail }}</p>
+  <p><a class="btn btn-ghost btn-sm" href="/ui">Back to the box</a></p>
+</div>
+{% endblock %}

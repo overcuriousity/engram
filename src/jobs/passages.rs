@@ -159,14 +159,21 @@ pub fn split_passages(
 /// re-runs this, and a segment that already owns rows is left alone.
 pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
-    let windows = split_into_segments(
-        &src.raw_text,
-        &core.counter,
-        // Against the prompt this corpus will be synthesized with: the split
-        // decides how much text one call is handed, so it has to be measured
-        // against the same overhead that call will carry.
-        super::synthesize::segment_budget(core, crate::infer::lang::of_corpus(&src.metadata)),
-    );
+    let lang = crate::infer::lang::of_corpus(&src.metadata);
+    // Against the prompt this corpus will be synthesized with: the split
+    // decides how much text one call is handed, so it has to be measured
+    // against the same overhead that call will carry — and where that leaves
+    // nothing, there is no size to cut to. Failed with the cause, rather than
+    // windows cut to a budget no call can honour.
+    let Some(budget) = super::synthesize::segment_budget(core, lang) else {
+        let reason = super::synthesize::no_budget_reason(core, lang);
+        tracing::error!(corpus_id, %reason, "cannot plan windows");
+        core.store
+            .set_corpus_status(corpus_id, CorpusStatus::Failed)
+            .await?;
+        return Ok(());
+    };
+    let windows = split_into_segments(&src.raw_text, &core.counter, budget);
     if windows.is_empty() {
         tracing::warn!(corpus_id, "source has no usable text");
         core.store
@@ -240,7 +247,17 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     // verbatim capture searchable and the job retryable. Guarded like
     // promotion is: a window already read, or put back by an operator's undo,
     // is not re-armed by a re-run of capture.
-    if windows.len() == 1
+    //
+    // Counted off the *stored* rows and not off `windows`. `upsert_segments`
+    // leaves the split alone once a window owns artifacts, so a re-run over a
+    // corpus captured under a different `context_tokens` recomputes one window
+    // where the base still holds ten — and everything downstream reads the
+    // stored rows: `window::run` and the judged read both do. Armed on the
+    // fresh count, "the whole capture fits one call" was asserted of a
+    // document that does not, and window 0 was promoted alone with its
+    // passages superseded under it. Half a document promoted, nobody asking.
+    let stored_windows = core.store.segment_progress(corpus_id).await?.1;
+    if stored_windows == 1
         && core.store.segment_state(corpus_id, 0).await? == Some(SegmentState::Verbatim)
         && !core.store.segment_no_promote(corpus_id, 0).await?
     {
@@ -260,6 +277,13 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
 
 /// A corpus title with no model: the first heading, else the first non-empty
 /// line, cut to `TITLE_MAX` characters. `None` for whitespace.
+///
+/// Cut at a word, through the same `truncate_at_word` every other shortened
+/// label goes through. This used to be `chars().take(TITLE_MAX)`, which is the
+/// hard cut that function exists to replace — and because a derived title is
+/// stored as `title_hint` and then displayed verbatim, it is the one that
+/// reached the screen: the Recent list and the day page carried names ending
+/// "the registrar does not au" with nothing to say they had been shortened.
 pub fn derive_title(raw_text: &str) -> Option<String> {
     let line = raw_text
         .lines()
@@ -275,7 +299,7 @@ pub fn derive_title(raw_text: &str) -> Option<String> {
     if line.is_empty() {
         return None;
     }
-    Some(line.chars().take(TITLE_MAX).collect())
+    Some(crate::web::markdown::truncate_at_word(&line, TITLE_MAX))
 }
 
 #[cfg(test)]
@@ -390,8 +414,21 @@ mod tests {
             derive_title("plain first line\nsecond").as_deref(),
             Some("plain first line")
         );
+        // One unbroken token has no word to break at, so it takes the hard cut
+        // — plus the ellipsis, which is what says it was cut at all.
         let long = "x".repeat(200);
-        assert_eq!(derive_title(&long).unwrap().chars().count(), TITLE_MAX);
+        let cut = derive_title(&long).unwrap();
+        assert_eq!(cut.chars().count(), TITLE_MAX + 1);
+        assert!(cut.ends_with('…'), "{cut}");
+        // Ordinary prose breaks at a space instead. This is the case the old
+        // `chars().take` got wrong, and the one that reached the screen.
+        let prose = "Remind me to renew the domain before 14 November 2026. \
+                     The registrar does not auto-renew because the card expired.";
+        let cut = derive_title(prose).unwrap();
+        assert_eq!(
+            cut,
+            "Remind me to renew the domain before 14 November 2026. The registrar does not…"
+        );
         assert_eq!(derive_title("   \n\t\n"), None);
         assert_eq!(heading_title("###   Deep heading  "), "Deep heading");
         // A link is its words, an empty one is nothing, and runs of spaces are

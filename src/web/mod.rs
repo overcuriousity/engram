@@ -1,6 +1,8 @@
 pub mod api;
+pub mod artifact;
 pub mod assets;
 pub mod auth_routes;
+pub mod corpus;
 pub mod corpus_view;
 pub mod day;
 pub mod due;
@@ -8,13 +10,16 @@ pub mod extension;
 pub mod insights;
 pub mod lineage_view;
 pub mod markdown;
+pub mod ops;
 pub mod pair;
+pub mod settings;
 pub mod share;
 pub mod state;
 pub mod tenant;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod ui;
+pub mod ui_error;
 pub mod vbg;
 pub mod workspace;
 
@@ -136,6 +141,10 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes::auth_router())
         .merge(workspace::routes())
         .merge(ui::ui_router())
+        .merge(settings::routes())
+        .merge(corpus::routes())
+        .merge(artifact::routes())
+        .merge(ops::routes())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
         .merge(share::share_router(
@@ -472,5 +481,22 @@ mod tests {
         // axum's default is 2 MB and was never chosen. A long chapter of prose
         // is well under this; a book-sized paste is refused with a message.
         assert_eq!(MAX_BODY_BYTES, 8 * 1024 * 1024);
+    }
+
+    /// No page is wider than the window it is read in, and nothing on one is
+    /// crushed to a column of single characters.
+    ///
+    /// 375 is the narrow half of what a phone is; 700 is the band above the tab
+    /// bar's breakpoint and below the one that puts two regions side by side;
+    /// 1500 is the first width at which the workspace is three-up, which is the
+    /// arrangement most of the layout exists for and none of it was measuring.
+    #[tokio::test]
+    #[ignore = "needs node and a headless Chrome; see the note above"]
+    async fn no_page_runs_off_the_side_of_a_phone() {
+        let pages = crate::web::test_support::every_page().await;
+        for width in ["375", "700", "1500"] {
+            let run = crate::web::test_support::measure(&pages, width);
+            crate::web::test_support::nothing_is_broken(&run, width);
+        }
     }
 }

@@ -61,6 +61,17 @@ fn default_rerank() -> bool {
     true
 }
 
+/// What priming reads at the moment of one search: the activation of the
+/// candidates, the artifacts this sitting has been in, and the due reminders.
+/// Recorded beside the pool so a replay at another lift sees what the
+/// searcher saw, and handed back in by the idle pass on the Judge door.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Priming {
+    pub activation: HashMap<String, f64>,
+    pub sitting: std::collections::HashSet<String>,
+    pub due: std::collections::HashSet<String>,
+}
+
 /// The gate's claim for one search, held for as long as the search runs.
 ///
 /// Two shapes because the two lanes are two different things: a lease is a
@@ -217,11 +228,14 @@ pub struct SearchResult {
     /// `None` for a hit only the lexical half found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f32>,
-    /// `title` is the corpus's, not this passage's own. The stored title is
-    /// only ever a real heading; a passage without one is shown under the
-    /// note it came from, and said to be, so it is not mistaken for the whole.
+    /// `title` is not a name of *this* text. Two ways that happens: the hit is
+    /// a passage carrying the heading of the section it was cut from — see
+    /// `Provenance::names_its_own_text` — or it had no title and `fill_titles`
+    /// put the note's name there so a rail of `(untitled)` rows is readable.
+    /// A door that shows names decides for itself what to do with a borrowed
+    /// one; the web rail shows none, and the machine-facing doors keep it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub titled_by_corpus: bool,
+    pub borrowed_name: bool,
     /// The ranked hit that recalled this one. `None` for a ranked hit — which
     /// is every hit inside `limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,6 +248,42 @@ pub struct SearchResult {
     /// row. A `Default` there would claim a retrieved rank of zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<crate::core::explain::HitExplanation>,
+}
+
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for SearchResult {
+    fn default() -> Self {
+        Self {
+            artifact_id: String::new(),
+            corpus_id: String::new(),
+            title: None,
+            text: String::new(),
+            category: None,
+            tags: vec![],
+            score: 0.0,
+            status: None,
+            superseded_by: None,
+            last_verified_at: None,
+            weak: false,
+            model_written: false,
+            synthesized: false,
+            origin_count: 0,
+            primed: false,
+            in_sitting: false,
+            due_at: None,
+            due_in: None,
+            past_cliff: false,
+            retired: false,
+            similarity: None,
+            borrowed_name: false,
+            via: None,
+            reason: None,
+            explanation: None,
+        }
+    }
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -250,6 +300,11 @@ impl From<SearchHit> for SearchResult {
         SearchResult {
             model_written: provenance.is_some_and(|p| p.is_model_written()),
             synthesized: provenance == Some(crate::store::artifacts::Provenance::Synthesized),
+            // A passage carries the heading of the section it was cut from and
+            // a note carries none; neither is a name for this text. Said here
+            // rather than at each door, so `fill_titles` below is the only
+            // other thing that can set it and every door reads one flag.
+            borrowed_name: provenance.is_some_and(|p| !p.names_its_own_text()),
             origin_count: h.payload.origin_corpora.len(),
             artifact_id: h.payload.artifact_id,
             corpus_id: h.payload.corpus_id,
@@ -269,7 +324,6 @@ impl From<SearchHit> for SearchResult {
             past_cliff: false,
             retired: false,
             similarity: h.similarity,
-            titled_by_corpus: false,
             via: None,
             reason: None,
             explanation: None,
@@ -641,8 +695,19 @@ fn prime(
     margin: f64,
     lift: usize,
     sitting: &std::collections::HashSet<String>,
+    sitting_prime: bool,
     due: &std::collections::HashSet<String>,
 ) -> Vec<SearchResult> {
+    // The knob gates the *use* of the sitting, never its collection: the
+    // `Priming` this search records names what the session touched either way,
+    // which is the whole of what lets the idle pass replay the search with the
+    // sitting on and find out whether it should be. Held to the badge as well
+    // as the lift, so serving is unchanged until the loop adopts it.
+    let empty = std::collections::HashSet::new();
+    let sitting = match sitting_prime {
+        true => sitting,
+        false => &empty,
+    };
     // Marked before anything can return. `in_sitting` is a fact about the row —
     // this sitting has been in it — and not a consequence of the reordering. A
     // list of two is a list nothing can move in, not a list where the badge
@@ -811,7 +876,8 @@ impl Core {
     /// `(untitled)` rows is unreadable when the note's own title is one join
     /// away. Done here, once, on the way out of the ranking: the CLI, MCP, the
     /// web rail and the extension all inherit it. Said on the result
-    /// (`titled_by_corpus`) so a door can show that the name is the note's.
+    /// (`borrowed_name`) so a door can decide whether to show a name that is
+    /// the note's rather than this passage's.
     ///
     /// Best-effort: a failed read costs the titles, never the results.
     pub(crate) async fn fill_titles(&self, results: &mut [SearchResult]) {
@@ -835,7 +901,7 @@ impl Core {
         for r in results.iter_mut().filter(|r| r.title.is_none()) {
             if let Some(t) = titles.get(&r.corpus_id) {
                 r.title = Some(t.clone());
-                r.titled_by_corpus = true;
+                r.borrowed_name = true;
             }
         }
     }
@@ -986,17 +1052,104 @@ impl Core {
     /// past it hands back exactly the rows they asked not to see. `links_from`
     /// already excludes anything not active and not live, so what is left to
     /// re-check here is what the caller typed.
+    /// Lift the top candidate that just missed the window into the last
+    /// visible row, on `feedback.explore` of the searches that are recorded.
+    ///
+    /// Returns the artifact that was lifted and the 0-based rank it held
+    /// before, or `None` when this search did not explore. The caller carries
+    /// that rank onto the candidate row, and `open_event` charges an open to
+    /// it rather than to the row the exploration lent — which is the whole
+    /// point. Without it the loop records only what it already believed.
+    ///
+    /// Only where the evidence is worth gathering: a door that records opens,
+    /// capture switched on, a window of at least two rows, and something
+    /// actually below the cut. A one-row answer has no "last row" to spend.
+    ///
+    /// Which searches explore is decided by hashing the event this one folds
+    /// into, falling back to the query text. Not a coin flip per keystroke: a
+    /// typing burst folds into one event and one piece of evidence, and a list
+    /// whose bottom row appeared and vanished as somebody typed would be a
+    /// worse thing to read than anything this buys.
+    fn explore_swap(
+        &self,
+        results: &mut [SearchResult],
+        q: &str,
+        limit: usize,
+        door: crate::store::feedback::Door,
+        origin: &Origin,
+    ) -> Option<(String, usize)> {
+        if !self.learn.enabled
+            || !door.records_opens()
+            || self.feedback.explore <= 0.0
+            || limit < 2
+            || results.len() <= limit
+            // The lifted row has to be inside the pool that gets recorded, or
+            // it is a row on screen with no candidate row behind it — and an
+            // open on it is refused for not being in the pool, which throws
+            // away the one observation the exploration was spent to buy.
+            || limit >= self.feedback.candidates
+        {
+            return None;
+        }
+        // The event where the door names one, so a whole typing burst answers
+        // the same way. Where it does not — the API and MCP, which name
+        // nothing — the query and the hour: a fixed seed per query would
+        // explore on the same questions for ever and never on the others,
+        // which is a sample of the base rather than of the searching.
+        let hourly;
+        let seed: &str = match origin.fold_onto.as_deref() {
+            Some(ev) => ev,
+            None => {
+                hourly = format!("{q}:{}", crate::store::now() / 3_600);
+                &hourly
+            }
+        };
+        // FNV-1a. A hash rather than a random number because there is no
+        // randomness in this process to draw on and one coin flip does not
+        // earn a dependency — and because a decision that is a function of the
+        // event is one a later reader of the journal can reproduce.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in seed.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let share = (self.feedback.explore.clamp(0.0, 1.0) * 1000.0) as u64;
+        if h % 1000 >= share {
+            return None;
+        }
+        // The top of what the window cut off, into the bottom of the window.
+        // The displaced row keeps its place in the pool and simply stops being
+        // shown, so nothing about it is misrecorded.
+        let natural = limit;
+        let lifted = results[natural].artifact_id.clone();
+        results.swap(limit - 1, natural);
+        if let Some(e) = results[limit - 1].explanation.as_mut() {
+            e.explored = Some(crate::core::explain::StageEffect {
+                from: Some(natural),
+                to: Some(limit - 1),
+                delta: None,
+            });
+        }
+        tracing::debug!(
+            artifact = %lifted,
+            from = natural,
+            "an exploring search lifted a hidden candidate into the last row"
+        );
+        Some((lifted, natural))
+    }
+
     async fn associated(
         &self,
         results: &[SearchResult],
         filter: &SearchFilter,
+        spread_max: usize,
     ) -> Vec<SearchResult> {
         let anchors: Vec<String> = results
             .iter()
             .take(self.associate.spread_from)
             .map(|r| r.artifact_id.clone())
             .collect();
-        if anchors.is_empty() || self.associate.spread_max == 0 {
+        if anchors.is_empty() || spread_max == 0 {
             return Vec::new();
         }
         let links = match self
@@ -1029,9 +1182,7 @@ impl Core {
                 // negative `i64` and switch association silently off, which is
                 // the one failure nobody would report as a bug.
                 i64::try_from(
-                    self.associate
-                        .spread_max
-                        .saturating_mul(self.associate.spread_from.saturating_add(1)),
+                    spread_max.saturating_mul(self.associate.spread_from.saturating_add(1)),
                 )
                 .unwrap_or(i64::MAX),
             )
@@ -1048,7 +1199,7 @@ impl Core {
             results.iter().map(|r| r.artifact_id.clone()).collect();
         let mut out = Vec::new();
         for l in links {
-            if out.len() >= self.associate.spread_max {
+            if out.len() >= spread_max {
                 break;
             }
             if !have.insert(l.other.clone()) {
@@ -1090,15 +1241,24 @@ impl Core {
                 past_cliff: false,
                 retired: false,
                 similarity: None,
-                titled_by_corpus: false,
+                // Read from the row, the way the ranked path reads it from the
+                // payload. A recalled passage carries the heading of the
+                // section it was cut from just as a ranked one does, and
+                // hard-coding `false` here put that heading back on the one
+                // rail that sits directly under the rows it was taken off.
+                borrowed_name: !c.provenance.names_its_own_text(),
                 // Set here, where `via` is known. Never ranked, so every other
                 // stage stays absent rather than defaulting to values that
                 // would read as facts about a competition that never happened.
                 explanation: Some(crate::core::explain::HitExplanation::recalled(&l.via)),
                 via: Some(l.via),
                 reason: l.reason,
-                model_written: false,
-                synthesized: false,
+                // Also the row's own answer, and for a harder reason than the
+                // heading: `model_written` is what stops a paraphrase being
+                // handed back as its own root, and a merged artifact reached
+                // by association is as model-written as one that was ranked.
+                model_written: c.provenance.is_model_written(),
+                synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
                 origin_count: 0,
             });
         }
@@ -1175,6 +1335,40 @@ impl Core {
         self.query_cache.lock().ok().and_then(|c| c.get(&key))
     }
 
+    /// The other direction: hand the cache a vector a query was searched with
+    /// before, so the next search of `q` embeds nothing. What lets a replay of
+    /// stored observations spend no inference — the vector is stored beside
+    /// each one for exactly this.
+    pub fn remember_query_vector(&self, q: &str, vector: Vec<f32>) {
+        // An empty vector is not a vector this query was searched with; it is
+        // the absence of one, spelled `unwrap_or_default()` somewhere upstream.
+        // `ask` stores `cached_query_vector(&req.q).unwrap_or_default()` on its
+        // row, so a question whose embedding had already fallen out of this
+        // cache is recorded with `vec![]` — and the observation written beside
+        // it carries the same. The sweep then replays that observation and
+        // hands the empty vector straight back here.
+        //
+        // This cache is not the sweep's own: `search_inner` reads it verbatim,
+        // for every door. So one such replay left a zero-dimension vector under
+        // a query that people actually type, and the next real search of that
+        // wording ran against it — `cosine` refuses a width it does not share
+        // and answers 0.0, so the search returned its candidates in no
+        // meaningful order at all, silently, until the entry was evicted.
+        //
+        // Refused here rather than at each of the three call sites, because
+        // this is the one place all of them pass through and a fourth is one
+        // patch away.
+        if vector.is_empty() {
+            return;
+        }
+        let key = q.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Ok(mut c) = self.query_cache.lock()
+            && c.get(&key).is_none()
+        {
+            c.put(key, vector);
+        }
+    }
+
     /// `search`, with the per-source cap chosen by the caller and what the
     /// search cost. `cap` of `None` lets a single source supply every result:
     /// `ask` wants that, since a question is often answered by one document.
@@ -1186,8 +1380,11 @@ impl Core {
         cap: Option<usize>,
         origin: impl Into<Origin>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
-        let weight = self.ranking.read().expect("ranking lock").recency_weight;
-        self.search_inner(query, cap, weight, origin.into(), true, None)
+        let params = crate::core::ranking::RankingParams {
+            per_source_cap: cap,
+            ..*self.ranking.read().expect("ranking lock")
+        };
+        self.search_inner(query, params, origin.into(), true, None)
             .await
     }
 
@@ -1208,15 +1405,8 @@ impl Core {
         params: crate::core::ranking::RankingParams,
         origin: impl Into<Origin>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
-        self.search_inner(
-            query,
-            params.per_source_cap,
-            params.recency_weight,
-            origin.into(),
-            false,
-            None,
-        )
-        .await
+        self.search_inner(query, params, origin.into(), false, None)
+            .await
     }
 
     /// `search_with`, reporting each stage as it starts.
@@ -1235,11 +1425,14 @@ impl Core {
         origin: Origin,
     ) -> impl tokio_stream::Stream<Item = Result<SearchEvent>> + 'static {
         let core = self.clone();
-        let weight = self.ranking.read().expect("ranking lock").recency_weight;
+        let params = crate::core::ranking::RankingParams {
+            per_source_cap: cap,
+            ..*self.ranking.read().expect("ranking lock")
+        };
         async_stream::try_stream! {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let task = tokio::spawn(async move {
-                core.search_inner(&query, cap, weight, origin, true, Some(tx)).await
+                core.search_inner(&query, params, origin, true, Some(tx)).await
             });
             // The sender lives inside the search and is dropped when it
             // returns, so this ends exactly once every stage it reported has
@@ -1259,13 +1452,14 @@ impl Core {
     async fn search_inner(
         &self,
         query: &SearchQuery,
-        cap: Option<usize>,
-        recency_weight: f32,
+        params: crate::core::ranking::RankingParams,
         origin: Origin,
         waited_on: bool,
         stages: Option<tokio::sync::mpsc::UnboundedSender<SearchEvent>>,
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let door = origin.door;
+        let cap = params.per_source_cap;
+        let recency_weight = params.recency_weight;
         // A client that hung up must not fail a search that is already running:
         // the send is the report, not the work.
         let say = |ev: SearchEvent| {
@@ -1314,6 +1508,7 @@ impl Core {
         // list below is a promise about work that is going to happen and it has
         // to be made before any of it starts.
         let reranking = query.rerank
+            && params.rerank
             && match door {
                 Door::Ask => self.reranks_ask(),
                 // The same predicate that arms the UI's refining pass: written
@@ -1355,7 +1550,28 @@ impl Core {
         let vector = match cached {
             Some(v) => v,
             None => {
-                let v = self.embedder.embed_query(q).await?;
+                // Retried only where somebody is waiting, and for the reason
+                // the box is built the way it is: a search is one embedding
+                // call per debounced keystroke, so a burst of typing is a
+                // burst of calls, and the first thing a shared endpoint does
+                // about a burst is shed some of it. One 429 in the middle of a
+                // word used to be a failed search.
+                //
+                // A sweep takes the other road. It runs twenty-one searches
+                // per judged pair over hundreds of pairs, nobody is watching,
+                // and the job layer already owns backoff for it — spending a
+                // budget per search there would turn a rate-limited minute
+                // into a run that never finishes.
+                let v = match waited_on {
+                    true => {
+                        crate::infer::retry::transiently(
+                            crate::infer::retry::INTERACTIVE_BUDGET,
+                            || self.embedder.embed_query(q),
+                        )
+                        .await?
+                    }
+                    false => self.embedder.embed_query(q).await?,
+                };
                 if let Ok(mut c) = self.query_cache.lock() {
                     c.put(key, v.clone());
                 }
@@ -1379,7 +1595,7 @@ impl Core {
         // Over-fetch whenever something downstream narrows the list: both the
         // per-source cap and the reranker can only discard what they are given.
         let candidates = if cap.is_some() || reranking {
-            limit * CANDIDATE_MULTIPLIER
+            limit * params.candidate_multiplier
         } else {
             limit
         };
@@ -1393,7 +1609,7 @@ impl Core {
         // Widening the fetch is also the cost of the setting: `Config::normalize`
         // caps `candidates` at `MAX_LIMIT * CANDIDATE_MULTIPLIER` so this can
         // never exceed what the widest ordinary search already fetches.
-        let candidates = if self.learn.enabled && door.captured() {
+        let candidates = if self.learn.enabled && door.fetches_the_capture_pool() {
             candidates.max(self.feedback.candidates)
         } else {
             candidates
@@ -1405,7 +1621,16 @@ impl Core {
         say(SearchEvent::Stage(SearchStage::Retrieve));
         let hits = self
             .vectors
-            .search_weighted(&vector, &sparse, candidates, &filter, recency_weight)
+            .search_weighted(
+                &vector,
+                &sparse,
+                candidates,
+                &filter,
+                crate::vector::Recency {
+                    weight: recency_weight,
+                    half_life_days: params.recency_half_life_days,
+                },
+            )
             .await?;
 
         // Where retrieval put each hit, read before anything below reorders
@@ -1470,10 +1695,11 @@ impl Core {
 
         // Read once, and from the same configuration the vector store was
         // built from: a second reading of these could drift from the formula
-        // that actually scored this search. `recency_weight` comes off the
-        // parameter rather than the lock, because `search_with_ranking`
-        // overrides it and the sweep must be explained with the weight it ran.
-        let half_life_secs = self.recency_half_life_days as u64 * 86_400;
+        // that actually scored this search. The recency terms come off the
+        // parameters rather than the lock, because `search_with_ranking`
+        // overrides them and a replay must be explained with the settings it
+        // ran under.
+        let half_life_secs = params.recency_half_life_days as u64 * 86_400;
         let pinned_boost = self.pinned_boost;
         // Asked of the store, not of the configuration: the default
         // `search_weighted` drops the weight and delegates to a plain
@@ -1597,7 +1823,7 @@ impl Core {
         };
         for r in &mut results {
             r.due_at = due_map.get(&r.artifact_id).copied();
-            r.due_in = r.due_at.map(crate::web::ui::ago_or_ahead);
+            r.due_in = r.due_at.map(crate::fmt::ago_or_ahead);
         }
         // Retirement, read for the whole page in one query beside the due map.
         {
@@ -1623,42 +1849,57 @@ impl Core {
             true => due_map.keys().cloned().collect(),
             false => Default::default(),
         };
-        if self.associating()
-            && self.associate.prime_lift > 0
-            && !matches!(door, Door::Ask | Door::Judge)
-        {
+        // Kept for the capture below: what a replay needs to see this list
+        // the way the searcher did. Only a real search records it.
+        let mut primed_with: Option<Priming> = None;
+        let primes = self.associating() && !matches!(door, Door::Ask | Door::Judge);
+        if primes || origin.replay.is_some() {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            let activation = self.engagement_now(&ids).await;
-            // Off by default and empty when off: this is the only part of the
-            // sitting that moves an order, and the same query ranking
-            // differently in two sittings is what is disorienting about it.
-            // Held off the doors priming is already held off, for the same
-            // reasons, and off every door with no session for the reason in
+            // Collected whatever the knob says, and used only where it says
+            // so — see `prime`. Recording this is what makes the knob
+            // measurable at all: gated on itself, it produced no evidence
+            // about itself, so the idle pass could never move it. Held off the
+            // doors priming is already held off, for the same reasons, and
+            // empty on every door with no session for the reason in
             // `Origin::session`.
-            let sitting: std::collections::HashSet<String> = match self.sitting.prime {
-                true => origin
-                    .session
-                    .as_deref()
-                    .map(|s| {
-                        self.sittings
-                            .read(s, now_secs(), self.pursuit.idle_secs as i64)
-                            .touched
-                            .into_iter()
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                false => Default::default(),
+            let sitting: std::collections::HashSet<String> = origin
+                .session
+                .as_deref()
+                .map(|s| {
+                    self.sittings
+                        .read(s, now_secs(), self.pursuit.idle_secs as i64)
+                        .touched
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default();
+            // A replay is primed with what the recorded search read, not with
+            // the base as it stands now: the activation has decayed since and
+            // the sitting is long over.
+            let priming = match origin.replay.clone() {
+                Some(p) => p,
+                None => Priming {
+                    activation: self.engagement_now(&ids).await,
+                    sitting,
+                    due: due.clone(),
+                },
             };
             results = prime(
                 results,
-                &activation,
+                &priming.activation,
                 self.associate.prime_margin,
-                self.associate.prime_lift,
-                &sitting,
-                &due,
+                params.prime_lift,
+                &priming.sitting,
+                params.sitting_prime,
+                &priming.due,
             );
             note_reorder(&mut results, &before, |e| &mut e.prime);
+            // Only a real search records what it read; a replay is not an
+            // event.
+            if primes {
+                primed_with = Some(priming);
+            }
         }
 
         // Before the capture below, not after the truncate: the recorded
@@ -1670,6 +1911,14 @@ impl Core {
         // was already going to be dropped, and the sink has nothing to say
         // about it.
 
+        // The one row of this search the ranking did not choose.
+        //
+        // Before the window is fixed, so the lifted candidate goes through the
+        // same sinking and cliff-marking as everything else a person is shown,
+        // and before the capture below, so `shown` records what was actually
+        // on screen. Its own rank is carried separately: see `explored_from`.
+        let explored = self.explore_swap(&mut results, q, limit, door, &origin);
+
         let visible = limit.min(results.len());
         sink_retired_and_mark_the_cliff(&mut results[..visible], reranked);
 
@@ -1680,9 +1929,21 @@ impl Core {
         //
         // Except at the UI door, which waits for its own capture — see
         // `captured_event` below.
+        // The band, read before the capture so it is in the pool: an open on
+        // an appended hit has to find its row, or it is not an observation.
+        // Appended after the truncate, below, so it stays outside `limit` and
+        // outside the retrieval count. The anchors are the shown window, which
+        // is what the append used to hand `associated` after the truncate.
+        let recalled = if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
+            self.associated(&results[..visible], &filter, params.spread_max)
+                .await
+        } else {
+            Vec::new()
+        };
+
         let mut captured_event = None;
         if self.learn.enabled && door.captured() {
-            let candidates: Vec<crate::store::feedback::NewCandidate> = results
+            let mut candidates: Vec<crate::store::feedback::NewCandidate> = results
                 .iter()
                 .take(self.feedback.candidates)
                 .enumerate()
@@ -1691,8 +1952,25 @@ impl Core {
                     score: r.score,
                     similarity: sims.get(&r.artifact_id).copied().flatten(),
                     shown: i < limit,
+                    band: false,
+                    explored_from: explored
+                        .as_ref()
+                        .filter(|(id, _)| *id == r.artifact_id)
+                        .map(|(_, natural)| *natural as i64),
                 })
                 .collect();
+            candidates.extend(
+                recalled
+                    .iter()
+                    .map(|r| crate::store::feedback::NewCandidate {
+                        artifact_id: r.artifact_id.clone(),
+                        score: r.score,
+                        similarity: None,
+                        shown: true,
+                        band: true,
+                        explored_from: None,
+                    }),
+            );
             let event = crate::store::feedback::NewEvent {
                 query: query.q.trim().to_string(),
                 door,
@@ -1701,6 +1979,7 @@ impl Core {
                 // named one — what keeps a second tab's keystroke from folding
                 // into the first tab's search. See `record_search`.
                 fold_onto: origin.fold_onto.clone(),
+                context: primed_with.clone(),
                 filters: serde_json::json!({
                     "tags": query.tags,
                     "category": query.category,
@@ -1767,30 +2046,29 @@ impl Core {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
         }
-        // After the truncate and after capture, so an association can only ever
-        // add: it is outside `limit`, outside the recorded pool, and outside the
-        // retrieval count. See `Touch::shown`.
+        // After the truncate, so an association can only ever add: it is
+        // outside `limit` and outside the retrieval count. See `Touch::shown`.
+        // It is inside the recorded pool, flagged as the band, so an open on
+        // it counts; that is what the spread rule reads.
         //
-        // Gated on the door, not on `captured()` — that predicate means
-        // "recorded for relevance feedback", an unrelated idea that happens
-        // to select the same four doors today. `Ask` is excluded because it
-        // synthesises an answer from `results` as excerpts; text that never
-        // matched the question must not become source material. `Judge` is
-        // excluded because its query is composed in full knowledge of the
-        // answer and needs a clean pool to label, not a widened one.
-        if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
-            let recalled = self.associated(&results, &filter).await;
-            if !recalled.is_empty() {
-                self.mark_seen(&recalled, &HashMap::new(), false);
-                let from = results.len();
-                results.extend(recalled);
-                // The earlier pass ran before these existed. Without this an
-                // associated passage with no heading of its own renders
-                // untitled beside ranked siblings from the same note that show
-                // its name — `retrieve_round` already re-runs it after
-                // `reach_sideways` for the same reason.
-                self.fill_titles(&mut results[from..]).await;
-            }
+        // Gated on the door where `recalled` is read, not on `captured()` —
+        // that predicate means "recorded for relevance feedback", an unrelated
+        // idea that happens to select the same four doors today. `Ask` is
+        // excluded because it synthesises an answer from `results` as
+        // excerpts; text that never matched the question must not become
+        // source material. `Judge` is excluded because its query is composed
+        // in full knowledge of the answer and needs a clean pool to label, not
+        // a widened one.
+        if !recalled.is_empty() {
+            self.mark_seen(&recalled, &HashMap::new(), false);
+            let from = results.len();
+            results.extend(recalled);
+            // The earlier pass ran before these existed. Without this an
+            // associated passage with no heading of its own renders untitled
+            // beside ranked siblings from the same note that show its name —
+            // `retrieve_round` already re-runs it after `reach_sideways` for
+            // the same reason.
+            self.fill_titles(&mut results[from..]).await;
         }
         tracing::info!(
             q = %query.q,
@@ -1825,6 +2103,35 @@ mod tests {
     use crate::store::feedback::Door;
     use sqlx::Row;
 
+    /// An empty vector is the *absence* of one, spelled `unwrap_or_default()`
+    /// upstream — and this cache is not the sweep's own. `search_inner` reads
+    /// it verbatim for every door, so one replay of an observation recorded
+    /// without a vector left a zero-dimension entry under a query people
+    /// actually type, and the next real search of that wording ranked on
+    /// nothing at all: `cosine` refuses a width it does not share.
+    #[tokio::test]
+    async fn an_empty_query_vector_is_never_remembered() {
+        let core = test_core().await;
+        core.remember_query_vector("wie mounte ich das image", vec![]);
+        assert!(
+            core.cached_query_vector("wie mounte ich das image")
+                .is_none(),
+            "the absence of a vector was cached as a vector"
+        );
+        // A real one still lands, and still wins over a later empty.
+        core.remember_query_vector("wie mounte ich das image", vec![0.1, 0.2]);
+        assert_eq!(
+            core.cached_query_vector("wie mounte ich das image"),
+            Some(vec![0.1, 0.2])
+        );
+        core.remember_query_vector("wie mounte ich das image", vec![]);
+        assert_eq!(
+            core.cached_query_vector("wie mounte ich das image"),
+            Some(vec![0.1, 0.2]),
+            "and cannot be displaced by one"
+        );
+    }
+
     async fn seed(core: &crate::core::Core, texts: &[(&str, &str, &[&str])]) -> String {
         seed_from(core, "raw", texts).await
     }
@@ -1842,12 +2149,10 @@ mod tests {
             .map(|(i, (text, cat, tags))| NewArtifact {
                 ordinal: i as i64,
                 text: text.to_string(),
-                corpus_span: None,
                 title: Some(format!("t{i}")),
                 category: Some(cat.to_string()),
                 tags: tags.iter().map(|s| s.to_string()).collect(),
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -2203,6 +2508,48 @@ mod tests {
         worker.await.unwrap();
     }
 
+    /// Typing is one embedding call per debounced keystroke, so a burst is a
+    /// burst of calls and a shared endpoint sheds part of it. One 429 in the
+    /// middle of a word used to be a failed search and a wiped rail.
+    ///
+    /// Real time rather than `start_paused`, for the reason the lane test
+    /// above gives: the pool's own timeouts are timers too. One refusal, so
+    /// the test pays at most one jittered gap.
+    #[tokio::test]
+    async fn a_rate_limited_keystroke_is_asked_again() {
+        let mut core = test_core().await;
+        let embedder = std::sync::Arc::new(
+            crate::infer::fake::FakeEmbedder::new(core.embedder.dim()).busy_for_the_first(1),
+        );
+        core.embedder = embedder.clone();
+
+        core.search(&q("mounting an image"), Door::Api)
+            .await
+            .expect("a search met one 429 and gave up");
+        assert_eq!(embedder.calls(), 2, "the keystroke was not asked again");
+    }
+
+    /// And the other road. A sweep is twenty-one searches per judged pair over
+    /// hundreds of pairs with nobody watching; the job layer owns its backoff,
+    /// and a budget spent per search would turn a rate-limited minute into a
+    /// run that never ends.
+    #[tokio::test]
+    async fn a_sweep_does_not_wait_out_a_limiter() {
+        let mut core = test_core().await;
+        let embedder = std::sync::Arc::new(
+            crate::infer::fake::FakeEmbedder::new(core.embedder.dim()).busy_for_the_first(1),
+        );
+        core.embedder = embedder.clone();
+
+        let params = *core.ranking.read().expect("ranking lock");
+        let e = core
+            .search_with_ranking(&q("mounting an image"), params, Door::Judge)
+            .await
+            .expect_err("the sweep waited the limiter out");
+        assert!(matches!(e, Error::InferenceBusy { .. }), "{e}");
+        assert_eq!(embedder.calls(), 1, "the sweep retried");
+    }
+
     fn q(text: &str) -> SearchQuery {
         SearchQuery {
             q: text.into(),
@@ -2217,6 +2564,80 @@ mod tests {
             include_deprecated: false,
             include_superseded: false,
         }
+    }
+
+    #[tokio::test]
+    async fn the_pool_is_as_deep_as_the_multiplier_says() {
+        let core = test_core().await;
+        seed(&core, &[("mounting an image", "procedure", &[])]).await;
+        let mut query = q("mount");
+        query.limit = 4;
+        let base = *core.ranking.read().unwrap();
+        for multiplier in [1usize, 2, 5] {
+            let params = crate::core::ranking::RankingParams {
+                candidate_multiplier: multiplier,
+                per_source_cap: Some(2),
+                ..base
+            };
+            let (_, outcome) = core
+                .search_with_ranking(&query, params, Door::Judge)
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome.explanation.candidates_fetched,
+                4 * multiplier,
+                "multiplier {multiplier}"
+            );
+        }
+    }
+
+    /// The replay fetches exactly what the live path fetches.
+    ///
+    /// The idle pass ranks its candidate generations on the Judge door so that
+    /// measurement and serving are one pipeline. `feedback.candidates` is a
+    /// floor under the over-fetch that only the captured doors applied, so the
+    /// replay was a second pipeline in the one place it must not be — and the
+    /// gap fell exactly on an axis the pass sweeps.
+    ///
+    /// At `LIMIT = 10` and the shipped floor of 20, a `candidate_multiplier`
+    /// of 1 and of 2 are the same setting in production: both fetch 20. The
+    /// replay fetched 10 against 20 and could adopt on the difference — a
+    /// change to a number that would not change a single search anyone made.
+    #[tokio::test]
+    async fn the_replay_door_fetches_the_pool_the_captured_doors_do() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(&core, &[("mounting an image", "procedure", &[])]).await;
+        let mut query = q("mount");
+        query.limit = 4;
+        let base = *core.ranking.read().unwrap();
+
+        let mut fetched = vec![];
+        for multiplier in [1usize, 2] {
+            let params = crate::core::ranking::RankingParams {
+                candidate_multiplier: multiplier,
+                per_source_cap: Some(2),
+                ..base
+            };
+            let (_, judged) = core
+                .search_with_ranking(&query, params, Door::Judge)
+                .await
+                .unwrap();
+            let (_, served) = core
+                .search_with_ranking(&query, params, Door::Ui)
+                .await
+                .unwrap();
+            assert_eq!(
+                judged.explanation.candidates_fetched, served.explanation.candidates_fetched,
+                "the replay measured a pool the live door does not fetch (multiplier {multiplier})"
+            );
+            fetched.push(judged.explanation.candidates_fetched);
+        }
+        assert_eq!(
+            fetched[0], fetched[1],
+            "two rungs the floor makes identical were measured as different"
+        );
+        assert_eq!(fetched[0], core.feedback.candidates);
     }
 
     #[tokio::test]
@@ -2546,6 +2967,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_generation_with_rerank_off_never_calls_the_reranker() {
+        let (core, reranker) = test_core_counting_reranked_docs().await;
+        seed(
+            &core,
+            &[("alpha", "c", &[]), ("beta", "c", &[]), ("gamma", "c", &[])],
+        )
+        .await;
+        core.ranking.write().unwrap().rerank = false;
+        core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
+        assert_eq!(
+            reranker.calls(),
+            0,
+            "rerank off in the generation must mean no call"
+        );
+        core.ranking.write().unwrap().rerank = true;
+        core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
+        assert_eq!(reranker.calls(), 1);
+    }
+
+    #[tokio::test]
     async fn rerank_over_fetches_candidates_before_narrowing() {
         // Reranking can only reorder what it is given. If the candidate pool
         // were not wider than the limit, a better match ranked 11th by vector
@@ -2731,18 +3172,7 @@ mod tests {
             payload: crate::vector::VectorPayload {
                 artifact_id: chunk.into(),
                 corpus_id: src.into(),
-                text: String::new(),
-                title: None,
-                category: None,
-                tags: vec![],
-                created_at: 0,
-                last_seen_at: None,
-                hit_count: None,
-                status: None,
-                last_verified_at: None,
-                superseded_by: None,
-                origin_corpora: vec![],
-                provenance: None,
+                ..Default::default()
             },
             score,
             similarity: Some(score),
@@ -3247,35 +3677,53 @@ mod tests {
             .map(|id| SearchResult {
                 artifact_id: (*id).into(),
                 corpus_id: "c".into(),
-                title: None,
-                text: String::new(),
-                category: None,
-                tags: vec![],
                 score: 0.5,
-                status: None,
-                superseded_by: None,
-                last_verified_at: None,
-                weak: false,
-                primed: false,
-                in_sitting: false,
-                due_at: None,
-                due_in: None,
-                past_cliff: false,
-                retired: false,
-                similarity: None,
-                titled_by_corpus: false,
-                via: None,
-                reason: None,
-                explanation: None,
-                model_written: false,
-                synthesized: false,
-                origin_count: 0,
+                ..Default::default()
             })
             .collect()
     }
 
     fn order(rs: &[SearchResult]) -> Vec<&str> {
         rs.iter().map(|r| r.artifact_id.as_str()).collect()
+    }
+
+    #[test]
+    fn the_sitting_moves_nothing_and_badges_nothing_while_the_knob_is_off() {
+        // The whole promise of collecting the sitting unconditionally: what
+        // serving does must not change until the loop adopts the knob. Held to
+        // the badge as well as the order, because the badge is what a person
+        // would notice appearing.
+        let sitting = std::collections::HashSet::from(["d".to_string()]);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+            false,
+            &Default::default(),
+        );
+        assert_eq!(order(&out), vec!["a", "b", "c", "d"], "nothing moved");
+        assert!(
+            out.iter().all(|r| !r.in_sitting),
+            "and nothing is badged either"
+        );
+    }
+
+    #[test]
+    fn the_sitting_lifts_and_badges_once_the_knob_is_on() {
+        let sitting = std::collections::HashSet::from(["d".to_string()]);
+        let out = prime(
+            ranked(&["a", "b", "c", "d"]),
+            &HashMap::new(),
+            0.5,
+            2,
+            &sitting,
+            true,
+            &Default::default(),
+        );
+        assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
+        assert!(out[1].primed && out[1].in_sitting);
     }
 
     #[test]
@@ -3290,6 +3738,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
@@ -3306,6 +3755,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "c"]);
@@ -3321,6 +3771,7 @@ mod tests {
             0.5,
             2,
             &sitting,
+            true,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
@@ -3337,6 +3788,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &due,
         );
         assert_eq!(order(&out), vec!["a", "d", "b", "c"]);
@@ -3353,6 +3805,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &due,
         );
         assert_eq!(
@@ -3374,6 +3827,7 @@ mod tests {
             0.5,
             2,
             &sitting,
+            true,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b"], "nothing can move on two rows");
@@ -3395,6 +3849,7 @@ mod tests {
             0.5,
             2,
             &sitting,
+            true,
             &Default::default(),
         );
         assert_eq!(
@@ -3414,6 +3869,7 @@ mod tests {
             0.5,
             2,
             &sitting,
+            true,
             &Default::default(),
         );
         assert_eq!(order(&out)[0], "a");
@@ -3428,6 +3884,7 @@ mod tests {
             0.5,
             0,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "c", "d"]);
@@ -3444,6 +3901,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(
@@ -3486,6 +3944,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert!(
@@ -3542,6 +4001,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         assert_eq!(order(&out), vec!["a", "b", "e", "c", "d"]);
@@ -3561,6 +4021,7 @@ mod tests {
             0.5,
             2,
             &Default::default(),
+            false,
             &Default::default(),
         );
         let moved = order(&out).iter().position(|id| *id == "g").unwrap();
@@ -3572,22 +4033,20 @@ mod tests {
     async fn priming_changes_the_order_a_search_returns_and_says_which_hit_moved() {
         let mut core = test_core().await;
         core.learn.enabled = true;
-        core.associate.prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
         seed(&core, &texts).await;
         reembed_all(&core).await;
 
-        let plain = {
-            let mut off = core.clone();
-            off.associate.prime_lift = 0;
-            off.search(&q("alpha text about it"), Door::Ui)
-                .await
-                .unwrap()
-        };
+        // The lift is the live generation's, read off `Core::ranking`.
+        let plain = core
+            .search(&q("alpha text about it"), Door::Ui)
+            .await
+            .unwrap();
         assert!(plain.len() >= 4, "this test needs a list to reorder");
         assert!(plain.iter().all(|r| !r.primed));
+        core.ranking.write().unwrap().prime_lift = 2;
 
         // The one at the bottom is the one people actually keep confirming.
         let bottom = plain.last().unwrap().artifact_id.clone();
@@ -3647,15 +4106,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_search_records_the_sitting_even_though_the_knob_is_off() {
+        // The defect this change exists to fix: the sitting used to be
+        // collected only when the knob was already on, so no evidence about it
+        // ever accumulated, so the idle pass could never measure it, so it
+        // stayed off forever. The knob gates the *use* of the sitting, never
+        // its collection.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(&core, &[("alpha text about it", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text about it").await;
+
+        assert!(
+            !core.ranking.read().unwrap().sitting_prime,
+            "the fixture must run with the knob off, or this proves nothing"
+        );
+        core.sittings
+            .touched("sess", &a, now_secs(), core.pursuit.idle_secs as i64);
+
+        let (_, outcome) = core
+            .search_with(
+                &q("alpha text about it"),
+                None,
+                crate::store::feedback::Origin::from(Door::Ui).in_sitting(Some("sess".to_string())),
+            )
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+
+        let event = outcome.event.expect("the UI door waits for its capture");
+        let ctx = core
+            .store
+            .search_context(&event)
+            .await
+            .unwrap()
+            .expect("a priming search records what priming read");
+        assert!(
+            ctx.sitting.contains(&a),
+            "the touched artifact must be in the recorded sitting: {:?}",
+            ctx.sitting
+        );
+    }
+
+    #[tokio::test]
+    async fn a_door_with_no_session_records_an_empty_sitting() {
+        // An access token is not a conversation. `Origin::session` is `None`
+        // everywhere but the web door, and collecting the sitting
+        // unconditionally must not change that.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed(&core, &[("alpha text about it", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text about it").await;
+        core.sittings
+            .touched("sess", &a, now_secs(), core.pursuit.idle_secs as i64);
+
+        // The same live sitting exists; this search simply does not belong to
+        // it, because the door cannot name one.
+        let (_, outcome) = core
+            .search_with(&q("alpha text about it"), None, Door::Ui)
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+
+        let event = outcome.event.expect("the UI door waits for its capture");
+        let ctx = core.store.search_context(&event).await.unwrap().unwrap();
+        assert!(
+            ctx.sitting.is_empty(),
+            "a search with no session names no sitting: {:?}",
+            ctx.sitting
+        );
+    }
+
+    #[tokio::test]
     async fn priming_never_reaches_the_order_while_learning_is_off() {
         // The spec promise (§11): "existing installs see nothing change until
         // they opt in." With `[learn]` off, a large activation must not move
         // the ranked order — the order must be byte-identical to
         // `prime_lift = 0`, not merely bounded.
-        let mut core = test_core().await;
+        let core = test_core().await;
         assert!(!core.learn.enabled);
         // Priming on, so that `[learn]` off is the only thing holding it.
-        core.associate.prime_lift = 2;
+        core.ranking.write().unwrap().prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -3704,7 +4237,7 @@ mod tests {
         // pool it labels to be the pool the ranking produced.
         let mut core = test_core().await;
         core.learn.enabled = true;
-        core.associate.prime_lift = 2;
+        core.ranking.write().unwrap().prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -3899,12 +4432,7 @@ mod tests {
                 .map(|i| NewArtifact {
                     ordinal: i,
                     text: text.to_string(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 })
                 .collect();
             for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
@@ -3930,6 +4458,46 @@ mod tests {
         );
     }
 
+    /// A passage *with* a heading is the harder half. `fill_titles` never
+    /// touches it — it has a title — so nothing said the title was borrowed,
+    /// and the rail printed the section's name over the slice as if the slice
+    /// owned it.
+    #[tokio::test]
+    async fn a_passage_carrying_its_sections_heading_says_the_name_is_borrowed() {
+        let core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("feeding schedule", "web", Some("Sourdough"))
+            .await
+            .unwrap();
+        let new = vec![NewArtifact {
+            text: "feeding schedule that finally worked".to_string(),
+            title: Some("Kapitel 3".to_string()),
+            ..Default::default()
+        }];
+        for c in core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &new,
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap()
+        {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+        }
+        let hits = core
+            .search(&q("feeding schedule"), Door::Judge)
+            .await
+            .unwrap();
+        assert_eq!(hits[0].title.as_deref(), Some("Kapitel 3"));
+        assert!(
+            hits[0].borrowed_name,
+            "the heading names the section, not this passage"
+        );
+    }
+
     #[tokio::test]
     async fn a_passage_with_no_heading_is_shown_under_its_notes_title() {
         // Most pasted notes have no markdown heading, so their passages are
@@ -3948,14 +4516,8 @@ mod tests {
             (&unnamed, "words"),
         ] {
             let new = vec![NewArtifact {
-                ordinal: 0,
                 text: text.to_string(),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             }];
             for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
                 crate::jobs::embed::run(&core, &c.id).await.unwrap();
@@ -3970,12 +4532,12 @@ mod tests {
         };
         assert_eq!(of(&named).title.as_deref(), Some("Sourdough"));
         assert!(
-            of(&named).titled_by_corpus,
-            "the title must say it is the note's"
+            of(&named).borrowed_name,
+            "the title must say it is not this passage's own"
         );
         // Nothing is invented where the note has no title either.
         assert_eq!(of(&unnamed).title, None);
-        assert!(!of(&unnamed).titled_by_corpus);
+        assert!(!of(&unnamed).borrowed_name);
     }
 
     #[tokio::test]
@@ -4085,6 +4647,96 @@ mod tests {
     /// The id of the artifact whose text is exactly this. Ordering from
     /// `list_all_artifact_ids` is not promised, and a test that assumed one
     /// would pass or fail on which row SQLite happened to return first.
+    /// A base of `n` artifacts, learning on, everything embedded.
+    async fn explorable(explore: f32, n: usize) -> crate::core::Core {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        core.feedback.explore = explore;
+        for i in 0..n {
+            let raw = format!("src{i}");
+            let text = format!("mount the loop device image {i}");
+            seed_from(&core, &raw, &[(text.as_str(), "note", &[])]).await;
+        }
+        reembed_all(&core).await;
+        core
+    }
+
+    /// Every candidate the last search recorded, in pool order: the artifact,
+    /// whether it was shown, and the rank it would have held.
+    async fn pool_with_exploration(core: &crate::core::Core) -> Vec<(String, i64, Option<i64>)> {
+        sqlx::query_as(
+            "SELECT artifact_id, shown, explored_from
+               FROM search_candidates WHERE band = 0 ORDER BY rank",
+        )
+        .fetch_all(&core.store.pool)
+        .await
+        .unwrap()
+    }
+
+    /// The hole the whole feature exists to close: without exploration nothing
+    /// below the window is ever shown, so nothing below the window can ever be
+    /// opened, so the tuner can only ever learn about rows it already chose.
+    #[tokio::test]
+    async fn an_exploring_search_shows_one_row_the_ranking_hid() {
+        let core = explorable(1.0, 8).await;
+        let mut query = q("mount the loop device image");
+        query.limit = 3;
+        let out = core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+
+        assert_eq!(out.len(), 3, "the window is still the window");
+        let pool = pool_with_exploration(&core).await;
+        let lifted: Vec<_> = pool.iter().filter(|(_, _, e)| e.is_some()).collect();
+        assert_eq!(lifted.len(), 1, "exactly one row is lent, not a shuffle");
+        let (id, shown, from) = lifted[0];
+        assert_eq!(*shown, 1, "a lifted row nobody sees is worth nothing");
+        assert_eq!(
+            *from,
+            Some(3),
+            "charged to the rank the ranking gave it, which is the first one it cut"
+        );
+        assert!(
+            out.iter().any(|r| &r.artifact_id == id),
+            "the lifted artifact is in the answer the searcher was handed"
+        );
+        // And the row it displaced is still in the pool, simply not shown.
+        assert_eq!(
+            pool.iter().filter(|(_, shown, _)| *shown == 1).count(),
+            3,
+            "the window did not grow"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_explores_when_the_knob_is_off_or_there_is_no_room() {
+        let core = explorable(0.0, 8).await;
+        let mut query = q("mount the loop device image");
+        query.limit = 3;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+        assert!(
+            pool_with_exploration(&core)
+                .await
+                .iter()
+                .all(|(_, _, e)| e.is_none()),
+            "explore = 0 explores"
+        );
+
+        // Nothing below the cut: there is no hidden candidate to lend a row to.
+        let core = explorable(1.0, 2).await;
+        let mut query = q("mount the loop device image");
+        query.limit = 10;
+        core.search(&query, Door::Ui).await.unwrap();
+        core.background.wait_idle().await;
+        assert!(
+            pool_with_exploration(&core)
+                .await
+                .iter()
+                .all(|(_, _, e)| e.is_none()),
+            "a window wider than the base explored anyway"
+        );
+    }
+
     async fn id_of(core: &crate::core::Core, text: &str) -> String {
         sqlx::query_scalar("SELECT id FROM artifacts WHERE text = ?")
             .bind(text)
@@ -4119,6 +4771,83 @@ mod tests {
         );
         assert_eq!(out[1].artifact_id, b);
         assert_eq!(out[1].via.as_deref(), Some(a.as_str()));
+
+        // The width is the live generation's, not the file's.
+        core.ranking.write().unwrap().spread_max = 0;
+        let out = core.search(&query, Door::Ui).await.unwrap();
+        assert_eq!(out.len(), 1, "spread zero appends nothing: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn an_appended_hit_is_captured_in_the_band_and_an_open_on_it_is_an_observation() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("both of these"), 30.0, now_secs())
+            .await
+            .unwrap();
+        let params = *core.ranking.read().unwrap();
+        let generation = core
+            .store
+            .record_generation(&crate::store::generations::NewGeneration {
+                params: params.into(),
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let mut query = q("t0\nalpha text");
+        query.limit = 1;
+        let (out, outcome) = core
+            .search_with_ranking(&query, params, Door::Ui)
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        let event = outcome.event.expect("the UI door waits for its capture");
+        let rows =
+            sqlx::query("SELECT artifact_id, band, shown FROM search_candidates ORDER BY rank")
+                .bind(&event)
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        let band: Vec<&sqlx::sqlite::SqliteRow> = rows
+            .iter()
+            .filter(|r| r.get::<i64, _>("band") == 1)
+            .collect();
+        assert_eq!(band.len(), 1, "the appended hit is in the pool, flagged");
+        assert_eq!(band[0].get::<String, _>("artifact_id"), b);
+        assert_eq!(band[0].get::<i64, _>("shown"), 1);
+        // It is also in the ranked pool, unshown, past the limit of one: the
+        // open below has to land on the row the person saw.
+
+        assert!(core.store.open_event(&event, &b).await.unwrap());
+        let obs = core
+            .store
+            .observations_for_generation(&generation, 5)
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].artifact_id.as_deref(), Some(b.as_str()));
+        // The place on screen, not the place in the pool. `limit` is one here
+        // and the pool holds three rows, so the band hit is the second thing
+        // the person read — while `search_candidates.rank` calls it the third.
+        // The distance is `feedback.candidates - limit` and it is ten by
+        // default: `eval::sweep` and `jobs::retract` both read `rank - 1` as
+        // the place that was served, so recording the pool position handed
+        // every band open a baseline ten places too deep and made replays look
+        // better than they were.
+        assert_eq!(
+            obs[0].rank,
+            Some(2),
+            "the place it was shown at, under the one ranked hit: {rows:?}"
+        );
     }
 
     #[tokio::test]
@@ -4195,11 +4924,16 @@ mod tests {
     /// separately-seeded cores (whose artifact ids are fresh UUIDs and so never
     /// equal) can still be compared for shape.
     async fn captured_pool(core: &crate::core::Core, a: &str, b: &str) -> Vec<(&'static str, i64)> {
-        let rows: Vec<(String, i64)> =
-            sqlx::query_as("SELECT artifact_id, shown FROM search_candidates ORDER BY rank")
-                .fetch_all(&core.store.pool)
-                .await
-                .unwrap();
+        // The ranked pool. The band is recorded beside it, flagged, so the
+        // spread rule can read it — and every reader that learns from the
+        // pool leaves the flagged rows out, which is what keeps this loop
+        // closed; step 4 of the test below checks that.
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT artifact_id, shown FROM search_candidates WHERE band = 0 ORDER BY rank",
+        )
+        .fetch_all(&core.store.pool)
+        .await
+        .unwrap();
         rows.into_iter()
             .map(|(id, shown)| {
                 let role = if id == a {
@@ -4219,7 +4953,10 @@ mod tests {
         // The failure mode of any Hebbian system: a link recalls an artifact, is
         // strengthened by having done so, and recalls it harder next time. Both
         // loops have to be closed by construction: the recalled hit must not be
-        // written as a candidate, and must not count as a retrieval.
+        // a candidate anything learns from, and must not count as a retrieval.
+        // It *is* written to the pool, flagged as the band, so an open on it
+        // is an observation the spread rule can read; the flag is what every
+        // learning reader excludes on.
         //
         // This cannot be checked by asking "is `b` absent from
         // `search_candidates`" directly: on a base this small, `b` is a
@@ -4297,6 +5034,37 @@ mod tests {
             (after - before).abs() < 1e-9,
             "being recalled raised activation"
         );
+
+        // 4. The band is in the pool, flagged, and read by nothing that
+        // learns: the associate job's co-appearance read sees the ranked
+        // list alone.
+        let band: Vec<String> =
+            sqlx::query_scalar("SELECT artifact_id FROM search_candidates WHERE band = 1")
+                .fetch_all(&linked.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            band,
+            vec![b.clone()],
+            "the recalled hit is recorded as the band"
+        );
+        let event: String = sqlx::query_scalar("SELECT id FROM search_events")
+            .fetch_one(&linked.store.pool)
+            .await
+            .unwrap();
+        let shown = linked
+            .store
+            .events_between(0, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == event)
+            .expect("the event")
+            .shown;
+        assert!(
+            shown.iter().all(|(id, _)| *id != b),
+            "the pursuit's shown list read the band: {shown:?}"
+        );
     }
 
     #[tokio::test]
@@ -4317,6 +5085,71 @@ mod tests {
         let mut query = q("t0\nalpha text");
         query.limit = 1;
         assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
+    }
+
+    /// A passage recalled by association shows no name, exactly as a ranked
+    /// one does.
+    ///
+    /// The rail puts the two lists one under the other, so a heading that the
+    /// ranked rows no longer carry reappearing three rows down does not read
+    /// as a different rule — it reads as the same rule applied wrongly. Both
+    /// answers come off the row's own provenance, which is why this also pins
+    /// `model_written`: a merge reached by association is as model-written as
+    /// one that was ranked, and `false` there is how a paraphrase is handed
+    /// back as its own root.
+    #[tokio::test]
+    async fn a_recalled_hit_is_named_and_attributed_by_its_own_provenance() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("something else entirely", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "something else entirely").await;
+        core.store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now_secs())
+            .await
+            .unwrap();
+
+        async fn recalled(core: &crate::core::Core) -> SearchResult {
+            let mut query = q("t0\nalpha text");
+            query.limit = 1;
+            core.search(&query, Door::Ui)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|h| h.via.is_some())
+                .expect("the associated hit")
+        }
+
+        // A slice of a section, carrying that section's heading — `t1` here,
+        // which names the seeded corpus and not this passage.
+        sqlx::query("UPDATE artifacts SET provenance = 'passage' WHERE id = ?")
+            .bind(&b)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let hit = recalled(&core).await;
+        assert!(
+            hit.borrowed_name,
+            "a recalled passage carries a heading that is not its own: {:?}",
+            hit.title
+        );
+        assert!(!hit.model_written, "a passage is source text");
+
+        // The other side of the same read: a merge names its own text, and is
+        // never its own root.
+        sqlx::query("UPDATE artifacts SET provenance = 'merged' WHERE id = ?")
+            .bind(&b)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let hit = recalled(&core).await;
+        assert!(!hit.borrowed_name, "a merge was named by what wrote it");
+        assert!(
+            hit.model_written,
+            "a merge reached by association is a merge"
+        );
     }
 
     #[tokio::test]
@@ -4395,34 +5228,18 @@ mod tests {
 
         let dummy = |id: String| SearchResult {
             artifact_id: id,
-            corpus_id: String::new(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
             score: 1.0,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         let results = vec![dummy(a.clone()), dummy(b.clone()), dummy(c.clone())];
 
-        let out = core.associated(&results, &SearchFilter::default()).await;
+        let out = core
+            .associated(
+                &results,
+                &SearchFilter::default(),
+                core.associate.spread_max,
+            )
+            .await;
         let ids: Vec<&str> = out.iter().map(|r| r.artifact_id.as_str()).collect();
         assert!(
             ids.contains(&d.as_str()),
@@ -4511,29 +5328,8 @@ mod tests {
         let dummy = |id: &str, score: f32| SearchResult {
             artifact_id: id.into(),
             corpus_id: "c".into(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
             score,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         let mut results = vec![
             dummy("a", 0.95),
@@ -4574,29 +5370,9 @@ mod tests {
         let dummy = |id: &str, score: f32, retired: bool| SearchResult {
             artifact_id: id.into(),
             corpus_id: "c".into(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
             score,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
             retired,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         // The retired row scores highest of all, and is first in the ranking.
         let mut results = vec![
@@ -4636,29 +5412,9 @@ mod tests {
         let dummy = |id: &str, score: f32, similarity: Option<f32>| SearchResult {
             artifact_id: id.into(),
             corpus_id: "c".into(),
-            title: None,
-            text: String::new(),
-            category: None,
-            tags: vec![],
             score,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
-            retired: false,
             similarity,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         };
         let fused = [1.050, 0.633, 0.383, 0.250, 0.217];
         // Sanity: on the fused scores alone the rule draws its line after #1.
@@ -4785,14 +5541,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "captured text".into(),
-                    corpus_span: None,
                     title: Some("c".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -4857,14 +5608,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "a".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await

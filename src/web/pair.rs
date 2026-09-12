@@ -6,10 +6,11 @@
 //! browser's own auth-flow window opens this page, and the redirect carries
 //! the token back into the extension that started the flow.
 
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Form;
 use axum::Router;
@@ -98,6 +99,17 @@ struct PairTemplate {
     signed_in: bool,
 }
 
+impl PairTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    fn section(&self) -> &'static str {
+        ""
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct PairParams {
     #[serde(default)]
@@ -125,11 +137,12 @@ async fn pair_page(
     tenant: Option<Tenant>,
     headers: HeaderMap,
     Query(p): Query<PairParams>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     if !is_extension_redirect(&p.redirect_uri) {
         return Err(Error::Validation(
             "that redirect does not belong to a browser extension".into(),
-        ));
+        )
+        .into());
     }
     Ok(HtmlTemplate(PairTemplate {
         origin: request_origin(&headers).unwrap_or_default(),
@@ -144,11 +157,12 @@ async fn pair_submit(
     tenant: Tenant,
     headers: HeaderMap,
     Form(p): Form<PairParams>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     if !is_extension_redirect(&p.redirect_uri) {
         return Err(Error::Validation(
             "that redirect does not belong to a browser extension".into(),
-        ));
+        )
+        .into());
     }
     let origin = request_origin(&headers).unwrap_or_default();
     // The browser that asked, recorded with the token: every extension token

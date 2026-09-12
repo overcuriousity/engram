@@ -36,6 +36,10 @@ const MAX_NODES: usize = 200;
 pub struct LineageNode {
     pub id: String,
     pub title: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`. A node is a link and nothing
+    /// else, so it can never be empty; it can say it is not a name.
+    pub named: bool,
     /// `merge` or `captured` — what kind of artifact this is, in one word.
     pub kind: &'static str,
     pub when: String,
@@ -280,6 +284,9 @@ impl Walk<'_> {
             return LineageNode {
                 id: id.to_string(),
                 title: "deleted since".into(),
+                // Not a name and not an opening either — it is the tree saying
+                // what happened. Set as text, like the other nameless nodes.
+                named: false,
                 kind: "gone",
                 when: String::new(),
                 // Nothing is known about when it was written; it sorts to the
@@ -293,8 +300,10 @@ impl Walk<'_> {
             };
         };
         let (source_href, source_label) = self.source_of(&c).await;
+        let label = crate::web::ui::row_label(&c);
         LineageNode {
-            title: crate::web::ui::title_of(&c),
+            title: label.text,
+            named: label.named,
             kind: match c.provenance {
                 crate::store::artifacts::Provenance::Merged => "merge",
                 crate::store::artifacts::Provenance::Synthesized => "synthesized",
@@ -302,7 +311,7 @@ impl Walk<'_> {
                 crate::store::artifacts::Provenance::Captured => "captured",
                 crate::store::artifacts::Provenance::Note => "note",
             },
-            when: crate::web::ui::fmt_time(c.created_at),
+            when: crate::fmt::fmt_time(c.created_at),
             created_at: c.created_at,
             source_href,
             source_label,
@@ -375,10 +384,7 @@ mod tests {
                     source: crate::store::artifacts::SpanSource::Located,
                 }),
                 title: Some(format!("captured {i}")),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         s.insert_artifacts(&src.id, &new)
@@ -393,10 +399,94 @@ mod tests {
         NewMerged {
             text: text.into(),
             title: Some(text.into()),
-            category: None,
-            tags: vec![],
-            caveats: vec![],
+            ..Default::default()
         }
+    }
+
+    /// A lineage node is a link and nothing else — no snippet beside it — so
+    /// a passage emptied of its name is a node nobody can see or click. It is
+    /// named by how its text opens, and marked so the tree does not read the
+    /// opening as a name.
+    ///
+    /// Promotion is where a passage lands here: the window job supersedes the
+    /// passages it rewrote, and they show up under "Replaced without being
+    /// merged" on the artifact that replaced them.
+    #[tokio::test]
+    async fn a_passage_in_the_tree_is_named_by_how_its_text_opens() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("one\ntwo", "web", None).await.unwrap();
+        let p = s
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[NewArtifact {
+                    text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    title: Some("Kapitel 3".into()),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let winner = captured(&s, 1).await;
+        s.set_superseded_by(&p[0].id, Some(&winner[0]))
+            .await
+            .unwrap();
+
+        let l = build(&s, &winner[0]).await.unwrap();
+
+        let node = l
+            .also_replaced
+            .iter()
+            .find(|n| n.id == p[0].id)
+            .expect("the passage it replaced is on the page");
+        assert!(
+            node.title.starts_with("Der Vorgang setzt voraus"),
+            "the node read {:?}",
+            node.title
+        );
+        assert!(!node.named, "the opening of a text is not a name");
+    }
+
+    /// And the tree has to *look* like it is not a name: a node styled exactly
+    /// like the merge above it says the opening of a passage is what somebody
+    /// called it.
+    #[tokio::test]
+    async fn a_node_named_by_its_opening_is_set_as_text() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core
+            .store
+            .insert_corpus("one\ntwo", "web", None)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[NewArtifact {
+                    text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    title: Some("Kapitel 3".into()),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        let winner = captured(&core.store, 1).await;
+        core.store
+            .set_superseded_by(&p[0].id, Some(&winner[0]))
+            .await
+            .unwrap();
+
+        let d = crate::web::artifact::build_artifact_detail(&core, &winner[0], "")
+            .await
+            .unwrap();
+        let html =
+            askama::Template::render(&crate::web::artifact::ArtifactDetailFragment { d }).unwrap();
+        assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
+        assert!(html.contains("name-opening"), "{html}");
+        // And the class has to do something, or the distinction lives nowhere.
+        let css = include_str!("../../assets/css/30-components.css");
+        assert!(css.contains(".name-opening"), "the class has no rule");
     }
 
     /// The whole point: the generation between a merge and its captured roots

@@ -1,7 +1,7 @@
 //! `-a`: one question, streamed to the terminal as it is written.
 
-use crate::cli::capture::USER_AGENT;
 use crate::cli::endpoint::Endpoint;
+use crate::cli::endpoint::client;
 use crate::error::{Error, Result};
 
 /// Take every complete SSE frame out of `buf`, leaving a partial one behind.
@@ -234,10 +234,7 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
         std::env::var_os("NO_COLOR").is_some(),
         crate::cli::face::locale().as_deref(),
     );
-    let http = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let http = client()?;
     let res = http
         // `door=cli`, exactly as `-s` names its door: a question typed at a
         // shell is recorded, and the log should hold what it was.

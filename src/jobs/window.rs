@@ -90,7 +90,15 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // over, and `text_with_no_structure_still_splits_within_budget` asserts
     // the same bound. What must never happen is unbounded — the corpus that
     // came back fifteen times its budget.
-    let window_budget = super::synthesize::segment_budget(core, lang);
+    // No budget at all is not a small budget: the call would go out over the
+    // endpoint's real context and come back a non-retryable 400, once per
+    // window, with the cause named nowhere. Refused here instead, where the
+    // reason can be written down.
+    let Some(window_budget) = super::synthesize::segment_budget(core, lang) else {
+        let reason = super::synthesize::no_budget_reason(core, lang);
+        tracing::error!(corpus_id, window = idx, %reason, "no window can be synthesized");
+        return Err(crate::error::Error::Validation(reason));
+    };
     let window_tokens = core.counter.count(&text);
     debug_assert!(
         window_tokens <= window_budget * 2,
@@ -167,7 +175,18 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
                 // for. The retry's own judgement still wins where it has one.
                 let first_judgement = reply.judgement.take();
                 reply = second;
-                reply.judgement = reply.judgement.take().or(first_judgement);
+                // `says_something()` and not `is_some()`. `parse_judged_response`
+                // answers `Some(..)` for every reply that parses, and `moment`,
+                // `events` and `links` are all `#[serde(default)]` — so a retry
+                // that parsed but left the JUDGE block out yielded
+                // `Some(Judgement::default())`, which is an empty judgement that
+                // won against a full one. The capture this whole retry exists
+                // for — "erinnere mich Freitag, /mnt/backup prüfen", where the
+                // second call fixes the path and answers `"moment": null` —
+                // lost its reminder to a `Some` that said nothing at all.
+                if !reply.judgement.as_ref().is_some_and(|j| j.says_something()) {
+                    reply.judgement = first_judgement;
+                }
             }
             // The first reply parsed; it merely paraphrased. Keeping it and
             // letting `flag_unverified` mark what went missing beats losing a
@@ -333,8 +352,7 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         match anchor {
             Some(anchor) => {
                 if let Err(e) =
-                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids, &text)
-                        .await
+                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids).await
                 {
                     tracing::warn!(
                         corpus_id,
@@ -1423,14 +1441,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "l1 l2".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await

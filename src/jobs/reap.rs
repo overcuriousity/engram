@@ -4,9 +4,13 @@
 //! This sweep is the second look nobody was going to take by hand: free rules
 //! nominate the long-retired, one model call per nominee asks whether it still
 //! states anything the live base does not, and the verdict is acted on — the
-//! worthless are buried (text into `graveyard`, point deleted, stub kept), the
-//! valuable rewritten as live synthesized artifacts. No operator queue; the
-//! graveyard is the insurance a wrong verdict answers to.
+//! worthless are buried (text and vector into `graveyard`, point deleted,
+//! stub kept), the valuable rewritten as live synthesized artifacts. No
+//! operator queue. A wrong verdict answers to three things: the journal row
+//! every burial writes (`corpus_actions`), the Reaped listing on Insights with
+//! its Restore button, and `jobs::retract`'s second rule, which exhumes a
+//! buried artifact on its own when a search given up on would have been
+//! answered by it. A burial taken back is not bought again.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -41,6 +45,34 @@ pub async fn run(core: &Core) -> Result<Report> {
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
     for c in &cands {
+        // Reap's own week, before the judge call: a burial is the one action
+        // here that destroys text, and the cap is on taking it. Its own,
+        // because a shared count meant a week of condensations could quietly
+        // remove the ceiling's meaning here — and, the other way round, a week
+        // of burials could stop the idle pass shortening anything.
+        if !core.may_act(crate::store::actions::Job::Reap).await? {
+            tracing::info!("budget spent; the rest of the nominees wait for the window to move");
+            break;
+        }
+        // A burial taken back — by a person, or by the base for a search
+        // given up on — is not bought again. Read before the judge call,
+        // which is the expensive step.
+        if core
+            .store
+            .action_was_undone(&c.id, crate::store::actions::Kind::Reap)
+            .await?
+        {
+            tracing::debug!(artifact_id = %c.id, "a burial taken back before; left alone");
+            // Stood down, not merely skipped. This is a permanent answer about
+            // this row — a burial taken back is never bought again — and
+            // `reap_candidates` orders by `retired_at ASC`, so leaving the
+            // stamp alone makes it the oldest retirement in the base for ever:
+            // one nominee slot on every sweep, and the candidates behind it
+            // never reached. Exactly the starvation `step_aside` exists for,
+            // arriving through the one branch that never spends a model call.
+            step_aside(core, &c.id).await;
+            continue;
+        }
         let verdict = judge_one(core, c).await;
         // Counted only where a judgement actually came back. `jobs::did_work`
         // calls any non-zero number in the report work, so counting the
@@ -71,6 +103,19 @@ pub async fn run(core: &Core) -> Result<Report> {
                     tracing::info!(artifact_id = %c.id, reason, "valuable, but over this run's rescue cap; it waits");
                     continue;
                 }
+                // The writer this rewrite needs, asked for before the row is
+                // touched. `rescue_one` refuses with a `Validation` when there
+                // is none, and every `rescue_one` failure used to stand the
+                // candidate down — so a base with a `[infer.reap]` judge and no
+                // generator paid `max_judged_per_run` model calls a sweep to
+                // push every valuable thing it owns ninety days out of reach,
+                // one restamp at a time, while `report.judged` stayed non-zero
+                // and the empty-run backoff never engaged. A role that has not
+                // arrived is a wait, exactly as it is for `Describe`.
+                if core.generator.is_none() {
+                    tracing::info!(artifact_id = %c.id, reason, "valuable, but no generator model to rewrite it with; it waits");
+                    continue;
+                }
                 match rescue_one(core, c, &reason).await {
                     Ok(new_id) => {
                         report.rescued += 1;
@@ -78,7 +123,22 @@ pub async fn run(core: &Core) -> Result<Report> {
                     }
                     Err(e) => {
                         tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact; it waits");
-                        step_aside(core, &c.id).await;
+                        // Restamped only where the failure is about this row —
+                        // no source text left to rewrite from, a reply that
+                        // would not parse, an endpoint that refused this text.
+                        // An endpoint that merely did not answer says nothing
+                        // about the candidate, and the sweep's own cadence is
+                        // its retry; standing the row down for it would push
+                        // the whole backlog forward on every outage. A busy
+                        // endpoint says even less than a silent one: it is up,
+                        // and it has not so much as looked at this text.
+                        if !matches!(
+                            e,
+                            crate::error::Error::Inference { .. }
+                                | crate::error::Error::InferenceBusy { .. }
+                        ) {
+                            step_aside(core, &c.id).await;
+                        }
                     }
                 }
             }
@@ -355,11 +415,44 @@ async fn reap_one(
         "retired_at": c.retired_at,
     })
     .to_string();
+    // The vector goes into the grave beside the text, read before the point
+    // is deleted. A store that cannot answer buries without it, and says so:
+    // the burial is the point, the vector is what lets a give-up find it.
+    let dense = match core.vectors.dense_of(&c.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(artifact_id = %c.id, error = %e, "buried without its vector");
+            None
+        }
+    };
+    let journal = crate::store::actions::NewAction {
+        job: crate::store::actions::Job::Reap,
+        kind: crate::store::actions::Kind::Reap,
+        subject_id: c.id.clone(),
+        survivor_id: None,
+        detail: Some(reason.to_string()),
+        evidence: serde_json::json!({
+            "status": c.status.as_str(),
+            "retired_at": c.retired_at,
+            "created_at": c.created_at,
+        }),
+        pair_score: None,
+    };
     let _guard = core.lifecycle_lock.lock().await;
     // `bury` sets `lifecycle_dirty` inside its own transaction, so from the
     // instant the text is wiped the drift repair can finish the delete below
-    // if this process never gets to it.
-    core.store.bury(&c.id, &meta, min_age_secs).await?;
+    // if this process never gets to it. The journal row rides the same
+    // transaction.
+    core.store
+        .bury(
+            &c.id,
+            &meta,
+            min_age_secs,
+            dense.as_deref(),
+            c.embed_model.as_deref(),
+            &journal,
+        )
+        .await?;
     core.vectors
         .delete_artifacts(std::slice::from_ref(&c.id))
         .await?;
@@ -488,6 +581,22 @@ async fn judge_one(
     crate::infer::prompt::parse_reap(&reply?)
 }
 
+/// The journal row a burial writes, for tests elsewhere that bury by hand.
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) fn row(id: &str) -> crate::store::actions::NewAction {
+        crate::store::actions::NewAction {
+            job: crate::store::actions::Job::Reap,
+            kind: crate::store::actions::Kind::Reap,
+            subject_id: id.to_string(),
+            survivor_id: None,
+            detail: None,
+            evidence: serde_json::json!({}),
+            pair_score: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,12 +635,8 @@ mod tests {
             .map(|(i, t)| NewArtifact {
                 ordinal: i as i64,
                 text: (*t).into(),
-                corpus_span: None,
                 title: Some(format!("S{i}")),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         core.store
@@ -558,6 +663,58 @@ mod tests {
             .await
             .unwrap();
         backdate_retired_at(core, id, 100 * 86_400).await;
+    }
+
+    /// A burial taken back is a permanent answer about that row, and
+    /// `reap_candidates` orders by `retired_at ASC`. Skipped without a fresh
+    /// stamp it is the oldest retirement in the base for ever: one nominee
+    /// slot on every sweep, and the candidates behind it never reached — the
+    /// starvation `step_aside`'s own doc comment describes, arriving through
+    /// the one branch that never spends a model call.
+    #[tokio::test]
+    async fn a_burial_taken_back_stands_down_instead_of_holding_its_slot() {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        let mut core = test_core().await;
+        core.reap.enabled = true;
+        // No judge: every nominee that reaches the call fails there, which is
+        // fine — the branch under test is above it.
+        let ids = seed(&core, &["taken back before", "behind it"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        deprecate_long_ago(&core, &ids[1]).await;
+        // A burial on the first, already taken back.
+        core.store
+            .record_action(&NewAction {
+                job: Job::Reap,
+                kind: Kind::Reap,
+                subject_id: ids[0].clone(),
+                survivor_id: None,
+                detail: None,
+                evidence: serde_json::json!({}),
+                pair_score: None,
+            })
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(&ids[0], Kind::Reap, UndoneBy::Operator, "restored")
+            .await
+            .unwrap();
+        let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+
+        run(&core).await.unwrap();
+
+        let after = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+        assert!(
+            after > before,
+            "the row kept its place at the head of the queue: {before:?} -> {after:?}"
+        );
+        // And only that row. A candidate whose judge call merely failed —
+        // there is no reap model here — says nothing about itself, and the
+        // sweep's own cadence is its retry.
+        assert_eq!(
+            core.store.get_artifact(&ids[1]).await.unwrap().retired_at,
+            Some(crate::store::now() - 100 * 86_400),
+            "a candidate the endpoint never answered for was stood down too"
+        );
     }
 
     #[tokio::test]
@@ -628,9 +785,7 @@ mod tests {
                 &NewMerged {
                     text: "the fact, once".into(),
                     title: Some("M".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &ids,
             )
@@ -711,6 +866,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_spent_budget_judges_nothing_and_buries_nothing() {
+        let mut core = test_core().await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+        ]));
+        core.reaper = Some(scripted.clone());
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_week = 0;
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped), (0, 0));
+        assert_eq!(scripted.calls(), 0);
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_burial_taken_back_before_is_not_bought_again() {
+        use crate::store::actions::{Kind, UndoneBy};
+        let mut core = test_core().await;
+        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"verdict":"worthless","reason":"covered"}"#.into(),
+        ]));
+        core.reaper = Some(scripted.clone());
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        core.store
+            .record_action(&test_support::row(&ids[0]))
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(&ids[0], Kind::Reap, UndoneBy::Operator, "restored")
+            .await
+            .unwrap();
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped), (0, 0));
+        assert_eq!(
+            scripted.calls(),
+            0,
+            "the judge was asked about a burial taken back"
+        );
+        assert!(
+            core.store
+                .get_artifact(&ids[0])
+                .await
+                .unwrap()
+                .reaped_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn a_worthless_verdict_reaches_the_graveyard_and_the_point_dies() {
         let mut core = test_core().await;
         core.reaper = Some(std::sync::Arc::new(
@@ -736,6 +947,21 @@ mod tests {
             .expect("a grave");
         assert!(text.contains("stale duplicate fact"));
         assert!(meta.contains("covered"));
+        // The journal row rode the burial, and the grave kept the vector.
+        let rows = core
+            .store
+            .open_actions(&[crate::store::actions::Kind::Reap], 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject_id, ids[0]);
+        assert_eq!(rows[0].detail.as_deref(), Some("covered"));
+        let kept: i64 = sqlx::query_scalar("SELECT vec IS NOT NULL FROM graveyard WHERE id = ?")
+            .bind(&ids[0])
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1, "the vector was not kept in the grave");
         assert!(
             core.vectors
                 .payloads_of(std::slice::from_ref(&ids[0]))
@@ -982,9 +1208,7 @@ mod tests {
                 &NewMerged {
                     text: "a paraphrase of both".into(),
                     title: Some("M".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &ids,
             )

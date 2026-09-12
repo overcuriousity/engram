@@ -24,6 +24,29 @@ pub struct Report {
     pub contexts: u64,
     /// Interactions dropped for being past the same window.
     pub interactions: u64,
+    /// Searches given up on, written down as weak negatives.
+    pub gave_up: usize,
+    /// Generations adopted by the idle pass. Zero or one.
+    pub adopted: usize,
+    /// Generations the idle pass took back. Zero or one.
+    pub reverted: usize,
+    /// Corpus actions the pass took back on evidence.
+    pub undone: usize,
+    /// Artifacts the pass restored for a search given up on.
+    pub restored: usize,
+    /// Artifacts the integrate phase filed against the rest of the base, and
+    /// the capture probes it minted doing so.
+    pub integrated: usize,
+    pub probes: usize,
+    /// Probes the rehearse phase retired: another embedder, or an owner gone.
+    /// A change to the probe set itself, so this pass acted.
+    pub retired: usize,
+    /// Of the probes replayed, the ones that landed somewhere new. What this
+    /// pass learned, as opposed to how many measurements it repeated — see
+    /// `sleep::Replayed::moved`, and `Standing::rehearsed` beside it.
+    pub moved: usize,
+    /// Condensations the pass armed.
+    pub condensed: usize,
 }
 
 /// What the base holds, as opposed to what this pass did to it.
@@ -40,6 +63,20 @@ pub struct Report {
 pub struct Standing {
     /// Gap clusters the base holds after this pass, named or not.
     pub clusters: usize,
+    /// Probes the rehearse phase replayed.
+    ///
+    /// Standing, though it is this pass that ran them, and the distinction is
+    /// the one this struct exists to draw. The lap wraps at the end of the
+    /// probe set, so on any base that has ever captured anything this is
+    /// non-zero on every pass for ever — and a count that is never zero is a
+    /// backoff that never engages. Repeating a measurement over unchanged
+    /// inputs is not work; `Report::moved` carries the part of it that is.
+    pub rehearsed: usize,
+    /// Interferers rule 3 observed. A standing fact about the ranking rather
+    /// than anything this pass did: `sleep::interference` files nothing, and
+    /// says so at length. Left flat, it returned the same non-zero number over
+    /// an unchanged base on every run.
+    pub interference: usize,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -58,7 +95,78 @@ pub async fn run(core: &Core) -> Result<Report> {
     // another attempt.
     let mut failure: Option<crate::error::Error> = None;
 
+    // Before expiry, and that ordering is the point: expiring removes the very
+    // rows a give-up is read from, and a chain trimmed before it is read is a
+    // failure nobody ever hears about. It is a third pass in the same unit for
+    // the reason the other two are one — it reads the same log, on the same
+    // ticker, and a second ticker over one table is two things to reason about
+    // where there was one.
+    match crate::jobs::observe::run(core).await {
+        Ok(n) => report.gave_up = n,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not record what was given up on");
+            failure.get_or_insert(e);
+        }
+    }
+
+    // After the give-ups are written and before anything is expired: the pass
+    // reads the observations, and the give-ups just recorded are part of what
+    // the generation under watch is judged on. Its own quiet check is inside;
+    // this unit is only the ticker it hangs off, the way the give-up chain is.
+    match crate::jobs::tune::run_if_quiet(core).await {
+        Ok(p) => {
+            report.adopted = usize::from(p.adopted.is_some());
+            report.reverted = usize::from(p.reverted.is_some());
+            report.undone = p.undone;
+            report.restored = p.restored;
+            // The sleep phases. Flat where the number is this pass acting,
+            // because `jobs::did_work` reads flat numbers and nothing else:
+            // without them a pass that integrated five hundred artifacts
+            // reported no work at all, and `rearm_periodic_with` doubled the
+            // interval away from `sweep_hours` towards `backoff_max_hours` —
+            // on a base whose integration backlog drains at
+            // `OBSERVATION_LIMIT` a pass, and where nothing in production
+            // calls `arm_now` to put it back.
+            //
+            // And nested where it is not. "This pass acting" is a narrower
+            // test than "this pass ran a query": the rehearse lap wraps, so
+            // replaying probes over an unchanged base is the same measurement
+            // again for ever, and rule 3 counts a standing fact and files
+            // nothing at all. Left flat, those two meant the backoff could
+            // never engage on any base that had ever captured anything —
+            // which is every base it was written for. What the pass *learned*
+            // is `moved`, and that is flat.
+            report.integrated = p.integrated.integrated;
+            report.probes = p.integrated.probes;
+            report.retired = p.replayed.retired;
+            report.moved = p.replayed.moved;
+            report.condensed = p.condensed;
+            // The two that say what the base holds rather than what this pass
+            // did to it. Recorded all the same — `sweep_runs.detail` is the
+            // history a person reads — just where `did_work` does not read
+            // them.
+            report.standing.rehearsed = p.replayed.rehearsed;
+            report.standing.interference = p.interference;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "the idle pass failed; the live generation is unchanged");
+            failure.get_or_insert(e);
+        }
+    }
+
     if core.feedback.retain_days > 0 {
+        match core
+            .store
+            .expire_rehearsal_results(core.feedback.retain_days)
+            .await
+        {
+            Ok(n) if n > 0 => tracing::info!(dropped = n, "expired rehearsal results"),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "could not expire rehearsal results");
+                failure.get_or_insert(e);
+            }
+        }
         match core.store.expire_feedback(core.feedback.retain_days).await {
             Ok(n) => {
                 if n > 0 {
@@ -169,6 +277,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -255,15 +364,12 @@ mod tests {
                 .store
                 .record_ask(crate::store::asks::NewAsk {
                     question: q.into(),
-                    scope: None,
                     filters: "{}".into(),
                     query_vec: vec![1.0; 4],
                     embed_model: core.embedder.model().to_string(),
                     answer: "Not in the knowledge base.".into(),
                     abstained: true,
-                    dropped: 0,
-                    truncated: false,
-                    citations: vec![],
+                    ..Default::default()
                 })
                 .await
                 .unwrap();

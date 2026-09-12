@@ -63,6 +63,56 @@ impl Door {
         )
     }
 
+    /// Every door, so a rule about a subset can be written against the enum
+    /// instead of a list of strings somewhere else.
+    pub const ALL: [Door; 7] = [
+        Door::Ui,
+        Door::Api,
+        Door::Mcp,
+        Door::Judge,
+        Door::Extension,
+        Door::Cli,
+        Door::Ask,
+    ];
+
+    /// Whether a search on this door fetches the wider pool that capture
+    /// needs — `feedback.candidates` as a floor under the over-fetch.
+    ///
+    /// The captured doors, because that pool is what they store; and `Judge`,
+    /// because `Judge` is those doors replayed. The idle pass ranks its
+    /// candidate generations through `search_with_ranking` on this door so
+    /// that measurement and the live path are one pipeline, and a floor the
+    /// replay skips is a place where they are two.
+    ///
+    /// It showed up as an axis that could adopt on nothing. The sweep replays
+    /// at `LIMIT = 10`, and the shipped floor is 20, so a `candidate_multiplier`
+    /// of 1 and of 2 both fetch 20 candidates in production and are the same
+    /// setting — while the replay fetched 10 against 20 and scored them as a
+    /// difference worth having.
+    ///
+    /// `Ask` is not here. It is a door in its own right rather than a stand-in
+    /// for one, and widening its pool would be a change to what people are
+    /// served, not to what the sweep measures.
+    pub fn fetches_the_capture_pool(&self) -> bool {
+        self.captured() || matches!(self, Door::Judge)
+    }
+
+    /// Whether an open on this door is recorded, and so whether "nobody
+    /// opened it" is a fact about the search or merely the absence of any way
+    /// to say otherwise.
+    ///
+    /// Only the web UI. `Store::open_event` has exactly one caller, the
+    /// artifact page, and it is the only place `search_events.opened_at` is
+    /// ever written — a shell, an agent or the extension can read a result
+    /// list all day and leave the column NULL. That is why `jobs::observe`
+    /// asks this before writing anything down: on the other doors every
+    /// unopened search is unopened by construction, so a second search a
+    /// minute later would have made a weak negative out of a person simply
+    /// asking twice.
+    pub fn records_opens(&self) -> bool {
+        matches!(self, Door::Ui)
+    }
+
     /// The door a client is allowed to claim for itself.
     ///
     /// Only `extension` and `cli`. Everything else falls back to `Api`,
@@ -99,6 +149,10 @@ pub struct Origin {
     /// The event this search is a rewording of, named by the page that is
     /// typing. See `NewEvent::fold_onto`.
     pub fold_onto: Option<String>,
+    /// Priming inputs handed in by a replay, on the Judge door where priming
+    /// is otherwise off. Serving never sets this; the idle pass does, from
+    /// `search_context`, so the pass sees what the searcher saw.
+    pub replay: Option<crate::core::search::Priming>,
 }
 
 impl From<Door> for Origin {
@@ -108,6 +162,7 @@ impl From<Door> for Origin {
             scope: None,
             session: None,
             fold_onto: None,
+            replay: None,
         }
     }
 }
@@ -120,6 +175,7 @@ impl Door {
             scope: Some(scope.into()),
             session: None,
             fold_onto: None,
+            replay: None,
         }
     }
 }
@@ -138,6 +194,13 @@ impl Origin {
         self.fold_onto = event_id;
         self
     }
+
+    /// A replay: prime this search with what a recorded search read, on a
+    /// door that would otherwise not prime at all.
+    pub fn primed_as(mut self, p: crate::core::search::Priming) -> Origin {
+        self.replay = Some(p);
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +212,28 @@ pub struct NewCandidate {
     pub similarity: Option<f32>,
     /// Whether it was inside the answer the searcher actually saw.
     pub shown: bool,
+    /// Appended under the ranked list by association rather than ranked.
+    pub band: bool,
+    /// Where this artifact would have stood, 0-based, had the search not
+    /// explored. `None` on everything else. See `search_candidates`.
+    pub explored_from: Option<i64>,
+}
+
+/// Test-only, for the reason `NewArtifact`'s is: in production every field
+/// here is a decision, and a field added later must break every call site
+/// until somebody answers for it. A fixture has no such duty.
+#[cfg(test)]
+impl Default for NewCandidate {
+    fn default() -> Self {
+        Self {
+            artifact_id: String::new(),
+            score: 0.0,
+            similarity: None,
+            shown: false,
+            band: false,
+            explored_from: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +256,17 @@ pub struct NewEvent {
     /// typing — the id it was handed by the last answer it drew. `None` from a
     /// door with nothing to name. See the fold rule in `record_search`.
     pub fold_onto: Option<String>,
+    /// What priming read when this search ran, where the door primes. Kept
+    /// so the idle pass can replay the search at another lift.
+    pub context: Option<crate::core::search::Priming>,
+}
+
+/// What the appended band earned under one generation, beside the ranked
+/// tail of the same width. See `Store::band_use`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandUse {
+    pub band_used: usize,
+    pub tail_used: usize,
 }
 
 /// One recorded search as the pursuit sweep reads it.
@@ -361,9 +457,25 @@ impl Store {
         let id = match extends {
             Some(id) => {
                 sqlx::query(
+                    // `skips` goes back to zero with everything else the fold
+                    // replaces. The row keeps its id and nothing else: query,
+                    // vector, pool, filters and moment are all this search's,
+                    // so a skip that was a statement about the *earlier* query
+                    // is not a statement about this one. Left standing it was
+                    // permanent — `dealable!` excludes a skipped event, and no
+                    // later typing ever clears the flag — so pressing "not
+                    // sure" and carrying on typing inside `coalesce_secs` made
+                    // a brand-new question invisible to `pending_count` for
+                    // ever. `unjudge` was fixed for exactly this; the fold
+                    // path is the other door into it.
+                    //
+                    // The generation goes with them: the list is drawn again,
+                    // under whatever is live now.
                     "UPDATE search_events
                      SET query = ?, filters = ?, query_vec = ?, vec_dim = ?,
-                         embed_model = ?, created_at = ?, answered = ?
+                         embed_model = ?, created_at = ?, answered = ?, skips = 0,
+                         generation_id = (SELECT id FROM generations WHERE state = 'live'
+                                           ORDER BY created_at DESC, id DESC LIMIT 1)
                      WHERE id = ?",
                 )
                 .bind(&ev.query)
@@ -380,15 +492,24 @@ impl Store {
                     .bind(&id)
                     .execute(&mut *tx)
                     .await?;
+                sqlx::query("DELETE FROM search_context WHERE event_id = ?")
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await?;
                 id
             }
             None => {
                 let id = new_id();
                 sqlx::query(
+                    // The live generation read in the same statement, and so
+                    // under the same write lock, as the row it stamps. See
+                    // `search_events.generation_id`.
                     "INSERT INTO search_events
                        (id, query, door, scope, filters, query_vec, vec_dim, embed_model,
-                        created_at, answered)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        created_at, answered, generation_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                             (SELECT id FROM generations WHERE state = 'live'
+                               ORDER BY created_at DESC, id DESC LIMIT 1))",
                 )
                 .bind(&id)
                 .bind(&ev.query)
@@ -409,8 +530,8 @@ impl Store {
         for (rank, c) in ev.candidates.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO search_candidates
-                   (event_id, rank, artifact_id, score, similarity, shown)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                   (event_id, rank, artifact_id, score, similarity, shown, band, explored_from)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(rank as i64)
@@ -418,12 +539,69 @@ impl Store {
             .bind(c.score)
             .bind(c.similarity)
             .bind(c.shown as i64)
+            .bind(c.band as i64)
+            .bind(c.explored_from)
             .execute(&mut *tx)
             .await?;
+        }
+        if let Some(ctx) = &ev.context {
+            let raw = serde_json::to_string(ctx)
+                .map_err(|e| crate::error::Error::Store(format!("search_context: {e}")))?;
+            sqlx::query("INSERT INTO search_context (event_id, context) VALUES (?, ?)")
+                .bind(&id)
+                .bind(raw)
+                .execute(&mut *tx)
+                .await?;
         }
 
         tx.commit().await?;
         Ok(id)
+    }
+
+    /// Over the opened observations under one generation: how many opened
+    /// the band, and how many opened the last `spread_max` ranked hits that
+    /// were shown — the band's own width, at the weak end of the list beside
+    /// it.
+    pub async fn band_use(&self, generation_id: &str, spread_max: usize) -> Result<BandUse> {
+        let r = sqlx::query(
+            "SELECT
+               COALESCE(SUM(CASE WHEN c.band = 1 THEN 1 ELSE 0 END), 0) AS band_used,
+               COALESCE(SUM(CASE WHEN c.band = 0 AND c.rank >=
+                   (SELECT COUNT(*) FROM search_candidates s
+                     WHERE s.event_id = c.event_id AND s.band = 0 AND s.shown = 1) - ?
+                 THEN 1 ELSE 0 END), 0) AS tail_used
+             FROM observations o
+             JOIN search_candidates c
+               ON c.event_id = o.event_id AND c.artifact_id = o.artifact_id
+              AND c.shown = 1
+            WHERE o.generation_id = ? AND o.source = 'opened' AND o.excluded_at IS NULL",
+        )
+        .bind(spread_max as i64)
+        .bind(generation_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(BandUse {
+            band_used: r.get::<i64, _>("band_used") as usize,
+            tail_used: r.get::<i64, _>("tail_used") as usize,
+        })
+    }
+
+    /// What priming read when this search ran, or `None` where it did not
+    /// prime.
+    pub async fn search_context(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<crate::core::search::Priming>> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT context FROM search_context WHERE event_id = ?")
+                .bind(event_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        raw.map(|s| {
+            serde_json::from_str(&s)
+                .map_err(|e| crate::error::Error::Store(format!("search_context: {e}")))
+        })
+        .transpose()
     }
 }
 
@@ -509,12 +687,21 @@ impl Labeller {
 /// Insights with questions that had already been answered as far as anyone was
 /// ever going to answer them. The column is still written, and is still what
 /// tells a skipped search from one nobody has seen.
+/// A search a capture answered is not waiting for anybody either. The box
+/// searches while it is typed, so the sentence on its way into the base is
+/// recorded as a search of its own; asking whether *that* was answered is
+/// asking the writer about their own words, and counting it as waiting is a
+/// queue that fills itself every time somebody writes something down.
 macro_rules! dealable {
     () => {
         "judged_at IS NULL AND skips = 0 AND length(query) >= 3
+         AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                          WHERE kind IN ('search', 'unmatched')
+                            AND gap_id = search_events.id
+                            AND covered_by = 'capture')
          AND EXISTS (SELECT 1 FROM search_candidates WHERE event_id = search_events.id)
          AND COALESCE((SELECT max(COALESCE(similarity, 1.0)) FROM search_candidates
-                        WHERE event_id = search_events.id), 0) >= ?"
+                        WHERE event_id = search_events.id AND band = 0), 0) >= ?"
     };
 }
 
@@ -658,7 +845,61 @@ impl Store {
     /// above happened. That is what decides whether the bar under the artifact
     /// is drawn at all.
     pub async fn open_event(&self, event_id: &str, artifact_id: &str) -> Result<bool> {
-        Ok(sqlx::query(
+        let generation = self.live_generation().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        // Read before the stamp, because the stamp destroys the thing worth
+        // knowing: whether this event had been opened already. The UPDATE below
+        // is deliberately left exactly as it was — it has never carried an
+        // `opened_at IS NULL` guard, and adding one would change when the
+        // verdict bar is drawn. So the guard goes on the observation instead,
+        // which is new and answers to nothing.
+        //
+        // The join is also the membership check: no row here means this
+        // artifact was not in this event's pool, which is the same thing the
+        // EXISTS below refuses on. An artifact can hold two rows — unshown in
+        // the ranked pool and shown in the appended band — and the open came
+        // from the one the person saw, so the shown row is the rank.
+        //
+        // `rank` is the position in the recorded pool, and for a shown ranked
+        // hit that is also the position on screen. For a band row it is not:
+        // the band is appended after the whole pool, which is
+        // `feedback.candidates` wide — twenty by default — while the window a
+        // person reads is `limit`, ten. A band hit at screen position eleven
+        // therefore carried `rank = 20`, and `eval::sweep` and `jobs::retract`
+        // both read `served = rank - 1` as the place that was served, so every
+        // band open handed the tuning comparison a baseline ten places too
+        // deep: the served MRR came out low and a replay looked better than it
+        // was for no reason but where the band sits in the pool.
+        //
+        // So the observation gets the position on screen, counted over the
+        // shown rows in the order they were drawn — the ranked window first,
+        // then the band under it. One-based, like `observations.rank` and
+        // `ask_citations.n`. `search_candidates.rank` is untouched: it is the
+        // pool's own ordering and the table's key.
+        let before = sqlx::query(
+            "SELECT e.opened_at AS opened_at, e.query AS query,
+                    e.query_vec AS query_vec, e.embed_model AS embed_model,
+                    (SELECT COUNT(*) FROM search_candidates s
+                      WHERE s.event_id = e.id AND s.shown = 1
+                        AND (s.band < c.band
+                             OR (s.band = c.band AND s.rank < c.rank))) AS shown_rank,
+                    c.shown AS shown,
+                    c.rank AS rank,
+                    c.explored_from AS explored_from
+               FROM search_events e
+               JOIN search_candidates c
+                 ON c.event_id = e.id AND c.artifact_id = ?
+              WHERE e.id = ?
+              ORDER BY c.shown DESC, c.rank ASC
+              LIMIT 1",
+        )
+        .bind(artifact_id)
+        .bind(event_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let stamped = sqlx::query(
             "UPDATE search_events SET opened_at = ?
               WHERE id = ? AND judged_at IS NULL
                 AND EXISTS (SELECT 1 FROM search_candidates
@@ -668,10 +909,62 @@ impl Store {
         .bind(event_id)
         .bind(event_id)
         .bind(artifact_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected()
-            == 1)
+            == 1;
+
+        // An open is a deliberate act on a list somebody read: the strongest
+        // thing a plain search can say, and the only one it says out loud.
+        if let (true, Some(g), Some(row)) = (stamped, &generation, &before)
+            && row.get::<Option<i64>, _>("opened_at").is_none()
+        {
+            crate::store::observations::insert(
+                &mut *tx,
+                &crate::store::observations::NewObservation {
+                    generation_id: g.id.clone(),
+                    query: row.get("query"),
+                    query_vec: blob_to_vec(&row.get::<Vec<u8>, _>("query_vec")),
+                    embed_model: row.get("embed_model"),
+                    artifact_id: Some(artifact_id.to_string()),
+                    // `search_candidates.rank` counts from zero; `observations.rank`
+                    // and `ask_citations.n` both count from one. Converted here
+                    // rather than left for whoever compares an opened result with
+                    // a cited excerpt and finds them a place apart.
+                    //
+                    // From the screen position where there is one. A row that
+                    // was never shown has none — it cannot have been opened
+                    // from a list, only reached by a link the pool happens to
+                    // name — and there the pool position is still the only
+                    // honest answer.
+                    //
+                    // Except on the one row an exploring search lifted, which
+                    // is charged to where the ranking put it rather than to
+                    // the row it was lent. That is the whole value of the
+                    // exploration: the tuner's replay compares a candidate's
+                    // rank against this number, so crediting the incumbent
+                    // with the screen position it did not choose would throw
+                    // the evidence away at the moment it was finally gathered.
+                    // See `search_candidates.explored_from`.
+                    rank: Some(
+                        match (
+                            row.get::<Option<i64>, _>("explored_from"),
+                            row.get::<i64, _>("shown") == 1,
+                        ) {
+                            (Some(natural), _) => natural + 1,
+                            (None, true) => row.get::<i64, _>("shown_rank") + 1,
+                            (None, false) => row.get::<i64, _>("rank") + 1,
+                        },
+                    ),
+                    source: crate::store::observations::Source::Opened,
+                    event_id: Some(event_id.to_string()),
+                },
+            )
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(stamped)
     }
 
     /// "Not this one": the search stays a question for the deck, and the column
@@ -833,14 +1126,39 @@ impl Store {
         }
         s.judged = s.hits + s.gaps + s.discards;
 
-        // A left join, because an expected artifact that was never returned has
-        // no candidate row to join to — and that absence is precisely what a
-        // miss is.
+        // A correlated subquery rather than a join, because an artifact can sit
+        // in the pool twice — once ranked and once appended to the band — and
+        // two rows for one event would be counted as two searches. It reads
+        // `NULL` where the expected artifact was never returned, and that
+        // absence is precisely what a miss is.
+        //
+        // The band is not excluded. It used to be, which cost the field value
+        // every time the band did its job: an artifact association appended
+        // under the ranked list, opened, and confirmed as the answer joined to
+        // nothing, so a real find was counted in `finds` ("never returned"),
+        // dropped out of recall@10 and scored 0.0 MRR — displayed quality fell
+        // as the feature succeeded.
+        //
+        // The place is the place on screen, over the shown rows in the order
+        // they were drawn: the ranked window first, then the band under it.
+        // Same expression `open_event` stamps on the observation, so the
+        // number here and the number the tuner reads describe one event.
+        // `search_candidates.rank` is the pool's own ordering — for a band row
+        // it counts from after the pool — and is used only where a row was
+        // never shown and has no place on screen to report.
         let ranks: Vec<Option<i64>> = sqlx::query(
-            "SELECT c.rank AS rank FROM search_events e
-             LEFT JOIN search_candidates c
-               ON c.event_id = e.id AND c.artifact_id = e.expect_id
-             WHERE e.verdict = 'hit'",
+            "SELECT (SELECT CASE WHEN c.shown = 1
+                                 THEN (SELECT COUNT(*) FROM search_candidates s
+                                        WHERE s.event_id = e.id AND s.shown = 1
+                                          AND (s.band < c.band
+                                               OR (s.band = c.band AND s.rank < c.rank)))
+                                 ELSE c.rank END
+                       FROM search_candidates c
+                      WHERE c.event_id = e.id AND c.artifact_id = e.expect_id
+                      ORDER BY c.shown DESC, c.band ASC, c.rank ASC
+                      LIMIT 1) AS rank
+               FROM search_events e
+              WHERE e.verdict = 'hit'",
         )
         .fetch_all(&self.pool)
         .await?
@@ -886,6 +1204,20 @@ impl Store {
         .collect())
     }
 
+    /// Whether anybody has searched or asked since `since`. What tells an idle
+    /// pass that the quiet it started in has ended.
+    pub async fn activity_since(&self, since: i64) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM search_events WHERE created_at > ?)
+                  + (SELECT COUNT(*) FROM ask_events WHERE created_at > ?)",
+        )
+        .bind(since)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     /// Verdicts given since `since`. What the day's counter on the judge page
     /// reads, so it counts the work done rather than the pairs produced.
     pub async fn judged_since(&self, since: i64) -> Result<i64> {
@@ -926,9 +1258,15 @@ impl Store {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        // One promise, both tables. A question is the same class of personal
-        // data as a query and ages under the same window.
-        Ok(searches + self.expire_asks(retain_days).await?)
+        // One promise, every table that holds the words somebody typed. A
+        // question is the same class of personal data as a query; so is an
+        // observation, which stores the query verbatim beside its embedding and
+        // has no cascade from `search_events` to age it — the schema has said
+        // since it was written that the rehearsal results expire "with the
+        // observations", and until now nothing expired the observations.
+        Ok(searches
+            + self.expire_asks(retain_days).await?
+            + self.expire_observations(retain_days).await?)
     }
 
     /// Everything captured, gone. Judgements included: they are statements
@@ -959,11 +1297,17 @@ impl Store {
             .rows_affected();
         // Pursuits and what was opened are the same kind of record — what a
         // person did — and go with one press.
+        // And the observations, which are the same queries in another table.
+        // Nothing cascades to them — `artifact_id` carries no key and
+        // `event_id` is a bare column — so a button that emptied the searches
+        // out from under the page left the query text and its vector behind,
+        // complete, with nothing in the UI left to show them.
         Ok(searches
             + situations
             + profiles
             + self.purge_asks().await?
-            + self.purge_pursuits().await?)
+            + self.purge_pursuits().await?
+            + self.purge_observations().await?)
     }
 
     /// Recorded searches with `from < created_at <= to`, oldest first, with
@@ -985,7 +1329,7 @@ impl Store {
             let id: String = r.get("id");
             let shown: Vec<(String, Option<f32>)> = sqlx::query(
                 "SELECT artifact_id, similarity FROM search_candidates
-                  WHERE event_id = ? AND shown = 1 ORDER BY rank",
+                  WHERE event_id = ? AND shown = 1 AND band = 0 ORDER BY rank",
             )
             .bind(&id)
             .fetch_all(&self.pool)
@@ -1060,6 +1404,309 @@ impl Store {
 #[cfg(test)]
 mod tests {
 
+    /// A store with one generation live, and a helper that lists artifacts in
+    /// the order given so a rank is a known quantity.
+    async fn observed_base() -> (Store, String) {
+        use crate::store::generations::{GenerationParams, NewGeneration};
+        let store = Store::memory().await.unwrap();
+        let generation = store
+            .record_generation(&NewGeneration {
+                params: GenerationParams {
+                    recency_weight: 0.05,
+                    per_source_cap: Some(3),
+                    ..Default::default()
+                },
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        (store, generation)
+    }
+
+    fn event_with(artifacts: &[&str]) -> NewEvent {
+        NewEvent {
+            query: "loop device".into(),
+            door: Door::Ui,
+            scope: Some("me".into()),
+            filters: "{}".into(),
+            query_vec: vec![0.1, 0.2, 0.3],
+            embed_model: "fake".into(),
+            candidates: artifacts
+                .iter()
+                .enumerate()
+                .map(|(i, a)| NewCandidate {
+                    artifact_id: (*a).to_string(),
+                    score: 1.0 - i as f32 * 0.1,
+                    similarity: Some(0.9 - i as f32 * 0.1),
+                    shown: true,
+                    ..Default::default()
+                })
+                .collect(),
+            answered: false,
+            fold_onto: None,
+            context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recorded_search_keeps_what_priming_read_and_an_open_names_the_search() {
+        let (store, generation) = observed_base().await;
+        let mut ev = event_with(&["art-1", "art-2"]);
+        ev.context = Some(crate::core::search::Priming {
+            activation: [("art-1".to_string(), 0.7)].into_iter().collect(),
+            sitting: ["art-2".to_string()].into_iter().collect(),
+            due: Default::default(),
+        });
+        let id = store.record_search(ev, 0).await.unwrap();
+        let ctx = store
+            .search_context(&id)
+            .await
+            .unwrap()
+            .expect("context stored");
+        assert_eq!(ctx.activation.get("art-1"), Some(&0.7));
+        assert!(ctx.sitting.contains("art-2"));
+
+        assert!(store.open_event(&id, "art-1").await.unwrap());
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs[0].event_id.as_deref(), Some(id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_search_without_priming_stores_no_context_and_a_fold_drops_the_old_one() {
+        let (store, _) = observed_base().await;
+        let mut first = event_with(&["art-1"]);
+        first.context = Some(crate::core::search::Priming::default());
+        let id = store.record_search(first, 60).await.unwrap();
+        assert!(store.search_context(&id).await.unwrap().is_some());
+
+        // The same searcher rewords inside the window: the event folds, and
+        // the context is the new search's — here, none.
+        let mut second = event_with(&["art-1"]);
+        second.query = "loop devices".into();
+        second.fold_onto = Some(id.clone());
+        let folded = store.record_search(second, 60).await.unwrap();
+        assert_eq!(folded, id, "this test needs the fold to happen");
+        assert!(store.search_context(&id).await.unwrap().is_none());
+    }
+
+    /// The band is recorded after the whole *pool*, which is
+    /// `feedback.candidates` wide, while the window a person reads is `limit`.
+    /// Reading `search_candidates.rank` straight through gave a band hit at
+    /// screen position eleven an `observations.rank` of twenty-one, and
+    /// `eval::sweep` and `jobs::retract` both take `rank - 1` as the place
+    /// that was served — so every band open pushed the served baseline ten
+    /// places down and made a replay look better than it was.
+    #[tokio::test]
+    async fn an_open_in_the_band_is_recorded_at_the_place_it_was_on_screen() {
+        let (store, generation) = observed_base().await;
+        // Ten shown, ten more in the pool behind them, then the band.
+        let mut ev = event_with(&[]);
+        ev.candidates = (0..20)
+            .map(|i| NewCandidate {
+                artifact_id: format!("art-{i}"),
+                score: 1.0 - i as f32 * 0.01,
+                similarity: Some(0.9),
+                shown: i < 10,
+                ..Default::default()
+            })
+            .chain(std::iter::once(NewCandidate {
+                artifact_id: "recalled".into(),
+                score: 0.4,
+                shown: true,
+                band: true,
+                ..Default::default()
+            }))
+            .collect();
+        let event = store.record_search(ev, 5).await.unwrap();
+
+        assert!(store.open_event(&event, "recalled").await.unwrap());
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            obs[0].rank,
+            Some(11),
+            "the first row under a window of ten, not the row after the pool"
+        );
+    }
+
+    /// The field value counted a confirmed band hit as a miss.
+    ///
+    /// `feedback_stats` resolved `expect_id` to a rank through a join that
+    /// excluded band rows, so an artifact the association appended, opened,
+    /// and then confirmed as the answer joined to nothing: counted in `finds`
+    /// ("never returned"), dropped out of recall@10, scored 0.0 MRR. Displayed
+    /// quality fell every time the band did what it is for.
+    #[tokio::test]
+    async fn a_confirmed_hit_in_the_band_is_a_find_at_the_place_it_was_on_screen() {
+        let (store, _) = observed_base().await;
+        let mut ev = event_with(&["art-1", "art-2"]);
+        ev.candidates.push(NewCandidate {
+            artifact_id: "recalled".into(),
+            score: 0.4,
+            shown: true,
+            band: true,
+            ..Default::default()
+        });
+        let event = store.record_search(ev, 5).await.unwrap();
+        store
+            .judge_hit(&event, "recalled", Labeller::Deck)
+            .await
+            .unwrap();
+
+        let s = store.feedback_stats(0.0).await.unwrap();
+        assert_eq!(s.hits, 1);
+        assert_eq!(s.finds, 0, "it was returned — under the ranked list");
+        assert_eq!(s.recall_at_10, 1.0);
+        // Third on screen, two ranked rows above it: the same place
+        // `open_event` stamps on the observation, one lower for being counted
+        // from zero here.
+        assert!((s.mrr - 1.0 / 3.0).abs() < 1e-9, "{}", s.mrr);
+    }
+
+    /// The same read, from the other side: a shown ranked hit's pool position
+    /// *is* its screen position, and nothing about the band may move it.
+    #[tokio::test]
+    async fn a_ranked_open_keeps_its_place_whatever_is_appended_under_it() {
+        let (store, generation) = observed_base().await;
+        let mut ev = event_with(&["art-1", "art-2", "art-3"]);
+        ev.candidates.push(NewCandidate {
+            artifact_id: "recalled".into(),
+            score: 0.4,
+            shown: true,
+            band: true,
+            ..Default::default()
+        });
+        let event = store.record_search(ev, 5).await.unwrap();
+
+        assert!(store.open_event(&event, "art-3").await.unwrap());
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs[0].rank, Some(3));
+    }
+
+    /// The half of exploration that makes the evidence worth gathering.
+    ///
+    /// An exploring search lends its last visible row to the top candidate the
+    /// ranking cut. If the open were then credited to that row, the ranking
+    /// would be recorded as having surfaced at rank three something it had in
+    /// fact hidden at rank six — and the tuner would read its own intervention
+    /// back as proof that the current settings were right. Charged to
+    /// `explored_from`, the same open says the opposite, which is what it
+    /// actually means.
+    #[tokio::test]
+    async fn an_open_on_an_explored_row_is_charged_to_the_rank_the_ranking_chose() {
+        use crate::store::observations::Source;
+        let (store, generation) = observed_base().await;
+        let mut ev = event_with(&["art-1", "art-2", "art-3"]);
+        // The row the window cut, lent the last visible place.
+        ev.candidates[2].artifact_id = "hidden".into();
+        ev.candidates[2].explored_from = Some(5);
+        let event = store.record_search(ev, 5).await.unwrap();
+
+        assert!(store.open_event(&event, "hidden").await.unwrap());
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs[0].source, Source::Opened);
+        assert_eq!(
+            obs[0].rank,
+            Some(6),
+            "credited to the row it borrowed instead of the rank it held"
+        );
+
+        // And the ordinary rows beside it are untouched.
+        let (store, generation) = observed_base().await;
+        let event = store
+            .record_search(event_with(&["art-1", "art-2", "art-3"]), 5)
+            .await
+            .unwrap();
+        assert!(store.open_event(&event, "art-3").await.unwrap());
+        assert_eq!(
+            store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()[0]
+                .rank,
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_opened_result_is_an_observation_at_the_rank_it_was_listed() {
+        use crate::store::observations::Source;
+        let (store, generation) = observed_base().await;
+        let event = store
+            .record_search(event_with(&["art-1", "art-2", "art-3"]), 5)
+            .await
+            .unwrap();
+
+        assert!(store.open_event(&event, "art-2").await.unwrap());
+
+        let obs = store
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].artifact_id.as_deref(), Some("art-2"));
+        assert_eq!(obs[0].rank, Some(2));
+        assert_eq!(obs[0].source, Source::Opened);
+        assert_eq!(obs[0].query, "loop device");
+    }
+
+    #[tokio::test]
+    async fn opening_an_artifact_the_search_never_listed_writes_nothing() {
+        // `open_event` already refuses this. The observation must not outlive
+        // the refusal, or a positive would be recorded against a list that
+        // never held the artifact it names.
+        let (store, generation) = observed_base().await;
+        let event = store
+            .record_search(event_with(&["art-1"]), 5)
+            .await
+            .unwrap();
+
+        assert!(!store.open_event(&event, "art-9").await.unwrap());
+        assert!(
+            store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_the_same_result_twice_leaves_one_observation() {
+        // The second open affects no row because `opened_at` is already set.
+        // Asserted rather than assumed: it is what stops a double click being
+        // double evidence.
+        let (store, generation) = observed_base().await;
+        let event = store
+            .record_search(event_with(&["art-1"]), 5)
+            .await
+            .unwrap();
+        store.open_event(&event, "art-1").await.unwrap();
+        store.open_event(&event, "art-1").await.unwrap();
+
+        assert_eq!(
+            store
+                .observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn a_client_may_claim_the_cli_door_and_still_nothing_else() {
         use super::Door;
@@ -1089,14 +1736,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "x".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1126,6 +1767,42 @@ mod tests {
         assert_eq!(store.newest_event_at().await.unwrap(), Some(9_500));
     }
     use super::*;
+
+    #[tokio::test]
+    async fn activity_is_a_search_or_a_question_after_the_moment_asked_about() {
+        let store = Store::memory().await.unwrap();
+        let before = crate::store::now() - 10;
+        assert!(
+            !store.activity_since(before).await.unwrap(),
+            "an empty base is quiet"
+        );
+        store
+            .record_search(
+                NewEvent {
+                    fold_onto: None,
+                    query: "loop device".into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(store.activity_since(before).await.unwrap());
+        assert!(
+            !store
+                .activity_since(crate::store::now() + 10)
+                .await
+                .unwrap(),
+            "nothing has happened in the future"
+        );
+    }
 
     fn ev(query: &str, door: Door) -> NewEvent {
         scoped(query, door, None)
@@ -1165,8 +1842,10 @@ mod tests {
                 score: 0.9,
                 similarity: Some(0.8),
                 shown: true,
+                ..Default::default()
             }],
             answered: false,
+            context: None,
         }
     }
 
@@ -1424,6 +2103,35 @@ mod tests {
         assert!(!store.open_event(&id, "a1").await.unwrap());
     }
 
+    /// A skip is a statement about the question that was on screen. The fold
+    /// replaces every part of the row except its id — query, vector, pool,
+    /// filters, moment — so the statement no longer has a subject, and
+    /// `dealable!` excluding skipped events made a brand-new question
+    /// permanently invisible to `pending_count`. Nothing else ever clears the
+    /// flag: `unjudge` was fixed for this; the fold is the other door in.
+    #[tokio::test]
+    async fn a_fold_onto_a_skipped_event_is_a_new_question_and_waits_again() {
+        let (store, _) = observed_base().await;
+        let first = store
+            .record_search(event_with(&["art-1", "art-2"]), 0)
+            .await
+            .unwrap();
+        store.skip_event(&first).await.unwrap();
+        assert_eq!(store.pending_count(0.0).await.unwrap(), 0);
+
+        let mut next = event_with(&["art-3", "art-4"]);
+        next.query = "loop device on a mac".into();
+        next.fold_onto = Some(first.clone());
+        let folded = store.record_search(next, 300).await.unwrap();
+        assert_eq!(folded, first, "the same row, rewritten");
+
+        assert_eq!(
+            store.pending_count(0.0).await.unwrap(),
+            1,
+            "a question nobody has answered, waiting"
+        );
+    }
+
     #[tokio::test]
     async fn a_fold_that_took_the_artifact_out_of_the_pool_refuses_the_open() {
         // The click and the next keystroke race: a search still in flight when
@@ -1669,6 +2377,79 @@ mod tests {
         assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
     }
 
+    /// A stored capture and something of it to point a coverage row at.
+    /// `gap_coverage` carries foreign keys onto both.
+    async fn answering_capture(store: &Store) -> (String, String) {
+        let src = store
+            .insert_corpus("The ID photo is on Wednesday at 09:00.", "web", None)
+            .await
+            .unwrap();
+        let made = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "The ID photo is on Wednesday at 09:00.".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        (src.id, made[0].id.clone())
+    }
+
+    #[tokio::test]
+    async fn a_search_a_capture_answered_stops_waiting() {
+        // The box searches while it is typed, so a sentence on its way into the
+        // base is a recorded query of its own — one that can perfectly well
+        // have found something, and so be counted as waiting for a verdict.
+        // Asking the writer whether their own half-written capture was answered
+        // is a queue that fills itself every time somebody writes something
+        // down.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "when is the ID photo", &["a1"]).await;
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
+
+        let (corpus, artifact) = answering_capture(&store).await;
+        store
+            .cover_gap(
+                crate::store::gaps::GapKind::Unmatched,
+                &id,
+                &corpus,
+                &artifact,
+                0.0,
+                crate::store::gaps::CoveredBy::Capture,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_search_the_coverage_check_closed_is_still_waiting() {
+        // The other coverage is a measurement about the *base* — something
+        // stored later happens to sit near this query — and it says nothing
+        // about whether the search in front of the person was answered. Only
+        // the capture typed from the query answers the query.
+        let store = Store::memory().await.unwrap();
+        let id = seed(&store, "when is the ID photo", &["a1"]).await;
+
+        let (corpus, artifact) = answering_capture(&store).await;
+        store
+            .cover_gap(
+                crate::store::gaps::GapKind::Unmatched,
+                &id,
+                &corpus,
+                &artifact,
+                0.8,
+                crate::store::gaps::CoveredBy::Distance,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
+    }
+
     #[tokio::test]
     async fn a_search_the_vector_half_never_scored_is_still_counted() {
         // A hit found by the lexical half alone carries no similarity — the
@@ -1867,6 +2648,7 @@ mod tests {
                 score: 1.0 - i as f32 / 100.0,
                 similarity: Some(0.5),
                 shown: i < 10,
+                ..Default::default()
             })
             .collect();
         // No folding: these are separate searches, not one being typed.
@@ -1947,14 +2729,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "opening hours".into(),
-                    corpus_span: None,
                     title: Some("hours".into()),
-                    category: None,
-                    tags: Vec::new(),
-                    segment_idx: None,
-                    caveats: Vec::new(),
+                    ..Default::default()
                 }],
             )
             .await

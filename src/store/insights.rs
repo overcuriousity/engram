@@ -92,9 +92,10 @@ impl Store {
     /// calendar.
     ///
     /// It cannot be repaired by moving the thresholds, because the claim
-    /// underneath it is gone too. With `associate.prime_lift` shipped at zero,
-    /// activation does not move a search result at all — so "what a search
-    /// would find now" is no longer a thing this column can say. What the
+    /// underneath it is gone too. Priming moves a result by at most a rung of
+    /// `associate.prime_lift` — one place on a base started from the shipped
+    /// file, none at all where the lift is zero — so "what a search would find
+    /// now" is not a thing this column can say at any setting. What the
     /// number does still mean is what use put there, which is what promotion
     /// arms on and what priming would read if it were switched on, so that is
     /// what is reported: the bands are in units of an open
@@ -168,14 +169,8 @@ mod tests {
 
     fn chunk(text: &str) -> NewArtifact {
         NewArtifact {
-            ordinal: 0,
             text: text.into(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         }
     }
 

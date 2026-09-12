@@ -32,8 +32,28 @@ pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
 /// The window budget, derived from the synthesizer's context: the unit
 /// promotion reads, what coverage is measured against, and the line the size
 /// fork asks about.
-pub fn segment_budget(core: &Core, lang: crate::infer::lang::Lang) -> usize {
+///
+/// `None` where the configured context cannot hold a prompt and a smallest
+/// segment beside it — see [`segment_tokens`], which is where that is decided
+/// and why it is not a number. Every caller here has an honest answer for it,
+/// and none of them is "carry on with 256".
+pub fn segment_budget(core: &Core, lang: crate::infer::lang::Lang) -> Option<usize> {
     segment_tokens(core.synthesizer.budget(), prompt_overhead(core, lang))
+}
+
+/// What to tell somebody when there is no budget at all. One sentence, written
+/// once, because three call sites report it and they should not disagree about
+/// whose fault it is.
+pub fn no_budget_reason(core: &Core, lang: crate::infer::lang::Lang) -> String {
+    let b = core.synthesizer.budget();
+    format!(
+        "the synthesizer's context of {} tokens does not leave room for a prompt \
+         ({} tokens of instructions and context here) and a segment of at least {} \
+         beside it — raise infer.synthesize.context_tokens",
+        b.context_tokens,
+        prompt_overhead(core, lang) + b.context.total(),
+        crate::infer::budget::MIN_SEGMENT_TOKENS,
+    )
 }
 
 /// Measure how much of a corpus survived into its artifacts, and store it.
@@ -351,9 +371,17 @@ mod tests {
 
     /// A budget with room for several windows and an output ceiling that never
     /// binds, so the context blocks are what shape the windowing.
+    /// A synthesizer whose context carries the given opening and overlap.
+    ///
+    /// 4096 rather than the 2000 this used to say. The system prompt is about
+    /// 1564 tokens, so 2000 left 366 for input and output together — under the
+    /// smallest segment worth a call, and a configuration `segment_tokens` now
+    /// refuses outright. It used to be floored to 256 and these tests ran on
+    /// that: a budget no call could have honoured, which is exactly the state
+    /// the floor was hiding everywhere else.
     fn context_budget(opening: usize, overlap: usize) -> crate::infer::SynthesisBudget {
         crate::infer::SynthesisBudget {
-            context_tokens: 2000,
+            context_tokens: 4096,
             max_output_tokens: 100_000,
             output_ratio: 1.0,
             context: crate::infer::context::ContextBudget {
@@ -465,7 +493,7 @@ mod tests {
         // spins against the endpoint forever, and a debug_assert turns that
         // into a test failure instead of a production incident.
         let core = crate::core::test_support::test_core().await;
-        let budget = segment_budget(&core, crate::infer::lang::Lang::En);
+        let budget = segment_budget(&core, crate::infer::lang::Lang::En).expect("a window");
 
         let lines: Vec<String> = (0..400)
             .map(|i| format!("body line {i} with enough words to cost real tokens"))
@@ -660,6 +688,55 @@ mod tests {
     }
 
     /// A body several windows long under the fake synthesizer's budget.
+    /// A context too small for its own prompt fails the corpus with the reason,
+    /// rather than cutting it into windows no call can honour.
+    ///
+    /// The floor made this invisible: `segment_tokens` handed back 256, the
+    /// splitter cut to it, `jobs::window`'s guard compared against it and
+    /// passed, and every call went out over the endpoint's real context to be
+    /// refused with a 400 that is not retryable. Every window of every such
+    /// capture failed and the corpus settled `partial`, with the cause named
+    /// nowhere — least of all next to the setting that caused it.
+    #[tokio::test]
+    async fn a_context_too_small_to_synthesize_says_so_instead_of_failing_every_window() {
+        use crate::infer::fake::RecordingSynthesizer;
+        let mut core = test_core().await;
+        let rec = std::sync::Arc::new(RecordingSynthesizer::new(crate::infer::SynthesisBudget {
+            context_tokens: 1600,
+            max_output_tokens: 100_000,
+            output_ratio: 1.0,
+            context: crate::infer::context::ContextBudget::default(),
+        }));
+        core.synthesizer = rec.clone();
+        assert_eq!(
+            segment_budget(&core, crate::infer::lang::Lang::En),
+            None,
+            "the fixture is no longer the configuration this test is about"
+        );
+
+        let out = core
+            .ingest(&multi_segment_body(), "web", None)
+            .await
+            .unwrap();
+        plan(&core, &out.id).await.unwrap();
+
+        assert_eq!(
+            core.store.segments_for_corpus(&out.id).await.unwrap().len(),
+            0,
+            "windows were cut to a budget no call can honour"
+        );
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().status,
+            crate::store::corpora::CorpusStatus::Failed,
+            "the corpus was left looking like it was on its way"
+        );
+        assert_eq!(rec.seen.lock().unwrap().len(), 0, "a call was spent anyway");
+
+        // And the reason names the knob rather than the endpoint.
+        let reason = no_budget_reason(&core, crate::infer::lang::Lang::En);
+        assert!(reason.contains("context_tokens"), "{reason}");
+    }
+
     fn multi_segment_body() -> String {
         (0..400)
             .map(|i| format!("paragraph number {i} with some filler text"))
@@ -671,7 +748,7 @@ mod tests {
         crate::infer::split::split_into_segments(
             body,
             &core.counter,
-            segment_budget(core, crate::infer::lang::Lang::En),
+            segment_budget(core, crate::infer::lang::Lang::En).expect("a window"),
         )
         .len()
     }
@@ -1158,6 +1235,58 @@ Then run sync.";
         );
     }
 
+    /// And the same when the retry *parses* and merely says nothing. The merge
+    /// fell back only on a literal `None`, but `parse_judged_response` answers
+    /// `Some(..)` for every reply that parses and every field of the JUDGE
+    /// block is `#[serde(default)]` — so a retry that omits it yields
+    /// `Some(Judgement::default())`, an empty judgement that won against a full
+    /// one and took the reminder with it. `Judgement::says_something` is the
+    /// filter; `is_some` never was.
+    #[tokio::test]
+    async fn a_re_segmentation_that_says_nothing_does_not_retract_the_judgement() {
+        let mut core = test_core().await;
+        let synthesizer = std::sync::Arc::new(
+            crate::infer::fake::JudgingParaphraser::new(
+                "backup/",
+                crate::infer::Judgement {
+                    intent: Some("remind".into()),
+                    when: Some("2099-09-04T09:00".into()),
+                    rule: None,
+                    events: vec![],
+                    links: vec![],
+                },
+            )
+            .answering_an_empty_judgement_on_retry(),
+        );
+        core.synthesizer = synthesizer.clone();
+        let out = core
+            .ingest(
+                "erinnere mich Freitag, /mnt/backup/nightly.sh prüfen",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+
+        crate::jobs::test_support::drain(&core).await;
+
+        assert_eq!(synthesizer.calls(), 2, "exactly one re-segmentation");
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "an empty JUDGE block is not a retraction: {rows:?}"
+        );
+        assert!(rows[0].moment.at.is_some());
+        let chunks = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.contains("/mnt/backup/nightly.sh")),
+            "and the retry's literal is still what is stored: {chunks:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_literal_the_retry_also_drops_is_stored_flagged() {
         let mut core = test_core().await;
@@ -1265,50 +1394,19 @@ Then run sync.";
         assert!(cov > 0.0 && cov <= 1.0);
     }
 
-    #[tokio::test]
-    #[ignore = "pre-window databases predate the 2026-09 reshape; the legacy re-segmentation path is no longer maintained"]
-    async fn re_segmenting_replaces_chunks_written_before_windows_existed() {
-        // Chunks from before the window column was added carry no window, so
-        // the per-window delete could not see them and a re-segmentation
-        // appended a second copy of the whole source beside the first.
-        let core = test_core().await;
-        let out = core
-            .ingest("one para\n\ntwo para", "web", None)
-            .await
-            .unwrap();
-        segment_all(&core, &out.id).await;
-        let before = core
-            .store
-            .artifacts_for_corpus(&out.id)
-            .await
-            .unwrap()
-            .len();
-
-        // What an older database holds: chunks with no window, and no window
-        // rows to resume from.
-        sqlx::query("UPDATE artifacts SET segment_idx = NULL WHERE corpus_id = ?")
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM segments WHERE corpus_id = ?")
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-
-        segment_all(&core, &out.id).await;
-
-        assert_eq!(
-            core.store
-                .artifacts_for_corpus(&out.id)
-                .await
-                .unwrap()
-                .len(),
-            before,
-            "the pre-window chunks were left in place and duplicated"
-        );
-    }
+    // `re_segmenting_replaces_chunks_written_before_windows_existed` stood
+    // here. It manufactured a pre-window database — nulling `segment_idx` and
+    // deleting the segment rows — and asserted a re-segmentation did not
+    // duplicate the source. The 2026-09 capture reshape changed the shape of a
+    // small capture, so the count it compares moved and the test was marked
+    // ignored rather than fixed; ignored, it then failed silently for a month.
+    //
+    // Deleted rather than repaired. Nothing can reach that state any more: no
+    // writer leaves `segment_idx` null except a note and a merge, and the
+    // migration path that could have produced one was removed in August. What
+    // is worth keeping is the rule underneath it, which is a property of one
+    // query — see `store::artifacts`,
+    // `a_windowless_chunk_is_swept_with_the_window_and_a_note_is_not`.
 
     #[tokio::test]
     async fn a_second_run_does_not_re_segment_windows_that_finished() {
@@ -1528,14 +1626,8 @@ Then run sync.";
             .await
             .unwrap();
         let new = |text: &str| crate::store::artifacts::NewArtifact {
-            ordinal: 0,
             text: text.to_string(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         };
         core.store
             .insert_artifacts_with_provenance(

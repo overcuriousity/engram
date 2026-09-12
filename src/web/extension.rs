@@ -38,6 +38,19 @@ struct InstallTemplate {
     device_token: Option<String>,
 }
 
+impl InstallTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    ///
+    /// Reached from Settings and revoked there; it is that section's page.
+    fn section(&self) -> &'static str {
+        "settings"
+    }
+}
+
 /// The download page. Authenticated like everything else, and it carries this
 /// deployment's origin into the pairing link — the static, signed manifest
 /// cannot know it, so the page is where it is learned.

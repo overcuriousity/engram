@@ -4,11 +4,12 @@
 
 use crate::core::ingest::{Capture, ORIGIN_JOURNAL};
 use crate::core::moments::zone;
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::store::moments::Kind;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Path, Query};
@@ -52,11 +53,21 @@ pub(crate) struct Line {
     pub detail: String,
 }
 
+/// One artifact a sitting opened, as the row links to it. A pair of strings
+/// could not say whether the label was a name or the opening of the text
+/// standing in for one — see `ui::RowLabel` — and the row is a link and
+/// nothing else, so it needs both.
+pub(crate) struct Opened {
+    pub id: String,
+    pub label: String,
+    pub named: bool,
+}
+
 pub(crate) struct Sitting {
     pub span: String,
     pub query: String,
     pub searches: usize,
-    pub opened: Vec<(String, String)>,
+    pub opened: Vec<Opened>,
 }
 
 #[derive(Template)]
@@ -65,6 +76,12 @@ pub(crate) struct DayTemplate {
     pub date: String,
     pub prev: String,
     pub next: String,
+    /// What the two arrows say out loud. The heading beside them is
+    /// "Sunday, 6 September 2026" and the arrows were `2026-09-05` and
+    /// `2026-09-07` — three dates in one row, written two ways. Short, because
+    /// they sit either side of the heading and are a step rather than a date.
+    pub prev_label: String,
+    pub next_label: String,
     pub tz: String,
     pub heading: String,
     pub entries: Vec<Line>,
@@ -72,6 +89,17 @@ pub(crate) struct DayTemplate {
     pub was_due: Vec<Line>,
     pub refers: Vec<Line>,
     pub sittings: Vec<Sitting>,
+}
+
+impl DayTemplate {
+    /// Which entry in the top row and the tab bar is the one you are inside.
+    ///
+    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
+    /// "none of them", which is a real answer for a page that hangs off no
+    /// section.
+    fn section(&self) -> &'static str {
+        ""
+    }
 }
 
 impl DayTemplate {
@@ -114,7 +142,7 @@ fn hm(at: i64, tz: Tz) -> String {
         .unwrap_or_default()
 }
 
-async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> Result<Response> {
+async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> UiResult<Response> {
     let tz = zone(Some(&q.tz));
     let d = tz
         .timestamp_opt(tenant.core.clock.now(), 0)
@@ -133,9 +161,9 @@ async fn page(
     tenant: Tenant,
     Path(date): Path<String>,
     Query(q): Query<TzQuery>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     };
     // Round-tripped through the parse, the way `entry` does it and for the
     // same reason: chrono reads `%Y-%m-%d` leniently, so `/ui/day/2026-8-30`
@@ -151,7 +179,7 @@ async fn page(
     // hidden field, and `due.rs::render` normalises for the same reason.
     let tz_name = tz.name().to_string();
     let Some((from, to)) = bounds(day, tz) else {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     };
     let store = &tenant.core.store;
 
@@ -215,7 +243,12 @@ async fn page(
         let mut opened = vec![];
         for aid in &p.sources {
             if let Ok(a) = store.get_artifact(aid).await {
-                opened.push((aid.clone(), a.title.unwrap_or_else(|| "untitled".into())));
+                let label = crate::web::ui::row_label(&a);
+                opened.push(Opened {
+                    id: aid.clone(),
+                    label: label.text,
+                    named: label.named,
+                });
             }
         }
         sittings.push(Sitting {
@@ -237,6 +270,16 @@ async fn page(
             .unwrap_or(day)
             .format("%Y-%m-%d")
             .to_string(),
+        prev_label: day
+            .checked_sub_signed(chrono::Duration::days(1))
+            .unwrap_or(day)
+            .format("%a %-d %b")
+            .to_string(),
+        next_label: day
+            .checked_add_signed(chrono::Duration::days(1))
+            .unwrap_or(day)
+            .format("%a %-d %b")
+            .to_string(),
         heading: day.format("%A, %-d %B %Y").to_string(),
         date,
         tz: tz_name,
@@ -254,7 +297,7 @@ async fn entry(
     Path(date): Path<String>,
     headers: HeaderMap,
     Form(f): Form<EntryForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     // The date is a date, exactly as `page` demands — and for both of the
     // reasons `page` has plus one of its own. Unchecked, `POST
     // /ui/day/garbage/entry` stored a capture carrying `metadata.day =
@@ -264,7 +307,7 @@ async fn entry(
     // written — which is the failure the comment just below says was fixed for
     // the zone, arriving through the other half of the same URL.
     let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
-        return Err(Error::NotFound);
+        return Err(Error::NotFound.into());
     };
     // Round-tripped through the parse, so what goes into the header and into
     // `metadata.day` is the canonical spelling and not whatever spelled it.
@@ -296,7 +339,7 @@ async fn set_entry(
     Path(id): Path<String>,
     headers: HeaderMap,
     Form(f): Form<OnForm>,
-) -> Result<Response> {
+) -> UiResult<Response> {
     tenant.core.set_entry(&id, f.on == "1").await?;
     let back = headers
         .get("referer")
@@ -560,6 +603,51 @@ mod tests {
         assert_eq!(c[0].2, "journal");
     }
 
+    /// The same short line on two days is two entries.
+    ///
+    /// A diary repeats itself — that is most of what a diary is. Deduplicated
+    /// on the text alone, the second day's writing hashed to the first day's
+    /// corpus and stored nothing; `entry` discards `ingest_capture`'s outcome,
+    /// so the press redirected as though it had worked, and the second day's
+    /// page then said "Nothing on this day."
+    ///
+    /// Both directions are checked, because the fix moves what the `UNIQUE`
+    /// column means: a repeat on the *same* day must still be one entry.
+    #[tokio::test]
+    async fn the_same_line_written_on_two_days_is_two_entries() {
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        for date in ["2026-08-28", "2026-09-03", "2026-09-03"] {
+            app.clone()
+                .oneshot(form(
+                    &format!("/ui/day/{date}/entry"),
+                    &cookie,
+                    "text=Long+day.&tz=Europe/Berlin",
+                ))
+                .await
+                .unwrap();
+        }
+
+        for date in ["2026-08-28", "2026-09-03"] {
+            let html = body_of(
+                app.clone()
+                    .oneshot(get(&format!("/ui/day/{date}?tz=Europe/Berlin"), &cookie))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert!(
+                html.contains("Long day."),
+                "{date} lost the entry written on it"
+            );
+        }
+        assert_eq!(
+            core.store.recent_captures(5).await.unwrap().len(),
+            2,
+            "the second writing on one day made a second entry"
+        );
+    }
+
     #[tokio::test]
     async fn a_leniently_spelled_day_still_shows_the_day_it_names() {
         // chrono reads `%Y-%m-%d` leniently, so `2026-8-28` parses and the page
@@ -588,6 +676,60 @@ mod tests {
         assert!(
             html.contains(r#"action="/ui/day/2026-08-28/entry""#),
             "and the form posts the canonical day"
+        );
+    }
+
+    /// A sitting names what it opened, and nothing else: the row is a comma
+    /// list of links. A passage there was listed under the heading of the
+    /// section it was cut from, and a note under the word "untitled".
+    #[tokio::test]
+    async fn a_sitting_names_a_passage_it_opened_by_how_its_text_opens() {
+        let mut core = test_core().await;
+        let tz = chrono_tz::Tz::Europe__Berlin;
+        let day = tz
+            .with_ymd_and_hms(2026, 8, 30, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        core.clock = Clock::Fixed(day + 10 * 3_600);
+        let src = core
+            .store
+            .insert_corpus("one\ntwo", "web", None)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+                    title: Some("Kapitel 3".into()),
+                    ..Default::default()
+                }],
+                crate::store::artifacts::Provenance::Passage,
+            )
+            .await
+            .unwrap();
+        core.store
+            .insert_pursuit(
+                day + 14 * 3_600,
+                &["qdrant payload filter".into()],
+                std::slice::from_ref(&p[0].id),
+                None,
+            )
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("Kapitel 3"), "{html}");
+        assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
+        assert!(
+            html.contains("name-opening"),
+            "the opening was set as a name: {html}"
         );
     }
 

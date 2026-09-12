@@ -72,6 +72,30 @@ impl GapKind {
     }
 }
 
+/// How a hole came to be closed.
+///
+/// Two different claims, and the difference is what keeps one of them alive.
+/// `Distance` is the coverage check's own measurement — a new artifact landed
+/// near the gap's query — and it is only as good as the line it was measured
+/// against, so `trim_gap_coverage` drops it once that line has moved above it.
+/// `Capture` is not a measurement at all: the operator typed the query into
+/// the box and then wrote the answer into the same box, and the base was told
+/// so by the page. No line can be wrong about that one, so no line collects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoveredBy {
+    Distance,
+    Capture,
+}
+
+impl CoveredBy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CoveredBy::Distance => "distance",
+            CoveredBy::Capture => "capture",
+        }
+    }
+}
+
 /// One open gap: a question the base could not answer, or a search judged to
 /// have no answer.
 #[derive(Debug, Clone)]
@@ -741,11 +765,12 @@ impl Store {
         corpus_id: &str,
         artifact_id: &str,
         score: f32,
+        by: CoveredBy,
     ) -> Result<()> {
         sqlx::query(
             "INSERT OR REPLACE INTO gap_coverage
-               (kind, gap_id, corpus_id, artifact_id, score, covered_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+               (kind, gap_id, corpus_id, artifact_id, score, covered_at, covered_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(kind.as_str())
         .bind(gap_id)
@@ -753,6 +778,7 @@ impl Store {
         .bind(artifact_id)
         .bind(score)
         .bind(now())
+        .bind(by.as_str())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -855,10 +881,17 @@ impl Store {
     /// shopping reminder was answered by a document on Windows versions, and
     /// once the line is where it belongs that row is wrong by the same rule
     /// that wrote it.
+    ///
+    /// Except a `capture` row, which no line ever wrote. A capture typed into
+    /// the box the query was typed into answers it because the page said so,
+    /// and its score is only what the two happened to measure — often nothing
+    /// at all, since what gets stored is a synthesized artifact rather than the
+    /// sentence. Collected on that score, the hole would come back the moment
+    /// the base grew enough to measure its own line.
     pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
         Ok(sqlx::query(
             "DELETE FROM gap_coverage
-              WHERE score < ?
+              WHERE (score < ? AND (covered_by IS NULL OR covered_by <> 'capture'))
                  OR (kind = 'ask'
                      AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = gap_coverage.gap_id))
                  OR (kind IN ('search', 'unmatched')
@@ -1066,15 +1099,12 @@ mod tests {
         let id = store
             .record_ask(NewAsk {
                 question: q.into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec,
                 embed_model: "fake".into(),
                 answer: "Not in the knowledge base.".into(),
                 abstained: true,
-                dropped: 0,
-                truncated: false,
-                citations: vec![],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1087,15 +1117,11 @@ mod tests {
         let ask = store
             .record_ask(NewAsk {
                 question: q.into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec![1.0, 0.0],
                 embed_model: "fake".into(),
                 answer: "here is what I found".into(),
-                abstained: false,
-                dropped: 0,
-                truncated: false,
-                citations: vec![],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1139,20 +1165,21 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "job priority is a column".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
             .unwrap();
         store
-            .cover_gap(GapKind::Subject, &id, &src.id, &made[0].id, 0.9)
+            .cover_gap(
+                GapKind::Subject,
+                &id,
+                &src.id,
+                &made[0].id,
+                0.9,
+                CoveredBy::Distance,
+            )
             .await
             .unwrap();
 
@@ -1178,20 +1205,21 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "job priority is a column".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
             .unwrap();
         store
-            .cover_gap(GapKind::Subject, &id, &src.id, &made[0].id, 0.9)
+            .cover_gap(
+                GapKind::Subject,
+                &id,
+                &src.id,
+                &made[0].id,
+                0.9,
+                CoveredBy::Distance,
+            )
             .await
             .unwrap();
 
@@ -1231,20 +1259,21 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "job priority is a column".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
             .unwrap();
         store
-            .cover_gap(GapKind::Subject, &id, &src.id, &made[0].id, 0.52)
+            .cover_gap(
+                GapKind::Subject,
+                &id,
+                &src.id,
+                &made[0].id,
+                0.52,
+                CoveredBy::Distance,
+            )
             .await
             .unwrap();
         assert_eq!(store.trim_gap_coverage(0.5).await.unwrap(), 0);
@@ -1291,6 +1320,7 @@ mod tests {
                     embed_model: "fake".into(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -1324,9 +1354,11 @@ mod tests {
                             score: *s,
                             similarity: Some(*s),
                             shown: true,
+                            ..Default::default()
                         })
                         .collect(),
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -1420,10 +1452,11 @@ mod tests {
                     candidates: vec![crate::store::feedback::NewCandidate {
                         artifact_id: "a-0".into(),
                         score: 0.9,
-                        similarity: None,
                         shown: true,
+                        ..Default::default()
                     }],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -1529,11 +1562,25 @@ mod tests {
         let one = search_with(&store, "mount an E01", &[0.10]).await;
         let two = search_with(&store, "grep a pcap", &[0.10]).await;
         store
-            .cover_gap(GapKind::Unmatched, &one, "corpus-a", "art-1", 0.8)
+            .cover_gap(
+                GapKind::Unmatched,
+                &one,
+                "corpus-a",
+                "art-1",
+                0.8,
+                CoveredBy::Distance,
+            )
             .await
             .unwrap();
         store
-            .cover_gap(GapKind::Unmatched, &two, "corpus-b", "art-2", 0.9)
+            .cover_gap(
+                GapKind::Unmatched,
+                &two,
+                "corpus-b",
+                "art-2",
+                0.9,
+                CoveredBy::Distance,
+            )
             .await
             .unwrap();
 
@@ -1601,7 +1648,14 @@ mod tests {
         .unwrap();
         let id = search_with(&store, "mount an E01", &[0.10]).await;
         store
-            .cover_gap(GapKind::Unmatched, &id, "corpus-a", "art-1", 0.8)
+            .cover_gap(
+                GapKind::Unmatched,
+                &id,
+                "corpus-a",
+                "art-1",
+                0.8,
+                CoveredBy::Distance,
+            )
             .await
             .unwrap();
         assert!(store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty());
@@ -1647,7 +1701,14 @@ mod tests {
         let expired = search_with(&store, "grep a pcap", &[0.10]).await;
         for id in [&kept, &expired] {
             store
-                .cover_gap(GapKind::Unmatched, id, "corpus-a", "art-1", 0.8)
+                .cover_gap(
+                    GapKind::Unmatched,
+                    id,
+                    "corpus-a",
+                    "art-1",
+                    0.8,
+                    CoveredBy::Distance,
+                )
                 .await
                 .unwrap();
         }
@@ -1816,15 +1877,11 @@ mod tests {
         let right = store
             .record_ask(NewAsk {
                 question: "ok".into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec![1.0, 1.0],
                 embed_model: "fake".into(),
                 answer: "yes".into(),
-                abstained: false,
-                dropped: 0,
-                truncated: false,
-                citations: vec![],
+                ..Default::default()
             })
             .await
             .unwrap();

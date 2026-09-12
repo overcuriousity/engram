@@ -102,7 +102,42 @@ pub fn cover_line(core: &Core) -> f32 {
 /// Every failure here is a warning and nothing more. A capture that is stored
 /// is stored; a coverage check that could not run is a line on the capture page
 /// that does not appear.
+/// Whether this gap is the search a capture was typed from.
+///
+/// Both readings of a search row count. `unmatched` is a search with nothing
+/// near it and `search` is one somebody judged a hole, and one row is only ever
+/// one of the two at a time — but which one it is can change under a capture
+/// that is still settling, and the link is about the row.
+fn is_typed_from(g: &crate::store::gaps::GapVec, event_id: &str) -> bool {
+    g.gap.id == event_id && matches!(g.gap.kind, GapKind::Search | GapKind::Unmatched)
+}
+
 pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
+    // The search this capture was typed from, where the box named one. Not a
+    // gap like the others: it is the query somebody typed on their way to
+    // writing this very text, so what closes it is the link and not a score —
+    // see `close_line` below.
+    let typed_from =
+        crate::core::ingest::typed_from(&core.store.get_corpus(corpus_id).await?.metadata)
+            .map(str::to_string);
+    cover_answering(core, corpus_id, typed_from).await
+}
+
+/// The same check, against a corpus that is not where the link was recorded.
+///
+/// For the capture whose text the base already held byte for byte. `ingest`
+/// answers that one with the stored corpus and stores nothing — no artifacts,
+/// no embed job, so no `settle_corpus` and no `cover` — while the page that
+/// sent it swaps the gap's row away on the 2xx. The hole was still open, and
+/// came back on the next load. The link is a person's claim and not a
+/// measurement: they wrote this text in answer to that query, and it is no
+/// less true for the answer having already been in the base. What closes the
+/// hole is the artifact the stored corpus already has.
+pub async fn cover_answering(
+    core: &Core,
+    corpus_id: &str,
+    typed_from: Option<String>,
+) -> Result<usize> {
     if !core.learn.enabled {
         return Ok(0);
     }
@@ -112,6 +147,16 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
         .await?;
     if open.gaps.is_empty() {
         return Ok(0);
+    }
+    // Moved to the front before the cap bites. Every other gap the cap leaves
+    // out is simply not checked by this capture, which is the accepted cost of
+    // the ceiling — but this one is the reason the capture exists, and nothing
+    // comes back for it: `cover` runs once, from `settle_corpus`.
+    if let Some(at) = typed_from
+        .as_deref()
+        .and_then(|ev| open.gaps.iter().position(|g| is_typed_from(g, ev)))
+    {
+        open.gaps.swap(0, at);
     }
     if open.gaps.len() > COVER_MAX_GAPS {
         tracing::debug!(
@@ -178,14 +223,28 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
     }
     let mut closed = 0;
     for (g, hit) in open.gaps.iter().zip(best) {
+        let typed = typed_from.as_deref().is_some_and(|ev| is_typed_from(g, ev));
+        // Something of this capture's to point the coverage row at. Even the
+        // linked gap needs one — `gap_coverage` names the artifact that
+        // answered, and a capture whose artifacts are not in the vector store
+        // has nothing to name.
         let Some(hit) = hit else { continue };
         // `None` is "no opinion" and not a low value — a lexical hit the dense
-        // half never returned. It cannot close a gap, because closing one is a
-        // claim about distance.
-        let Some(sim) = hit.similarity else { continue };
-        if sim < cover_line(core) {
-            continue;
+        // half never returned. It cannot close a gap on distance, because
+        // closing one that way is a claim about distance. On the linked gap it
+        // decides nothing: the score there is recorded, not read.
+        if !typed {
+            let Some(sim) = hit.similarity else { continue };
+            if sim < cover_line(core) {
+                continue;
+            }
         }
+        let sim = hit.similarity.unwrap_or_default();
+        let by = if typed {
+            crate::store::gaps::CoveredBy::Capture
+        } else {
+            crate::store::gaps::CoveredBy::Distance
+        };
         // Warned and skipped rather than returned: the vector store can hand
         // back an `artifact_id` SQLite no longer has — the drift
         // `reconcile_stores_once` exists to repair — and `gap_coverage`
@@ -200,6 +259,7 @@ pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
                 corpus_id,
                 &hit.payload.artifact_id,
                 sim,
+                by,
             )
             .await
         {
@@ -361,15 +421,12 @@ mod tests {
             .store
             .record_ask(NewAsk {
                 question: q.into(),
-                scope: None,
                 filters: "{}".into(),
                 query_vec: vec,
                 embed_model: core.embedder.model().to_string(),
                 answer: "Not in the knowledge base.".into(),
                 abstained: true,
-                dropped: 0,
-                truncated: false,
-                citations: vec![],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -395,6 +452,7 @@ mod tests {
                     embed_model: core.embedder.model().to_string(),
                     candidates: vec![],
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -423,6 +481,153 @@ mod tests {
         while crate::jobs::run_one(core).await.unwrap() {}
         core.background.wait_idle().await;
         src.id
+    }
+
+    /// A search the box recorded on its way to a capture, with nothing near it:
+    /// the shape of every sentence typed into the box before Capture is
+    /// pressed.
+    async fn unmatched_search(core: &Core, q: &str, vec: Vec<f32>) -> String {
+        core.store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: q.into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some("me".into()),
+                    filters: "{}".into(),
+                    query_vec: vec,
+                    embed_model: core.embedder.model().to_string(),
+                    // Nothing at all came back, which is the plainest hole
+                    // there is and what the empty box answers.
+                    candidates: vec![],
+                    answered: false,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap()
+    }
+
+    /// A capture typed into the box the query was typed into, driven the whole
+    /// way through the queue.
+    async fn captured_from(core: &Core, text: &str, event_id: &str) -> String {
+        let src = core
+            .ingest_capture(crate::core::ingest::Capture::new(text, "web").with_search(event_id))
+            .await
+            .unwrap();
+        while crate::jobs::run_one(core).await.unwrap() {}
+        core.background.wait_idle().await;
+        src.id
+    }
+
+    #[tokio::test]
+    async fn a_capture_closes_the_search_it_was_typed_from() {
+        // The box searches while you type, so the sentence on its way into the
+        // base is recorded as a search that found nothing — a hole whose
+        // answer is the very capture being written. The distance check cannot
+        // see that: what is stored is a synthesized artifact and not the
+        // sentence, so the two need not land near each other at all. The link
+        // the box already holds says it outright.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = unmatched_search(
+            &core,
+            "Erinnerung Termin Foto Dienstausweis Mittwoch 0900 Zimmer A323",
+            v.clone(),
+        )
+        .await;
+        // Out of reach of the measurement, so nothing here can close by
+        // distance and the link is the only thing that could have.
+        core.set_weak_below(1.0);
+
+        let corpus = captured_from(
+            &core,
+            "Erinnerung Termin Foto Dienstausweis Mittwoch 0900 Zimmer A323",
+            &id,
+        )
+        .await;
+
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below())
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .all(|g| g.gap.id != id),
+            "the query is still on the capture page as a hole in the base"
+        );
+        let covered = core.store.gaps_covered_by(&corpus).await.unwrap();
+        assert_eq!(covered.len(), 1, "the capture cannot say what it answered");
+        assert_eq!(
+            covered[0].text,
+            "Erinnerung Termin Foto Dienstausweis Mittwoch 0900 Zimmer A323"
+        );
+    }
+
+    /// And a capture whose text the base already held closes its hole too.
+    ///
+    /// `ingest` answers a duplicate with the stored corpus and stores nothing
+    /// — no artifacts, no embed job, so no `settle_corpus` and no `cover` —
+    /// while the page that sent it has already swapped the hole's row away on
+    /// the 2xx. The hole stayed open and came back on the next load. The link
+    /// is a claim about what somebody wrote, not a measurement, and it holds
+    /// whether or not this call stored anything.
+    #[tokio::test]
+    async fn a_capture_the_base_already_had_still_closes_the_hole_it_was_typed_into() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let text = "Erinnerung Termin Foto Dienstausweis Mittwoch 0900 Zimmer A323";
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let first = unmatched_search(&core, text, v.clone()).await;
+        // Out of reach of the measurement, so the link is the only thing that
+        // could close anything.
+        core.set_weak_below(1.0);
+        let corpus = captured_from(&core, text, &first).await;
+
+        // The same sentence written again, from a search of its own.
+        let again = unmatched_search(&core, text, v).await;
+        let same = captured_from(&core, text, &again).await;
+        assert_eq!(same, corpus, "the stored corpus, and no second one");
+
+        let open = core
+            .store
+            .open_gaps(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap();
+        assert!(
+            open.gaps.iter().all(|g| g.gap.id != again),
+            "the second query is still a hole the page would ask back at them"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_repair_pass_keeps_what_a_capture_answered() {
+        // Coverage is dropped when it scored under a line that has since moved
+        // up, because a measurement under the line was never an answer. A
+        // capture typed from the query is not a measurement, and the sweep
+        // that collects weak ones must not take it: the gap would come back
+        // the moment the base grew enough to measure itself.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let id = unmatched_search(&core, "when is the ID photo", vec![1.0, 0.0, 0.0, 0.0]).await;
+        core.set_weak_below(1.0);
+        captured_from(&core, "The ID photo is on Wednesday at 09:00.", &id).await;
+
+        core.store.trim_gap_coverage(1.0).await.unwrap();
+
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below())
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .all(|g| g.gap.id != id),
+            "the repair pass reopened a hole a capture had answered"
+        );
     }
 
     /// How close this vector gets to anything in that document. What the
@@ -530,17 +735,8 @@ mod tests {
                     artifact_id: "no-such-artifact".into(),
                     corpus_id: corpus.clone(),
                     text: "a torn write".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     created_at: crate::store::now(),
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             }])
             .await

@@ -12,6 +12,50 @@ pub enum Fetched {
     Image { mime: String, bytes: Vec<u8> },
 }
 
+/// The one scheme rule, for every door that takes a URL from an operator.
+///
+/// `Url::parse` accepts `javascript:` and `data:` happily, so parsing is not a
+/// check. Three doors needed this and each had written it out: `fetch` below,
+/// which is the only one that dereferences the URL, and the two that merely
+/// *store* one — the capture endpoint's `html` plus `url` pairing, which never
+/// fetches, and the share target. A stored URL is rendered as a link on the
+/// corpus page, which is reason enough for the same rule to apply there.
+pub fn ensure_readable(url: &url::Url) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(Error::Validation(format!(
+            "unsupported scheme `{}` — only http and https are read",
+            url.scheme()
+        )));
+    }
+    Ok(())
+}
+
+/// Parse an operator-supplied URL and hold it to `ensure_readable`.
+pub fn parse_readable(raw: &str) -> Result<url::Url> {
+    let url = url::Url::parse(raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
+    ensure_readable(&url)?;
+    Ok(url)
+}
+
+/// Whether a body is one link and nothing else.
+///
+/// The single guess the capture doors make, and it is made because every share
+/// sheet on both platforms hands a shared link over as `text/plain`. Narrow on
+/// purpose: one whitespace-separated token, parsing as a URL, over http or
+/// https. A line of prose that opens with a link is prose, and a caller who
+/// wants the other reading has `POST /corpora`, which asks in as many words.
+pub fn only_a_url(body: &str) -> Option<url::Url> {
+    let trimmed = body.trim();
+    if trimmed.split_whitespace().count() != 1 {
+        return None;
+    }
+    let u = url::Url::parse(trimmed).ok()?;
+    // The same rule `ensure_readable` states, asked as a question rather than
+    // enforced as a refusal: a lone `javascript:` word is text somebody typed,
+    // not a link they meant.
+    ensure_readable(&u).is_ok().then_some(u)
+}
+
 /// Retrieve a page for the paste-a-link door.
 ///
 /// The page-only face of `fetch`: a PDF or an image where HTML was expected
@@ -58,12 +102,7 @@ pub const USER_AGENT: &str = concat!(
 /// The endpoint is authenticated and single-operator, so the only caller who
 /// could aim it at the local network is the person who runs the machine.
 pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(Error::Validation(format!(
-            "unsupported scheme `{}` — only http and https are fetched",
-            url.scheme()
-        )));
-    }
+    ensure_readable(url)?;
 
     // Named, because Wikipedia — the single most likely thing to be pasted —
     // answers the library's default `reqwest/x.y` with a 403. The `Accept`

@@ -269,6 +269,37 @@ impl Capture {
         });
         self
     }
+
+    /// The search this capture was typed from: the box searches while it is
+    /// typed, so the sentence on its way into the base was already recorded as
+    /// a query, and the page knows which one.
+    ///
+    /// Which is the whole point of storing it. That query found nothing —
+    /// nothing was there yet, which is why somebody is writing it down — and
+    /// `unmatched` reads a search with nothing near it as a hole in the base,
+    /// so the capture page filled up with the operator's own half-written
+    /// captures asked back at them. `jobs::gaps::cover` is supposed to catch
+    /// that when the capture settles, but it can only measure a distance, and
+    /// what gets stored is a synthesized artifact rather than the sentence. The
+    /// link is not a measurement: this text was written in answer to that
+    /// query, and the box is the only thing that can say so.
+    ///
+    /// An id off a page, so nothing here trusts it: the door checks that the
+    /// search belongs to the person capturing (see `Store::event_is_mine`), and
+    /// `cover` only ever matches it against that subject's own open gaps.
+    pub fn with_search(mut self, event_id: &str) -> Self {
+        self.metadata["search"] = serde_json::json!({ "event_id": event_id });
+        self
+    }
+}
+
+/// The search a capture was typed from, where its door recorded one.
+pub fn typed_from(metadata: &serde_json::Value) -> Option<&str> {
+    metadata
+        .get("search")?
+        .get("event_id")?
+        .as_str()
+        .filter(|s| !s.is_empty())
 }
 
 /// The last path segment of a URL, when it reads as a file name. `plan.pdf`
@@ -376,7 +407,14 @@ impl Core {
             return Ok(());
         }
         let lang = crate::infer::lang::of_corpus(&c.metadata);
-        let budget = crate::jobs::synthesize::segment_budget(self, lang);
+        // No budget at all: nothing can be judged in one pass, so a reminder
+        // cannot be either, and saying which knob is wrong is more use than
+        // splitting against a fiction.
+        let Some(budget) = crate::jobs::synthesize::segment_budget(self, lang) else {
+            return Err(Error::Validation(
+                crate::jobs::synthesize::no_budget_reason(self, lang),
+            ));
+        };
         let windows = crate::infer::split::split_into_segments(&c.text, &self.counter, budget);
         if windows.len() <= 1 {
             return Ok(());
@@ -414,7 +452,31 @@ impl Core {
         let forced_remind =
             c.metadata["intent"].as_str() == Some(crate::core::moments::Intent::Remind.as_str());
 
-        if let Some(existing) = self.store.find_by_hash(&content_hash(text)).await? {
+        // The same bytes on a different day are not a duplicate — see
+        // `corpus_hash`, which is what decides it, because the column is
+        // UNIQUE and two entries are two rows or they are one.
+        //
+        // The second read is for the rows already in the base. Those were
+        // stored under the text alone, whatever day they name, so a journal
+        // entry repeated verbatim on its own day would miss the day-scoped
+        // hash and be written a second time onto the same day — which is the
+        // one duplicate this whole change is not asking for. Looked up by the
+        // old hash and accepted only where the day agrees, which is exactly
+        // the state a base upgrading into this has.
+        let existing = match self
+            .store
+            .find_by_hash(&crate::store::corpora::corpus_hash(text, &c.metadata))
+            .await?
+        {
+            Some(e) => Some(e),
+            None if c.metadata["day"].is_string() => self
+                .store
+                .find_by_hash(&content_hash(text))
+                .await?
+                .filter(|e| e.metadata["day"] == c.metadata["day"]),
+            None => None,
+        };
+        if let Some(existing) = existing {
             tracing::info!(corpus_id = %existing.id, "duplicate ingest, returning existing source");
             // The same bytes captured twice, the second time with "remind me"
             // on them. The stored corpus is the right row and this call adds
@@ -424,6 +486,7 @@ impl Core {
                 self.ask_the_judged_read_for_a_reminder(&existing.id)
                     .await?;
             }
+            self.close_the_gap_this_answered(&existing.id, &c.metadata);
             return Ok(IngestOutcome::existing(&existing));
         }
 
@@ -485,6 +548,7 @@ impl Core {
                     self.ask_the_judged_read_for_a_reminder(&existing.id)
                         .await?;
                 }
+                self.close_the_gap_this_answered(&existing.id, &c.metadata);
                 return Ok(IngestOutcome::existing(&existing));
             }
         };
@@ -507,7 +571,15 @@ impl Core {
             id: src.id,
             status: src.status,
             duplicate: false,
-            near_duplicate: near,
+            // What the doors read off this field is "parked", not "resembles
+            // something": `cli/capture.rs` and `mcp/mod.rs` both print *held
+            // for review — nothing is indexed until it is resolved in the web
+            // UI*, and `web/workspace.rs` sets `parked: true`. A forced
+            // reminder was never parked — it went straight to `Synthesize`
+            // above — so reporting the resemblance told the operator their
+            // `engram -r` was waiting for them while it was in fact
+            // synthesized, embedded, armed, and on its way to their phone.
+            near_duplicate: near.filter(|_| !forced_remind),
         })
     }
 
@@ -1156,6 +1228,18 @@ impl Core {
     /// on, since the artifact is already listed on Ops with its `superseded_by`
     /// set, even if the search-side flag has not caught up yet.
     pub async fn supersede(&self, loser_id: &str, winner_id: &str) -> Result<()> {
+        self.supersede_with(loser_id, winner_id, None).await
+    }
+
+    /// `supersede`, journaling what a corpus job did. The row rides the same
+    /// transaction as the hiding, so nothing can read a hidden artifact with
+    /// no row, or a row for an artifact still live.
+    pub async fn supersede_with(
+        &self,
+        loser_id: &str,
+        winner_id: &str,
+        journal: Option<crate::store::actions::NewAction>,
+    ) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         // Neither side may be retired. `set_superseded_by` writes
         // `status = 'superseded'` unconditionally, so superseding an artifact
@@ -1173,7 +1257,7 @@ impl Core {
             }
         }
         self.store
-            .set_superseded_by(loser_id, Some(winner_id))
+            .set_superseded_by_with(loser_id, Some(winner_id), journal.as_ref())
             .await?;
         self.vectors
             .set_lifecycle(loser_id, ArtifactStatus::Superseded, Some(winner_id))
@@ -1238,6 +1322,15 @@ impl Core {
     /// payload first would instead hide the artifact behind a row that still
     /// says active, and the repair, reading the row, would undo it.
     pub async fn deprecate(&self, id: &str) -> Result<()> {
+        self.deprecate_with(id, None).await
+    }
+
+    /// `deprecate`, journaling what a corpus job did; see `supersede_with`.
+    pub async fn deprecate_with(
+        &self,
+        id: &str,
+        journal: Option<crate::store::actions::NewAction>,
+    ) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         // A superseded artifact is already out of search, and `deprecate` does
         // not clear `superseded_by`, so this would leave a row that is both:
@@ -1256,7 +1349,7 @@ impl Core {
             )));
         }
         self.store
-            .set_artifact_status(id, ArtifactStatus::Deprecated)
+            .set_artifact_status_with(id, ArtifactStatus::Deprecated, journal.as_ref())
             .await?;
         self.vectors
             .set_lifecycle(id, ArtifactStatus::Deprecated, None)
@@ -1292,6 +1385,16 @@ impl Core {
             self.store.set_artifact_status(id, s).await?;
         }
         self.store.set_superseded_by(id, None).await?;
+        // Last, and after both setters. `exhume` clears `lifecycle_dirty`
+        // deliberately — until the `Embed` below lands there is no point for
+        // the drift repair to write a payload onto — but `set_artifact_status`
+        // and `set_superseded_by` each raise it again in their own statement,
+        // so the flag was `1` by the time this returned and the repair wrote
+        // onto the point the burial had deleted. Clearing it here is the
+        // ordering that makes `exhume`'s comment true.
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
+            .await?;
         self.store.enqueue(Stage::Embed, "artifact", id).await?;
         tracing::info!(artifact_id = id, "exhumed a reaped artifact");
         Ok(true)
@@ -1678,6 +1781,32 @@ impl Core {
     /// The same route `set_reminder(on = true)` takes, and refused for the
     /// same reason on a capture that splits: a multi-window corpus is read
     /// window by window and never judged.
+    /// The hole a capture answered, closed against a corpus that was already
+    /// stored.
+    ///
+    /// The other half of what the `forced_remind` calls beside it are for: a
+    /// capture whose bytes the base already holds adds no text, and so reaches
+    /// no embed job, no `settle_corpus` and no `jobs::gaps::cover` — while the
+    /// page that sent it has already swapped the hole's row away on the 2xx.
+    /// Left here, the hole came back on the next load. The link the box
+    /// carries is a claim about what was written and not a measurement, so it
+    /// holds whether or not this call stored anything.
+    ///
+    /// On the background handle and best-effort, like every other coverage
+    /// check: a capture that is stored is stored.
+    fn close_the_gap_this_answered(&self, corpus_id: &str, metadata: &serde_json::Value) {
+        let Some(event) = typed_from(metadata).map(str::to_string) else {
+            return;
+        };
+        let core = self.clone();
+        let id = corpus_id.to_string();
+        self.background.spawn(async move {
+            if let Err(e) = crate::jobs::gaps::cover_answering(&core, &id, Some(event)).await {
+                tracing::warn!(corpus_id = %id, error = %e, "could not close the gap a stored capture answered");
+            }
+        });
+    }
+
     async fn ask_the_judged_read_for_a_reminder(&self, corpus_id: &str) -> Result<()> {
         let src = self.store.get_corpus(corpus_id).await?;
         let mut meta = src.metadata.clone();
@@ -1732,6 +1861,77 @@ impl Core {
             .await
     }
 
+    /// The window `set_reminder(id, true)` would hand back to the judged read,
+    /// or `None` where there is nothing to hand back.
+    ///
+    /// Four conditions, and they were spelled out inside `set_reminder` alone
+    /// while `web::due::not_a_reminder` decided whether to *offer* the undo on
+    /// the first of them — so a capture of several windows, or one whose
+    /// promotion an operator had undone, was offered "Not a reminder — undo",
+    /// and pressing it restored nothing and said nothing. One predicate, asked
+    /// by both, is what keeps the button's promise the same as the method's.
+    ///
+    /// Reads only: a caller that merely asks changes no metadata and arms no
+    /// unit.
+    async fn reminder_reread(&self, artifact_id: &str) -> Result<Option<i64>> {
+        let art = self.store.get_artifact(artifact_id).await?;
+        // A merge belongs to no corpus, so there is no note to read again.
+        let Some(cid) = art.corpus_id.as_deref() else {
+            return Ok(None);
+        };
+        // A capture that splits into windows is read window by window and
+        // never judged (`jobs::window`, `judging = all.len() == 1`), the same
+        // reason `refuse_a_reminder_too_large_to_judge` turns a long
+        // `engram -r` away at the door. Pressing the button here used to
+        // re-promote the whole document and produce no judgement and no
+        // moment at all; nothing is armed and the caller is told so.
+        //
+        // `!= 1` and not `> 1`. Zero is the same answer as many and for a
+        // nearer reason: there is no window to hand back, so arming one for a
+        // `segment_idx` the artifact still carries would queue a unit against
+        // a segment that does not exist — and returning `true` would have the
+        // page report a reminder armed that nothing will ever judge. The
+        // sibling `ask_the_judged_read_for_a_reminder` has always spelled the
+        // empty case out; this one guarded only the long-capture half of it.
+        let windows = self.store.segments_for_corpus(cid).await?.len();
+        if windows != 1 {
+            tracing::info!(
+                corpus_id = cid,
+                windows,
+                "a reminder is read in one pass; this capture has no single window to re-read"
+            );
+            return Ok(None);
+        }
+        // Nothing to re-read: an artifact with no window cannot be handed back
+        // to the judged call, and saying it was armed something was a claim
+        // about a job that was never queued.
+        let Some(idx) = art.segment_idx else {
+            tracing::info!(
+                artifact_id,
+                "artifact belongs to no window; there is nothing to re-read"
+            );
+            return Ok(None);
+        };
+        // The same mark, for the same reason — see
+        // `ask_the_judged_read_for_a_reminder`. Read before any metadata is
+        // written, so a refusal changes nothing at all.
+        if self.store.segment_no_promote(cid, idx).await? {
+            tracing::info!(
+                corpus_id = cid,
+                window = idx,
+                "this window's promotion was undone; it is not read again for a reminder"
+            );
+            return Ok(None);
+        }
+        Ok(Some(idx))
+    }
+
+    /// Whether "is a reminder" has anything to do on this artifact. What the
+    /// band asks before offering the undo; `reminder_reread` is the answer.
+    pub async fn can_be_a_reminder(&self, artifact_id: &str) -> Result<bool> {
+        Ok(self.reminder_reread(artifact_id).await?.is_some())
+    }
+
     /// The reminder's half of `set_entry`: "this is not a reminder", with an
     /// undo, and it sticks.
     ///
@@ -1753,57 +1953,37 @@ impl Core {
     /// tell the difference between a row that went and a row that stayed.
     pub async fn set_reminder(&self, artifact_id: &str, on: bool) -> Result<bool> {
         let art = self.store.get_artifact(artifact_id).await?;
+        let intent = crate::core::moments::Intent::Remind;
         let Some(cid) = art.corpus_id.as_deref() else {
-            return Ok(false);
+            // A merge belongs to no corpus by construction, and `off` used to
+            // return here having done nothing at all — while `carry_moments`
+            // deliberately moves a root's open due row *onto* the merge. So
+            // the band could show a reminder whose "Not a reminder" answered
+            // `false`: no banner, no error, nothing deleted, and the row went
+            // on pushing at 48 h, 12 h, 3 h, 30 min and zero for ever.
+            //
+            // The row is what pushes, so `off` deletes it. What cannot be
+            // recorded is the durable refusal in the corpus metadata, and
+            // nothing needs it: that refusal exists to survive a re-read, and
+            // a merge is never read from a note again. `on` is the half that
+            // genuinely has nothing to do — there is no window to hand back —
+            // and it keeps saying so, which is what tells the band not to
+            // offer an undo it could not honour.
+            if on {
+                return Ok(false);
+            }
+            let gone = self.store.delete_refused_due(artifact_id).await?;
+            self.store.rearm_remind().await?;
+            return Ok(gone > 0);
         };
         let src = self.store.get_corpus(cid).await?;
         let mut meta = src.metadata.clone();
-        let intent = crate::core::moments::Intent::Remind;
         if on {
-            // A capture that splits into windows is read window by window and
-            // never judged (`jobs::window`, `judging = all.len() == 1`), the
-            // same reason `refuse_a_reminder_too_large_to_judge` turns a long
-            // `engram -r` away at the door. Pressing the button here used to
-            // re-promote the whole document and produce no judgement and no
-            // moment at all; nothing is armed and the caller is told so.
-            let windows = self.store.segments_for_corpus(cid).await?.len();
-            // `!= 1` and not `> 1`. Zero is the same answer as many and for a
-            // nearer reason: there is no window to hand back, so arming one
-            // for a `segment_idx` the artifact still carries would queue a
-            // unit against a segment that does not exist — and returning
-            // `true` would have the page report a reminder armed that nothing
-            // will ever judge. The sibling `ask_the_judged_read_for_a_reminder`
-            // has always spelled the empty case out; this one guarded only the
-            // long-capture half of it.
-            if windows != 1 {
-                tracing::info!(
-                    corpus_id = cid,
-                    windows,
-                    "a reminder is read in one pass; this capture has no single window to re-read"
-                );
-                return Ok(false);
-            }
-            // Nothing to re-read: an artifact with no window cannot be handed
-            // back to the judged call, and saying it was armed something was
-            // a claim about a job that was never queued.
-            let Some(idx) = art.segment_idx else {
-                tracing::info!(
-                    artifact_id,
-                    "artifact belongs to no window; there is nothing to re-read"
-                );
+            // Asked as one question, so the band's undo and this method cannot
+            // disagree about it — see `reminder_reread`.
+            let Some(idx) = self.reminder_reread(artifact_id).await? else {
                 return Ok(false);
             };
-            // The same mark, for the same reason — see
-            // `ask_the_judged_read_for_a_reminder`. Read before the metadata is
-            // written, so a refusal changes nothing at all.
-            if self.store.segment_no_promote(cid, idx).await? {
-                tracing::info!(
-                    corpus_id = cid,
-                    window = idx,
-                    "this window's promotion was undone; it is not read again for a reminder"
-                );
-                return Ok(false);
-            }
             crate::core::moments::allow_intent(&mut meta, intent);
             self.store.set_corpus_metadata(cid, &meta).await?;
             // Hand the note back to the judged read: re-run its window's
@@ -1834,7 +2014,7 @@ impl Core {
     pub async fn reprocess(&self, id: &str, stage: Stage) -> Result<()> {
         let src = self.store.get_corpus(id).await?;
         match stage {
-            Stage::Synthesize | Stage::Enrich => {
+            Stage::Synthesize => {
                 // Re-segmenting starts from `raw_text`, and an image whose read
                 // has not landed has none. Flipping it to `raw` would have
                 // synthesis fail on empty text and the pending read then find
@@ -1892,6 +2072,8 @@ impl Core {
             | Stage::Title
             | Stage::Dedupe
             | Stage::Relate
+            | Stage::Probe
+            | Stage::Condense
             | Stage::LinkJudge
             | Stage::Generate => {
                 return Err(Error::Validation(
@@ -2926,14 +3108,8 @@ mod tests {
             .insert_artifacts(
                 &out.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "t".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -2946,17 +3122,7 @@ mod tests {
                     artifact_id: chunks[0].id.clone(),
                     corpus_id: out.id.clone(),
                     text: "t".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    created_at: 0,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             }])
             .await
@@ -3051,17 +3217,7 @@ mod tests {
                 artifact_id: artifact_id.to_string(),
                 corpus_id: corpus_id.to_string(),
                 text: "t".into(),
-                title: None,
-                category: None,
-                tags: vec![],
-                created_at: 0,
-                last_seen_at: None,
-                hit_count: None,
-                status: None,
-                last_verified_at: None,
-                superseded_by: None,
-                origin_corpora: vec![],
-                provenance: None,
+                ..Default::default()
             },
         }
     }
@@ -3074,14 +3230,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "t".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -3103,24 +3253,13 @@ mod tests {
                 &src.id,
                 &[
                     crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: "loser".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
                         text: "winner".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
             )
@@ -3408,11 +3547,8 @@ mod tests {
                 end_line: 2,
                 source: crate::store::artifacts::SpanSource::Located,
             }),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let p = core
             .store
@@ -3760,6 +3896,68 @@ mod tests {
         );
     }
 
+    /// The band offers "Not a reminder — undo" on `can_be_a_reminder`, and it
+    /// used to decide on `corpus_id.is_some()` alone. `set_reminder(id, true)`
+    /// refuses on three more conditions, so the button appeared on captures it
+    /// could not honour, reported success and restored nothing — which is
+    /// precisely what the optional undo exists to prevent.
+    #[tokio::test]
+    async fn the_undo_is_offered_only_where_the_reminder_can_actually_come_back() {
+        use crate::store::artifacts::NewArtifact;
+        let core = test_core().await;
+        let out = core
+            .ingest("erinnere mich Freitag, die Rechnung zu senden", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let read = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.in_results())
+            .expect("a live artifact");
+        assert!(
+            core.can_be_a_reminder(&read.id).await.unwrap(),
+            "one window, read from a note: there is something to hand back"
+        );
+
+        // A corpus is not enough on its own. This one belongs to no window, so
+        // there is nothing for the judged read to be handed.
+        let src = core
+            .store
+            .insert_corpus("a note nothing segmented", "web", None)
+            .await
+            .unwrap();
+        let windowless = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    text: "a note nothing segmented".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        assert!(
+            core.store
+                .get_artifact(&windowless)
+                .await
+                .unwrap()
+                .corpus_id
+                .is_some(),
+            "the old predicate would have offered the button here"
+        );
+        assert!(
+            !core.can_be_a_reminder(&windowless).await.unwrap(),
+            "and pressing it would have restored nothing"
+        );
+    }
+
     /// A restore out of a merge is an operator overruling the merge for this
     /// one source, and the lineage has to record it or `merge::finish`'s
     /// unfinished-merge repair re-hides the source on the next sweep tick, and
@@ -3791,9 +3989,7 @@ mod tests {
                 &NewMerged {
                     text: "the merged account of the gutters".into(),
                     title: Some("gutters".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 std::slice::from_ref(&root),
             )
@@ -3828,7 +4024,17 @@ mod tests {
             .execute(&core.store.pool)
             .await
             .unwrap();
-        core.store.bury(&root, "{}", 100).await.unwrap();
+        core.store
+            .bury(
+                &root,
+                "{}",
+                100,
+                None,
+                None,
+                &crate::jobs::reap::test_support::row(&root),
+            )
+            .await
+            .unwrap();
         assert!(
             core.store
                 .get_artifact(&root)
@@ -3850,6 +4056,21 @@ mod tests {
                 .is_empty(),
             "and the repair may never hide it again"
         );
+        // And it is not left marked dirty. `exhume` clears the flag on purpose
+        // — the burial deleted the point, and until the `Embed` lands there is
+        // nothing for the drift repair to write a payload onto — but
+        // `set_artifact_status` and `set_superseded_by` each raise it again in
+        // their own statement, so it was `1` by the time `reactivate`
+        // returned and the repair wrote onto the deleted point.
+        let dirty: i64 = sqlx::query_scalar("SELECT lifecycle_dirty FROM artifacts WHERE id = ?")
+            .bind(&root)
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            dirty, 0,
+            "the point arrives with the embed, payload and all"
+        );
     }
 
     #[tokio::test]
@@ -3867,15 +4088,32 @@ mod tests {
 
         let again = first.replacen("Schritt 7:", "Schritt sieben:", 1);
         let again = again.as_str();
+        // Read before the capture, or the row this very call stores is the
+        // one that answers.
+        assert!(
+            core.store
+                .find_near_duplicate(
+                    &crate::store::shingle::signature(again),
+                    core.consolidate.near_dupe_min,
+                )
+                .await
+                .unwrap()
+                .is_some(),
+            "the fixture must actually resemble the first capture"
+        );
         let out = core
             .ingest_capture(
                 Capture::new(again, "cli").with_intent(Some(crate::core::moments::Intent::Remind)),
             )
             .await
             .unwrap();
+        // And the receipt says so. Every door reads this field as "parked" and
+        // nothing else — the CLI and MCP both answer *held for review, nothing
+        // is indexed* on it — so reporting the resemblance on a capture that
+        // was queued anyway told the operator the opposite of what happened.
         assert!(
-            out.near_duplicate.is_some(),
-            "the fixture must actually resemble the first capture"
+            out.near_duplicate.is_none(),
+            "nothing was parked, so nothing is reported as parked"
         );
         assert_ne!(
             core.store.get_corpus(&out.id).await.unwrap().status,

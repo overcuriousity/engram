@@ -410,6 +410,28 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
 /// `accept_language` is the raw header. Only the primary subtag of the first
 /// entry is read: `de-DE,de;q=0.9,en;q=0.8` is a reader who wants German, and
 /// weighing the rest to discover that is arithmetic for nothing.
+/// Which language the examples above came back in.
+///
+/// The pair is the classifier's own prototypes in the reader's language, and
+/// the page around them is English — so a German browser reads an English
+/// interface with two German sentences quoted in it. That is correct, because
+/// those are the words that base would actually be written in; what was wrong
+/// is that nothing in the markup said the language had changed, which is what
+/// a screen reader needs in order not to read German aloud in an English
+/// voice. Returned separately rather than folded into `examples_for`, whose
+/// two-element shape several tests are written against.
+///
+/// The answer is the language actually used, so a subtag with no prototypes
+/// reports the `en` it fell back to rather than the one that was asked for.
+pub fn examples_lang_for(accept_language: &str) -> &'static str {
+    let want = crate::infer::lang::primary_subtag(accept_language);
+    PROTOTYPES
+        .iter()
+        .find(|(i, l, _)| *i == Intent::Remind && *l == want)
+        .map(|(_, l, _)| *l)
+        .unwrap_or("en")
+}
+
 pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
     // The same reading `infer::lang` gives the header, and deliberately the
     // same one: the examples this table teaches and the language the
@@ -530,8 +552,24 @@ struct Rule {
     interval: u32,
     by_day: Vec<Weekday>,
     by_month_day: Option<u32>,
-    until: Option<i64>,
+    until: Option<Until>,
     count: Option<u32>,
+}
+
+/// How far a recurrence runs, in the terms the rule stated it.
+///
+/// Kept apart rather than normalised to one instant at parse time, because the
+/// two forms answer to different clocks and the parser has no zone: `parse_rule`
+/// is handed a string, while the zone belongs to the moment. Collapsing the
+/// date-only form into a UTC instant there is what dropped the operator's last
+/// day west of Greenwich.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    /// `UNTIL=20260901T235959Z`: an instant, as written, in UTC.
+    Instant(i64),
+    /// `UNTIL=20260901`: the last calendar day the recurrence may land on,
+    /// read in whichever zone the occurrences are resolved in.
+    LastDay(NaiveDate),
 }
 
 /// The largest INTERVAL the subset accepts. `next_after` walks day by day and
@@ -615,13 +653,26 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                 )
             }
             "UNTIL" => {
-                let dt = chrono::NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%SZ")
-                    .or_else(|_| {
-                        NaiveDate::parse_from_str(v, "%Y%m%d")
-                            .map(|d| d.and_hms_opt(23, 59, 59).unwrap())
-                    })
-                    .map_err(|_| format!("UNTIL={v} is not a date"))?;
-                r.until = Some(dt.and_utc().timestamp());
+                // The two forms are two different kinds of claim, and reading
+                // the second as the first drops a day.
+                //
+                // `20260901T235959Z` names an instant, in UTC, because the `Z`
+                // says so. `20260901` names a calendar day with no time and no
+                // zone in it at all, and RFC 5545 reads that against the
+                // event's own zone — which here is the reader's. Turned into
+                // 23:59:59 UTC and compared against occurrences resolved in
+                // that zone, every zone west of Greenwich lost the last day
+                // the operator named: "every day at 6pm until September 1" in
+                // America/Los_Angeles stopped after 31 August, because the
+                // 1 September occurrence is 2026-09-02T01:00Z.
+                //
+                // So the day is kept as a day and compared as one below.
+                r.until = Some(
+                    chrono::NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%SZ")
+                        .map(|dt| Until::Instant(dt.and_utc().timestamp()))
+                        .or_else(|_| NaiveDate::parse_from_str(v, "%Y%m%d").map(Until::LastDay))
+                        .map_err(|_| format!("UNTIL={v} is not a date"))?,
+                );
             }
             "COUNT" => {
                 r.count = Some(
@@ -669,24 +720,43 @@ pub fn rule_count(rule: &str) -> Option<u32> {
     parse_rule(rule).ok()?.count
 }
 
+/// The instants a moment may name: the range a calendar year can be spelled
+/// in, which is also the range every reader of a moment can do arithmetic in.
+/// `api::set_moment` holds a raw timestamp to it, and `resolve_local` holds
+/// every wall-clock time typed at the base to it.
+pub const YEAR_ONE: i64 = -62_135_596_800;
+pub const END_OF_9999: i64 = 253_402_300_799;
+
 /// A local wall-clock time as an instant, choosing for the operator on the
 /// two days a year when the zone cannot. An ambiguous fall-back hour takes
 /// its earlier reading; a time inside a spring-forward gap rolls forward to
 /// the first instant the zone has again, in quarter-hour steps — chrono's
 /// mapping for a gap is `None` with nothing to call `earliest()` on, and
 /// treating that as "no answer" silently dropped a date the operator named.
+///
+/// `None` outside years 1 to 9999, the same range `api::set_moment` holds a
+/// timestamp to, and the arithmetic is checked. `%Y` parses a signed
+/// six-digit year, so `when=+262142-12-31T23:59` reached here from the band's
+/// own form: the gap recovery added quarter-hours to a `NaiveDateTime` already
+/// at chrono's ceiling, and `+` on that panics — inside a handler, which
+/// aborts the connection. The range is the fix and the checked add is the
+/// belt: neither should depend on the other being there.
 pub(crate) fn resolve_local(dt: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
+    let stamped = |d: chrono::DateTime<Tz>| {
+        let ts = d.timestamp();
+        (YEAR_ONE..=END_OF_9999).contains(&ts).then_some(ts)
+    };
     if let Some(d) = tz.from_local_datetime(&dt).earliest() {
-        return Some(d.timestamp());
+        return stamped(d);
     }
     // Gaps are 30 or 60 minutes almost everywhere (Lord Howe's is 30); three
     // hours of quarter-hour steps covers the historical 2 h ones too.
     (1..=12)
         .find_map(|q| {
-            tz.from_local_datetime(&(dt + chrono::Duration::minutes(15 * q)))
-                .earliest()
+            dt.checked_add_signed(chrono::Duration::minutes(15 * q))
+                .and_then(|shifted| tz.from_local_datetime(&shifted).earliest())
         })
-        .map(|d| d.timestamp())
+        .and_then(stamped)
 }
 
 /// The next occurrence strictly after `at`, keeping `at`'s wall-clock time in
@@ -775,9 +845,16 @@ pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> 
         let Some(ts) = resolve_local(dt, tz) else {
             continue;
         };
-        if let Some(until) = r.until
-            && ts > until
-        {
+        // Each against its own clock: an instant against the instant this
+        // occurrence resolved to, a named day against the day it falls on in
+        // the reader's zone. An occurrence *on* the named day is inside the
+        // rule; the one after it is not.
+        let past = match r.until {
+            Some(Until::Instant(u)) => ts > u,
+            Some(Until::LastDay(d)) => date > d,
+            None => false,
+        };
+        if past {
             return None;
         }
         return Some(ts);
@@ -846,6 +923,18 @@ impl crate::core::Core {
                     .moment_parked_at(&m.artifact_id, crate::store::moments::Kind::Due, Some(next))
                     .await?
             {
+                // Both ends of the recurrence in one series. Where this row
+                // already has one it keeps it and nothing is written; where it
+                // does not — a row from before the column existed — it adopts
+                // its own id, because it *is* the head of this recurrence.
+                //
+                // Stamping only the successor would be worse than leaving both
+                // alone: `rule_is_exhausted` counts by series once a row has
+                // one, so the successor would be counted alone and a `COUNT=5`
+                // reminder would fire five more times from every completion.
+                if m.series_id.is_none() {
+                    self.store.adopt_into_own_series(&m.id).await?;
+                }
                 self.store
                     .insert_moment(&crate::store::moments::NewMoment {
                         artifact_id: m.artifact_id,
@@ -865,7 +954,21 @@ impl crate::core::Core {
                         // starting one: same series, so `COUNT` keeps counting
                         // from where the completed occurrence left it however
                         // many supersessions the rows have ridden since.
-                        series_id: m.series_id.clone(),
+                        //
+                        // Falling back to this row's own id, because a NULL
+                        // here is not "no series" — it is a row written before
+                        // the column existed, and `series_id` is
+                        // migration-added, so on any upgraded base it is every
+                        // recurring row. `insert_moment` reads `(None, Some(rule))`
+                        // as the head of a *new* series and stamps the
+                        // successor with its own id, which restarts the
+                        // `COUNT`: a `FREQ=DAILY;COUNT=5` reminder fired five
+                        // times, started again, and fired nine.
+                        //
+                        // This row is the series head in that case, which is
+                        // the same answer `set_rule`'s `COALESCE(series_id, id)`
+                        // writes for a rule set today.
+                        series_id: m.series_id.clone().or_else(|| Some(m.id.clone())),
                     })
                     .await?;
             }
@@ -1002,6 +1105,141 @@ mod tests {
             "two of two, and no third"
         );
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
+    }
+
+    /// The same count, on a base that predates the column that keeps it.
+    ///
+    /// `series_id` is migration-added, so every recurring row written before it
+    /// carries NULL — and `insert_moment` reads `(None, Some(rule))` as the
+    /// head of a new series and stamps the successor with its own id. Each
+    /// completion therefore started a fresh series, `occurrences_in_series`
+    /// counted one, and the count never arrived: a `COUNT=2` reminder went on
+    /// firing for as long as anyone kept answering it.
+    ///
+    /// The NULL is written directly here because nothing in the app can
+    /// produce one any more, which is exactly why the case needs a test.
+    /// The same, with more than one row from before the column. Every one of
+    /// them carries NULL, and adopting only the row being completed left the
+    /// occurrences already done outside the series the count now reads.
+    #[tokio::test]
+    async fn a_counted_recurrence_with_several_rows_from_before_the_column_stops_on_its_count() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Feed the cat", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let rule = "FREQ=DAILY;COUNT=3";
+        let mut rows = Vec::new();
+        for day in [30, 31] {
+            rows.push(
+                core.store
+                    .insert_moment(&NewMoment {
+                        artifact_id: aid.clone(),
+                        kind: Kind::Due,
+                        at: Some(
+                            berlin()
+                                .with_ymd_and_hms(2026, 8, day, 9, 0, 0)
+                                .unwrap()
+                                .timestamp(),
+                        ),
+                        tz: "Europe/Berlin".into(),
+                        rule: Some(rule.into()),
+                        source: Source::Cue,
+                        span: None,
+                        series_id: None,
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        // Both from before the column, and the first already done.
+        sqlx::query("UPDATE moments SET series_id = NULL WHERE artifact_id = ?")
+            .bind(&aid)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE moments SET done_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 86_400)
+            .bind(&rows[0])
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        core.complete_moment(&rows[1]).await.unwrap();
+        let third = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(third.len(), 1, "the third occurrence is armed");
+        core.complete_moment(&third[0].moment.id).await.unwrap();
+
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "three of three, and a fourth was armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_counted_recurrence_on_an_upgraded_base_still_stops() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new("Water the plants", "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id;
+        let rule = "FREQ=DAILY;COUNT=2";
+        let first = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(
+                    berlin()
+                        .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+                        .unwrap()
+                        .timestamp(),
+                ),
+                tz: "Europe/Berlin".into(),
+                rule: Some(rule.into()),
+                source: Source::Cue,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE moments SET series_id = NULL WHERE id = ?")
+            .bind(&first)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        core.complete_moment(&first).await.unwrap();
+        let second = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(second.len(), 1, "the second occurrence is armed");
+        core.complete_moment(&second[0].moment.id).await.unwrap();
+
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "two of two, and the count started over"
+        );
     }
 
     /// The recurrence that died on its first completion.
@@ -1205,6 +1443,40 @@ mod tests {
     fn berlin() -> chrono_tz::Tz {
         chrono_tz::Tz::Europe__Berlin
     }
+
+    /// A wall-clock time no calendar can spell is not a date, and asking for
+    /// one must not take the connection down with it.
+    ///
+    /// `%Y` parses a signed six-digit year, so the due band's own form carried
+    /// `when=+262142-12-31T23:59` straight here. The zone had no such instant,
+    /// the gap recovery added quarter-hours to a `NaiveDateTime` already at
+    /// chrono's ceiling, and `+` on that panics inside the handler.
+    #[test]
+    fn a_year_no_calendar_can_spell_is_refused_rather_than_panicked_over() {
+        let ceiling = chrono::NaiveDateTime::MAX;
+        assert_eq!(resolve_local(ceiling, berlin()), None);
+        assert_eq!(resolve_local(chrono::NaiveDateTime::MIN, berlin()), None);
+        let past_9999 = chrono::NaiveDate::from_ymd_opt(20_000, 1, 1)
+            .expect("chrono spells it even though a moment may not")
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(resolve_local(past_9999, berlin()), None);
+        // The bound is on the instant and not on the local year, so the first
+        // midnight of the year 10000 in a zone east of UTC is still 9999 to
+        // everything that reads the stamp — and is allowed.
+        let just_inside = chrono::NaiveDate::from_ymd_opt(10_000, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert!(resolve_local(just_inside, berlin()).is_some_and(|at| at <= END_OF_9999));
+        // And an ordinary date still resolves, inside the range on both sides.
+        let ordinary = chrono::NaiveDate::from_ymd_opt(2026, 9, 11)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        let at = resolve_local(ordinary, berlin()).expect("an ordinary date");
+        assert!((YEAR_ONE..=END_OF_9999).contains(&at));
+    }
     fn local(at: i64) -> String {
         berlin()
             .timestamp_opt(at, 0)
@@ -1366,6 +1638,40 @@ mod tests {
             .timestamp();
         assert!(next_after("FREQ=DAILY;UNTIL=20260831T235959Z", at, berlin()).is_none());
         assert!(next_after("FREQ=DAILY;UNTIL=20260901T235959Z", at, berlin()).is_some());
+    }
+
+    /// A date-only `UNTIL` names a day, and the day is the reader's.
+    ///
+    /// Read as 23:59:59 UTC and compared against occurrences resolved in the
+    /// reader's zone, every zone west of Greenwich lost the last day the
+    /// operator named: an 18:00 reminder on 1 September in Los Angeles is
+    /// 2026-09-02T01:00Z, which is past a UTC end-of-day for the 1st. The
+    /// reminder simply stopped a day early, silently.
+    ///
+    /// East of Greenwich the same arithmetic granted a day it should not have,
+    /// which is the other half of the same reading.
+    #[test]
+    fn a_date_only_until_is_the_readers_day_not_a_utc_instant() {
+        let la: Tz = "America/Los_Angeles".parse().unwrap();
+        let at = la
+            .with_ymd_and_hms(2026, 8, 31, 18, 0, 0)
+            .unwrap()
+            .timestamp();
+        let next = next_after("FREQ=DAILY;UNTIL=20260901", at, la)
+            .expect("the last day the operator named was dropped");
+        assert_eq!(
+            la.timestamp_opt(next, 0)
+                .unwrap()
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            "2026-09-01 18:00"
+        );
+        // And it ends there: the 2nd is past the named day.
+        assert!(next_after("FREQ=DAILY;UNTIL=20260901", next, la).is_none());
+
+        // The zoned form still means the instant it names, in UTC, for
+        // everyone — that is what the `Z` is for.
+        assert!(next_after("FREQ=DAILY;UNTIL=20260901T000000Z", at, la).is_none());
     }
 
     #[test]

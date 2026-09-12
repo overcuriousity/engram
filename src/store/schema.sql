@@ -277,6 +277,12 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- subsystem whose defence is that every decision is reversible and
   -- reviewable, who decided is not something to infer.
   decided_by     TEXT,
+  -- An operator pressed Synthese: they judged that these two cover the same
+  -- ground, and only the writing is left. A column and not a `state`, because
+  -- `state` records what the judge found and this records what a person
+  -- decided to do about it — two facts about one pair, and storing the second
+  -- on top of the first would lose the finding that put it on the queue.
+  synthesis_asked INTEGER NOT NULL DEFAULT 0,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);
@@ -317,7 +323,12 @@ CREATE TABLE IF NOT EXISTS search_events (
   dismissed_at INTEGER,
   -- A synthesized artifact led the list above `weak_below`: the base
   -- answered, and the pursuit this lands in closes satisfied.
-  answered    INTEGER NOT NULL DEFAULT 0
+  answered    INTEGER NOT NULL DEFAULT 0,
+  -- The generation live when this list was drawn, and what a give-up on it is
+  -- charged to. The give-up sweep reads a search a window later at the
+  -- earliest, and whatever is live by then need not be what served it. NULL
+  -- on a row recorded before the column, which nothing can charge.
+  generation_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_pending ON search_events(judged_at, skips, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_verdict ON search_events(verdict);
@@ -335,6 +346,25 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   score       REAL NOT NULL,
   similarity  REAL,
   shown       INTEGER NOT NULL,
+  -- 1 for an artifact appended under the ranked list by association. It was
+  -- shown, at the rank after the pool, and an open on it is an observation
+  -- like any other; the spread rule reads how often that happens.
+  band        INTEGER NOT NULL DEFAULT 0,
+  -- Where this artifact would have stood, 0-based, had the search not
+  -- explored. NULL on every row of an ordinary search, and on every row but
+  -- one of an exploring search.
+  --
+  -- The one thing the tuner could never learn on its own. A positive
+  -- observation exists only for an artifact the live ranking put on screen, so
+  -- a replay can reward reordering what was already shown and can never
+  -- discover what was hidden: widening the pool can never be shown to help,
+  -- and recency ratchets upward because people click among the recency-boosted
+  -- rows they were given. An exploring search lifts the top unshown candidate
+  -- into the last visible row, which is the only way an artifact the ranking
+  -- hid can ever earn an open. This column is what keeps the evidence honest
+  -- afterwards: the observation is charged to the rank the ranking actually
+  -- chose, not to the row the exploration lent it. See `Core::explores`.
+  explored_from INTEGER,
   PRIMARY KEY (event_id, rank)
 );
 -- `dealable!` asks two things of this table for every unjudged event, and the
@@ -345,6 +375,17 @@ CREATE TABLE IF NOT EXISTS search_candidates (
 -- covering read.
 CREATE INDEX IF NOT EXISTS idx_candidates_similarity
   ON search_candidates(event_id, similarity);
+
+-- What priming read at the moment of one search: the activation of the
+-- candidates, the artifacts this sitting had been in, and the due reminders.
+-- Recorded so the idle pass can replay the search at another `prime_lift` and
+-- see what the searcher would have seen; observations alone do not carry it.
+-- One row per event that primed, none for a door that never primes. JSON,
+-- for the reason `generations.params` is.
+CREATE TABLE IF NOT EXISTS search_context (
+  event_id  TEXT PRIMARY KEY REFERENCES search_events(id) ON DELETE CASCADE,
+  context   TEXT NOT NULL
+);
 
 -- ── Tuning sweeps ────────────────────────────────────────────────────────────
 -- One row per background sweep over the judged pairs: what the running
@@ -487,6 +528,13 @@ CREATE TABLE IF NOT EXISTS gap_coverage (
   -- Similarity of the best new hit. Kept so the page can say how strong a
   -- claim this was; a hit at exactly `weak_below` is a weak one.
   score       REAL NOT NULL,
+  -- How the hole came to be closed: 'distance' for the coverage check's own
+  -- measurement, 'capture' for a capture typed into the box the query was
+  -- typed into. The two are not the same claim and are not collected the same
+  -- way — `trim_gap_coverage` drops a measurement that has fallen under the
+  -- line, and a capture never scored against one. NULL on every row written
+  -- before the column, all of which were measurements.
+  covered_by  TEXT,
   covered_at  INTEGER NOT NULL,
   PRIMARY KEY (kind, gap_id)
 );
@@ -703,16 +751,260 @@ CREATE INDEX IF NOT EXISTS idx_moments_series   ON moments(series_id);
 -- ever wrong invisibly. `meta_json` snapshots what the stub no longer says:
 -- provenance, tags, span, and the judge's one-line reason.
 CREATE TABLE IF NOT EXISTS graveyard (
-  id         TEXT PRIMARY KEY,
-  title      TEXT,
-  text       TEXT NOT NULL,
-  meta_json  TEXT NOT NULL,
-  reaped_at  INTEGER NOT NULL
+  id          TEXT PRIMARY KEY,
+  title       TEXT,
+  text        TEXT NOT NULL,
+  meta_json   TEXT NOT NULL,
+  reaped_at   INTEGER NOT NULL,
+  -- The dense vector the point carried and the model that made it, kept so a
+  -- search given up on can be compared with what was buried without an
+  -- embedding. NULL for rows buried before the vector was kept, and for a
+  -- point the store no longer had.
+  vec         BLOB,
+  embed_model TEXT
 );
+
+-- ── The corpus journal ───────────────────────────────────────────────────────
+-- Every action a corpus job takes on its own: what was hidden, buried or
+-- created, in favour of what, on what evidence, and whether it was later taken
+-- back — by a person, or by the base on what use showed. The record the
+-- ranking side has in `generations`, for the corpus. Rows are never deleted;
+-- retention leaves them alone, as it leaves observations alone.
+CREATE TABLE IF NOT EXISTS corpus_actions (
+  id            TEXT PRIMARY KEY,
+  at            INTEGER NOT NULL,
+  -- dedupe | reap | promote | judgement | sleep
+  -- Also the unit the weekly budget is counted over: see `actions_since`.
+  job           TEXT NOT NULL,
+  -- merge | supersede | discard | reap | promote | moment | condense
+  kind          TEXT NOT NULL,
+  -- The artifact hidden or buried, the window promoted (`corpus_id#idx`), or
+  -- the moment written.
+  subject_id    TEXT NOT NULL,
+  -- For merge and supersede: what now answers for the subject.
+  survivor_id   TEXT,
+  detail        TEXT,
+  evidence_json TEXT NOT NULL,
+  -- The pair's cosine, for the dedupe kinds. A column rather than a JSON
+  -- path, because the review threshold's bands read it in aggregate.
+  pair_score    REAL,
+  undone_at     INTEGER,
+  -- operator | evidence
+  undone_by     TEXT,
+  undone_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_corpus_actions_open
+  ON corpus_actions(kind, at) WHERE undone_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_corpus_actions_subject
+  ON corpus_actions(subject_id, kind);
+CREATE INDEX IF NOT EXISTS idx_corpus_actions_survivor
+  ON corpus_actions(survivor_id) WHERE survivor_id IS NOT NULL;
 
 -- Cursors that have no row to live on. Three keys so far:
 -- `associate.events_after`, `associate.judged_after`, `pursuit.events_after`.
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+-- One named, immutable bundle of everything that decides what is retrieved and
+-- in what order, together with the identity of the models that computed under
+-- it. Exactly one row is `live`.
+--
+-- `params` is JSON rather than a column per knob because the set it holds is
+-- meant to widen, and a column per knob would make every widening a recreated
+-- database — which is the price this schema's doctrine charges for an altered
+-- column, and not one a tuning knob should cost.
+--
+-- The models are named because they are inside the measurement. Change the ask
+-- model and every citation-derived number shifts underneath the evidence; a
+-- generation that does not say who computed under it is a row of numbers
+-- nothing can be compared to.
+CREATE TABLE IF NOT EXISTS generations (
+  id            TEXT PRIMARY KEY,
+  created_at    INTEGER NOT NULL,
+  params        TEXT NOT NULL,
+  embed_recipe  TEXT NOT NULL,
+  chat_model    TEXT NOT NULL,
+  -- NULL for the generation a base starts with.
+  parent_id     TEXT,
+  -- Filled when a generation is proposed by a run rather than by a boot.
+  run_id        TEXT,
+  predicted     REAL,
+  -- `live` | `superseded`.
+  state         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_generations_live ON generations(state, created_at DESC);
+
+-- What use left behind: one statement that a particular artifact mattered, or
+-- did not, for a query somebody really asked, under a named generation.
+--
+-- Never updated except to exclude. An observation is a fact about a moment, and
+-- a moment does not change its mind.
+CREATE TABLE IF NOT EXISTS observations (
+  id            TEXT PRIMARY KEY,
+  created_at    INTEGER NOT NULL,
+  generation_id TEXT NOT NULL REFERENCES generations(id),
+  -- The query as asked, and its vector, so replaying it costs no embedding.
+  query         TEXT NOT NULL,
+  query_vec     BLOB NOT NULL,
+  vec_dim       INTEGER NOT NULL,
+  embed_model   TEXT NOT NULL,
+  -- What it is about. NULL where the observation is about the retrieval as a
+  -- whole rather than one artifact: an unsupported literal says the set failed
+  -- to carry the answer and names nothing inside it.
+  artifact_id   TEXT,
+  -- Where the artifact stood, 1-based, in the list this is about. NULL with a
+  -- NULL artifact.
+  rank          INTEGER,
+  -- `cited` | `opened` | `unsupported` | `gave_up`
+  source        TEXT NOT NULL,
+  -- Positive above zero, negative below. A weight class, not a tuned number.
+  -- That a weak negative may revert and may never adopt is enforced where
+  -- these are read, not here.
+  strength      REAL NOT NULL,
+  -- Set when the artifact this names has gone. An excluded observation is not
+  -- scored as a miss: a miss is a claim about ordering, and this is not one.
+  excluded_at   INTEGER,
+  -- The search event this came from, where it came from one: opened and
+  -- gave-up observations. NULL for a citation, which comes from an ask.
+  event_id      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_observations_generation
+  ON observations(generation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_observations_artifact
+  ON observations(artifact_id) WHERE artifact_id IS NOT NULL;
+-- The give-up sweep asks, of every search it reads, whether that search has
+-- already been written down (`jobs::observe`).
+CREATE INDEX IF NOT EXISTS idx_observations_event
+  ON observations(event_id) WHERE event_id IS NOT NULL;
+-- The anchor check reads observations by the query they were recorded under,
+-- twice per verdict, for up to 500 verdicts a pass (`eval::anchor::agreement`).
+-- Without this that is a thousand full scans of the largest table a busy base
+-- has — on the path that gates every adopt and every revert, holding the idle
+-- pass's claim throughout.
+CREATE INDEX IF NOT EXISTS idx_observations_query ON observations(query);
+
+-- ── Rehearsal ────────────────────────────────────────────────────────────────
+-- A probe: a question the base can ask itself about one artifact, with the
+-- vector it was embedded with, so the replay costs no inference. `capture`
+-- probes are the text of a later capture that landed on this artifact at
+-- integration — worded by a person who was not looking at the answer. `cue`
+-- probes are the questions a model-written artifact was written for. Nothing
+-- is minted from an artifact's own title or body.
+CREATE TABLE IF NOT EXISTS rehearsals (
+  id           TEXT PRIMARY KEY,
+  created_at   INTEGER NOT NULL,
+  -- capture | cue
+  class        TEXT NOT NULL,
+  query        TEXT NOT NULL,
+  query_vec    BLOB NOT NULL,
+  vec_dim      INTEGER NOT NULL,
+  embed_model  TEXT NOT NULL,
+  artifact_id  TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- capture: the artifact whose text is the query. NULL for a cue.
+  source_id    TEXT,
+  -- Set when the owner leaves results for good or the probe's model is no
+  -- longer the live embedder. Not replayed, not counted, never deleted.
+  retired_at   INTEGER
+);
+-- Once per *live* probe, not once for ever. Without the partial clause a
+-- retired row went on blocking its own replacement: `sleep::rehearse` retires
+-- every probe whose `embed_model` is no longer the live embedder's, and the
+-- fresh row minted at the new model — by `probe::run` after the re-embed, or
+-- by `rehearse` itself — was silently ignored by `INSERT OR IGNORE`. Change
+-- the embedder and that artifact had no probes again, ever; on a base with no
+-- human verdicts the rehearsal anchor then answered `no_evidence` for good,
+-- and the anchor is what refuses a candidate and reverts a generation.
+--
+-- The old name is dropped rather than reused: `CREATE ... IF NOT EXISTS` will
+-- not replace an index that is already there, so a base that has booted before
+-- would have kept the total one. The drop is a no-op on every boot after the
+-- first.
+DROP INDEX IF EXISTS idx_rehearsals_once;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rehearsals_live
+  ON rehearsals(artifact_id, class, query) WHERE retired_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_rehearsals_lap ON rehearsals(created_at, id) WHERE retired_at IS NULL;
+
+-- ── Integration ──────────────────────────────────────────────────────────────
+-- What the base found when a new artifact was run against the rest of it,
+-- once, when it arrived. The tag is surprise at encoding: novel (nothing near),
+-- known (something near that agrees), conflict (something near enough to be
+-- the same statement, carrying different values). Written once; a re-embed
+-- does not re-tag, because what the base knew when the artifact came is the
+-- meaning of the word.
+CREATE TABLE IF NOT EXISTS integrations (
+  artifact_id   TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+  at            INTEGER NOT NULL,
+  -- novel | known | conflict
+  tag           TEXT NOT NULL,
+  nearest_id    TEXT,
+  nearest_score REAL,
+  -- For a conflict: the fact tokens each side carries that the other does not.
+  detail        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_integrations_tag ON integrations(tag);
+
+-- One replay of one probe under one generation: where the owner landed, and
+-- who stood above it. Expired on `feedback.retain_days` with the observations.
+CREATE TABLE IF NOT EXISTS rehearsal_results (
+  id            TEXT PRIMARY KEY,
+  rehearsal_id  TEXT NOT NULL REFERENCES rehearsals(id) ON DELETE CASCADE,
+  generation_id TEXT NOT NULL REFERENCES generations(id),
+  at            INTEGER NOT NULL,
+  -- 1-based, like observations.rank; NULL past LIMIT.
+  rank          INTEGER,
+  -- JSON list of artifact ids that stood above the owner, in order.
+  outranked_by  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rehearsal_results_probe ON rehearsal_results(rehearsal_id, at DESC);
+CREATE INDEX IF NOT EXISTS idx_rehearsal_results_generation ON rehearsal_results(generation_id, at DESC);
+
+-- ── Sleep ────────────────────────────────────────────────────────────────────
+-- One row per sleep, whatever it did: the journal a person reads in the
+-- morning. Flat counts, so `jobs::did_work` reads them; ids where a person
+-- can follow one to its undo.
+CREATE TABLE IF NOT EXISTS sleep_runs (
+  id             TEXT PRIMARY KEY,
+  started        INTEGER NOT NULL,
+  ended          INTEGER NOT NULL,
+  -- Why it stopped: finished | activity | suspended | no_evidence | budget
+  stopped        TEXT NOT NULL,
+  generation_id  TEXT NOT NULL,
+  integrated     INTEGER NOT NULL DEFAULT 0,
+  novel          INTEGER NOT NULL DEFAULT 0,
+  known          INTEGER NOT NULL DEFAULT 0,
+  conflicts      INTEGER NOT NULL DEFAULT 0,
+  rehearsed      INTEGER NOT NULL DEFAULT 0,
+  found          INTEGER NOT NULL DEFAULT 0,
+  adopted        TEXT,
+  reverted       TEXT,
+  refused        TEXT,
+  undone         INTEGER NOT NULL DEFAULT 0,
+  restored       INTEGER NOT NULL DEFAULT 0,
+  interference   INTEGER NOT NULL DEFAULT 0,
+  condensed      INTEGER NOT NULL DEFAULT 0,
+  budget_used    INTEGER NOT NULL DEFAULT 0,
+  budget         INTEGER NOT NULL DEFAULT 0,
+  -- JSON: the corpus_actions ids and artifact_pairs ids this pass wrote.
+  detail         TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_sleep_runs_started ON sleep_runs(started DESC);
+
+-- ── Versions ─────────────────────────────────────────────────────────────────
+-- The versions a condensation retired. The live text stays in `artifacts`;
+-- every earlier one is here, readable in place and one call from live. The
+-- row is written in the same transaction as the text it retires and the
+-- journal row that says so: nothing may read a condensed artifact with no
+-- record of what it was.
+CREATE TABLE IF NOT EXISTS artifact_versions (
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  n           INTEGER NOT NULL,
+  text        TEXT NOT NULL,
+  title       TEXT,
+  caveats     TEXT NOT NULL DEFAULT '[]',
+  created_at  INTEGER NOT NULL,
+  -- The corpus_actions row that retired this version.
+  action_id   TEXT NOT NULL,
+  PRIMARY KEY (artifact_id, n)
 );

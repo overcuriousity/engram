@@ -23,7 +23,7 @@
 .btn-ghost { background: transparent; border-color: transparent; color: var(--color-fg-secondary); }
 .btn-ghost:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
 .btn-danger { background: var(--color-danger-dim); color: var(--color-danger); border-color: var(--color-danger); }
-.btn-danger:hover { background: var(--color-danger); color: #fff; }
+.btn-danger:hover { background: var(--color-danger); color: var(--color-bg-base); }
 .btn-sm { height: 32px; padding: 0 0.75rem; font-size: var(--text-xs); }
 
 /* Icon-only actions: verify, deprecate, delete.
@@ -49,8 +49,15 @@
 }
 .btn-icon:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
 .btn-icon svg { width: 16px; height: 16px; display: block; }
+/* Red at rest, not only under the pointer. In the artifact's action bar this
+   sits beside `Still accurate` and `Hide from results` in the same square
+   shape, and the only thing that told the irreversible one apart was a hover
+   state — which a phone does not have. The fill still waits for the hover; the
+   colour does not. */
+.btn-icon-danger { color: var(--color-danger); }
 .btn-icon-danger:hover {
-  background: var(--color-danger); border-color: var(--color-danger); color: #fff;
+  background: var(--color-danger); border-color: var(--color-danger);
+  color: var(--color-bg-base);
 }
 
 .input, .textarea {
@@ -89,6 +96,11 @@
    can carry four of them, and on a phone a non-wrapping row squeezed the title
    to one letter per line rather than pushing the badges under it. */
 .card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem; }
+/* A passage has no title by design, so its head is one badge and nothing else
+   — and at the head's full margin that badge sat alone on a line above the
+   body, which made an untitled card a different shape from a titled one in the
+   same column. The badge keeps its corner; the gap under it goes. */
+.card-head-bare { margin-bottom: 0; }
 .card-title { font-weight: 600; font-size: var(--text-md); }
 /* Only the first meta is pushed to the right edge. Any that wrap below it start
    at the left, where a second right-aligned run would read as a second column. */
@@ -146,7 +158,16 @@ table.grid tr:hover td { background: var(--color-bg-hover); }
 /* A line of guidance under the field it belongs to: smaller than the label it
    follows, and close enough to it to read as part of the same control. */
 .hint { margin: 0.375rem 0 0; font-size: var(--text-sm); line-height: 1.45; }
-.row { display: flex; gap: 0.5rem; align-items: center; }
+/* A term's few-word gloss, beside the term. */
+.gloss { color: var(--color-fg-secondary); font-size: var(--text-xs); font-weight: normal; }
+/* Wrapped, and that is the whole of the rule. Every button in a row is
+   `white-space: nowrap` above, and a flex item's automatic minimum size is its
+   own content — so a row of four labelled controls that did not fit simply ran
+   past the edge of the window and gave the document a horizontal scrollbar.
+   On a desktop that is a scrollbar nobody asked for; in an installed window it
+   is a control you cannot reach, because there is no wider window to open.
+   `gap` sets both axes, so a second line is spaced like the first. */
+.row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .stack { display: flex; flex-direction: column; gap: 0.75rem; }
 .spinner { visibility: hidden; color: var(--color-fg-muted); font-size: var(--text-xs); }
 .htmx-request .spinner, .htmx-request.spinner { visibility: visible; }
@@ -200,8 +221,23 @@ nav.top a.brand .mark { width: 22px; height: 22px; }
 
 /* ── Reading aids: highlighting, clamping, copying ───────────────────────── */
 
-mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; padding: 0 1px; }
-@media (prefers-color-scheme: dark) { mark { background: var(--color-warning-dim); } }
+/* A matched term. `color: inherit` took the muted grey of the snippet around
+   it, and over the tint that came to 4.43:1 — the highlight was making the
+   word it points at harder to read than the words beside it. Primary, so a
+   match is the most legible thing on the row.
+
+   Three states, two selectors, exactly as the palette does it. This was a bare
+   `prefers-color-scheme` media query, which is the one shape the theme toggle
+   cannot override: on a dark-preferring system an explicit *light* choice
+   turned every surface light and left the highlight on its dark tint. */
+mark {
+  background: var(--color-accent-dim); color: var(--color-fg-primary);
+  border-radius: 2px; padding: 0 1px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) mark { background: var(--color-warning-dim); }
+}
+:root[data-theme="dark"] mark { background: var(--color-warning-dim); }
 
 .clampable.is-clamped { max-height: 14rem; overflow: hidden; position: relative; }
 .clampable.is-clamped::after {
@@ -290,3 +326,9 @@ mark { background: var(--color-accent-dim); color: inherit; border-radius: 2px; 
      would put a permanent gradient on the boxes that are too short to scroll,
      which is the one case that has nothing to indicate. */
 }
+
+/* A row whose whole content is a label — a Housekeeping cell, a lineage node,
+   a day's opened list — has nothing to show when the artifact has no name of
+   its own, so it shows how the text opens instead. This is what keeps that
+   from reading as a name: see `ui::RowLabel`. */
+.name-opening { font-weight: 400; color: var(--color-fg-secondary); }
