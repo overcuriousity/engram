@@ -567,6 +567,10 @@ struct Rule {
 enum Until {
     /// `UNTIL=20260901T235959Z`: an instant, as written, in UTC.
     Instant(i64),
+    /// `UNTIL=20260901T235959`: a wall clock carrying no zone at all. RFC 5545
+    /// reads a floating DATE-TIME against the event's own zone, which here is
+    /// the reader's — the same reading `LastDay` gets, one step finer.
+    Local(chrono::NaiveDateTime),
     /// `UNTIL=20260901`: the last calendar day the recurrence may land on,
     /// read in whichever zone the occurrences are resolved in.
     LastDay(NaiveDate),
@@ -667,9 +671,21 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                 // 1 September occurrence is 2026-09-02T01:00Z.
                 //
                 // So the day is kept as a day and compared as one below.
+                // And `20260916T090000` — no `Z`, no offset — names neither:
+                // RFC 5545 calls that floating and reads it against the
+                // event's own zone, so it is the day's reading one step
+                // finer. It is also the spelling the configured model reaches
+                // for, the prompt having spent a paragraph asking it for
+                // local wall-clock times without a zone; matching none of the
+                // formats, it failed the whole rule and took the only date the
+                // answer carried with it.
                 r.until = Some(
                     chrono::NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%SZ")
                         .map(|dt| Until::Instant(dt.and_utc().timestamp()))
+                        .or_else(|_| {
+                            chrono::NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%S")
+                                .map(Until::Local)
+                        })
                         .or_else(|_| NaiveDate::parse_from_str(v, "%Y%m%d").map(Until::LastDay))
                         .map_err(|_| format!("UNTIL={v} is not a date"))?,
                 );
@@ -851,6 +867,7 @@ pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> 
         // rule; the one after it is not.
         let past = match r.until {
             Some(Until::Instant(u)) => ts > u,
+            Some(Until::Local(u)) => dt > u,
             Some(Until::LastDay(d)) => date > d,
             None => false,
         };
@@ -1672,6 +1689,45 @@ mod tests {
         // The zoned form still means the instant it names, in UTC, for
         // everyone — that is what the `Z` is for.
         assert!(next_after("FREQ=DAILY;UNTIL=20260901T000000Z", at, la).is_none());
+    }
+
+    /// `UNTIL=20260916T090000`: a DATE-TIME with no `Z` and no offset.
+    ///
+    /// RFC 5545 allows it, and it is what a model writes when the prompt has
+    /// spent a paragraph asking it for local wall-clock times without a zone —
+    /// so of the three spellings this is the one the configured model reaches
+    /// for. Neither format matched it, `parse_rule` failed the whole rule, and
+    /// the reminder lost the only date its answer carried. The live base did
+    /// exactly that to a ticket presale page:
+    ///
+    ///   WARN rule outside the subset; the reminder is single
+    ///     rule=FREQ=WEEKLY;BYDAY=MO;UNTIL=20260916T090000
+    ///     error=UNTIL=20260916T090000 is not a date
+    ///
+    /// Floating means the reader's clock, which is the same reading the
+    /// date-only form already gets and for the same reason — so it is compared
+    /// as a wall clock, never turned into a UTC instant at parse time.
+    #[test]
+    fn a_floating_until_is_a_wall_clock_in_the_readers_zone() {
+        let la: Tz = "America/Los_Angeles".parse().unwrap();
+        let at = la
+            .with_ymd_and_hms(2026, 8, 31, 18, 0, 0)
+            .unwrap()
+            .timestamp();
+        let next = next_after("FREQ=DAILY;UNTIL=20260901T235959", at, la)
+            .expect("a floating UNTIL is not a rule outside the subset");
+        assert_eq!(
+            la.timestamp_opt(next, 0)
+                .unwrap()
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            "2026-09-01 18:00"
+        );
+        // And it ends on its own wall clock: the 2nd at 18:00 is past
+        // 23:59:59 on the 1st, in the reader's zone and in no other.
+        assert!(next_after("FREQ=DAILY;UNTIL=20260901T235959", next, la).is_none());
+        // An occurrence earlier in the day than the named time still stands.
+        assert!(next_after("FREQ=DAILY;UNTIL=20260901T235959", at, la).is_some());
     }
 
     #[test]

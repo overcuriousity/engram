@@ -102,14 +102,67 @@ pub fn cover_line(core: &Core) -> f32 {
 /// Every failure here is a warning and nothing more. A capture that is stored
 /// is stored; a coverage check that could not run is a line on the capture page
 /// that does not appear.
-/// Whether this gap is the search a capture was typed from.
-///
-/// Both readings of a search row count. `unmatched` is a search with nothing
-/// near it and `search` is one somebody judged a hole, and one row is only ever
-/// one of the two at a time — but which one it is can change under a capture
-/// that is still settling, and the link is about the row.
-fn is_typed_from(g: &crate::store::gaps::GapVec, event_id: &str) -> bool {
-    g.gap.id == event_id && matches!(g.gap.kind, GapKind::Search | GapKind::Unmatched)
+/// What the box's link reaches: the search a capture was typed from, and the
+/// pursuit that same typing was clustered into.
+struct TypedFrom {
+    /// The search row itself. Both readings of it count: `unmatched` is a
+    /// search with nothing near it and `search` is one somebody judged a hole,
+    /// and one row is only ever one of the two at a time — but which one it is
+    /// can change under a capture that is still settling, and the link is
+    /// about the row.
+    event: Option<String>,
+    /// The open pursuit gaps whose cluster included that search.
+    ///
+    /// Resolved here rather than matched on the gap, because a pursuit is
+    /// keyed on its cluster and carries no event ids — see
+    /// `Store::pursuit_gaps_of_query`, which is the only join there is.
+    ///
+    /// Without this the link stopped at the search row while the sweep had
+    /// already made a second gap out of the same keystrokes, and that one
+    /// nothing closed. It is the wider hole of the two: `unmatched` demands a
+    /// best similarity under `weak_below` and a query of three characters or
+    /// more, and `pursuit_gaps_from!` asks for neither — so a paste the
+    /// measurement says is emphatically *not* a hole is a pursuit gap anyway,
+    /// shown whole on the capture page. The live base's list was led by four
+    /// of them, and the netcat one had scored 0.799 against a `weak_below` of
+    /// 0.35.
+    pursuits: Vec<String>,
+}
+
+impl TypedFrom {
+    async fn of(core: &Core, event: Option<String>) -> Result<Self> {
+        let Some(event) = event else {
+            return Ok(Self {
+                event: None,
+                pursuits: vec![],
+            });
+        };
+        // A search retention has taken away leaves the capture with nothing to
+        // reach through, which is a capture and not a failure.
+        let pursuits = match core.store.search_query(&event).await? {
+            Some(q) => {
+                core.store
+                    .pursuit_gaps_of_query(core.embedder.model(), &q)
+                    .await?
+            }
+            None => vec![],
+        };
+        Ok(Self {
+            event: Some(event),
+            pursuits,
+        })
+    }
+
+    /// Whether this gap is one the capture's own typing produced.
+    fn matches(&self, g: &crate::store::gaps::GapVec) -> bool {
+        match g.gap.kind {
+            GapKind::Search | GapKind::Unmatched => {
+                self.event.as_deref() == Some(g.gap.id.as_str())
+            }
+            GapKind::Pursuit => self.pursuits.contains(&g.gap.id),
+            _ => false,
+        }
+    }
 }
 
 pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
@@ -148,16 +201,17 @@ pub async fn cover_answering(
     if open.gaps.is_empty() {
         return Ok(0);
     }
+    let typed_from = TypedFrom::of(core, typed_from).await?;
     // Moved to the front before the cap bites. Every other gap the cap leaves
     // out is simply not checked by this capture, which is the accepted cost of
-    // the ceiling — but this one is the reason the capture exists, and nothing
-    // comes back for it: `cover` runs once, from `settle_corpus`.
-    if let Some(at) = typed_from
-        .as_deref()
-        .and_then(|ev| open.gaps.iter().position(|g| is_typed_from(g, ev)))
-    {
-        open.gaps.swap(0, at);
-    }
+    // the ceiling — but these are the reason the capture exists, and nothing
+    // comes back for them: `cover` runs once, from `settle_corpus`.
+    //
+    // All of them, not the first found: the link now names a search row *and*
+    // the pursuit its keystrokes were clustered into, and lifting one of the
+    // two left the other to the ceiling. Stable, so everything else keeps the
+    // order `open_gaps` sorted it into.
+    open.gaps.sort_by_key(|g| !typed_from.matches(g));
     if open.gaps.len() > COVER_MAX_GAPS {
         tracing::debug!(
             corpus_id,
@@ -223,7 +277,7 @@ pub async fn cover_answering(
     }
     let mut closed = 0;
     for (g, hit) in open.gaps.iter().zip(best) {
-        let typed = typed_from.as_deref().is_some_and(|ev| is_typed_from(g, ev));
+        let typed = typed_from.matches(g);
         // Something of this capture's to point the coverage row at. Even the
         // linked gap needs one — `gap_coverage` names the artifact that
         // answered, and a capture whose artifacts are not in the vector store
@@ -564,6 +618,69 @@ mod tests {
         assert_eq!(
             covered[0].text,
             "Erinnerung Termin Foto Dienstausweis Mittwoch 0900 Zimmer A323"
+        );
+    }
+
+    /// And the pursuit that same typing became.
+    ///
+    /// The link closed the search row and stopped there, because
+    /// `is_typed_from` named two kinds and the sweep had meanwhile clustered
+    /// those very keystrokes into a pursuit. Nobody opened a result — nobody
+    /// was searching — so `unsatisfied` read `engagement.is_empty()` and
+    /// closed it "nothing engaged", and `pursuit_gaps_from!` admits any
+    /// unsatisfied pursuit carrying a vector. The live base's capture page was
+    /// led by four of these: a netcat answer, an ice-cream shop's opening
+    /// hours, a ticket presale page and a shopping reminder, each shown whole
+    /// as a hole in the base.
+    ///
+    /// The lead here is a half-typed prefix and the finished sentence is the
+    /// second member, which is the shape the coalescer actually leaves behind:
+    /// matching the pursuit's leading query alone would miss it.
+    #[tokio::test]
+    async fn a_capture_closes_the_pursuit_its_own_typing_became() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let q = "Netcat can serve a file to one client, then exits";
+        let id = unmatched_search(&core, q, v.clone()).await;
+        let pid = core
+            .store
+            .insert_pursuit(
+                1,
+                &["Netcat can serve".into(), q.into()],
+                &[],
+                Some((v.as_slice(), core.embedder.model())),
+            )
+            .await
+            .unwrap();
+        core.store
+            .close_pursuit(&pid, "unsatisfied", "nothing engaged", 1)
+            .await
+            .unwrap();
+        // Out of reach of the measurement, so the link is the only thing that
+        // could close either row.
+        core.set_weak_below(1.0);
+
+        let corpus = captured_from(&core, q, &id).await;
+
+        let open = core
+            .store
+            .open_gaps(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap();
+        assert!(
+            open.gaps.iter().all(|g| g.gap.id != pid),
+            "the paste is still on the capture page as a hole in the base: {:?}",
+            open.gaps.iter().map(|g| &g.gap).collect::<Vec<_>>()
+        );
+        assert!(
+            core.store
+                .gaps_covered_by(&corpus)
+                .await
+                .unwrap()
+                .iter()
+                .any(|g| g.id == pid),
+            "the capture cannot say it answered the pursuit"
         );
     }
 

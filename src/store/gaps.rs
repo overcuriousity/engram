@@ -393,6 +393,54 @@ fn pursuit_text(queries_json: &str) -> String {
 pub const CALIBRATION_SAMPLE: i64 = 200;
 
 impl Store {
+    /// The open pursuit gaps that clustered this query.
+    ///
+    /// The join a capture needs to reach its own pursuit, and the only one
+    /// there is: a pursuit is keyed on its cluster, not on the events in it —
+    /// `interaction_events` says outright that the clustering decides what
+    /// belongs together and nothing stores a pursuit id — so what is on the
+    /// row is `queries`, the member events' query text as `need_of` collected
+    /// it. Matching on that text is therefore matching the pursuit's own
+    /// record of what was typed, not a guess about it, and
+    /// `normalize_query` is the comparison the clusterer already made when it
+    /// deduplicated those very strings.
+    ///
+    /// Every query, never the leading one alone: a typing burst that outruns
+    /// `feedback.coalesce_secs` leaves the half-typed prefix leading and the
+    /// finished sentence behind it, and the capture is made from the finished
+    /// sentence. The live base's exam-notes pursuit had exactly that shape.
+    ///
+    /// Held to the same rows `pursuit_gaps_sql!` would show and to the same
+    /// cap, so a pursuit this cannot name is one the capture page was never
+    /// going to draw.
+    pub async fn pursuit_gaps_of_query(
+        &self,
+        embed_model: &str,
+        query: &str,
+    ) -> Result<Vec<String>> {
+        let want = crate::store::links::normalize_query(query);
+        if want.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut out = vec![];
+        for r in sqlx::query(pursuit_gaps_sql!(""))
+            .bind(embed_model)
+            .bind(MAX_OPEN_GAPS)
+            .fetch_all(&self.pool)
+            .await?
+        {
+            let queries: Vec<String> =
+                serde_json::from_str(&r.get::<String, _>("queries")).unwrap_or_default();
+            if queries
+                .iter()
+                .any(|q| crate::store::links::normalize_query(q) == want)
+            {
+                out.push(r.get("id"));
+            }
+        }
+        Ok(out)
+    }
+
     /// Every open gap with a vector under `embed_model`, newest first, up to
     /// `MAX_OPEN_GAPS` of each kind. A vector under another model is not
     /// comparable and is left out; an empty one (the cache had evicted it)

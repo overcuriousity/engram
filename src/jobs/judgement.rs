@@ -205,7 +205,35 @@ pub async fn apply(
                 core.store.delete_read_due(anchor_id).await?;
                 return Ok(());
             }
-            let at = j.when.as_deref().and_then(|w| parse_local(w, tz));
+            // A reminder is for future-self, so an instant that has already
+            // passed is not one — whichever of the two doors below produced
+            // it. Measured against the clock rather than against the capture,
+            // because the value this exists for is the *prompt's* clock: the
+            // JUDGE block states `Current local time` so that "morgen um 9"
+            // has something to resolve against, and a model with nothing else
+            // to say hands that line straight back as `when`. The block is
+            // built when synthesis runs, which is after the capture was
+            // written, so an echo sits *after* `src.created_at` whenever the
+            // job starts a minute or more behind the paste and a comparison
+            // against the capture would wave it through.
+            //
+            // The live base filed two of these. A shopping note put its 18:00
+            // in `events` and the prompt's clock in `when`; a ticket page put
+            // both presale dates in `events` after `validate_rule` threw out
+            // its recurrence, and answered `when` with the clock. Each got a
+            // due row at the minute it was read, which the band draws as due
+            // at once and the ladder's last rung pushes immediately — beside
+            // the correct future row, so one note looked like two reminders.
+            //
+            // No arm of its own: an instant that is no instant leaves `at`
+            // unset, and every reading of an undated judgement below already
+            // says what that means.
+            let future = |at: &i64| *at > core.clock.now();
+            let at = j
+                .when
+                .as_deref()
+                .and_then(|w| parse_local(w, tz))
+                .filter(future);
             let valid_rule = j
                 .rule
                 .clone()
@@ -221,11 +249,17 @@ pub async fn apply(
             // the only date the answer had: `when: null` with
             // `FREQ=WEEKLY;BYDAY=FR;COUNT=1` left `at` and `rule` both unset
             // and the reminder was filed away as an ordinary capture.
-            let at = at.or_else(|| {
-                valid_rule
-                    .as_deref()
-                    .and_then(|r| first_occurrence(r, src.created_at, tz))
-            });
+            // Held to the same line: a rule anchored at an old capture can
+            // yield an occurrence that is itself behind us, and a date the
+            // rule carries is no better a reminder for having been computed
+            // than for having been stated.
+            let at = at
+                .or_else(|| {
+                    valid_rule
+                        .as_deref()
+                        .and_then(|r| first_occurrence(r, src.created_at, tz))
+                })
+                .filter(future);
             let rule = valid_rule
                 // A rule that yields one occurrence is not a repetition, it is
                 // the date `when` already carries. Asked to judge "Freitag
@@ -898,6 +932,46 @@ mod tests {
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].subject_id, rows[0].moment.id);
         assert_eq!(journal[0].detail.as_deref(), Some("due"));
+    }
+
+    /// The JUDGE block's own clock, handed straight back as `when`.
+    ///
+    /// `synthesis_prompt` states `Current local time` so that "morgen um 9"
+    /// can be resolved against something, and a model that has nothing else
+    /// to say answers with that line. On the live base it did so twice: a
+    /// shopping note whose 18:00 went to `events` and whose `when` was the
+    /// prompt's clock, and a ticket page whose presale dates went to `events`
+    /// after its recurrence rule was thrown out. Both filed a due row at the
+    /// minute the reading was made, which the band draws as due at once and
+    /// the ladder's last rung pushes immediately — beside the correct future
+    /// row, which is what made it look like two reminders for one note.
+    ///
+    /// An instant that has already passed is not a date a note names for
+    /// future-self, whatever produced it, so it is no date at all and the
+    /// arms below decide what an undated reading means.
+    #[tokio::test]
+    async fn a_judged_reminder_already_in_the_past_is_not_a_date() {
+        let mut core = test_core().await;
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2020-01-01T09:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        });
+        core.ingest(
+            "erinnere mich, dass ich um 18 Uhr einkaufen gehen muss.",
+            "web",
+            None,
+        )
+        .await
+        .unwrap();
+        drain(&core).await;
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert!(
+            rows.is_empty(),
+            "a reading whose only date has passed leaves the note a capture: {rows:?}"
+        );
     }
 
     #[tokio::test]

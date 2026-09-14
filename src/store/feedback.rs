@@ -1204,6 +1204,21 @@ impl Store {
         .collect())
     }
 
+    /// The words one recorded search was made of, where the row still exists.
+    ///
+    /// `None` rather than an error for a row retention has since taken away: a
+    /// capture naming a search that is gone is a capture, and the caller —
+    /// `gaps::cover_answering`, reaching from a capture to the pursuit its own
+    /// typing became — has nothing to do about it either way.
+    pub async fn search_query(&self, id: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT query FROM search_events WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
     /// Whether anybody has searched or asked since `since`. What tells an idle
     /// pass that the quiet it started in has ended.
     pub async fn activity_since(&self, since: i64) -> Result<bool> {
