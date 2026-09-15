@@ -393,7 +393,13 @@ async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| Error::Internal(e.to_string()))?;
-    Ok(match crate::jobs::remind::push(&http, &target, "engram", "A test from Settings.").await {
+    let msg = crate::jobs::remind::Message::notice(
+        "engram",
+        "A test from Settings.",
+        tenant.core.clock.now(),
+    );
+    let sender = crate::jobs::remind::Sender::load(&tenant.core).await?;
+    Ok(match crate::jobs::remind::push(&http, &target, &msg, &sender).await {
         Ok(()) => axum::response::Html("<p class=\"muted\">Sent.</p>".to_string()),
         // The transport detail goes to the server log, never the page: this
         // is a server-side POST to whatever URL the user saved, and in a

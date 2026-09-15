@@ -3,6 +3,7 @@
 
 use crate::core::Core;
 use crate::error::Result;
+use crate::jobs::webpush::{Kind, Payload, PayloadMoment, Vapid, WebPushKeys};
 
 /// The one Remind row per tenant.
 pub const REMIND_TARGET: &str = "due";
@@ -95,12 +96,24 @@ pub fn next_lead_at(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    Gotify { url: String, token: String },
-    UnifiedPush { endpoint: String },
+    Gotify {
+        url: String,
+        token: String,
+    },
+    /// `keys` is what a UnifiedPush registration hands back beside its
+    /// endpoint, and what makes the push RFC 8291 ciphertext the push service
+    /// cannot read. `None` is a row from before Web Push — an endpoint typed
+    /// into Settings by hand — and it keeps receiving plaintext, because the
+    /// day this shipped was not the day anyone's reminders stopped.
+    UnifiedPush {
+        endpoint: String,
+        keys: Option<WebPushKeys>,
+    },
 }
 
 /// The channels in a user's `notify` JSON. A Gotify entry needs both its url
-/// and its token; a UnifiedPush entry is its endpoint.
+/// and its token; a UnifiedPush entry is its endpoint, with its keys where
+/// both were registered.
 pub fn notify_targets(notify: &serde_json::Value) -> Vec<Target> {
     let mut out = vec![];
     if let (Some(url), Some(token)) = (
@@ -117,19 +130,113 @@ pub fn notify_targets(notify: &serde_json::Value) -> Vec<Target> {
     if let Some(e) = notify["unifiedpush"]["endpoint"].as_str()
         && !e.is_empty()
     {
-        out.push(Target::UnifiedPush { endpoint: e.into() });
+        let keys = match (
+            notify["unifiedpush"]["p256dh"].as_str(),
+            notify["unifiedpush"]["auth"].as_str(),
+        ) {
+            (Some(p256dh), Some(auth)) if !p256dh.is_empty() && !auth.is_empty() => {
+                Some(WebPushKeys {
+                    p256dh: p256dh.into(),
+                    auth: auth.into(),
+                })
+            }
+            _ => None,
+        };
+        out.push(Target::UnifiedPush {
+            endpoint: e.into(),
+            keys,
+        });
     }
     out
 }
 
-/// One POST per channel, no library. Gotify takes a JSON body and the token
-/// in a header; UnifiedPush takes the message as the body.
+/// One message in every shape a channel takes: the title and body Gotify
+/// and a legacy endpoint read, and the payload a keyed endpoint decodes.
+/// Composed once per wake, so no channel can disagree with another about
+/// what was said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub title: String,
+    pub body: String,
+    pub payload: Payload,
+}
+
+impl Message {
+    /// Not on the ladder: a confirmation or a test.
+    pub fn notice(title: &str, body: &str, now: i64) -> Message {
+        Message {
+            title: title.into(),
+            body: body.into(),
+            payload: Payload::new(Kind::Notice {
+                at: now,
+                title: title.into(),
+                body: body.into(),
+            }),
+        }
+    }
+
+    /// The ladder's: `compose` for the prose channels, and for the payload
+    /// the first `BODY_LINES` rows by id with the rest as a count — the same
+    /// cut the body makes, so what the two say agrees.
+    pub fn due(rows: &[crate::store::moments::DueRow], now: i64) -> Message {
+        let (title, body) = compose(rows, now);
+        let moments = rows
+            .iter()
+            .take(BODY_LINES)
+            .map(|row| PayloadMoment {
+                id: row.moment.id.clone(),
+                title: row.title.clone(),
+                at: row.moment.snoozed_until.or(row.moment.at).unwrap_or(now),
+            })
+            .collect();
+        Message {
+            title,
+            body,
+            payload: Payload::new(Kind::Due {
+                at: now,
+                moments,
+                more: rows.len().saturating_sub(BODY_LINES),
+            }),
+        }
+    }
+}
+
+/// Who is speaking, for the keyed channel: the instance's VAPID identity and
+/// the contact it names. Loaded once per wake — the key is a row in the
+/// control database, and reading it per target would read it per target.
+pub struct Sender {
+    pub vapid: Vapid,
+    /// `mailto:` the user's address where the identity provider gave one —
+    /// RFC 8292's `sub`, which a sender SHOULD carry and this one carries
+    /// when it has something true to put there.
+    pub sub: Option<String>,
+}
+
+impl Sender {
+    pub async fn load(core: &Core) -> Result<Sender> {
+        let vapid = Vapid::from_keys(&core.store.control.vapid().await?)?;
+        let sub = core
+            .store
+            .control
+            .user(&core.store.subject)
+            .await?
+            .and_then(|u| u.email)
+            .map(|e| format!("mailto:{e}"));
+        Ok(Sender { vapid, sub })
+    }
+}
+
+/// One POST per channel. Gotify takes a JSON body and the token in a header;
+/// a keyed UnifiedPush endpoint takes the payload as one `aes128gcm` record
+/// under a VAPID signature (`jobs::webpush`); a keyless one takes the title
+/// and body as plaintext, which is what it was registered to receive.
 pub async fn push(
     http: &reqwest::Client,
     target: &Target,
-    title: &str,
-    message: &str,
+    msg: &Message,
+    sender: &Sender,
 ) -> crate::error::Result<()> {
+    let (title, message) = (&msg.title, &msg.body);
     let res = match target {
         Target::Gotify { url, token } => {
             http.post(url)
@@ -138,7 +245,27 @@ pub async fn push(
                 .send()
                 .await
         }
-        Target::UnifiedPush { endpoint } => {
+        Target::UnifiedPush {
+            endpoint,
+            keys: Some(keys),
+        } => {
+            let req = crate::jobs::webpush::request(
+                endpoint,
+                keys,
+                &sender.vapid,
+                sender.sub.as_deref(),
+                &msg.payload.to_bytes(),
+            )?;
+            // Executed rather than rebuilt, so the client's redirect policy
+            // and timeout apply to this branch exactly as to the others.
+            let req = reqwest::Request::try_from(req)
+                .map_err(|e| crate::error::Error::Internal(format!("web push request: {e}")))?;
+            http.execute(req).await
+        }
+        Target::UnifiedPush {
+            endpoint,
+            keys: None,
+        } => {
             http.post(endpoint)
                 .body(format!("{title}\n{message}"))
                 .send()
@@ -217,14 +344,14 @@ pub fn compose(rows: &[crate::store::moments::DueRow], now: i64) -> (String, Str
 /// so the two can never step on each other's delivery state.
 async fn deliver(
     http: &reqwest::Client,
+    sender: &Sender,
     targets: &[Target],
-    title: &str,
-    message: &str,
+    msg: &Message,
 ) -> Result<()> {
     let mut delivered = false;
     let mut failure = None;
     for t in targets {
-        match push(http, t, title, message).await {
+        match push(http, t, msg, sender).await {
             Ok(()) => delivered = true,
             Err(e) => {
                 tracing::warn!(error = %e, "a push channel refused");
@@ -265,7 +392,8 @@ pub async fn notify_now(core: &Core, title: &str, message: &str) -> Result<()> {
     if targets.is_empty() {
         return Ok(());
     }
-    deliver(&http_client()?, &targets, title, message).await
+    let msg = Message::notice(title, message, core.clock.now());
+    deliver(&http_client()?, &Sender::load(core).await?, &targets, &msg).await
 }
 
 /// Post what this wake owes as one message, record every moment it covered,
@@ -286,8 +414,8 @@ pub async fn run(core: &Core) -> Result<()> {
     if owed.is_empty() {
         return Ok(());
     }
-    let (title, message) = compose(&owed, now);
-    deliver(&http_client()?, &targets, &title, &message).await?;
+    let msg = Message::due(&owed, now);
+    deliver(&http_client()?, &Sender::load(core).await?, &targets, &msg).await?;
     let ids: Vec<String> = owed.iter().map(|r| r.moment.id.clone()).collect();
     // The message is already out, so from here the mark is the fragile step
     // and `?` is the wrong thing to do with it. `Error::Store` is retryable —
@@ -494,9 +622,10 @@ mod tests {
             &http,
             &Target::UnifiedPush {
                 endpoint: allowed.uri(),
+                keys: None,
             },
-            "engram",
-            "A test from Settings.",
+            &Message::notice("engram", "A test from Settings.", 0),
+            &Sender::load(&test_core().await).await.unwrap(),
         )
         .await
         .expect_err("a redirect is a misconfigured endpoint, not a hop to take");
@@ -742,6 +871,175 @@ mod tests {
         );
     }
 
+    /// The receiver's half of a registration, made in the test.
+    fn a_receiver() -> (p256::SecretKey, web_push_native::Auth, serde_json::Value) {
+        use base64::Engine;
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let secret = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let auth = web_push_native::Auth::from([9u8; 16]);
+        let keys = serde_json::json!({
+            "p256dh": b64.encode(secret.public_key().to_encoded_point(false).as_bytes()),
+            "auth": b64.encode(auth),
+        });
+        (secret, auth, keys)
+    }
+
+    #[tokio::test]
+    async fn a_keyed_target_receives_an_encrypted_due_payload_it_can_decrypt() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (secret, auth, mut keys) = a_receiver();
+        keys["endpoint"] = format!("{}/up", server.uri()).into();
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = Clock::Fixed(now);
+        let id = due_at(&core, now - 10).await;
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({ "unifiedpush": keys }),
+            )
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        let [req] = &reqs[..] else {
+            panic!("one push: {}", reqs.len())
+        };
+        assert_eq!(req.headers["content-encoding"], "aes128gcm");
+        assert_eq!(req.headers["content-type"], "application/octet-stream");
+        assert!(req.headers.contains_key("ttl"));
+        let vapid = core.store.control.vapid().await.unwrap();
+        let authz = req.headers["authorization"].to_str().unwrap();
+        assert!(authz.starts_with("vapid t="), "{authz}");
+        assert!(authz.ends_with(&format!(", k={}", vapid.public)), "{authz}");
+        assert!(
+            !req.body.windows(7).any(|w| w == b"invoice"),
+            "the push service reads nothing"
+        );
+        let plain = web_push_native::decrypt(req.body.clone(), &secret, &auth).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(payload["v"], 1);
+        assert_eq!(payload["kind"], "due");
+        assert_eq!(payload["at"], now);
+        assert_eq!(payload["moments"][0]["id"], id);
+        assert!(
+            payload["moments"][0]["title"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
+            "the row's label travels: {payload}"
+        );
+        assert_eq!(payload["moments"][0]["at"], now - 10);
+        assert_eq!(payload["more"], 0);
+        assert!(
+            core.store
+                .moment(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .notified_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_keyless_legacy_target_still_gets_plaintext() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_string_contains("Send the invoice"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = Clock::Fixed(now);
+        due_at(&core, now - 10).await;
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {"endpoint": format!("{}/up", server.uri())}}),
+            )
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        let reqs = server.received_requests().await.unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            !reqs[0].headers.contains_key("content-encoding"),
+            "a row registered for plaintext is not handed ciphertext"
+        );
+        assert!(!reqs[0].headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn a_wake_past_one_record_is_refused_on_the_keyed_channel_and_gotify_still_takes_it() {
+        // Titles long enough that eight of them overflow one record. The keyed
+        // channel refuses rather than truncates; the message is still
+        // delivered, because Gotify took it, and the rows are marked.
+        let up = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&up)
+            .await;
+        let gotify = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&gotify)
+            .await;
+        let (_, _, mut keys) = a_receiver();
+        keys["endpoint"] = format!("{}/up", up.uri()).into();
+        let mut core = test_core().await;
+        let now = crate::store::now();
+        core.clock = Clock::Fixed(now);
+        let long = "x".repeat(crate::jobs::webpush::MAX_PLAINTEXT);
+        let rows: Vec<_> = (0..2)
+            .map(|i| crate::store::moments::DueRow {
+                title: long.clone(),
+                ..row(Some(now - 10 - i), None)
+            })
+            .collect();
+        let msg = Message::due(&rows, now);
+        assert!(msg.payload.to_bytes().len() > crate::jobs::webpush::MAX_PLAINTEXT);
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({
+                    "gotify": {"url": format!("{}/message", gotify.uri()), "token": "t"},
+                    "unifiedpush": keys,
+                }),
+            )
+            .await
+            .unwrap();
+        let targets = notify_targets(
+            &core
+                .store
+                .control
+                .notify(&core.store.subject)
+                .await
+                .unwrap(),
+        );
+        let sender = Sender::load(&core).await.unwrap();
+        deliver(&http_client().unwrap(), &sender, &targets, &msg)
+            .await
+            .unwrap();
+        drop(up);
+    }
+
     #[tokio::test]
     async fn nothing_is_armed_for_a_user_with_no_channel() {
         let core = test_core().await;
@@ -936,8 +1234,29 @@ mod tests {
         assert_eq!(
             notify_targets(&serde_json::json!({"unifiedpush": {"endpoint": "e"}})),
             vec![Target::UnifiedPush {
-                endpoint: "e".into()
+                endpoint: "e".into(),
+                keys: None,
             }]
+        );
+        assert_eq!(
+            notify_targets(
+                &serde_json::json!({"unifiedpush": {"endpoint": "e", "p256dh": "p", "auth": "a"}})
+            ),
+            vec![Target::UnifiedPush {
+                endpoint: "e".into(),
+                keys: Some(WebPushKeys {
+                    p256dh: "p".into(),
+                    auth: "a".into(),
+                }),
+            }]
+        );
+        assert_eq!(
+            notify_targets(&serde_json::json!({"unifiedpush": {"endpoint": "e", "p256dh": "p"}})),
+            vec![Target::UnifiedPush {
+                endpoint: "e".into(),
+                keys: None,
+            }],
+            "half a keypair is no keypair"
         );
     }
 }
