@@ -16,7 +16,31 @@ use crate::store::segments::SegmentState;
 /// something different depending on when it ran.
 ///
 /// Arms a job; calls no model. The job queue and `[pacing]` bound the load.
+/// The journal's name for one window: the subject of a promotion, and what
+/// `undo_promotion` stamps.
+pub fn window_key(corpus_id: &str, idx: i64) -> String {
+    format!("{corpus_id}#{idx}")
+}
+
 pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize> {
+    // The week's budget, asked before anything is armed — as dedupe, reap,
+    // consolidate and sleep all ask it.
+    //
+    // Promotion's own week, and only its own. It is counted rather than
+    // exempt — a promotion is the base acting on the corpus unasked, which is
+    // what the cap bounds — but these arrive on ordinary use rather than on a
+    // sweep: `maybe_promote` runs from `mark_artifact_opened` and
+    // `mark_artifacts_cited`. Against one shared count, ten promotions in a
+    // week (a person reading their own base attentively) exhausted the default
+    // cap and stood dedupe, reap and condense down until the window moved,
+    // silently. Per job, it can only ever exhaust its own.
+    //
+    // Nothing is lost when it does: the window is read again once the week
+    // moves, and the passages keep the activation that armed this.
+    if !core.may_act(crate::store::actions::Job::Promote).await? {
+        tracing::info!("a window is over the promotion line, but the week's budget is spent");
+        return Ok(0);
+    }
     let activation = core.store.activation_of(ids).await?;
     let mut armed = 0;
     for id in ids {
@@ -76,6 +100,17 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
                 &crate::jobs::window::unit_target(corpus_id, idx),
                 idx,
             )
+            .await?;
+        core.store
+            .record_action(&crate::store::actions::NewAction {
+                job: crate::store::actions::Job::Promote,
+                kind: crate::store::actions::Kind::Promote,
+                subject_id: window_key(corpus_id, idx),
+                survivor_id: None,
+                detail: None,
+                evidence: serde_json::json!({ "passage": id, "activation": earned }),
+                pair_score: None,
+            })
             .await?;
         tracing::info!(
             artifact_id = %id,
@@ -515,6 +550,19 @@ mod tests {
                 .await
                 .unwrap()
         );
+        // And the journal says which window, on what.
+        let rows = core
+            .store
+            .open_actions(&[crate::store::actions::Kind::Promote], 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].subject_id, window_key(&corpus, 0));
+        assert!(
+            rows[0].evidence_json.contains(&p),
+            "{}",
+            rows[0].evidence_json
+        );
         assert!(
             core.store
                 .live_job(Stage::SegmentWindow, &unit(&corpus))
@@ -587,6 +635,56 @@ mod tests {
         assert_eq!(
             core.store.segment_state(&corpus, 0).await.unwrap(),
             Some(SegmentState::Verbatim)
+        );
+    }
+
+    /// A promotion is the base acting on the corpus unasked, and it is counted
+    /// against the week's budget — so it has to read the budget, which is the
+    /// one thing it never did.
+    ///
+    /// The row it writes is a `Kind::Promote`, counted against `Job::Promote`
+    /// and nothing else. It reads its own week because these arrive on
+    /// ordinary reading rather than on a sweep — ten in a week is a person
+    /// going carefully through their own base — and, before the count was
+    /// split per job, that also stood dedupe, reap, condense and `arm_dedupe`
+    /// down for the rest of the week without a word.
+    #[tokio::test]
+    async fn a_spent_budget_arms_no_promotion() {
+        let (mut core, corpus, p) = earned_with_one_passage().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_week = 0;
+        let now = crate::store::now();
+        core.store
+            .bump_activation(
+                std::slice::from_ref(&p),
+                core.promote.activation_above + 1.0,
+                core.activation.half_life_days,
+                now,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            maybe_promote(&core, std::slice::from_ref(&p), now)
+                .await
+                .unwrap(),
+            0,
+            "a promotion was armed on a budget that is spent"
+        );
+        assert_eq!(
+            core.store.segment_state(&corpus, 0).await.unwrap(),
+            Some(SegmentState::Verbatim),
+            "the window was reset for a promotion nobody could afford"
+        );
+
+        // Below "full" the corpus units are under their own switch and the
+        // budget is not consulted — the same line `dedupe::run` draws.
+        core.evolve.autonomous = crate::config::Autonomy::Ranking;
+        assert_eq!(
+            maybe_promote(&core, std::slice::from_ref(&p), now)
+                .await
+                .unwrap(),
+            1
         );
     }
 
@@ -795,11 +893,8 @@ mod tests {
             ordinal: o,
             text: t.into(),
             corpus_span: Some(sp(a, b)),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let passages = core
             .store
@@ -1107,14 +1202,9 @@ mod tests {
             &corpus,
             0,
             vec![crate::store::artifacts::NewArtifact {
-                ordinal: 0,
                 text: "dup".into(),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
                 segment_idx: Some(0),
-                caveats: vec![],
+                ..Default::default()
             }],
         )
         .await
@@ -1144,18 +1234,7 @@ mod tests {
                 payload: crate::vector::VectorPayload {
                     artifact_id: id.into(),
                     corpus_id: corpus.into(),
-                    text: String::new(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    created_at: 0,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             }])
             .await
@@ -1181,11 +1260,8 @@ mod tests {
                     ordinal: 9,
                     text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
                     corpus_span: Some(sp(3, 4)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1242,11 +1318,8 @@ mod tests {
                     ordinal: 9,
                     text: "an entirely different sentence about nothing here".into(),
                     corpus_span: Some(claimed(3, 4)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1285,11 +1358,8 @@ mod tests {
                     ordinal: 9,
                     text: "A rewrite of the whole note, in the model's own words.".into(),
                     corpus_span: Some(unplaced(1, 6)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1343,11 +1413,8 @@ mod tests {
                     ordinal: 9,
                     text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
                     corpus_span: Some(sp(3, 4)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1390,11 +1457,8 @@ mod tests {
                     ordinal: 9,
                     text: "Die dritte und vierte Zeile, in eigenen Worten.".into(),
                     corpus_span: Some(sp(3, 4)),
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1421,11 +1485,8 @@ mod tests {
             ordinal: o,
             text: t.into(),
             corpus_span: Some(sp(a, b)),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let paraphrase = core
             .store

@@ -198,7 +198,6 @@ body { overflow-x: hidden; }
 }
 .flag b { color: var(--color-warning); }
 
-.crumb { font-size: var(--text-sm); color: var(--color-fg-muted); margin-bottom: 0.75rem; }
 
 
 /* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
@@ -358,16 +357,46 @@ body { overflow-x: hidden; }
    of the way until hover or focus — lives on in `.seen-row` below, which still
    has a dismiss button to place. */
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
-.rail-head { display: flex; gap: 0.5rem; align-items: baseline; }
+/* Wrapped, and the row depends on it. A badge is `white-space: nowrap` and a
+   title is `overflow-wrap: anywhere` — the second of those is what keeps a long
+   name from pushing the column open, and together, in a row that could not
+   wrap, they were a trap: once the badges filled the line the title was
+   squeezed to its own minimum, which `anywhere` makes a single character. It
+   then set one character per line, thirty-odd lines tall, in a box thirteen
+   pixels wide that `.rail` clips — so a result carrying `loose · primed · due`
+   in a rail dragged near its floor rendered as a chip row, four hundred pixels
+   of nothing, and a snippet at the bottom of a card nobody could read.
+   A row gap under the column gap, so a title that drops to its own line sits
+   under the chips rather than a chip's width away from them. */
+.rail-head { display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
+/* A passage has no title by design, so this row's head is a badge and nothing
+   else — and at the head's full height it spent a whole line on one chip
+   before the snippet started, which made an untitled card a different shape
+   from a titled one down the same list. Marked by the template rather than
+   guessed at with `:has()`, because the template is what knows. */
+.rail-head-bare { margin-bottom: -0.125rem; }
 .rail-rank { font-size: var(--text-xs); color: var(--color-fg-muted); }
-.rail-title { font-weight: 600; font-size: var(--text-base); }
+/* `flex-basis: 0`, so the title never decides where the row breaks. Flex wraps
+   on an item's *preferred* width, and a title's preferred width is the whole of
+   it — so with the basis left at `auto` a two-word rank chip and a title that
+   wanted 250px put the chip alone on one line and the title on the next, on
+   every ranked row in the list. At a basis of zero the title asks for nothing
+   and takes what the line has left, which is the behaviour the row had before
+   it could wrap at all.
+   The floor is the other half: it is what still sends the title to a line of
+   its own when the chips have genuinely taken the row, rather than leaving it
+   to be squeezed to the single character `overflow-wrap: anywhere` allows. */
+.rail-title { font-weight: 600; font-size: var(--text-base); flex: 1 1 0; min-width: 7rem; }
 /* A passage with no heading of its own is shown under its note's title. The
-   name is borrowed, not earned, so it is said quietly and marked: a `·` in
-   front of it, and the weight of the surrounding text rather than a title's.
-   Without this the borrowed name rendered identical to a real heading and the
-   distinction lived only in the tooltip, where nobody scanning a list looks. */
-.rail-title-corpus { font-weight: 400; color: var(--color-fg-secondary); }
-.rail-title-corpus::before { content: "· "; color: var(--color-fg-muted); }
+   name is borrowed, not earned, so it is said quietly and marked, and the
+   weight is the surrounding text's rather than a title's. Without this the
+   borrowed name rendered identical to a real heading and the distinction lived
+   only in the tooltip, where nobody scanning a list looks.
+
+   The mark used to be a bare `·`. On the row it read as a separator with its
+   left-hand side missing, and the only thing that said otherwise was that
+   tooltip — which is to say nothing at all on the phone this is mostly read
+   on. A word does the marking now and needs no explaining. */
 /* Two lines at most, and a floor under it: an artifact whose excerpt came back
    empty collapsed to a bare title, so card heights swung between one line and
    four down a list that is read by scanning. */
@@ -432,41 +461,6 @@ body { overflow-x: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .refined-tick { animation: none; }
 }
-
-/* ── The rail before anything is asked ───────────────────────────────────
-   The idle state is designed, not left over: the base introduces itself under
-   the heading "This memory" — one measure line, then the last few captures.
-   Everything here is a step quieter than a result, because none of it is one:
-   the box above is what dominates the idle page, and this recedes the moment
-   a query exists. The figures are mono for the reason Insights' are — they
-   are measurements, and a proportional face makes two of them the same width
-   by accident. */
-.idle-held {
-  margin: 0; font-size: var(--text-sm); color: var(--color-fg-secondary);
-}
-.idle-held .mono { color: var(--color-fg-primary); }
-.idle-recent { display: flex; flex-direction: column; gap: 0.125rem; margin-top: 0.5rem; }
-.idle-recent > .label { margin-bottom: 0.125rem; }
-/* Deliberately not `.rail-item`: the card is the shape of a ranked answer,
-   and a recent capture is not an answer to anything. A quiet row — title
-   left, when right — that lights up only under the pointer. */
-/* No negative side margins, however much the hover box wants to bleed to the
-   rail's edge. The rail scrolls vertically, which computes its horizontal
-   overflow from `visible` to `auto`, so a row six pixels wider than its column
-   gave the rail a real horizontal scroll — a bar across the bottom that moved
-   the whole column sideways and cut the first character off every line in it.
-   The hover box lines up with the text instead, which is where the rest of the
-   rail's content already ends. */
-.idle-row {
-  display: flex; gap: 0.75rem; align-items: baseline; justify-content: space-between;
-  text-decoration: none; color: var(--color-fg-secondary);
-  padding: 0.25rem 0.375rem; border-radius: var(--radius-sm);
-}
-.idle-row:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
-.idle-row-title {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.idle-row-when { flex: none; font-size: var(--text-xs); color: var(--color-fg-muted); }
 
 /* Where the ranked list's relevance falls off. The rows past it are still
    ranked — they placed — but they no longer read as answers. */
@@ -555,16 +549,30 @@ body { overflow-x: hidden; }
 .grid td div > a:hover { text-decoration: underline; }
 
 
-/* ── An artifact's own controls ──────────────────────────────────────────── */
+/* ── The controls for whatever the page is about ─────────────────────────── */
 
-/* Delete is not one of the other two. It sits at the far end so the control
-   that cannot be undone is never flush against two that can.
+/* An artifact's own row, and the corpus page's: the same shape either way — a
+   handful of things you can do to the one thing on the screen, with the one
+   that cannot be undone held apart from the rest.
+
+   Delete is not one of the others. It sits at the far end so the control that
+   cannot be undone is never flush against ones that can.
 
    `form + form`, because a superseded or deprecated artifact renders neither
    verify nor deprecate: delete is then the only form in the row, and pushing
    it away from siblings it does not have just stranded a lone trash button at
-   the far side of an empty row. */
-.actions { display: flex; gap: 0.375rem; align-items: center; margin-bottom: 0.75rem; }
+   the far side of an empty row. A restored corpus is the same case — nothing
+   to re-segment, nothing to re-read, delete and nothing else.
+
+   Wrapped, for the reason `.row` is: the corpus page puts four labelled `.btn`
+   controls in here, and a `.btn` does not break its label, so on a phone the
+   row ran off the side of the window and took the document's width with it. A
+   wrapped delete keeps its auto margin and lands at the right of its own line,
+   which is the same statement one line lower down. */
+.actions {
+  display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center;
+  margin-bottom: 0.75rem;
+}
 /* Anchored to the artifact under a rule rather than floating at the top of a
    wide column. At three-up the lone trash button ended a thousand pixels from
    its siblings, which reads as stranded rather than as caution — the distance
@@ -681,6 +689,7 @@ body { overflow-x: hidden; }
   .regions.reading .rail-title,
   .regions.reading .rail-snippet,
   .regions.reading .rail-why,
+  .regions.reading .rail-where,
   .regions.reading .badge { display: none; }
   .regions.reading .rail-item {
     padding: 0.5rem 0; text-align: center;
@@ -707,10 +716,13 @@ body { overflow-x: hidden; }
 .regions.hide-source .split { grid-template-columns: minmax(0, 1fr); }
 .regions.hide-source .split > :nth-child(2) { display: none; }
 
-/* Why a result arrived, under the snippet that shows what it says. Quieter
-   than the snippet: this explains the row, it is not the row. Gone in reading
-   mode with everything else but the rank. */
-.rail-why { margin: 0.25rem 0 0; font-size: var(--text-xs); color: var(--color-fg-muted); }
+/* Why a result arrived, and — one line further down — where in its source it
+   sits, both under the snippet that shows what it says. Quieter than the
+   snippet: these explain the row, they are not the row. Two names and one
+   rule, because they are two statements, one about the ranking and one about
+   the document, rendered the same way. Gone in reading mode with everything
+   else but the rank. */
+.rail-why, .rail-where { margin: 0.25rem 0 0; font-size: var(--text-xs); color: var(--color-fg-muted); }
 /* Accented rather than muted like `.rail-why` above it: that line explains
    something that already happened to the ordering, this one is an offer. */
 .rail-continues { margin: 0.25rem 0 0; font-size: var(--text-xs); color: var(--color-accent); }
@@ -1046,7 +1058,6 @@ body { overflow-x: hidden; }
 .day-line { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline; margin: 0.25rem 0; }
 .day-text { white-space: pre-wrap; flex: 1 1 100%; }
 .inline { display: inline; }
-.idle-row-when[href]:hover { text-decoration: underline; }
 
 /* ── A file, waiting to be sent ──────────────────────────────────────────── */
 
@@ -1169,6 +1180,15 @@ body { overflow-x: hidden; }
    column rather than as four bands across the page. */
 #idle { max-width: 46rem; }
 
+/* And the box itself, while it is idle. `#idle` above is one measure because
+   short lines under a full-bleed box read as bands rather than as a column —
+   but the box was the widest band of all: at 1440px the workspace opened on a
+   1408px textarea above a 736px column, with 670px of nothing to the right of
+   everything the page had to say. It takes the same measure while there is
+   nothing beside it to line up with, and takes the width back on the first
+   keystroke, when the rail and the pane arrive under it and need it. */
+html:not(.typing) .regions-rail-focus-source .region-bar { max-width: 46rem; }
+
 /* The closing line, and the only place an idle page says what the base holds.
    It replaced a block of counts and a list of five captures in the rail — the
    same five the middle column was already rendering in another shape. */
@@ -1183,6 +1203,18 @@ body { overflow-x: hidden; }
   color: inherit; display: inline-block; max-width: 20rem; vertical-align: bottom;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* What a paste becomes: a term and its gloss, two columns. */
+.teach {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.125rem 0.75rem; margin: 0.75rem 0 0; font-size: var(--text-xs);
+}
+.teach dt { color: var(--color-fg-primary); }
+.teach dd { margin: 0; color: var(--color-fg-secondary); }
+.teach .chip-example { text-align: left; }
+/* The list retires by coming back empty: an out-of-band swap can only replace
+   an element the response carries, so the fragment renders the `<dl>` in every
+   state and fills it in only while the base is young. */
+.teach:empty { display: none; }
 
 /* The chip row is revealed by app.js on the first keystroke. `display: contents`
    so the wrapper adds no box of its own: the label and the chips go on being
@@ -1191,6 +1223,24 @@ body { overflow-x: hidden; }
 .kind-row[hidden] { display: none; }
 
 /* ── The guidance line, and what the box says back ───────────────────────── */
+
+/* The row reads "All · concept · procedure": the first is written into the
+   template and the rest come off the artifacts' own `category`, which is
+   stored lower-case. One capitalised chip beside three that are not is the
+   sort of thing that reads as a bug in the data. Presentation, so nothing is
+   guessed at in Rust and the stored value is untouched. */
+#kind-chips .chip > span { text-transform: capitalize; }
+
+/* The hint is what an idle box says for itself: two example phrasings and a
+   sentence about pasting. It goes with the first keystroke, like the rest of
+   the idle column — the template calls it "the only guidance an idle page
+   carries", and a page with a query typed and ten results under it is not an
+   idle page.
+
+   This rule lived in the phone stylesheet, so only a phone did it. On every
+   other screen "Try 'remind me to send the invoice on friday'" stood above the
+   results for as long as the search did. */
+html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
 
 /* An example reads as a quotation you can press, not as a button. Three
    buttons in a sentence would make the sentence a toolbar. */

@@ -172,8 +172,12 @@
     <div>
       <div class="label pane-label">Artifact</div>
       <div class="card">
-        <div class="card-head">
-          <span class="card-title">{{ d.title }}</span>
+        <div class="card-head{% if d.title.is_empty() %} card-head-bare{% endif %}">
+          {# No heading over a passage or a note: neither has a name of its own
+             — see `Provenance::names_its_own_text` — and the text starts one
+             line below. The element goes with the name, or an empty one takes
+             the head row's gap over a card that has nothing to head. #}
+          {% if !d.title.is_empty() %}<span class="card-title">{{ d.title }}</span>{% endif %}
           <span class="spacer"></span>
           {# The corpus page could edit an artifact and this one could not, on
              the screen whose whole subject is one artifact. Same box, same
@@ -181,7 +185,7 @@
           <button class="btn btn-ghost btn-sm" type="button"
                   onclick="var f=document.getElementById('edit-{{ d.id }}');
                            f.style.display='block';this.style.display='none';
-                           f.querySelector('textarea').focus()">edit</button>
+                           f.querySelector('textarea').focus()">Edit</button>
         </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
         {# Under the text, once it has been read: was it the one? Only where
@@ -209,6 +213,39 @@
              hx-get="/ui/artifacts/{{ next }}?via={{ d.id }}"
              hx-target="closest [data-terms]" hx-swap="outerHTML"
              hx-push-url="true">continues in the next passage →</a></p>
+        {% endif %}
+        {% if let Some(t) = d.tag %}
+        {# What the base found when this arrived: its salience, as a word. #}
+        <p class="muted hint">{{ t }}</p>
+        {% endif %}
+        {% if !d.versions.is_empty() %}
+        {# What this artifact used to say, oldest first. The live text is a
+           condensed one where `condensed` is set, and the button puts the
+           last version back through the same method the base's undo calls. #}
+        <details class="muted">
+          <summary>earlier versions ({{ d.versions.len() }})</summary>
+          <ul class="mono">
+            {% for (n, when, _aid) in d.versions %}<li>version {{ n }} · {{ when }}</li>{% endfor %}
+          </ul>
+          {% if let Some(aid) = d.condensed %}
+          {# The same shape as the four buttons above, and for the reason
+             `ReturnTo` was introduced: this one had no `hx-post` and no `to`,
+             so pressing it from a search result took the whole window to
+             /ui/insights and the results being worked through were gone. #}
+          <form method="post" action="/ui/ops/condensations/{{ aid }}/undo"
+                hx-post="/ui/ops/condensations/{{ aid }}/undo?terms={{ d.terms|urlencode }}"
+                hx-target="closest [data-artifact]" hx-swap="outerHTML">
+            <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
+            <button type="submit" class="quiet-link">Restore the last version</button>
+          </form>
+          {% endif %}
+        </details>
+        {% endif %}
+        {% if !d.probes.is_empty() %}
+        <details class="muted">
+          <summary>what has asked for this ({{ d.probes.len() }})</summary>
+          <ul class="mono">{% for p in d.probes %}<li>{{ p }}</li>{% endfor %}</ul>
+        </details>
         {% endif %}
         {% if !d.caveats.is_empty() %}
         {# Emitted by the same synthesis call that wrote the artifact, from what
@@ -243,7 +280,7 @@
             <button class="btn btn-ghost btn-sm" type="button"
                     onclick="var f=this.closest('form');f.style.display='none';
                              f.parentElement.querySelector('.card-head button').style.display=''">
-              cancel
+              Cancel
             </button>
           </div>
         </form>
@@ -262,7 +299,13 @@
            hx-get="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
            hx-target="closest [data-terms]" hx-swap="outerHTML"
            hx-push-url="true">
+          {# No heading where the neighbour has no name of its own — a passage
+             carries its section's, and the snippet below is the row. The
+             element goes with the name; an empty one opened the row with a
+             blank line the named rows beside it do not have. #}
+          {% if !r.title.is_empty() %}
           <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
+          {% endif %}
           <div class="rail-snippet">{{ r.snippet }}</div>
         </a>
         {% endfor %}
@@ -280,7 +323,9 @@
              hx-get="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
              hx-target="closest [data-terms]" hx-swap="outerHTML"
              hx-push-url="true">
+            {% if !r.title.is_empty() %}
             <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
+            {% endif %}
             {% if let Some(why) = r.why %}<div class="rail-why">{{ why }}</div>{% endif %}
             <div class="rail-snippet">{{ r.snippet }} · {{ r.corpus_title }}</div>
           </a>

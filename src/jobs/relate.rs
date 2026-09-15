@@ -61,6 +61,10 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         .vectors
         .neighbours(artifact_id, core.consolidate.per_point)
         .await?;
+    // The live generation's, not the file's: a base with autonomy on moves
+    // this threshold on what its lowest band earned. Read once, before any
+    // await, so the lock is never held across one.
+    let review_min = core.ranking.read().expect("ranking lock").review_min;
 
     for h in hits {
         // `similarity` and not `score`. `review_min` is a cosine, and `score`
@@ -74,7 +78,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
             );
             continue;
         };
-        if similarity < core.consolidate.review_min {
+        if similarity < review_min {
             continue;
         }
         // Ordinary rather than an error: the vector store can list a point
@@ -430,6 +434,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_review_threshold_is_the_live_generation_s_not_the_file_s() {
+        // A neighbour at cosine 0.86: below the shipped 0.88, above a rung
+        // the base may step down to.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.86, 0.51]),
+            ],
+        )
+        .await;
+        assert_eq!(core.ranking.read().unwrap().review_min, 0.88);
+
+        run(&core, &ids[1]).await.unwrap();
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "below the threshold, nothing is asked"
+        );
+
+        core.ranking.write().unwrap().review_min = 0.84;
+        run(&core, &ids[1]).await.unwrap();
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the lowered rung admits it"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unrelated_neighbour_is_left_entirely_alone() {
         let core = test_core().await;
         let ids = seed(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
@@ -484,14 +526,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: "never embedded".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -514,14 +550,9 @@ mod tests {
             .insert_artifacts_with_provenance(
                 &src.id,
                 &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
                     text: text.to_string(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
                 Provenance::Passage,
             )
@@ -703,25 +734,16 @@ mod tests {
                 &src.id,
                 &[
                     crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: "Spuren sind materielle Veraenderungen an Personen oder Sachen."
                             .into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
                         segment_idx: Some(0),
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
                         text: "Spuren sind materielle Veraenderungen".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
                         segment_idx: Some(1),
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
                 Provenance::Passage,
@@ -869,12 +891,9 @@ mod tests {
         let na = |o: i64, t: &str, seg: i64| crate::store::artifacts::NewArtifact {
             ordinal: o,
             text: t.into(),
-            corpus_span: None,
             title: Some("same heading".into()),
-            category: None,
-            tags: vec![],
             segment_idx: Some(seg),
-            caveats: vec![],
+            ..Default::default()
         };
         // One written row and the verbatim passage beside it, in one window.
         let written = core
@@ -943,12 +962,9 @@ mod tests {
         let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
             ordinal: o,
             text: t.into(),
-            corpus_span: None,
             title: Some("same heading".into()),
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let rows = core
             .store

@@ -10,32 +10,15 @@ use super::{Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
 
-/// The runtime-tunable knobs, as stored. Mirrors
-/// `core::ranking::RankingParams`; separate because what is written to a
-/// database outlives the shape a running program happens to hold it in.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct RunParams {
-    pub recency_weight: f32,
-    pub per_source_cap: Option<usize>,
-}
-
-impl From<crate::core::ranking::RankingParams> for RunParams {
-    fn from(p: crate::core::ranking::RankingParams) -> Self {
-        Self {
-            recency_weight: p.recency_weight,
-            per_source_cap: p.per_source_cap,
-        }
-    }
-}
-
-impl From<RunParams> for crate::core::ranking::RankingParams {
-    fn from(p: RunParams) -> Self {
-        Self {
-            recency_weight: p.recency_weight,
-            per_source_cap: p.per_source_cap,
-        }
-    }
-}
+/// The knobs a sweep ran under, as stored.
+///
+/// The same eight values a generation holds, serialised the same way, so it is
+/// the same type and not a copy of it: a knob added to one is a knob the other
+/// has to store or the two records stop being comparable, which is the whole
+/// point of writing them down beside a recall figure. Named here because a
+/// sweep is what this module is about, and `run.base_params` reads better than
+/// `run.base_generation_params` at every call site.
+pub type RunParams = super::generations::GenerationParams;
 
 /// One pair that moved, named by the leading characters of its own query.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -132,6 +115,28 @@ impl Store {
             .filter(|r| r.recommended && r.applied_at.is_none()))
     }
 
+    /// Take back a run's recommendation, leaving the run itself alone.
+    ///
+    /// The idle pass writes the run before its last gate: the ladder picks a
+    /// candidate, the run is journalled with the numbers that picked it, and
+    /// only then is the candidate replayed on the base's own probes. A
+    /// candidate refused there is never applied, so nothing stamps
+    /// `applied_at` — and `open_recommendation` would go on offering the
+    /// refused parameters under an Apply button for as long as that run stayed
+    /// the latest. Pressing it wrote settings the base had already measured and
+    /// rejected, and `tried_candidates` then made sure they were never
+    /// re-measured.
+    ///
+    /// The row stays, with its pairs, its diff and its numbers: the sweep
+    /// happened and the journal should say so. Only the offer is withdrawn.
+    pub async fn withdraw_eval_run(&self, id: &str) -> Result<bool> {
+        let res = sqlx::query("UPDATE eval_runs SET recommended = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     pub async fn eval_run(&self, id: &str) -> Result<Option<EvalRun>> {
         let row = sqlx::query("SELECT * FROM eval_runs WHERE id = ?")
             .bind(id)
@@ -202,15 +207,24 @@ fn hydrate(row: sqlx::sqlite::SqliteRow) -> Result<EvalRun> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_run_written_before_the_retrieval_knobs_still_reads() {
+        let p: RunParams = parse(r#"{"recency_weight":0.05,"per_source_cap":3}"#).unwrap();
+        assert_eq!(p.candidate_multiplier, 3);
+        assert_eq!(p.recency_half_life_days, 180);
+    }
+
     fn sample(recommended: bool) -> NewEvalRun {
         let base = RunParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
+            ..Default::default()
         };
         let best = if recommended {
             RunParams {
                 recency_weight: 0.1,
                 per_source_cap: None,
+                ..Default::default()
             }
         } else {
             base

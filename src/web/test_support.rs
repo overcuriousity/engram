@@ -2,8 +2,9 @@
 
 use crate::core::Core;
 use axum::body::Body;
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
 use axum::response::Response;
+use tower::ServiceExt as _;
 
 /// The real router over `core`, in local auth mode with no password
 /// configured (`local`); pass `Some(cfg)` to test the login form itself.
@@ -232,4 +233,635 @@ pub fn a_png() -> Vec<u8> {
         .write_to(&mut out, image::ImageFormat::Png)
         .unwrap();
     out.into_inner()
+}
+
+// ── Nothing runs off the side of the window ─────────────────────────────
+//
+// One property, over every page there is, and it cannot be asserted about
+// markup: a row of controls that does not fit renders perfectly, validates
+// perfectly, and makes the document wider than the window. The page then
+// slides sideways under the thumb — a scrollbar nobody asked for in a
+// browser, and in an installed window a control that cannot be reached at
+// all, because there is no wider window to open. So the measurement has to
+// happen where the layout does, which is a browser.
+//
+// `#[ignore]`, for the reason `tests/browser_ask.rs` is: this needs node
+// and a headless Chrome, and `cargo test` may assume neither. The tests that
+// use these live where the thing they measure does — `web::tests` for every
+// page at once, `web::ui::tests` for one rail row.
+
+/// The headless Chrome to drive, or `None` when the machine has none.
+///
+/// A second copy of `tests/browser_ask.rs`'s locator, and deliberately: the
+/// integration crate there sees only this crate's public API, and this test
+/// needs `test_support`, which is `cfg(test)`. Neither can call the other's.
+pub(crate) fn chrome() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("ENGRAM_CHROME") {
+        return Some(std::path::PathBuf::from(p));
+    }
+    let home = std::env::var("HOME").ok()?;
+    let cache = std::path::PathBuf::from(home).join(".cache/ms-playwright");
+    let mut found: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(&cache)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let bin = e
+                .path()
+                .join("chrome-headless-shell-linux64/chrome-headless-shell");
+            bin.exists()
+                .then(|| (playwright_build(&e.file_name()), bin))
+        })
+        .collect();
+    // Newest install wins, so an old download is not preferred forever. By the
+    // build number and not by the name: sorting the paths themselves is
+    // lexicographic, which puts `chromium_headless_shell-999` after `-1148`
+    // and pins the oldest install forever — exactly what this line is here to
+    // prevent.
+    found.sort();
+    found.pop().map(|(_, p)| p)
+}
+
+/// The build number Playwright ends a download directory with —
+/// `chromium_headless_shell-1148` is build 1148 — or zero where the name ends
+/// in anything else, which sorts such a directory below every numbered one
+/// rather than letting it win on a comparison nobody can predict.
+fn playwright_build(dir: &std::ffi::OsStr) -> u64 {
+    dir.to_string_lossy()
+        .rsplit('-')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Every full page a signed-in person can open, with something in the base
+/// for each of them to have to render. `/ui/ops` is not one of them any
+/// more — it redirects to Insights, which is already here.
+///
+/// A PDF, because the corpus page's control row is at its longest there —
+/// re-segment, the original, re-extract and delete — and that row is what
+/// sent this whole page sideways.
+pub(crate) async fn every_page() -> Vec<(String, String)> {
+    use crate::store::corpora::{CorpusStatus, Reading};
+
+    let (app, cookie, core) = crate::web::test_support::app_session_and_core().await;
+    let doc = core
+        .store
+        .insert_attached_corpus(
+            "h",
+            crate::core::ingest::ORIGIN_PDF,
+            Some("Betriebssysteme und digitale Spuren — NTFS, Teil 1"),
+            None,
+            &serde_json::json!({"file": {"name": "FBUDS-03-NTFS-1.pdf"}}),
+            Reading::EXTRACTION,
+            &crate::store::attachments::NewFile {
+                kind: "pdf",
+                mime: "application/pdf",
+                filename: Some("FBUDS-03-NTFS-1.pdf"),
+                bytes: b"%PDF-1.4",
+                preview: b"",
+                width: None,
+                height: None,
+            },
+        )
+        .await
+        .unwrap()
+        .into_corpus();
+    core.store
+        .set_read_text(
+            &doc.id,
+            "NTFS is the New Technology File System.\n\n                 It shipped with Windows NT 3.1 and has been the default since.\n\n                 Every file on the volume has a record in the Master File Table.",
+            vec![],
+        )
+        .await
+        .unwrap();
+    core.store
+        .set_corpus_status(&doc.id, CorpusStatus::Ready)
+        .await
+        .unwrap();
+    crate::jobs::synthesize::segment_all(&core, &doc.id).await;
+    let artifact = core.store.artifacts_for_corpus(&doc.id).await.unwrap()[0]
+        .id
+        .clone();
+
+    let mut out = Vec::new();
+    for (name, uri) in [
+        ("search", "/ui".to_string()),
+        ("insights", "/ui/insights".into()),
+        ("settings", "/ui/settings".into()),
+        ("day", "/ui/day/2026-09-08".into()),
+        ("corpus", format!("/ui/corpora/{}", doc.id)),
+        ("artifact", format!("/ui/artifacts/{artifact}")),
+    ] {
+        let html = crate::web::test_support::get_body(&app, &cookie, &uri).await;
+        out.push((name.to_string(), html));
+    }
+    out
+}
+
+/// One run of the harness over `pages`, at `width`, as JSON.
+pub(crate) fn measure(pages: &[(String, String)], width: &str) -> serde_json::Value {
+    let chrome = chrome().expect(
+        "no headless Chrome found. Set ENGRAM_CHROME to one, or install Playwright's \
+         chrome-headless-shell, to run this test.",
+    );
+    let root = env!("CARGO_MANIFEST_DIR");
+    let listed: Vec<serde_json::Value> = pages
+        .iter()
+        .map(|(name, html)| serde_json::json!({"name": name, "html": html}))
+        .collect();
+    let dir = tempfile::tempdir().expect("a place to hand the pages over");
+    let list = dir.path().join("pages.json");
+    std::fs::write(&list, serde_json::to_vec(&listed).unwrap()).unwrap();
+
+    let out = std::process::Command::new("node")
+        .arg(format!("{root}/tests/browser/page_width.js"))
+        .arg(root)
+        .arg(&chrome)
+        .arg(&list)
+        .arg(width)
+        .output()
+        .expect("node is needed to run this test");
+    // The harness's own exit first, and its stderr with it. A node that threw
+    // before it could print left this asserting on an empty stdout, so the
+    // failure read as "the harness printed nothing" — or, worse, as a JSON
+    // error about whatever unrelated line was last — and said nothing about
+    // the stack that actually explains it.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the width harness exited with {}: {stderr}",
+        out.status
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .last()
+        .unwrap_or_else(|| panic!("the harness printed nothing: {stdout}{stderr}"));
+    let run: serde_json::Value =
+        serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"));
+    assert_eq!(
+        run["pages"].as_array().map(|p| p.len()),
+        Some(pages.len()),
+        "a result per page: {run}"
+    );
+    run
+}
+
+/// The two claims every page has to satisfy, whatever is on it.
+pub(crate) fn nothing_is_broken(run: &serde_json::Value, width: &str) {
+    for p in run["pages"].as_array().unwrap() {
+        assert!(p["error"].is_null(), "{p}");
+        let doc = p["scrollWidth"].as_i64().unwrap();
+        let window = p["clientWidth"].as_i64().unwrap();
+        assert!(
+            doc <= window,
+            "at {width}px the {} page is {doc}px wide in a {window}px window, so the \
+             whole page scrolls sideways. What sticks out: {}",
+            p["name"],
+            p["over"],
+        );
+        let squeezed = p["squeezed"].as_array().expect("a squeeze list");
+        assert!(
+            squeezed.is_empty(),
+            "at {width}px the {} page crushes text into a column narrower than its own \
+             letters, which the browser then clips away entirely: {squeezed:?}",
+            p["name"],
+        );
+    }
+}
+
+// ── A signed-in app, and the shapes a page test asks for ────────────────────
+//
+// These grew inside `web::ui`'s test module and were reachable only from it,
+// which is part of why that module became the place every page's tests
+// lived. Here they belong to every `web/` module, and a page split out of
+// `ui.rs` keeps its tests instead of leaving them behind.
+
+pub(crate) async fn app_with_session() -> (axum::Router, String) {
+    let (app, cookie, _core) = app_session_and_core().await;
+    (app, cookie)
+}
+
+pub(crate) async fn app_session_and_core() -> (axum::Router, String, crate::core::Core) {
+    let core = crate::core::test_support::test_core().await;
+    let handle = core.clone();
+    let (app, cookie) = app_with_cookie(core).await;
+    (app, cookie, handle)
+}
+
+pub(crate) async fn get_body(app: &axum::Router, cookie: &str, uri: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
+    body_of(res).await
+}
+
+pub(crate) fn form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("POST")
+        .header("cookie", cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// A recording session, one artifact, and one captured search of this
+/// user's whose pool holds it.
+pub(crate) async fn searched_app() -> (axum::Router, String, crate::core::Core, String, String) {
+    searched_app_tuned(None).await
+}
+
+/// `searched_app`, with the judgement floor low enough that a verdict on
+/// the bar can cross it — the bar is the labeller now, so the bar is what
+/// pays for a sweep.
+pub(crate) async fn searched_app_tuned(
+    floor: Option<i64>,
+) -> (axum::Router, String, crate::core::Core, String, String) {
+    let mut core = crate::core::test_support::test_core().await;
+    core.learn.enabled = true;
+    if let Some(n) = floor {
+        core.feedback.tune.min_judgements = n;
+    }
+    let handle = core.clone();
+    let (app, cookie) = app_with_cookie(core).await;
+    let src = handle
+        .store
+        .insert_corpus("raw", "web", None)
+        .await
+        .unwrap();
+    let a = handle
+        .store
+        .insert_artifacts(
+            &src.id,
+            &[crate::store::artifacts::NewArtifact {
+                text: "mounting the image".into(),
+                title: Some("mount".into()),
+                ..Default::default()
+            }],
+        )
+        .await
+        .unwrap()[0]
+        .id
+        .clone();
+    let event = handle
+        .store
+        .record_search(
+            crate::store::feedback::NewEvent {
+                fold_onto: None,
+                query: "image will not mount".into(),
+                door: crate::store::feedback::Door::Ui,
+                scope: Some(crate::store::TEST_SUBJECT.into()),
+                filters: "{}".into(),
+                query_vec: vec![0.1, 0.2],
+                embed_model: "fake".into(),
+                candidates: vec![crate::store::feedback::NewCandidate {
+                    artifact_id: a.clone(),
+                    score: 1.0,
+                    similarity: Some(0.5),
+                    shown: true,
+                    ..Default::default()
+                }],
+                answered: false,
+                context: None,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    (app, cookie, handle, a, event)
+}
+
+/// A captured photograph whose vision read has not landed.
+pub(crate) async fn an_unread_image(core: &crate::core::Core) -> String {
+    core.ingest_image(crate::core::ingest::ImageCapture {
+        bytes: a_png(),
+        filename: Some("p.png".into()),
+        title_hint: None,
+        note: None,
+        lang: crate::infer::lang::Lang::default(),
+    })
+    .await
+    .unwrap()
+    .id
+}
+
+/// One source, so the base is not empty.
+///
+/// The ask door only opens over a held base — with nothing stored it
+/// redirects to the plain page, because the workspace renders no Ask verb
+/// there and the door would be a question in a box with no way to send it.
+/// Every test below that wants the ask *page* wants a base with something
+/// in it first.
+pub(crate) async fn hold_something(core: &crate::core::Core) {
+    core.ingest_capture(crate::core::ingest::Capture::new(
+        "LevelDB tombstones survive compaction longer than the manual admits.",
+        "ui",
+    ))
+    .await
+    .unwrap();
+}
+
+/// A session over a base holding one source. See `hold_something`.
+pub(crate) async fn app_holding_something() -> (axum::Router, String) {
+    let (app, cookie, core) = app_session_and_core().await;
+    hold_something(&core).await;
+    (app, cookie)
+}
+
+/// A session whose core records searches, which is what the association
+/// features are gated on. `app_session_and_core` cannot be reused: the
+/// router owns its own clone of the core, so flipping a flag afterwards
+/// changes the handle and not the app.
+pub(crate) async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core)
+{
+    let mut core = crate::core::test_support::test_core().await;
+    core.learn.enabled = true;
+    let handle = core.clone();
+    let (app, cookie) = app_with_cookie(core).await;
+    (app, cookie, handle)
+}
+
+/// The same, for the one route that takes a `PUT`: editing an artifact.
+pub(crate) fn put_form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("PUT")
+        .header("cookie", cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// The first half of the two-request ask: park the question, take the id.
+/// `q` is form-encoded, as it is in the body it goes into.
+pub(crate) async fn post_ask(app: &axum::Router, cookie: &str, q: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(form("/ui/ask", cookie, &format!("q={q}")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "the question was not parked");
+    crate::web::test_support::json_of(res).await["id"]
+        .as_str()
+        .expect("parking hands back an id")
+        .to_string()
+}
+
+/// The second half: spend the id and stream.
+pub(crate) async fn get_stream(app: &axum::Router, cookie: &str, id: &str) -> Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/ui/ask/{id}/stream"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// One whole ask over the wire, as the page performs it.
+pub(crate) async fn ask_over_sse(app: &axum::Router, cookie: &str, q: &str) -> String {
+    let id = post_ask(app, cookie, q).await;
+    let res = get_stream(app, cookie, &id).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    body_of(res).await
+}
+
+/// The HTML the page swaps in, pulled out of the `done` frame the way the
+/// browser reads it: the payload is JSON, so the fragment survives the
+/// blank lines its markdown carries.
+pub(crate) fn done_html(body: &str) -> String {
+    let data = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+        .find(|v| v.get("html").is_some())
+        .unwrap_or_else(|| panic!("no done event in {body}"));
+    data["html"].as_str().unwrap().to_string()
+}
+
+/// A session plus a corpus that has been through synthesis and embedding,
+/// which is the only state in which there is anything to facet or to find a
+/// neighbour among.
+pub(crate) async fn app_with_embedded_corpus() -> (axum::Router, String) {
+    let core = crate::core::test_support::test_core().await;
+    let out = core
+        .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+        .await
+        .unwrap();
+    crate::jobs::synthesize::segment_all(&core, &out.id).await;
+    crate::jobs::embed::run_corpus(&core, &out.id)
+        .await
+        .unwrap();
+
+    app_with_cookie(core).await
+}
+
+/// Markup with every run of whitespace collapsed, so an assertion about an
+/// attribute pair does not also assert where the template wrapped a line.
+pub(crate) fn flat(html: &str) -> String {
+    html.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The box form's `hx-trigger`, on its own. `html.contains("load")` is
+/// not the same question: the context offer carries `hx-trigger="load"`
+/// too, and so does the word inside half the prose on the page.
+pub(crate) fn trigger_of(html: &str) -> String {
+    let form = html.split(r#"id="box-form""#).nth(1).expect("the box form");
+    let trigger = form.split(r#"hx-trigger=""#).nth(1).expect("its trigger");
+    trigger.split('"').next().unwrap().to_string()
+}
+
+/// A session with the recommender on, plus one artifact old enough and
+/// unseen enough that `resurface` returns it.
+pub(crate) async fn app_recommending() -> (axum::Router, String, crate::store::Store, String) {
+    let mut core = crate::core::test_support::test_core().await;
+    core.recommend.enabled = true;
+    core.learn.enabled = true;
+    let store = core.store.clone();
+    let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+    let a = core
+        .store
+        .insert_artifacts(
+            &src.id,
+            &[crate::store::artifacts::NewArtifact {
+                text: "when the recycling centre is open".into(),
+                title: Some("recycling centre".into()),
+                ..Default::default()
+            }],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    core.vectors
+        .upsert(vec![crate::vector::VectorPoint {
+            vector: vec![1.0; 8],
+            sparse: Default::default(),
+            payload: crate::vector::VectorPayload {
+                artifact_id: a.id.clone(),
+                corpus_id: src.id.clone(),
+                text: a.text.clone(),
+                title: Some("recycling centre".into()),
+                ..Default::default()
+            },
+        }])
+        .await
+        .unwrap();
+    let background = core.background.clone();
+    let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+    // Held so a test can drain the recording writes rather than sleep.
+    BACKGROUND.with(|b| *b.borrow_mut() = Some(background));
+    (app, cookie, store, a.id)
+}
+
+// Where `app_recommending` parks the background handle for `drain` to find.
+thread_local! {
+    static BACKGROUND: std::cell::RefCell<Option<std::sync::Arc<crate::core::background::Background>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The recording writes run off the request path. Drain them rather than
+/// sleeping and hoping.
+pub(crate) async fn drain() {
+    let b = BACKGROUND.with(|b| b.borrow().clone());
+    if let Some(b) = b {
+        b.wait_idle().await;
+    }
+}
+
+/// Percent-encoding for the handful of characters these test bodies carry.
+pub(crate) fn urlencoding_of(s: &str) -> String {
+    s.replace(':', "%3A").replace('/', "%2F")
+}
+
+/// One corpus with `n` artifacts, titled so the ops page can be searched
+/// for them.
+pub(crate) async fn artifacts(core: &crate::core::Core, titles: &[&str]) -> Vec<String> {
+    let src = core.store.insert_corpus("x", "web", None).await.unwrap();
+    let new: Vec<crate::store::artifacts::NewArtifact> = titles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| crate::store::artifacts::NewArtifact {
+            ordinal: i as i64,
+            text: format!("body of {t}"),
+            title: Some((*t).to_string()),
+            ..Default::default()
+        })
+        .collect();
+    core.store
+        .insert_artifacts(&src.id, &new)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.id)
+        .collect()
+}
+
+/// The excerpt list, out of the `citations` frame, the way the page reads
+/// it. Keyed apart from the answer's `html` so `done_html` above cannot pick
+/// this frame up by mistake.
+pub(crate) fn rail_html(body: &str) -> String {
+    let data = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d.trim()).ok())
+        .find(|v| v.get("rail").is_some())
+        .unwrap_or_else(|| panic!("no citations event in {body}"));
+    data["rail"].as_str().unwrap().to_string()
+}
+
+/// Every run that follows `open`, up to the next `end`, in document order.
+pub(crate) fn pulled(html: &str, open: &str, end: char) -> Vec<String> {
+    html.match_indices(open)
+        .map(|(at, m)| {
+            html[at + m.len()..]
+                .chars()
+                .take_while(|c| *c != end)
+                .collect()
+        })
+        .collect()
+}
+
+/// One live artifact on a fresh session.
+pub(crate) async fn session_with_an_artifact() -> (axum::Router, String, crate::core::Core, String)
+{
+    let (app, cookie, core) = app_session_and_core().await;
+    let out = core
+        .ingest_capture(crate::core::ingest::Capture::new(
+            "The pool holds sixteen connections.",
+            "ui",
+        ))
+        .await
+        .unwrap();
+    crate::jobs::test_support::drain(&core).await;
+    let aid = core
+        .store
+        .artifacts_for_corpus(&out.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.in_results())
+        .expect("a live artifact")
+        .id;
+    (app, cookie, core, aid)
+}
+
+pub(crate) fn row_on(
+    subject: &str,
+    kind: crate::store::actions::Kind,
+) -> crate::store::actions::NewAction {
+    crate::store::actions::NewAction {
+        job: crate::store::actions::Job::Dedupe,
+        kind,
+        subject_id: subject.to_string(),
+        survivor_id: None,
+        detail: None,
+        evidence: serde_json::json!({}),
+        pair_score: None,
+    }
+}
+
+/// A `Chunk` with every field named, so a test can say the one thing it
+/// cares about and nothing else. `Chunk` has no `Default` on purpose —
+/// most of its fields are decisions — so the fixture carries them here
+/// rather than putting a misleading default on the type.
+pub(crate) fn chunk_fixture(title: Option<&str>, text: &str) -> crate::store::artifacts::Chunk {
+    crate::store::artifacts::Chunk {
+        id: "a".into(),
+        corpus_id: Some("s".into()),
+        provenance: crate::store::artifacts::Provenance::Captured,
+        source_count: 0,
+        ordinal: 56,
+        text: text.into(),
+        corpus_span: None,
+        title: title.map(str::to_string),
+        category: None,
+        tags: vec![],
+        embed_state: crate::store::artifacts::EmbedState::Embedded,
+        embed_model: None,
+        created_at: 0,
+        embed_rev: 0,
+        segment_idx: None,
+        flags: vec![],
+        flag_detail: None,
+        superseded_by: None,
+        caveats: vec![],
+        status: crate::store::artifacts::ArtifactStatus::Active,
+        last_verified_at: None,
+        cues: vec![],
+        retired_at: None,
+        reaped_at: None,
+    }
 }

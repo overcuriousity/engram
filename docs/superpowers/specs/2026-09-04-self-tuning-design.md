@@ -52,6 +52,15 @@ operator could use what retrieval gave them*, which is one step removed from
 *the person got their answer*. Verdicts are the sparse, honest sample that
 checks the two have not come apart.
 
+**No gate in this design is a tuned constant.** Every threshold is a rule that
+reads the evidence in front of it: adopt when the margin exceeds what one
+observation could account for, watch until the prediction separates from noise,
+suspend when self-generated scores stop agreeing with human ones better than
+chance. The precedent is already in the tree — `sweep.rs`'s `recommend` gates an
+automatic feature today with two net better pairs and no aggregate loss, and no
+number calibrated against anybody's corpus. A system that tunes itself must not
+need a person to tune its gates, or the regress never bottoms out.
+
 Drift across many small steps is accepted. The corpus is untouched by any of
 this, so the worst case is a ranking that has wandered somewhere nobody chose —
 recoverable, because the operator's starting point is never overwritten.
@@ -159,6 +168,46 @@ So search evidence is structurally weaker than ask evidence, and the design
 treats it that way rather than pretending otherwise. Weaker evidence is enough
 to stop something, never enough to start it.
 
+### The blind spot, and the one row that answers it
+
+Everything above is implicit feedback, and implicit feedback has a hole that no
+amount of care in the scoring can close: **an open or a citation can only ever
+happen to an artifact the live ranking already put on screen.** Replay those
+observations under a different setting and you learn how that setting would
+have reordered what was shown. You learn nothing at all about what was hidden.
+
+Two consequences follow, and neither is visible from inside the loop:
+
+- **A wider candidate pool can never be measured as an improvement.** Nothing
+  outside the window is ever opened, so widening it produces no positive
+  evidence and the axis is frozen in practice.
+- **Recency ratchets.** People click among the recency-boosted rows they were
+  handed; the replay reads those clicks back as recency working, and the ladder
+  walks up.
+
+So the design gives up one row. On a share of recorded searches —
+`feedback.explore`, one in ten — the top candidate that just missed the window
+is lifted into the **last visible row**, and the row it displaces stops being
+shown. The last row because it is where a reader is least likely to be
+interrupted; the top of what was cut because that is the boundary the ranking
+actually drew, and the most informative place to ask whether it drew it right.
+
+The half that makes it worth anything is the bookkeeping.
+`search_candidates.explored_from` records the rank the ranking gave that
+artifact, and `open_event` charges an open on it to **that** rank rather than to
+the row it borrowed. Otherwise the ranking would be recorded as having surfaced
+at rank ten something it had in fact hidden at rank eleven, and the loop would
+read its own intervention back as proof it was already right.
+
+An open on an explored row is therefore the only positive observation in the
+system whose served rank can be a *miss*. It is the one piece of evidence the
+incumbent could not have produced and cannot take credit for, and it is the
+first thing a widened pool could ever win on.
+
+Disclosed rather than hidden: the row carries `explored` in its explanation,
+beside `prime` and `rerank`, so the one place in a result list where the order
+is not the ranking's answer says so.
+
 ### Scoring
 
 Not "what fraction of what was shown got used". That ratio is maximised by
@@ -221,9 +270,18 @@ quiet period. That pattern is established in the tree.
 ### Adoption
 
 1. **Positive observations only.** Weak negatives cannot promote a candidate.
-2. **A floor on evidence.** Below it, nothing moves. `docs/evaluation.md`
-   already sets the honest version of this for verdicts: under twenty, "the
-   arithmetic works and the result means nothing."
+2. **A gate, not a floor.** Nothing moves unless the candidate beats the live
+   generation by more than a single observation could account for, and loses on
+   neither aggregate. That is `sweep.rs`'s `recommend` generalized from pairs to
+   observations — two net better, no aggregate loss, ties keep the current
+   value — and its doc comment already says what it is for: *"the gate, and the
+   reason the whole feature is safe to run automatically."*
+
+   Deliberately not a tuned number. A floor of "twenty" would be a constant
+   someone picked on somebody's corpus, and the whole claim of this design is
+   that the system does not need a person to hand-tune it. A base with four
+   observations adopts nothing because four cannot clear the gate, not because
+   a number said so.
 3. **One parameter per adoption.** Move three and lose the ability to say which
    one did it. Slower, and it keeps the journal readable and the revert exact.
 4. **The prediction is recorded** — how much this generation should improve the
@@ -236,9 +294,12 @@ against the prediction, and against the **lived** record of its predecessor —
 never against the predecessor's offline number, which was computed on replayed
 evidence and is not the same kind of quantity.
 
-The watch window is measured **in observations, not in days**. A base in heavy
-use decides quickly; a quiet one waits. This self-paces and is more honest than
-any fixed period.
+The watch does not run for a fixed count any more than adoption clears a fixed
+floor. It ends when the live evidence can separate the prediction from noise —
+the same gate, pointed the other way: the adopted generation is kept when it
+holds its margin and taken back when the predecessor would clear the gate
+against it. A base in heavy use decides quickly; a quiet one waits, and neither
+is a number anybody chose.
 
 ### Revert
 
@@ -304,10 +365,14 @@ become autonomous until a restore path exists that a person can actually take.
 ## When the ground moves
 
 **The models change.** A generation names its embedding recipe and its chat
-model. The embedding side is already caught at boot — engram refuses to start
-when stored vectors do not match the configured recipe. The chat model is not
-caught by anything today; that is a small new check at boot against the live
-generation. When either has changed, prior observations are **marked as another
+model. The embedding side is *half* caught at boot, and the halves differ: a
+`dim` that does not match the collection refuses to start, while a changed
+model or template is only a warning — `tenants::embed_recipe_check` says it
+once and carries on, deliberately, because "a base that will not open is worse
+than one that says what is wrong with it". So the recipe change engram already
+notices does not stop anything, and the chat model is noticed by nothing at
+all. Naming both in the generation is what turns either into an era boundary,
+and it is the generation that enforces it rather than a refusal to boot. When either has changed, prior observations are **marked as another
 era, not deleted** — nothing is deleted here — and are no longer eligible for
 adoption. A new line starts from the live generation's parameters, and Ops says
 so rather than the counting silently continuing.
@@ -343,6 +408,21 @@ design is never built, stage 1 still pays for itself.
 the reordering parameters first — where a candidate is scored by re-sorting a
 stored list and nothing is retrieved — and over the retrieval parameters once
 that loop has a track record in the journal.
+
+One stage, two plans. The retrieval parameters need the pass to genuinely
+re-search rather than re-sort a cached list, which turns its cost from a few
+vector reads into a query per candidate per observation. That is a different
+conversation about what a quiet base may spend, and it is held separately for
+that reason rather than because it is a different piece of work.
+
+*Built 2026-09-05.* That conversation, read against the tree, ended with two
+of the four retrieval knobs in and two out: the pool depth and the recency
+half-life move; rerank on/off does not, because the gate scores ranking quality
+and cannot weigh the model call per search that adopting it would impose; and
+`prime_lift` cannot be replayed, because observations do not record the sitting.
+The reasons are in `docs/superpowers/plans/2026-09-05-self-tuning-stage-2b.md`
+under "What the code admits", and the running state of the whole design in
+`docs/superpowers/plans/2026-09-05-self-tuning-handoff.md`.
 
 **Stage 3 — earned autonomy for the corpus jobs.** Needs stage 2's agreement
 history to exist before it can mean anything, and needs a reap restore path
@@ -396,8 +476,9 @@ remains a key, and a key written in the file wins.
 
 ## Out of scope
 
-- **Serving exploration.** No live A/B, no per-request variation. One
-  generation is live and the same query ranks the same way twice.
+- **Live A/B between generations.** One generation is live at a time. The
+  exploration described in Part 2 varies one row of one search in ten; it does
+  not run two rankings side by side.
 - **Tuning the embedding recipe.** It cannot be swept at runtime; it belongs to
   the cargo harness, which re-embeds a frozen corpus for exactly this reason.
 - **Prompt evolution.** The generator's prompts are inside the measurement, not

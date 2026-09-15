@@ -169,6 +169,48 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// What is actually running, printed under what the file says.
+///
+/// The file is the operator's starting point; the database holds what is live.
+/// At boot an unchanged file loses to the generation the idle pass adopted
+/// (see `store::generations::boot_generation`), so a file printed on its own
+/// quietly stops describing the base it configures. One line per base, because
+/// the live generation is a fact about a base and not about the file.
+///
+/// Best-effort, and never an error: `--print-config` is a thing operators paste
+/// into issues, and it has to answer on a machine whose database does not
+/// exist yet.
+async fn print_live_ranking(cfg: &Config) {
+    println!("# ── what is actually running ──");
+    println!("# The keys above are where each base starts. Where a base has a");
+    println!("# live generation, that is what retrieval uses instead — an idle");
+    println!("# pass may have moved a knob since, and an unchanged file does not");
+    println!("# take it back. Turning evolve.autonomous off returns the base to");
+    println!("# the file at the next start.");
+    if let Err(e) = live_ranking(cfg).await {
+        println!("# (no base could be read from here: {e})");
+    }
+}
+
+async fn live_ranking(cfg: &Config) -> Result<()> {
+    let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
+    let users = control.users().await?;
+    if users.is_empty() {
+        println!("# no base yet — the first login provisions one, and it starts from the file");
+    }
+    for u in users {
+        let store = tenant_store(cfg, &control, &u).await?;
+        match store.live_generation().await? {
+            Some(g) => {
+                println!("# {} — generation {} ({})", u.subject, g.id, g.state);
+                println!("#   {:?}", g.params);
+            }
+            None => println!("# {} — no generation yet; the file is what runs", u.subject),
+        }
+    }
+    Ok(())
+}
+
 /// Resolve `--user`, or refuse with the list rather than picking one.
 ///
 /// A default here is how the wrong collection gets reindexed: the operator
@@ -368,6 +410,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(args.config.as_deref())?;
     if args.print_config {
         println!("{}", cfg.redacted());
+        print_live_ranking(&cfg).await;
         return Ok(());
     }
 

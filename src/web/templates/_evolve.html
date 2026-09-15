@@ -1,0 +1,47 @@
+{# What the base has been doing to its own ranking, and whether it may.
+
+   Autonomy the operator cannot see is autonomy they cannot judge. First, in
+   plain words, whether the loop is suspended and why; then the generation in
+   force and whether it is being watched; then what was adopted and what was
+   taken back. Rendered for everyone who can open this page — it is disclosure,
+   not a control — and only once a generation exists to disclose. #}
+{% if let Some(e) = evolve %}
+<div id="evolve" class="judge-tune">
+  {% if let Some(s) = e.suspended %}
+  <p class="row"><strong>Not moving on its own.</strong> {{ s }}</p>
+  {% endif %}
+  {# A heading, because this block had none and followed one that did — so
+     "Last night" appeared to own the ranking lines under it. #}
+  <h3>Ranking</h3>
+  {# Which mode the base is in, said whatever the mode. The block used to speak
+     only where autonomy was not moving the ranking, so on the default — the
+     setting most bases are on — nothing on the page told it from off. #}
+  <p class="row"><span>{{ e.mode }}</span></p>
+  <p class="row"><span>{{ e.live }}</span></p>
+  <details class="judge-tune-history">
+    <summary class="muted">its parameters</summary>
+    <p class="mono">{{ e.params }}</p>
+  </details>
+  <p class="muted hint">{{ e.standing }}</p>
+  <p class="muted hint">{{ e.rehearsed }}</p>
+  {% if !e.history.is_empty() %}
+  <details class="judge-tune-history">
+    <summary class="muted">generations ({{ e.history.len() }})</summary>
+    <ul class="mono">
+      {% for h in e.history %}<li>{{ h }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+  {% if let Some(r) = e.rules %}
+  <p class="muted hint">{{ r }}</p>
+  {% endif %}
+  {% if !e.actions.is_empty() %}
+  <details class="judge-tune-history">
+    <summary class="muted">what the base did to the corpus ({{ e.actions.len() }})</summary>
+    <ul class="mono">
+      {% for a in e.actions %}<li>{{ a }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{% endif %}

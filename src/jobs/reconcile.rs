@@ -289,14 +289,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "a body".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -337,14 +332,9 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "the window".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
                     segment_idx: Some(0),
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -394,14 +384,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "an artifact older than windows".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -498,14 +482,8 @@ mod tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "an artifact that outlived its corpus".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await

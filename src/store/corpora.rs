@@ -212,6 +212,29 @@ pub fn content_hash(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
 }
 
+/// The hash a corpus is stored and deduplicated under.
+///
+/// The text alone for every ordinary capture, which is what this has always
+/// been. For a capture that names a day it is the day *and* the text, because
+/// a journal entry is scoped to the day it was written on — that is what
+/// `metadata.day` is and what the day page reads.
+///
+/// `content_hash` is `UNIQUE`, so this is not merely a lookup key: two entries
+/// carrying the same short line are two rows or they are one, and the column
+/// decides which. Under the text alone they were one. "Long day." written on
+/// Monday and again on Thursday returned Monday's corpus, stored nothing, and
+/// left Thursday's page reading "Nothing on this day" — the second day's
+/// writing simply discarded, with the press reporting success.
+///
+/// The day goes in front of the text with a newline between, so no day can be
+/// spelled to collide with the beginning of another entry's text.
+pub fn corpus_hash(raw_text: &str, metadata: &serde_json::Value) -> String {
+    match metadata["day"].as_str() {
+        Some(day) => content_hash(format!("{day}\n{raw_text}")),
+        None => content_hash(raw_text),
+    }
+}
+
 fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
     Corpus {
         id: r.get("id"),
@@ -301,7 +324,7 @@ impl Store {
             raw_text: raw_text.to_string(),
             origin: origin.to_string(),
             title_hint: title_hint.map(str::to_string),
-            content_hash: content_hash(raw_text),
+            content_hash: corpus_hash(raw_text, metadata),
             status,
             created_at: now(),
             updated_at: now(),
@@ -462,22 +485,6 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
-        Ok(())
-    }
-
-    /// The one write to `origin` outside insert: a capture becoming, or
-    /// ceasing to be, a journal entry. A channel label, never content.
-    pub async fn set_corpus_origin(&self, id: &str, origin: &str) -> Result<()> {
-        let n = sqlx::query("UPDATE corpora SET origin = ?, updated_at = ? WHERE id = ?")
-            .bind(origin)
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-        if n == 0 {
-            return Err(crate::error::Error::NotFound);
-        }
         Ok(())
     }
 
@@ -662,6 +669,38 @@ impl Store {
             q = q.bind(id);
         }
         Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
+    }
+
+    /// The captures somebody typed while one of these searches was on screen.
+    ///
+    /// `(corpus_id, event_id)`, the pair `jobs::gaps::cover_answering` needs:
+    /// the note, and the search its link names. The link is written by the box
+    /// into `metadata.search.event_id` — see `core::ingest::typed_from`, which
+    /// is the one reader of that path and the shape this mirrors.
+    ///
+    /// Retired notes included on purpose. A reminder that is done is still the
+    /// answer somebody wrote to the query they were typing, and the hole it
+    /// filled did not re-open when they ticked it off.
+    pub async fn captures_typed_from(&self, event_ids: &[String]) -> Result<Vec<(String, String)>> {
+        if event_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let marks = std::iter::repeat_n("?", event_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        // `AssertSqlSafe` because the only thing spliced in is a run of `?`
+        // this function counted itself; every value is bound. Same idiom as
+        // `retired_among`.
+        let mut q = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(format!(
+            "SELECT id, json_extract(metadata, '$.search.event_id') AS event_id
+               FROM corpora
+              WHERE json_extract(metadata, '$.search.event_id') IN ({marks})
+              ORDER BY created_at, id"
+        )));
+        for id in event_ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool).await?)
     }
 
     /// The newest few captures, by the columns a list row shows. This is the
@@ -1158,24 +1197,13 @@ mod tests {
                 &src.id,
                 &[
                     crate::store::artifacts::NewArtifact {
-                        ordinal: 0,
                         text: "one".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     crate::store::artifacts::NewArtifact {
                         ordinal: 1,
                         text: "two".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
             )

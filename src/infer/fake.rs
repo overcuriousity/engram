@@ -41,6 +41,10 @@ pub struct FakeEmbedder {
     /// When set, every call is refused with this reason — the endpoint's "no",
     /// which a worker must not retry.
     reject_with: Option<String>,
+    /// Calls still to be answered with "too many requests" before this
+    /// embedder starts working. The endpoint's "not now", which is the one
+    /// answer a caller can fix by asking again.
+    busy_for: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeEmbedder {
@@ -55,6 +59,7 @@ impl FakeEmbedder {
             calls: std::sync::atomic::AtomicUsize::new(0),
             sent: std::sync::Mutex::new(Vec::new()),
             reject_with: None,
+            busy_for: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -62,6 +67,14 @@ impl FakeEmbedder {
         let mut e = Self::new(8);
         e.reject_with = Some(msg.to_string());
         e
+    }
+
+    /// An endpoint behind a limiter: the first `n` calls are shed, the rest
+    /// answered. What a burst of keystrokes meets on a shared server, and what
+    /// a cold model answers while it loads.
+    pub fn busy_for_the_first(self, n: usize) -> Self {
+        self.busy_for.store(n, std::sync::atomic::Ordering::Relaxed);
+        self
     }
 
     pub fn calls(&self) -> usize {
@@ -86,6 +99,22 @@ impl Embedder for FakeEmbedder {
             return Err(Error::InferenceRejected {
                 role: "embed",
                 detail: m.clone(),
+            });
+        }
+        // Counted as a call before it is refused, because it was one: the
+        // limiter is in front of the endpoint and the request reached it.
+        if self
+            .busy_for
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |n| n.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(Error::InferenceBusy {
+                role: "embed",
+                detail: "HTTP 429 Too Many Requests".into(),
             });
         }
         Ok(texts
@@ -303,6 +332,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
 pub struct JudgingParaphraser {
     drop_token: String,
     judgement: Judgement,
+    empty_on_retry: bool,
     calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -311,8 +341,21 @@ impl JudgingParaphraser {
         Self {
             drop_token: drop_token.to_string(),
             judgement,
+            empty_on_retry: false,
             calls: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The retry answers `Some(Judgement::default())` instead of `None` — a
+    /// reply that parsed and simply said nothing about the note as a moment.
+    ///
+    /// The commoner of the two shapes, and the one the merge could not see:
+    /// `parse_judged_response` answers `Some(..)` for every reply that parses
+    /// and `moment`, `events` and `links` are all `#[serde(default)]`, so a
+    /// retry that omits the JUDGE block lands here and not on `None`.
+    pub fn answering_an_empty_judgement_on_retry(mut self) -> Self {
+        self.empty_on_retry = true;
+        self
     }
 
     pub fn calls(&self) -> usize {
@@ -346,7 +389,11 @@ impl Synthesizer for JudgingParaphraser {
                 caveats: vec![],
                 pinned: false,
             }],
-            judgement: first.then(|| self.judgement.clone()),
+            judgement: if first {
+                Some(self.judgement.clone())
+            } else {
+                self.empty_on_retry.then(Judgement::default)
+            },
         })
     }
 
@@ -549,11 +596,18 @@ pub struct FakeReranker {
     /// what it is given, so a test about over-fetching has to look at this
     /// rather than at the answer.
     saw: std::sync::atomic::AtomicUsize,
+    /// How many times it was called at all, for tests about whether a
+    /// search or a replay reached the reranker.
+    calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeReranker {
     pub fn docs_seen(&self) -> usize {
         self.saw.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -567,6 +621,7 @@ impl Reranker for FakeReranker {
     ) -> Result<Vec<(usize, f32)>> {
         self.saw
             .store(docs.len(), std::sync::atomic::Ordering::SeqCst);
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut out: Vec<(usize, f32)> = (0..docs.len()).map(|i| (i, i as f32)).collect();
         out.reverse();
         out.truncate(top_n);

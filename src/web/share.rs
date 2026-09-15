@@ -6,11 +6,13 @@
 //! they are read by the same code; what differs is only the answer, which is a
 //! page for a person rather than JSON for a client.
 
+use crate::core::fetch::only_a_url;
 use crate::core::ingest::ORIGIN_SHARE;
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::tenants::Tenant;
-use crate::web::api::{only_a_url, read_capture_parts};
+use crate::web::api::read_capture_parts;
 use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
 use axum::Router;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::post;
@@ -34,7 +36,7 @@ async fn share(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     multipart: axum::extract::Multipart,
-) -> Result<Response> {
+) -> UiResult<Response> {
     let lang = crate::web::state::capture_lang(&tenant, &headers).await;
     let (mut fields, files) = read_capture_parts(multipart).await?;
     let title = fields.remove("title");
@@ -51,19 +53,10 @@ async fn share(
     }
 
     // Read before anything is stored, so a bad scheme costs nothing.
-    let shared_url = match shared_url {
-        Some(raw) => {
-            let u = url::Url::parse(&raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
-            if !matches!(u.scheme(), "http" | "https") {
-                return Err(Error::Validation(format!(
-                    "url: `{}` is not a scheme a page is read over",
-                    u.scheme()
-                )));
-            }
-            Some(u)
-        }
-        None => None,
-    };
+    let shared_url = shared_url
+        .as_deref()
+        .map(crate::core::fetch::parse_readable)
+        .transpose()?;
 
     // Text standing alone is a capture; text alongside files is their caption.
     let text = fields.remove("text");
@@ -115,9 +108,7 @@ async fn share(
 
     match first_file.or(landing) {
         Some(id) => Ok(Redirect::to(&format!("/ui/corpora/{id}")).into_response()),
-        None => Err(Error::Validation(
-            "that share carried nothing to capture".into(),
-        )),
+        None => Err(Error::Validation("that share carried nothing to capture".into()).into()),
     }
 }
 

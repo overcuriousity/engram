@@ -333,6 +333,27 @@ impl Tenants {
                 "could not read the stored weak line; the floor stands until the next pass"
             );
         }
+        // Every `Core` is built from the config file, so every one of them
+        // starts out ranking by what the file says — including the ones built
+        // for a base whose live generation supersedes it. Deciding that here,
+        // per open and awaited, is the only place it can be decided: a core
+        // that begins serving under file params while observations are written
+        // under the adopted generation never corrects itself, because the
+        // *base* has already recorded that it saw this file (`FILE_PARAMS_SEEN`)
+        // and every later boot agrees with the first.
+        //
+        // Not in `on_first_open`, where this used to sit. That claim is once
+        // per subject per process, and it is spent by whichever caller opens
+        // the base first — at boot, the repair ticker, on a transient core it
+        // drops immediately. Cheap enough to await: a `meta` read, the live
+        // generation, and a write only when the file actually moved.
+        if let Err(e) = generation_check(&core, &self.cfg).await {
+            tracing::warn!(
+                subject = %user.subject,
+                error = %e,
+                "could not name this base's generation; it serves under the file until the next open"
+            );
+        }
         self.on_first_open(&core, &user.subject, trigger);
         Ok(Tenant { core, user })
     }
@@ -373,6 +394,10 @@ impl Tenants {
     /// lazily, rather than for every registered user at startup: a hundred
     /// users would otherwise mean a hundred full collection scrolls before the
     /// port opens.
+    ///
+    /// Only the work that is genuinely once per process belongs here. What the
+    /// *core in hand* serves under does not — see the `generation_check` call
+    /// in `open`, which this used to swallow.
     ///
     /// Two guards keep that promise, and the name of this function is the
     /// first of them. `open` is a cache *miss*, not a first sight: a registry
@@ -542,6 +567,68 @@ mod tests {
         assert_eq!(t.open_count(), 1, "the second request reused the open core");
     }
 
+    /// Every `Core` is built from the config file, so every one of them starts
+    /// out ranking by what the file says. Deciding the generation once per
+    /// process — which is what `on_first_open` does — left that standing on
+    /// every core built afterwards: the base went on writing observations
+    /// under the adopted generation while the core served the file's
+    /// parameters, and nothing ever corrected it, because `FILE_PARAMS_SEEN`
+    /// had already recorded that this file was seen.
+    ///
+    /// The claim is spent by whoever opens first, and at boot that is the
+    /// repair ticker, on a transient core it drops immediately.
+    #[tokio::test]
+    async fn a_reopened_tenant_serves_what_the_base_adopted_and_not_the_file() {
+        use crate::store::generations::{GenerationParams, NewGeneration};
+        // One resident tenant, so opening a second evicts the first.
+        let (t, _dir) = test_tenants(1).await;
+        let first = t.get_or_provision("sub-1", None).await.unwrap();
+        let file = GenerationParams::from(*first.core.ranking.read().unwrap());
+        let live = first
+            .core
+            .store
+            .live_generation()
+            .await
+            .unwrap()
+            .expect("opening the base names a generation");
+        assert_eq!(live.params, file, "nothing has moved yet");
+
+        // What a quiet period does: adopt a child that ranks differently.
+        let moved = GenerationParams {
+            recency_weight: file.recency_weight + 0.2,
+            ..file
+        };
+        first
+            .core
+            .store
+            .adopt_generation_lived(
+                &NewGeneration {
+                    params: moved,
+                    embed_recipe: live.embed_recipe.clone(),
+                    chat_model: live.chat_model.clone(),
+                    parent_id: Some(live.id.clone()),
+                },
+                0.1,
+            )
+            .await
+            .unwrap();
+        drop(first);
+
+        // A pass over every registered user, of the kind the repair ticker
+        // runs: it opens the base without keeping it, and used to be the one
+        // open that consumed the process's single claim on this subject.
+        t.get_transient("sub-1").await.unwrap();
+        // And an eviction, which is the other way a serving core is rebuilt.
+        t.get_or_provision("sub-2", None).await.unwrap();
+
+        let back = t.get("sub-1").await.unwrap();
+        assert_eq!(
+            GenerationParams::from(*back.core.ranking.read().unwrap()),
+            moved,
+            "the reopened core serves what the base adopted"
+        );
+    }
+
     #[tokio::test]
     async fn racing_first_requests_provision_once() {
         let (t, _dir) = test_tenants(8).await;
@@ -685,6 +772,41 @@ mod tests {
         assert_eq!(a.core.store.list_corpora(10, 0).await.unwrap().len(), 1);
         assert!(b.core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
+}
+
+/// Name the settings this tenant is retrieving under, so that what use leaves
+/// behind has something to be evidence *about*.
+///
+/// Beside `embed_recipe_check` and for the same reason: per tenant, answered
+/// from the config and the base together, and asked once when a base opens
+/// rather than on every request.
+///
+/// Both models are pinned, as one string. The ask model writes the citations
+/// and the synthesize model writes the artifacts they cite, so either changing
+/// shifts what the evidence means — and a composite says that without a second
+/// column to keep in step.
+pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
+    let params = crate::store::generations::GenerationParams::from(
+        *core.ranking.read().expect("ranking lock"),
+    );
+    let chat_model = format!(
+        "ask={};synth={}",
+        cfg.infer.ask.as_ref().map_or("none", |a| a.model.as_str()),
+        cfg.infer.synthesize.model,
+    );
+    let live = crate::store::generations::boot_generation(
+        &core.store,
+        params,
+        &cfg.infer.embed.fingerprint(),
+        &chat_model,
+        cfg.evolve.autonomous.moves_ranking(),
+    )
+    .await?;
+    // Serve under it. Shared by every clone of this core, so the requests
+    // already being answered move with it — the same swap the apply button
+    // makes, arrived at from the other side.
+    *core.ranking.write().expect("ranking lock") = live.params.into();
+    Ok(())
 }
 
 /// Say it out loud when the embedding recipe changed under a base that already

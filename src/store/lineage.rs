@@ -234,6 +234,12 @@ impl Store {
     /// for or the candidates run out. The set being walked is merges that are
     /// not embedded *yet*, which empties itself as they embed, so the loop is
     /// bounded by work in flight rather than by the size of the base.
+    ///
+    /// Only merges that have hidden nothing. One whose roots are already
+    /// superseded onto it landed once, and an embed it is waiting on now is a
+    /// later one: `jobs::condense` rewrites a merged artifact like any other
+    /// and queues it again. Retiring that merge took what it replaced out of
+    /// results with it, behind a deprecated row nothing restores.
     pub async fn stranded_merges(&self, limit: i64) -> Result<Vec<String>> {
         const PAGE: i64 = 500;
         let want = limit.max(0) as usize;
@@ -246,6 +252,7 @@ impl Store {
                     AND a.status = 'active'
                     AND a.superseded_by IS NULL
                     AND a.embed_state != 'embedded'
+                    AND NOT EXISTS (SELECT 1 FROM artifacts r WHERE r.superseded_by = a.id)
                     AND a.id > ?
                   ORDER BY a.id
                   LIMIT ?",
@@ -403,12 +410,7 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i,
                 text: format!("artifact {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = s.insert_artifacts(&src.id, &new).await.unwrap();
@@ -418,10 +420,7 @@ mod tests {
     fn merged(text: &str) -> NewMerged {
         NewMerged {
             text: text.into(),
-            title: None,
-            category: None,
-            tags: vec![],
-            caveats: vec![],
+            ..Default::default()
         }
     }
 
@@ -744,12 +743,7 @@ mod tests {
         let na = |ordinal: i64, text: &str| crate::store::artifacts::NewArtifact {
             ordinal,
             text: text.into(),
-            corpus_span: None,
-            title: None,
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         };
         let made = s
             .insert_artifacts_with_provenance(
@@ -780,18 +774,14 @@ mod tests {
         let c1 = s.insert_corpus("one", "web", None).await.unwrap();
         let c2 = s.insert_corpus("two", "web", None).await.unwrap();
         let na = |t: &str, a: i64, b: i64| crate::store::artifacts::NewArtifact {
-            ordinal: 0,
             text: t.into(),
             corpus_span: Some(crate::store::artifacts::CorpusSpan {
                 start_line: a,
                 end_line: b,
                 source: crate::store::artifacts::SpanSource::Located,
             }),
-            title: None,
-            category: None,
-            tags: vec![],
             segment_idx: Some(0),
-            caveats: vec![],
+            ..Default::default()
         };
         let r1 = s.insert_artifacts(&c1.id, &[na("r1", 1, 3)]).await.unwrap()[0]
             .id

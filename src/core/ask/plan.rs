@@ -117,29 +117,10 @@ mod tests {
         SearchResult {
             artifact_id: "a".into(),
             corpus_id: "s".into(),
-            title: None,
             text: "body".into(),
-            category: None,
-            tags: vec![],
             score: 0.5,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
             weak,
-            primed: false,
-            due_at: None,
-            due_in: None,
-            in_sitting: false,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         }
     }
 

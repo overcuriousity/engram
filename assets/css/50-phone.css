@@ -154,11 +154,9 @@
   .regions-rail-focus-source .region-bar .facet-label,
   .regions-rail-focus-source .region-bar .keyhint,
   .regions-rail-focus-source .region-bar .row { display: none; }
-  /* The hint carries the two example chips, and on a phone they are the
-     only thing that says what the box is for — the narrow placeholder is
-     clipped around its thirtieth character. Shown while the box is empty,
-     gone with the first keystroke like the rest of the idle column. */
-  html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
+  /* The hint's own rule moved to 40-workspace.css: it was never about the
+     phone, and being here was why a desktop kept "Try …" standing over ten
+     results. */
 
   /* One line for the box, one for the verbs, and nothing else. The box starts
      at a single row here rather than growing into the screen: a phone has
@@ -205,12 +203,6 @@
     text-decoration: none; white-space: nowrap;
     font-size: var(--text-xs); color: var(--color-fg-muted);
   }
-  /* Over the icon, not beside the label: the tab is 46px tall and a number
-     would either shrink the label or push it off centre. */
-  .tab-dot {
-    position: absolute; top: 5px; right: 50%; margin-right: -14px;
-    width: 7px; height: 7px; border-radius: 50%; background: var(--color-accent);
-  }
   .tabbar a[aria-current="page"] { color: var(--color-accent); }
   .tabbar svg { width: 20px; height: 20px; }
 
@@ -231,10 +223,6 @@
 
   /* No scroller inside a scroller: the page is the only thing that scrolls. */
   .rail, .raw { max-height: none; }
-
-  /* The idle rail's recent rows are links, and a thumb needs the same room
-     here that every other target gets. */
-  .idle-row { min-height: 44px; align-items: center; }
 
   /* The metadata column is fixed-width and the title is what gives: with a
      timestamp in the row, a name truncated to "Fake title: al…" was all that

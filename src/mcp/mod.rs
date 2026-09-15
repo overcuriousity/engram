@@ -815,6 +815,27 @@ type TenantServices = std::sync::Mutex<(
     Vec<String>,
 )>;
 
+/// rmcp reaps an idle session after five minutes, and an agent's session is not
+/// idle in the sense that number assumes: the gap between one tool call and the
+/// next is a person thinking, which routinely runs longer than that. The SSE
+/// keep-alive does not help, because its pings are written at the HTTP layer
+/// and never reach the session worker whose timer is running. So a client that
+/// holds the stream open watches the session die under it, and its reconnect
+/// carries a session id the server has already forgotten.
+///
+/// An hour is the working unit: longer than any pause between calls, short
+/// enough that a session abandoned by a dropped connection is still reclaimed
+/// rather than held until the service is evicted.
+const SESSION_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+fn session_manager() -> rmcp::transport::streamable_http_server::session::local::LocalSessionManager
+{
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    let mut manager = LocalSessionManager::default();
+    manager.session_config.keep_alive = Some(SESSION_KEEP_ALIVE);
+    manager
+}
+
 fn service_for(
     services: &TenantServices,
     tenants: &std::sync::Arc<crate::tenants::Tenants>,
@@ -825,9 +846,7 @@ fn service_for(
     PkdbTools,
     rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
 > {
-    use rmcp::transport::streamable_http_server::{
-        StreamableHttpService, session::local::LocalSessionManager,
-    };
+    use rmcp::transport::streamable_http_server::StreamableHttpService;
     let subject = tenant.user.subject.clone();
     // The one thing read off the core the door was handed, and only because
     // `routes` is synchronous. It is the same answer for every tenant.
@@ -847,7 +866,7 @@ fn service_for(
                         asks,
                     ))
                 },
-                std::sync::Arc::new(LocalSessionManager::default()),
+                std::sync::Arc::new(session_manager()),
                 service_config(public_host),
             )
         })
@@ -948,27 +967,8 @@ mod tests {
             corpus_id: "s".into(),
             title: title.map(str::to_string),
             text: text.into(),
-            category: None,
-            tags: vec![],
             score: 0.5,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
-            via: None,
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         }
     }
 
@@ -1089,27 +1089,9 @@ mod tests {
             corpus_id: "c".into(),
             title: Some(id.into()),
             text: "body".into(),
-            category: None,
-            tags: vec![],
             score: 0.5,
-            status: None,
-            superseded_by: None,
-            last_verified_at: None,
-            weak: false,
-            primed: false,
-            in_sitting: false,
-            due_at: None,
-            due_in: None,
-            past_cliff: false,
-            retired: false,
-            similarity: None,
-            titled_by_corpus: false,
             via: via.map(str::to_string),
-            reason: None,
-            explanation: None,
-            model_written: false,
-            synthesized: false,
-            origin_count: 0,
+            ..Default::default()
         }
     }
 
@@ -1561,6 +1543,24 @@ mod tests {
     }
 
     #[test]
+    fn an_mcp_session_outlives_the_pause_between_tool_calls() {
+        // rmcp's own default is five minutes, which expires while the person
+        // driving the agent is still reading the last answer. The client
+        // holding the stream cannot tell that apart from the server going
+        // away, so the session has to outlast a human pause.
+        let configured = session_manager()
+            .session_config
+            .keep_alive
+            .expect("an idle session is still reclaimed eventually");
+        assert!(
+            configured
+                > rmcp::transport::streamable_http_server::session::local::SessionConfig::DEFAULT_KEEP_ALIVE,
+            "{configured:?} is no better than the default rmcp reaps at"
+        );
+        assert_eq!(configured, std::time::Duration::from_secs(60 * 60));
+    }
+
+    #[test]
     fn the_mcp_door_keeps_loopback_only_without_a_public_host() {
         let config = service_config(None);
         assert_eq!(config.allowed_hosts, ["localhost", "127.0.0.1", "::1"]);
@@ -1621,6 +1621,7 @@ mod tests {
 
     fn due_row(title: &str, at: Option<i64>) -> crate::store::moments::DueRow {
         crate::store::moments::DueRow {
+            named: true,
             moment: crate::store::moments::Moment {
                 id: format!("m-{title}"),
                 artifact_id: "a".into(),

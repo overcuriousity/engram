@@ -22,10 +22,19 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     if p.state != "open" || p.artifact_id.is_some() {
         return Ok(());
     }
+    let now = crate::store::now();
+    // Closed, not merely returned from. `periodic_units` no longer arms this
+    // stage without a generator, but a unit queued before that model was taken
+    // out of the config still arrives here — and a bare `Ok(())` left the
+    // pursuit `open` with no artifact and no reason, which is a row Ops shows
+    // for ever and nobody can act on. Every other exit from this function says
+    // why it took nothing; so does this one.
     let Some(generator) = core.generator.clone() else {
+        core.store
+            .close_pursuit(pursuit_id, "unsatisfied", "no generator configured", now)
+            .await?;
         return Ok(());
     };
-    let now = crate::store::now();
 
     // The engaged artifacts resolved to what was captured, in engagement
     // order. A synthesized artifact the operator pivoted through contributes
@@ -335,6 +344,10 @@ pub fn decide(n: &Need, min_sources: usize, min_engagement: f64) -> Decision {
 
 /// One event of either kind, as the sweep clusters it.
 struct Ev {
+    /// Search only: the `search_events` row. Carried because a capture's link
+    /// names that row and nothing else — see `cover_typed_from` below, which
+    /// is the only reader.
+    id: Option<String>,
     at: i64,
     scope: Option<String>,
     query: String,
@@ -387,6 +400,7 @@ pub async fn run(core: &Core) -> Result<usize> {
     let mut evs: Vec<Ev> = searches
         .into_iter()
         .map(|e| Ev {
+            id: Some(e.id),
             at: e.created_at,
             scope: e.scope,
             query: e.query,
@@ -399,6 +413,7 @@ pub async fn run(core: &Core) -> Result<usize> {
             cited: vec![],
         })
         .chain(asks.into_iter().map(|a| Ev {
+            id: None,
             at: a.created_at,
             scope: a.scope,
             query: a.question,
@@ -536,6 +551,7 @@ pub async fn run(core: &Core) -> Result<usize> {
                 core.store
                     .close_pursuit(&pid, "unsatisfied", &why, now)
                     .await?;
+                cover_typed_from(core, &evs, &members).await;
             }
             Decision::Generate => {
                 if let Some(covering) = covered_by_existing(core, &sources).await? {
@@ -553,6 +569,55 @@ pub async fn run(core: &Core) -> Result<usize> {
     core.store.meta_set(PURSUIT_AFTER, &now.to_string()).await?;
     tracing::info!(pursuits = written, line, "pursuit sweep");
     Ok(written)
+}
+
+/// The captures that answered this pursuit before it was ever a pursuit.
+///
+/// `jobs::gaps::cover` runs once per capture, from `settle_corpus`, and it
+/// runs the moment the note is stored. The pursuit those same keystrokes
+/// become does not exist yet: the sweep only groups a sitting once it has
+/// been idle for `idle_secs`, and it is the sweep that closes the cluster
+/// `unsatisfied` and so makes a gap of it. So `TypedFrom::of` resolved no
+/// pursuits at all for the one sequence the link was written for — paste,
+/// search as you type, capture, sweep — and nothing came back for it
+/// afterwards, because nothing else calls `cover`.
+///
+/// This is that second call, made from the only place that knows the pursuit
+/// exists. The decision above is untouched and stands on its own evidence:
+/// nothing in the base engaged, which is true, and the row says so. What the
+/// capture changes is whether the hole is still open, and that is a
+/// `gap_coverage` row — the very row `cover_answering` writes, `CoveredBy`
+/// and all, so a pursuit answered this way and one answered by a capture made
+/// a minute later are one thing in the store and one thing on the page.
+///
+/// Best-effort, and deliberately not `?`: the sweep has already written and
+/// closed the pursuit, and a coverage check that could not run is a line on a
+/// page that does not appear. Taking the whole sweep down for it would leave
+/// the remaining clusters of this pass undecided.
+async fn cover_typed_from(core: &Core, evs: &[Ev], members: &[usize]) {
+    let ids: Vec<String> = members.iter().filter_map(|&m| evs[m].id.clone()).collect();
+    let typed = match core.store.captures_typed_from(&ids).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not look for a capture typed from this pursuit");
+            return;
+        }
+    };
+    for (corpus_id, event_id) in typed {
+        match crate::jobs::gaps::cover_answering(core, &corpus_id, Some(event_id)).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(
+                    corpus_id,
+                    closed = n,
+                    "a capture answered the pursuit it was typed from"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(corpus_id, error = %e, "could not record that a capture answered a pursuit");
+            }
+        }
+    }
 }
 
 /// Score one cluster.
@@ -711,12 +776,8 @@ mod tests {
         let na = |o: i64, t: &str| NewArtifact {
             ordinal: o,
             text: t.into(),
-            corpus_span: None,
             title: Some(format!("S{o}")),
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         };
         core.store
             .insert_artifacts(
@@ -775,6 +836,40 @@ mod tests {
         for id in &ids {
             assert!(core.store.get_artifact(id).await.unwrap().in_results());
         }
+    }
+
+    /// With `[learn]` on and no `[infer.generate]`, `generate` returned a bare
+    /// `Ok(())` and the pursuit stayed `open` with no artifact and no reason —
+    /// a row Ops shows for ever that nobody can act on. `periodic_units` no
+    /// longer arms the stage without a generator, but a unit queued before the
+    /// model was taken out of the config still arrives here.
+    #[tokio::test]
+    async fn a_pursuit_with_no_generator_closes_unsatisfied_rather_than_sitting_open() {
+        let mut core = test_core().await;
+        // `[learn]` on, `[infer.generate]` absent: the shape an operator
+        // reaches by taking the model out of a working config.
+        core.generator = None;
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(100, &["how do I read the journal".into()], &ids, None)
+            .await
+            .unwrap();
+
+        generate(&core, &pid).await.unwrap();
+
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "unsatisfied", "closed, and not left open");
+        assert_eq!(p.reason.as_deref(), Some("no generator configured"));
+        assert!(p.artifact_id.is_none());
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "and nothing was written"
+        );
     }
 
     /// A generation reads originals. A pursuit whose engaged source is itself
@@ -919,6 +1014,98 @@ mod tests {
         );
         let p = core.store.get_pursuit(&pid).await.unwrap();
         assert_eq!(p.state, "satisfied", "{p:?}");
+    }
+
+    /// The order the live base actually does it in.
+    ///
+    /// `jobs::gaps::cover` runs once, from `settle_corpus`, the moment the
+    /// note is stored — and at that moment the pursuit those same keystrokes
+    /// become does not exist. Only the sweep, after `idle_secs` of quiet,
+    /// clusters the searches and closes the cluster `unsatisfied`, which is
+    /// what makes a gap of it. So the capture-side link resolved no pursuits
+    /// at all for the one sequence it was written for, and nothing came back
+    /// for it afterwards.
+    ///
+    /// Out of reach of the measurement on purpose: `weak_below` is 1.0, so a
+    /// distance could not close this gap and the link is the only thing that
+    /// can.
+    #[tokio::test]
+    async fn a_pursuit_swept_up_after_the_capture_is_still_closed_by_it() {
+        let mut core = pursuing_core().await;
+        let q = "Netcat can serve a file to one client, then exits";
+        let v = core.embedder.embed_query(q).await.unwrap();
+        let at = crate::store::now() - 100;
+        // A search that found nothing, quiet long enough for the sweep.
+        let eid = core
+            .store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: q.into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: Some("me".into()),
+                    filters: "{}".into(),
+                    query_vec: v.clone(),
+                    embed_model: core.embedder.model().to_string(),
+                    candidates: vec![],
+                    answered: false,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(&eid)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+
+        // The answer, written into the box the query was typed into — and
+        // driven the whole way through the queue, which is where `cover` runs
+        // and finds no pursuit to close.
+        let corpus = core
+            .ingest_capture(crate::core::ingest::Capture::new(q, "web").with_search(&eid))
+            .await
+            .unwrap()
+            .id;
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        core.background.wait_idle().await;
+        core.set_weak_below(1.0);
+
+        run(&core).await.unwrap();
+
+        let states: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, state FROM pursuits ORDER BY id")
+                .fetch_all(&core.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            states.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(),
+            vec!["unsatisfied"],
+            "the sweep decides on its own evidence — nothing engaged — and the \
+             capture changes only whether the hole is still open"
+        );
+        let covered = core.store.gaps_covered_by(&corpus).await.unwrap();
+        assert!(
+            covered
+                .iter()
+                .any(|g| g.kind == crate::store::gaps::GapKind::Pursuit),
+            "the capture cannot say it answered the pursuit it was typed from: {covered:?}"
+        );
+        let open = core
+            .store
+            .open_gaps(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap();
+        assert!(
+            open.gaps
+                .iter()
+                .all(|g| g.gap.kind != crate::store::gaps::GapKind::Pursuit),
+            "the paste is still on the capture page as a hole in the base: {:?}",
+            open.gaps.iter().map(|g| &g.gap).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -1069,9 +1256,11 @@ mod tests {
                             score: 1.0 - i as f32 * 0.1,
                             similarity: Some(0.9),
                             shown: true,
+                            ..Default::default()
                         })
                         .collect(),
                     answered: false,
+                    context: None,
                 },
                 0,
             )
@@ -1286,8 +1475,6 @@ mod tests {
                 embed_model: "fake".into(),
                 answer: "an answer".into(),
                 abstained,
-                dropped: 0,
-                truncated: false,
                 citations: cited
                     .iter()
                     .map(|(a, used)| crate::store::asks::NewAskCitation {
@@ -1296,6 +1483,7 @@ mod tests {
                         used: *used,
                     })
                     .collect(),
+                ..Default::default()
             })
             .await
             .unwrap();

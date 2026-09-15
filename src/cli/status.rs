@@ -11,10 +11,7 @@ use crate::error::{Error, Result};
 
 /// Ask the server what it is doing, and say it.
 pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
-    let http = reqwest::Client::builder()
-        .user_agent(crate::cli::capture::USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let http = crate::cli::endpoint::client()?;
     let res = http
         .get(e.api("/status"))
         .bearer_auth(&e.token)
@@ -67,7 +64,7 @@ pub(crate) fn render_due(face: &Face, rows: &serde_json::Value) -> String {
         let line = match r["moment"]["at"].as_i64() {
             None => format!("    (undated)  {title}"),
             Some(at) if at < now => format!("    {}  {title}", face.ink_dim("overdue")),
-            Some(at) => format!("    {}  {title}", crate::web::ui::ago_or_ahead(at)),
+            Some(at) => format!("    {}  {title}", crate::fmt::ago_or_ahead(at)),
         };
         out.push_str(&line);
         out.push('\n');

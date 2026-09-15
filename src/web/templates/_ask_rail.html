@@ -16,9 +16,12 @@
 <div class="rail-row">
   <a class="rail-item" id="cite-{{ loop.index }}" role="option" aria-selected="false"
      href="/ui/artifacts/{{ r.artifact_id }}" target="_blank" rel="noopener">
-    <div class="rail-head">
+    <div class="rail-head{% if r.title.is_empty() %} rail-head-bare{% endif %}">
       <span class="rail-rank mono">[{{ loop.index }}]</span>
-      <span class="rail-title">{{ r.title }}</span>
+      {# No heading where the excerpt has no name of its own; the bracket keeps
+         the row addressable and the snippet carries it. Same rule as the
+         search rail — see `render_hit`. #}
+      {% if !r.title.is_empty() %}<span class="rail-title">{{ r.title }}</span>{% endif %}
     </div>
     <div class="rail-snippet">{{ r.snippet }}</div>
   </a>

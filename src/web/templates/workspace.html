@@ -2,6 +2,11 @@
 {% block title %}engram{% endblock %}
 {% block regions %}regions-rail-focus-source{% endblock %}
 {% block content %}
+{# The one page with no visible heading: the box names itself, and a title
+   over it would be a label on a label. The document still needs a top level —
+   every other page has one, and without it this one's outline started at
+   whatever the first fragment happened to render. #}
+<h1 class="sr-only">Search, ask, or capture</h1>
 <div class="region-bar">
 {# One form around the box and the chips, so a chip carries the query with it
    and the query carries the chips. `change` fires for the chips, `input` only
@@ -54,7 +59,11 @@
                   input[!event.isComposing] changed delay:120ms from:textarea[name=q],
                   submit{% if !q.is_empty() && open_with.is_empty() %},
                   load{% endif %}"
-      hx-params="q,category,rerank,explain,fold,tz"
+      {# No `tz` here. `UiSearchParams` has no such field and `fate_echo` does
+         no date parsing, so serde discarded it on every keystroke. The capture
+         path is what wants the zone, and app.js reads `#box-tz` directly for
+         it — this allowlist governs the *search* fragment and nothing else. #}
+      hx-params="q,category,rerank,explain,fold"
       hx-indicator="#search-spinner"{% if search_reranks %} data-rerank="true"{% endif %}>
   {# `/ui?explain=1` and nothing else. `hx-params` above is an allowlist, so
      the name has to appear in both places or the fragment is asked without it
@@ -335,6 +344,9 @@
      a hidden parent that is revealed later. #}
   <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
        hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
+  {# The list of what a paste becomes comes with the idle fragment below — see
+     `_idle_foot.html`. It used to be rendered here, with the page, and a page
+     is built once: the fifth capture left it standing until a reload. #}
   {{ idle|safe }}
 </div>
 {% include "_keyhint.html" %}

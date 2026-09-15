@@ -1,4 +1,42 @@
-/* The corpus, band by band. */
+/* The corpus page: its head, and the source band by band. */
+
+/* ── The head of the page ────────────────────────────────────────────────── */
+
+/* The page takes the window — see the note on `regions-table` at the top of
+   corpus.html — and almost nothing up here is better for it. A title, a status,
+   four controls, the file's metadata and one sentence about coverage are read,
+   not scanned across; at 110rem they were a line of text with a metre of
+   nothing beside them. So the head keeps the measure the rest of the
+   application reads at, `regions-focus`'s own 46rem, and the bands below start
+   at the same left edge and run the full width.
+
+   `.src-flat` is the branch with no bands to run wide: a capture that could not
+   be banded is one column of wrapped text, and the width belongs to a pair of
+   columns rather than to one. */
+.src-top, .src-flat { max-width: 46rem; }
+
+/* The name of the capture and what state it is in, on one line while they fit
+   and on two when they do not. `anywhere`, because a title is whatever the
+   capture was called — a URL with no spaces in it is an ordinary one, and it
+   used to take the document's width with it. */
+.src-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.625rem;
+}
+.src-head h1 { margin: 0; overflow-wrap: anywhere; }
+/* The row of controls follows directly, so the gap under the title is the gap
+   between the two of them rather than the heading's own. */
+.src-top .actions { margin: 0.75rem 0 1rem; }
+
+/* Artifacts that sit beside no lines — not placed, or written from this source
+   among others. A stack of full-width cards was the worst of both: too wide to
+   read and too tall to scan. `min()` in the track floor so a phone gets one
+   column rather than a 26rem track it has to scroll sideways to finish. */
+.unplaced {
+  display: grid; gap: 0.75rem; align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(min(26rem, 100%), 1fr));
+  /* The same right edge the bands have, so the page has one and not three. */
+  max-width: 93rem;
+}
 
 /* ── The corpus, band by band ────────────────────────────────────────────── */
 
@@ -7,7 +45,17 @@
    an eight-line passage that yielded one short artifact leaves the right cell
    mostly empty. Folding it would hide source on the page that exists to show
    source. */
-.bands { display: flex; flex-direction: column; gap: 0.75rem; }
+/* Two reading measures side by side, and no wider. The page takes the window
+   so that the pair can be two columns at all, but a column is still something
+   a person reads down: past about 46rem each — `regions-focus`'s measure,
+   twice, with the gap between them — the source runs to lines nobody tracks
+   and an artifact card holds two lines of prose across most of a metre. Under
+   a 1440px window the shell is narrower than this and the cap does nothing;
+   it is here for the screens where it would not. */
+.bands {
+  display: flex; flex-direction: column; gap: 0.75rem;
+  max-width: 93rem;
+}
 .band { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
 /* One column on a narrow screen: the source first, then what came of it. Here
    rather than in 40-workspace.css, where it used to be and never applied: both

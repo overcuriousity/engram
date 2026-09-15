@@ -1,4 +1,5 @@
 pub mod associate;
+pub mod condense;
 pub mod consolidate;
 pub mod context;
 pub mod dedupe;
@@ -8,7 +9,9 @@ pub mod extract;
 pub mod gaps;
 pub mod judgement;
 pub mod merge;
+pub mod observe;
 pub mod passages;
+pub mod probe;
 pub mod promote;
 pub mod pursuit;
 pub mod reap;
@@ -16,7 +19,10 @@ pub mod reconcile;
 pub mod relate;
 pub mod remind;
 pub mod retention;
+pub mod retract;
+pub mod sleep;
 pub mod synthesize;
+pub mod tune;
 pub mod window;
 
 use crate::core::Core;
@@ -128,7 +134,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
     // periodic has none.
     let mut did_work = false;
     let result = match (job.stage, job.target_kind.as_str()) {
-        (Stage::Synthesize | Stage::Enrich, _) => synthesize::plan(core, &job.target_id).await,
+        (Stage::Synthesize, _) => synthesize::plan(core, &job.target_id).await,
         // Embedding is batched per source; the per-chunk path is for edits,
         // for oversize splits, and for isolating a chunk the batch chokes on.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
@@ -138,6 +144,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
+        (Stage::Probe, _) => probe::run(core, &job.target_id).await,
+        (Stage::Condense, _) => condense::run(core, &job.target_id).await,
         (Stage::Describe, _) => describe::run(core, &job.target_id).await,
         (Stage::Extract, _) => extract::run(core, &job.target_id).await,
         (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,
@@ -570,6 +578,64 @@ mod tests {
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::{MAX_ATTEMPTS, backoff_secs};
     use std::sync::Arc;
+
+    /// A standing count claims no work, and a report that gains one keeps
+    /// working without being told about this.
+    ///
+    /// Asserted on the retention report itself rather than on a hand-written
+    /// JSON blob: the whole mechanism is that `did_work` reads the fields a
+    /// sweep already serializes, so a field moved into or out of `Standing` is
+    /// only correct if it is correct *there*.
+    #[test]
+    fn a_sweeps_standing_counts_are_not_work() {
+        use crate::jobs::retention::{Report, Standing};
+
+        // A base with retrieval competition and a probe set that the lap keeps
+        // re-measuring, and nothing else happening. Every number here says what
+        // the base holds, not what this pass did to it.
+        let quiet = Report {
+            standing: Standing {
+                clusters: 7,
+                rehearsed: 42,
+                interference: 3,
+            },
+            ..Default::default()
+        };
+        assert!(
+            !did_work(&detail(&quiet).unwrap()),
+            "a quiet base reported work, so the backoff never engages"
+        );
+
+        // And the moment anything actually moves, it is work again — which is
+        // what makes the backoff safe to have at all.
+        for busy in [
+            Report {
+                moved: 1,
+                ..quiet.clone()
+            },
+            Report {
+                retired: 1,
+                ..quiet.clone()
+            },
+            Report {
+                condensed: 1,
+                ..quiet.clone()
+            },
+            Report {
+                integrated: 1,
+                ..quiet.clone()
+            },
+            Report {
+                gave_up: 1,
+                ..quiet.clone()
+            },
+        ] {
+            assert!(
+                did_work(&detail(&busy).unwrap()),
+                "a pass that changed something reported none: {busy:?}"
+            );
+        }
+    }
 
     /// The row a sweep leaves behind, whatever state it left in.
     async fn pending_run_after(core: &Core, stage: Stage) -> Option<i64> {
@@ -1159,11 +1225,46 @@ mod tests {
         assert!(did_work(r#"{"expired":1,"standing":{"clusters":3}}"#));
 
         let quiet = serde_json::to_string(&crate::jobs::retention::Report {
-            standing: crate::jobs::retention::Standing { clusters: 12 },
+            standing: crate::jobs::retention::Standing {
+                clusters: 12,
+                ..Default::default()
+            },
             ..Default::default()
         })
         .unwrap();
         assert!(!did_work(&quiet), "{quiet}");
+
+        // And a sleep that only integrated is work. It adopted no generation
+        // and took nothing back — the four numbers the report used to carry
+        // are all zero — so the backoff doubled the interval away from
+        // `sweep_hours` on the very passes that were draining the integration
+        // backlog five hundred artifacts at a time. The rehearsal beside it
+        // rides along as a standing count and neither adds to that claim nor
+        // subtracts from it.
+        let slept = serde_json::to_string(&crate::jobs::retention::Report {
+            integrated: 500,
+            standing: crate::jobs::retention::Standing {
+                rehearsed: 500,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(did_work(&slept), "{slept}");
+
+        // The other side of the move: a pass that replayed five hundred probes
+        // and changed nothing is five hundred repeated measurements, which is
+        // the dormant base the backoff exists for. Flat, `rehearsed` said work
+        // on every pass over any base that had ever captured anything.
+        let rehearsed_only = serde_json::to_string(&crate::jobs::retention::Report {
+            standing: crate::jobs::retention::Standing {
+                rehearsed: 500,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!did_work(&rehearsed_only), "{rehearsed_only}");
 
         // Same shape, and worse: `context::run` is a full recompute, so all
         // three of its standing counts are non-zero on every run over unchanged

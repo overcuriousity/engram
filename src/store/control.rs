@@ -125,38 +125,8 @@ impl Control {
             ),
         ];
 
-        let mut missing = Vec::new();
-        for (table, columns) in super::schema_columns(SCHEMA) {
-            let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
-                .bind(&table)
-                .fetch_all(&self.pool)
-                .await?
-                .iter()
-                .map(|r| r.get::<String, _>("name"))
-                .collect();
-            // No columns at all is no such table: a fresh control database, or
-            // a table this schema is about to create.
-            if have.is_empty() {
-                continue;
-            }
-            for c in columns {
-                if !have.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
-                    missing.push(format!("{table}.{c}"));
-                }
-            }
-        }
-        for (table, column, ddl) in ADDITIVE {
-            let key = format!("{table}.{column}");
-            let Some(i) = missing.iter().position(|m| *m == key) else {
-                continue;
-            };
-            sqlx::raw_sql(ddl)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
-            tracing::info!(column = %key, "added a column the control schema expects");
-            missing.remove(i);
-        }
+        let mut missing = super::missing_columns(&self.pool, SCHEMA).await?;
+        super::apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;
         if !missing.is_empty() {
             return Err(crate::error::Error::Store(format!(
                 "the control database is older than the schema: {} missing. \

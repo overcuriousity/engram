@@ -182,7 +182,15 @@ pub fn compose(rows: &[crate::store::moments::DueRow], now: i64) -> (String, Str
             now,
             crate::core::moments::zone(Some(&row.moment.tz)),
         );
-        return (row.title.clone(), format!("{}\n{}", row.opening, when));
+        // The opening only where the title is a name. A reminder on a passage
+        // has none, so its label already *is* the opening — printed again on
+        // the first line of the body, the notification said one thing twice
+        // and pushed the time off the visible part of the banner.
+        let body = match row.named {
+            true => format!("{}\n{}", row.opening, when),
+            false => when,
+        };
+        return (row.title.clone(), body);
     }
     let mut body: Vec<String> = rows
         .iter()
@@ -370,9 +378,37 @@ mod tests {
         id
     }
 
+    /// A reminder on a passage has no name of its own, so the row's label *is*
+    /// the opening of its text — and the single-row push put that same opening
+    /// in the title and again on the first line of the body.
+    #[test]
+    fn a_push_over_a_nameless_reminder_does_not_say_its_text_twice() {
+        let now = 1_787_320_320;
+        let bare = crate::store::moments::DueRow {
+            named: false,
+            title: "Der Vorgang setzt voraus, dass das Journal".into(),
+            opening: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
+            ..row(Some(now + 3_600), None)
+        };
+        let (title, body) = compose(std::slice::from_ref(&bare), now);
+        assert!(title.starts_with("Der Vorgang setzt voraus"), "{title}");
+        assert!(
+            !body.contains("Der Vorgang setzt voraus"),
+            "the text stood in the title and again in the body: {body}"
+        );
+        assert!(!body.trim().is_empty(), "the body still says when: {body}");
+
+        // A named reminder keeps both: the name is not the text, so the
+        // opening under it is telling the reader something new.
+        let (title, body) = compose(&[row(Some(now + 3_600), None)], now);
+        assert_eq!(title, "Send the invoice");
+        assert!(body.contains("Send the invoice"), "{body}");
+    }
+
     /// A `DueRow` built by hand, so `compose` can be read on its own.
     fn row(at: Option<i64>, snoozed_until: Option<i64>) -> crate::store::moments::DueRow {
         crate::store::moments::DueRow {
+            named: true,
             moment: crate::store::moments::Moment {
                 id: "m1".into(),
                 artifact_id: "a1".into(),

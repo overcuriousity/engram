@@ -1,0 +1,1552 @@
+//! The corpus jobs answer to the same evidence the ranking side answers to.
+//!
+//! Two rules, both read inside the idle pass after the anchor check, under
+//! the same claim and the same switch. Rule 1 asks whether what a merge or a
+//! supersession hid is still found through what now answers for it. Rule 2
+//! asks whether a search that was given up on would have been answered by
+//! something the base hid or buried. Either way the base takes its own action
+//! back through the same `Core` method the operator's button calls, and
+//! stamps the journal row as taken back on evidence.
+//!
+//! Rule 1 is `recommend` pointed the other way: the subject's own record is
+//! the candidate and the survivor's replay is the base, and an action is taken
+//! back when the record clears the gate; nothing in it is a tuned constant.
+//! Rule 2 is a comparison of two similarities from one search, over the base's
+//! own measured line and one margin — `RESTORE_MARGIN`, the only tuned number
+//! in the file, and it says there why beating a weak best by nothing is not
+//! evidence.
+
+use crate::core::Core;
+use crate::error::Result;
+use crate::eval::sweep::{self, Pair};
+use crate::store::actions::{Kind, UndoneBy};
+use crate::store::generations::Generation;
+use crate::store::pairs::DecidedBy;
+
+/// Rows one pass will reconsider. A bound on work, like `OBSERVATION_LIMIT`:
+/// every subject costs one vector read per observation naming it.
+const ACTION_LIMIT: usize = 200;
+
+/// How much better than the best live hit a hidden artifact has to be before
+/// its hiding counts as having cost an answer.
+///
+/// A give-up is a search with nothing opened followed by another search inside
+/// five minutes, which is mostly a query being refined — so the live best it
+/// is measured against is usually a weak number, and over dense vectors a
+/// superseded near-duplicate sits within a hundredth of its survivor on half
+/// the queries near them. "Any amount more similar" therefore restores on a
+/// coin toss. Getting that wrong is not free and not reversible by the base:
+/// `dedupe` routes any repeat verdict on a taken-back action to a person, so
+/// one noise-triggered restore permanently converts an automatic decision into
+/// human queue work.
+const RESTORE_MARGIN: f32 = 0.05;
+
+/// What the corpus half of one pass did. Flat counts, so `jobs::did_work`
+/// reads them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Retracted {
+    /// Subjects rule 1 had evidence about.
+    pub reconsidered: usize,
+    /// Actions rule 1 took back.
+    pub undone: usize,
+    /// Artifacts rule 2 restored.
+    pub restored: usize,
+    /// Interferers rule 3 observed. Counted only: retrieval competition is a
+    /// fact about ranking, and `sleep::interference` files nothing.
+    pub interference: usize,
+    /// Condensations armed.
+    pub condensed: usize,
+}
+
+/// Both rules, in order. `started` is when the pass began: a search or a
+/// question after it stops the rules between subjects, with nothing half
+/// done — every undo is one call and one stamp.
+pub async fn run(core: &Core, live: &Generation, started: i64) -> Result<Retracted> {
+    let (reconsidered, undone, stopped) = rule_one(core, live, started).await?;
+    let mut out = Retracted {
+        reconsidered,
+        undone,
+        restored: 0,
+        interference: 0,
+        condensed: 0,
+    };
+    if stopped {
+        return Ok(out);
+    }
+    let (restored, stopped) = rule_two(core, started).await?;
+    out.restored = restored;
+    if stopped {
+        return Ok(out);
+    }
+    let (interference, stopped) = crate::jobs::sleep::interference(core, live, started).await?;
+    out.interference = interference;
+    if stopped {
+        return Ok(out);
+    }
+    let (condensed, _) = crate::jobs::sleep::condense_candidates(core, live, started).await?;
+    out.condensed = condensed;
+    let last = serde_json::json!({
+        "at": crate::store::now(),
+        "reconsidered": out.reconsidered,
+        "undone": out.undone,
+        "restored": out.restored,
+    });
+    core.store.meta_set(LAST_RUN, &last.to_string()).await?;
+    Ok(out)
+}
+
+/// Where rule 2 has read the give-ups up to: a `Cursor`, in `meta`.
+const GAVE_UP_AFTER: &str = "evolve.retract.gave_up_after";
+
+/// Where rule 1 has read the open actions up to: a `Cursor`, in `meta`.
+///
+/// Rule 2's cursor only ever moves forward, because an observation is written
+/// once and never reconsidered. This one wraps. An open action stays open for
+/// as long as the evidence keeps agreeing with it — which is nearly always —
+/// so there is no end of the table to arrive at, only a lap to finish and
+/// start again.
+const ACTED_AFTER: &str = "evolve.retract.acted_after";
+
+/// What the rules did the last time they ran, as JSON in `meta`, for the
+/// page: `Retracted` plus `at`.
+pub const LAST_RUN: &str = "evolve.retract.last";
+
+/// Rule 2: a give-up that a hidden artifact would have answered.
+///
+/// Every give-up since the last pass is searched once more with hidden hits
+/// included, and the graveyard is compared by cosine over what was buried by
+/// the same model. When the best hidden hit the base itself hid clears both
+/// the measured relevance line and `RESTORE_MARGIN` over the best live hit,
+/// the hiding cost an answer, and the base restores it through the method the
+/// operator's button calls. An artifact a person hid has no row and is not the
+/// base's to restore.
+///
+/// Returns (artifacts restored, stopped early).
+pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)> {
+    use crate::store::artifacts::ArtifactStatus;
+    let current = *core.ranking.read().expect("ranking lock");
+    let after = core
+        .store
+        .meta_get(GAVE_UP_AFTER)
+        .await?
+        .map(|s| crate::store::Cursor::parse(&s))
+        .unwrap_or_default();
+    let mut restored = 0;
+    let mut cursor = after.clone();
+    let live_model = core.embedder.model().to_string();
+    // Read once for the pass, on the first give-up that gets far enough to
+    // need it. Every observation that reaches the comparison was recorded
+    // under `live_model` — the loop `continue`s on any other — so the argument
+    // was constant and the whole graveyard was fetched and decoded again for
+    // each of up to `OBSERVATION_LIMIT` give-ups, with the idle-pass claim
+    // held throughout. Lazy rather than hoisted outright so a pass with
+    // nothing to compare still costs no query.
+    let mut buried: Option<Vec<(String, Vec<f32>)>> = None;
+    for o in core
+        .store
+        .gave_ups_since(&after, sweep::OBSERVATION_LIMIT)
+        .await?
+    {
+        if core.store.activity_since(started).await? {
+            core.store.meta_set(GAVE_UP_AFTER, &cursor.encode()).await?;
+            return Ok((restored, true));
+        }
+        cursor = crate::store::Cursor {
+            at: o.created_at,
+            id: o.id.clone(),
+        };
+        // Both sides of the comparison below have to come from one vector
+        // space. `graveyard_vectors` is asked for the observation's model and
+        // the cosine is taken against the observation's own query vector,
+        // while the replay runs whatever is loaded now — so a give-up recorded
+        // under an older embedder would have its buried candidates scored in
+        // one space and its live hits in another, and the two numbers would
+        // not be comparable at all. Rule 1 draws the same line by era.
+        if o.embed_model != live_model {
+            continue;
+        }
+        core.remember_query_vector(&o.query, o.query_vec.clone());
+        let q = crate::core::search::SearchQuery {
+            q: o.query.clone(),
+            limit: sweep::LIMIT,
+            tags: vec![],
+            category: None,
+            mark: false,
+            rerank: false,
+            explain: false,
+            include_deprecated: true,
+            include_superseded: true,
+        };
+        let (hits, _) = core
+            .search_with_ranking(&q, current, crate::store::feedback::Door::Judge)
+            .await?;
+        let is_hidden = |h: &crate::core::search::SearchResult| {
+            h.superseded_by.is_some() || h.status.is_some_and(|s| s != ArtifactStatus::Active)
+        };
+        // The floor the hidden candidates have to clear, and a real one: with
+        // no live hit at all there is nothing to be better than, and a fold
+        // from zero would accept the closest grave whatever its cosine —
+        // which, over dense vectors, is very nearly any grave. A query the
+        // base answers with nothing is a gap, not a burial to take back.
+        let Some(best_live) = hits
+            .iter()
+            .filter(|h| !is_hidden(h))
+            .filter_map(|h| h.similarity)
+            .reduce(f32::max)
+        else {
+            continue;
+        };
+        // What a hidden artifact has to reach, which is two bars in one.
+        // `weak_below` is the base's own measured line for "this is not about
+        // what was asked", and a refinement that matched nothing well leaves
+        // `best_live` well under it: beating a weak best is not the same as
+        // being an answer, and without the floor a judge-discarded artifact
+        // came back on a search that found nothing. The margin is the other
+        // half — see `RESTORE_MARGIN`.
+        let bar = (best_live + RESTORE_MARGIN).max(core.weak_below());
+        // The best hidden hit the base itself hid, with the row that says so.
+        let mut best_hidden: Option<(f32, crate::store::actions::Action)> = None;
+        for h in hits.iter().filter(|h| is_hidden(h)) {
+            let Some(sim) = h.similarity else { continue };
+            if sim < bar || best_hidden.as_ref().is_some_and(|(b, _)| sim <= *b) {
+                continue;
+            }
+            for kind in [Kind::Discard, Kind::Supersede, Kind::Merge] {
+                if let Some(a) = core.store.open_action_on(&h.artifact_id, kind).await? {
+                    best_hidden = Some((sim, a));
+                    break;
+                }
+            }
+        }
+        // And the graveyard, by cosine over what was buried by the same model.
+        if buried.is_none() {
+            buried = Some(core.store.graveyard_vectors(&live_model).await?);
+        }
+        for (id, vec) in buried.iter().flatten() {
+            let sim = crate::vector::cosine(&o.query_vec, vec);
+            if sim < bar || best_hidden.as_ref().is_some_and(|(b, _)| sim <= *b) {
+                continue;
+            }
+            if let Some(a) = core.store.open_action_on(id, Kind::Reap).await? {
+                best_hidden = Some((sim, a));
+            }
+        }
+        let Some((sim, a)) = best_hidden else {
+            continue;
+        };
+        let reason = format!(
+            "a search given up on would have been answered by it (cosine {sim:.2} against {best_live:.2} live)"
+        );
+        // A subject that is gone is skipped, not raised. `graveyard_vectors`
+        // and the hit list both exclude artifacts whose row has been deleted,
+        // so reaching here means one left between that read and this write —
+        // but the cost of being wrong about that is the whole rule, not one
+        // subject: every `?` in this loop returns *before* the cursor is
+        // stamped below, so a single unrestorable row re-read and re-failed
+        // every give-up after it, on every lap, for ever. Nothing this rule
+        // does is worth that.
+        // Whether anything in the base ever said *why* this artifact stopped
+        // being active.
+        //
+        // `reap_candidates` nominates on `status != 'active'`, so a row an
+        // operator hid by hand and then let age out is buried exactly like one
+        // the judge discarded — and `reactivate` forces `Active`, so restoring
+        // it republished something a person had deliberately hidden. A search
+        // going unanswered is evidence about the ranking; it is not a second
+        // opinion on somebody's decision.
+        //
+        // The status cannot tell the two apart: both leave `Deprecated`, and
+        // the column survives the burial untouched either way. The journal
+        // can. `deprecate_with` writes a `Kind::Discard` row for a corpus job's
+        // verdict, and the Hide button on Ops calls `deprecate`, which writes
+        // none — so a deprecated row with no discard behind it is a decision
+        // nothing but a person could have made.
+        //
+        // Skipped rather than restored-as-deprecated: putting the row back at
+        // a status that is still hidden does no work, answers no give-up, and
+        // would stamp a journal row claiming it had.
+        if a.kind == Kind::Reap
+            && let Ok(c) = core.store.get_artifact(&a.subject_id).await
+            && c.status == crate::store::artifacts::ArtifactStatus::Deprecated
+            && core
+                .store
+                .open_action_on(&a.subject_id, Kind::Discard)
+                .await?
+                .is_none()
+        {
+            tracing::info!(
+                subject = %a.subject_id,
+                "a search given up on would have been answered by an artifact somebody hid \
+                 by hand before it was buried; leaving that decision alone"
+            );
+            continue;
+        }
+        let restore = match a.kind {
+            Kind::Discard | Kind::Reap => core.reactivate(&a.subject_id).await,
+            Kind::Supersede => core.unsupersede(&a.subject_id).await,
+            _ => Ok(()),
+        };
+        if let Err(crate::error::Error::NotFound) = restore {
+            tracing::info!(
+                subject = %a.subject_id,
+                kind = a.kind.as_str(),
+                "the artifact this would have put back is gone; leaving the row alone"
+            );
+            continue;
+        }
+        // The same line rule 1 draws, and for the same reason: every `?` in
+        // this loop returns before the cursor is stamped, so a row whose undo
+        // cannot be carried out would re-read and re-fail on every later pass
+        // and take the rest of the idle pass with it. The `NotFound` guard
+        // above is this rule with one cause named; a failure with any other
+        // cause is no better to wedge on.
+        if let Err(e) = restore {
+            tracing::warn!(
+                subject = %a.subject_id,
+                kind = a.kind.as_str(),
+                error = %e,
+                "could not restore what a give-up would have been answered by; moving on"
+            );
+            continue;
+        }
+        match stamp_restored(core, &a, &reason).await {
+            Ok(true) => {}
+            // A kind this rule does not take back. Not a failure.
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    subject = %a.subject_id,
+                    kind = a.kind.as_str(),
+                    error = %e,
+                    "restored an artifact but could not stamp the journal; moving on"
+                );
+                continue;
+            }
+        }
+        restored += 1;
+        tracing::info!(
+            subject = %a.subject_id,
+            kind = a.kind.as_str(),
+            sim,
+            best_live,
+            "restored what a search given up on would have been answered by"
+        );
+    }
+    core.store.meta_set(GAVE_UP_AFTER, &cursor.encode()).await?;
+    Ok((restored, false))
+}
+
+/// Stamp the journal rows for one of rule 2's restores, and undo the merge
+/// behind a `Merge` row. `false` for a kind this rule does not take back.
+///
+/// Split out of the loop for the reason `take_back` is: so the caller can
+/// catch a failure and step over the row rather than end the pass on it.
+async fn stamp_restored(
+    core: &Core,
+    a: &crate::store::actions::Action,
+    reason: &str,
+) -> Result<bool> {
+    match a.kind {
+        Kind::Discard | Kind::Reap => {
+            core.store
+                .undo_action_on(&a.subject_id, a.kind, UndoneBy::Evidence, reason)
+                .await?;
+        }
+        Kind::Supersede => {
+            core.store
+                .undo_action_on(&a.subject_id, Kind::Supersede, UndoneBy::Evidence, reason)
+                .await?;
+        }
+        Kind::Merge => {
+            let survivor = a.survivor_id.clone().expect("a merge row names its merge");
+            // Stamped only if it happened. A merge a later one has since
+            // hidden is left alone, and closing its rows on the strength of an
+            // undo that did nothing would take it out of rule 1's reach for
+            // good — see `merge::Undone`.
+            if !crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence)
+                .await?
+                .happened()
+            {
+                return Ok(false);
+            }
+            core.store
+                .undo_actions_under(&survivor, UndoneBy::Evidence, reason)
+                .await?;
+        }
+        Kind::Promote | Kind::Moment | Kind::Condense => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Carry out one of rule 1's undos: restore what the action hid, then stamp
+/// the journal rows that recorded it. Returns the rows stamped.
+///
+/// A function rather than a match in the loop so the caller can catch a
+/// failure and step over the row — see the call site.
+async fn take_back(core: &Core, a: &crate::store::actions::Action, reason: &str) -> Result<usize> {
+    match a.kind {
+        Kind::Merge => {
+            let survivor = a.survivor_id.clone().expect("a merge row names its merge");
+            // The same rule as `stamp_restored`: no rows are closed for an
+            // undo that did nothing. Zero rather than an error, because this
+            // is an ordinary state for rule 1 to meet and the pass must go on
+            // to the next row.
+            if !crate::jobs::merge::undo(core, &survivor, DecidedBy::Evidence)
+                .await?
+                .happened()
+            {
+                return Ok(0);
+            }
+            Ok(core
+                .store
+                .undo_actions_under(&survivor, UndoneBy::Evidence, reason)
+                .await? as usize)
+        }
+        Kind::Supersede => {
+            core.unsupersede(&a.subject_id).await?;
+            Ok(core
+                .store
+                .undo_action_on(&a.subject_id, Kind::Supersede, UndoneBy::Evidence, reason)
+                .await? as usize)
+        }
+        _ => unreachable!("only merge and supersede reach here"),
+    }
+}
+
+/// One probe's last result at or before `at` against its last result after
+/// it, both measured under the same generation — the latest such pair the
+/// probe has.
+///
+/// A rank is a measurement at one set of ranking parameters, so results from
+/// either side of a generation boundary compare the knobs rather than the
+/// artifact. Taking the last result on each side whatever it was measured
+/// under, rule 1 read an adoption as the condensation's doing: one that had
+/// lost nothing was taken back for what the new settings moved, and — since
+/// `condense_candidates` refuses anything once taken back — never offered
+/// again.
+fn spanning(
+    results: &[crate::store::rehearsals::RehearsalResult],
+    at: i64,
+) -> Option<(
+    &crate::store::rehearsals::RehearsalResult,
+    &crate::store::rehearsals::RehearsalResult,
+)> {
+    results
+        .iter()
+        .filter(|t| t.at > at)
+        .filter_map(|t| {
+            results
+                .iter()
+                .filter(|b| b.at <= at && b.generation_id == t.generation_id)
+                .max_by_key(|b| b.at)
+                .map(|b| (b, t))
+        })
+        .max_by_key(|(_, t)| t.at)
+}
+
+/// Rule 1: a survivor must still be found.
+///
+/// For every merge and supersession not yet taken back, the observations that
+/// named the subject before it was hidden are replayed at the live parameters,
+/// and where the survivor lands is read off the list — `satisfied_by` already
+/// resolves the subject to what answers for it. When the subject's record
+/// clears `recommend` against the survivor's replay, the action lost what the
+/// subject had, and the base takes it back. A subject nobody had used has no
+/// evidence and is left alone.
+///
+/// `ACTION_LIMIT` rows a pass, from where the last pass stopped, wrapping at
+/// the end. Reading the oldest rows every time would be no rule at all past
+/// the first few hundred actions: an open row leaves the set only by being
+/// taken back, so the same rows would be replayed for ever and nothing
+/// written since would ever be looked at.
+///
+/// Returns (subjects reconsidered, actions undone, stopped early).
+pub(crate) async fn rule_one(
+    core: &Core,
+    live: &Generation,
+    started: i64,
+) -> Result<(usize, usize, bool)> {
+    let current = *core.ranking.read().expect("ranking lock");
+    let mut reconsidered = 0;
+    let mut undone = 0;
+    let after = core
+        .store
+        .meta_get(ACTED_AFTER)
+        .await?
+        .map(|s| crate::store::Cursor::parse(&s))
+        .unwrap_or_default();
+    let kinds = [Kind::Merge, Kind::Supersede, Kind::Condense];
+    let mut batch = core
+        .store
+        .open_actions_after(&kinds, &after, ACTION_LIMIT)
+        .await?;
+    // The end of a lap. Nothing left after the cursor and the cursor is not at
+    // the start, so start it over: the rows before it are open still, and this
+    // is the pass that gets back to them.
+    if batch.is_empty() && after != crate::store::Cursor::default() {
+        batch = core
+            .store
+            .open_actions_after(&kinds, &crate::store::Cursor::default(), ACTION_LIMIT)
+            .await?;
+    }
+    let mut cursor = after;
+    for a in batch {
+        if core.store.activity_since(started).await? {
+            core.store.meta_set(ACTED_AFTER, &cursor.encode()).await?;
+            return Ok((reconsidered, undone, true));
+        }
+        cursor = crate::store::Cursor {
+            at: a.at,
+            id: a.id.clone(),
+        };
+        // A merge's rows are stamped together by the first original that
+        // fails; the rest of that merge are no longer open by the time the
+        // loop reaches them.
+        if core
+            .store
+            .open_action_on(&a.subject_id, a.kind)
+            .await?
+            .is_none()
+        {
+            continue;
+        }
+        // A condensation's record is its probes, before and after: are they
+        // still finding the artifact where they found it? The same
+        // `recommend` shape as the merge case, pointed the same way — the
+        // record before is the candidate, the replay after is the base.
+        if a.kind == Kind::Condense {
+            // One probe, one place in each list. `recommend` zips the two
+            // positionally and reads index *i* on either side as the same
+            // query replayed, so flattening every probe's results into two
+            // heaps and partitioning them on the clock does not hold: a probe
+            // retired before the condensation contributed only to `before`, a
+            // probe minted after it only to `after`, and the comparison then
+            // put an easy old query's rank 1 against a hard new query's rank 5
+            // and took a condensation back that had lost nothing. The mirror
+            // case hid a real regression.
+            //
+            // So the pairing is per probe — its last result before the
+            // condensation against its last result after, both under one
+            // generation (see `spanning`) — and a probe missing either side
+            // sits the round out, because there is nothing to compare it with.
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for p in core.store.rehearsals_of(&a.subject_id).await? {
+                let results = core
+                    .store
+                    .results_of(&p.id, sweep::OBSERVATION_LIMIT)
+                    .await?;
+                let rank = |r: &crate::store::rehearsals::RehearsalResult| {
+                    r.rank.map(|n| (n - 1).max(0) as usize)
+                };
+                if let Some((b, t)) = spanning(&results, a.at) {
+                    before.push(rank(b));
+                    after.push(rank(t));
+                }
+            }
+            if before.is_empty() {
+                continue;
+            }
+            reconsidered += 1;
+            if !sweep::recommend(&after, &before) {
+                continue;
+            }
+            core.uncondense(&a.id, UndoneBy::Evidence).await?;
+            undone += 1;
+            tracing::info!(
+                subject = %a.subject_id,
+                "took a condensation back on evidence: its probes stopped finding it"
+            );
+            continue;
+        }
+        let named = core
+            .store
+            .observations_naming(
+                &a.subject_id,
+                a.at,
+                &live.embed_recipe,
+                &live.chat_model,
+                sweep::OBSERVATION_LIMIT,
+            )
+            .await?;
+        if named.is_empty() {
+            continue;
+        }
+        reconsidered += 1;
+        let satisfies = crate::eval::satisfied_by(core, &a.subject_id).await;
+        let mut observed = Vec::with_capacity(named.len());
+        let mut replayed = Vec::with_capacity(named.len());
+        for o in named {
+            let pair = Pair {
+                query: o.query,
+                satisfies: satisfies.clone(),
+                query_vec: Some(o.query_vec),
+                priming: None,
+                served_rank: o.rank,
+                // Rule 1 reads `served_rank` directly and never asks the
+                // rerank axis anything, so this is only ever false here.
+                served_reranked: false,
+                // A person's query, not an artifact's text.
+                exclude: Vec::new(),
+            };
+            // Measured where the replay beside it is measured; see
+            // `sweep::served_at`.
+            observed.push(pair.served());
+            replayed.push(sweep::rank_of(core, &pair, current, false).await?);
+        }
+        // `recommend` pointed the other way: the subject's record is the
+        // candidate, the survivor's replay is the base. When the record clears
+        // the gate, the survivor lost what the subject had.
+        if !sweep::recommend(&replayed, &observed) {
+            continue;
+        }
+        let reason = format!(
+            "what it hid was found better than it is, over {} observations",
+            observed.len()
+        );
+        // Logged and stepped over, not raised. Every `?` in this loop returns
+        // before the cursor is stamped below, so one row whose undo cannot be
+        // carried out re-read and re-failed on every later pass, for ever —
+        // and it took the whole idle pass with it: rule 2, interference,
+        // condense and ranking adoption all run after this one and none of
+        // them was reached. Rule 2 already draws this line for the one cause
+        // it knew about; the cost of being wrong about a single action is
+        // never worth the rest of the pass, whatever the cause.
+        //
+        // Left open on purpose. The row is not stamped, so the next lap comes
+        // back to it — this is a skip, not a decision — and if the failure was
+        // transient the undo happens then.
+        match take_back(core, &a, &reason).await {
+            Ok(n) => undone += n,
+            Err(e) => {
+                tracing::warn!(
+                    subject = %a.subject_id,
+                    kind = a.kind.as_str(),
+                    error = %e,
+                    "could not take a corpus action back; leaving the row open and moving on"
+                );
+                continue;
+            }
+        }
+        tracing::info!(
+            subject = %a.subject_id,
+            kind = a.kind.as_str(),
+            "took a corpus action back on evidence"
+        );
+    }
+    core.store.meta_set(ACTED_AFTER, &cursor.encode()).await?;
+    Ok((reconsidered, undone, false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::sweep::test_support::{QUERY, seeded};
+    use crate::store::actions::{Job, NewAction};
+    use crate::store::generations::NewGeneration;
+    use crate::store::observations::{NewObservation, Source};
+
+    /// Name the running configuration as the live generation, under `recipe`.
+    async fn generation_under(core: &Core, recipe: &str) -> Generation {
+        let params = *core.ranking.read().unwrap();
+        core.store
+            .record_generation(&NewGeneration {
+                params: params.into(),
+                embed_recipe: recipe.into(),
+                chat_model: "qwen".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        core.store.live_generation().await.unwrap().unwrap()
+    }
+
+    async fn generation_for(core: &Core) -> Generation {
+        generation_under(core, "recipe-a").await
+    }
+
+    /// A used excerpt at the rank it was served, carrying the vector a real
+    /// search of `QUERY` would have used.
+    async fn observed(core: &Core, generation: &str, artifact: &str, rank: i64) {
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        core.store
+            .record_observation(&NewObservation {
+                generation_id: generation.into(),
+                query: QUERY.into(),
+                query_vec,
+                embed_model: "fake".into(),
+                artifact_id: Some(artifact.into()),
+                rank: Some(rank),
+                source: Source::Cited,
+                event_id: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    fn supersede_row(loser: &str, winner: &str) -> NewAction {
+        NewAction {
+            job: Job::Dedupe,
+            kind: Kind::Supersede,
+            subject_id: loser.into(),
+            survivor_id: Some(winner.into()),
+            detail: None,
+            evidence: serde_json::json!({}),
+            pair_score: Some(0.9),
+        }
+    }
+
+    #[tokio::test]
+    async fn rule_one_takes_a_condensation_back_when_its_probes_stop_finding_it() {
+        let (mut core, order) = seeded().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let g = generation_for(&core).await;
+        let id = order[0].clone();
+        let before = core.store.get_artifact(&id).await.unwrap();
+        // Three probes, each found at rank 1 before the condensation and each
+        // missing after. Three probes and not three results of one: `recommend`
+        // counts *pairs*, and three measurements of one query are one pair.
+        let probes = probes_on(&core, &id, &g, 3).await;
+        let (action, _) = core
+            .store
+            .condense_artifact(&id, None, "shorter", None, &[], serde_json::json!({}))
+            .await
+            .unwrap()
+            .expect("no revision was pinned");
+        let at = core.store.action(&action).await.unwrap().unwrap().at;
+        for p in &probes {
+            result_at(&core, p, &g, Some(1), at - 10).await;
+            result_at(&core, p, &g, None, at + 10).await;
+        }
+
+        let (reconsidered, undone, _) = rule_one(&core, &g, crate::store::now()).await.unwrap();
+        assert_eq!((reconsidered, undone), (1, 1));
+        let back = core.store.get_artifact(&id).await.unwrap();
+        assert_eq!(back.text, before.text);
+        assert!(
+            core.store
+                .action_was_undone(&id, Kind::Condense)
+                .await
+                .unwrap()
+        );
+    }
+
+    /// `recommend` zips its two lists positionally and reads index *i* on
+    /// either side as the same query replayed. Flattening every probe's
+    /// results into two heaps and splitting them on the clock does not hold
+    /// that: a probe retired before the condensation lands only in `before`,
+    /// one minted after it only in `after`, and the comparison then puts an
+    /// easy old query against a hard new one. Four such places apart was
+    /// enough to revert a condensation that had lost nothing — and the mirror
+    /// case hid a real regression.
+    #[tokio::test]
+    async fn a_condensation_is_judged_on_probes_that_span_it_and_no_others() {
+        let (mut core, order) = seeded().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let g = generation_for(&core).await;
+        let id = order[0].clone();
+        let text = core.store.get_artifact(&id).await.unwrap().text;
+        let old_probes = probes_on(&core, &id, &g, 4).await;
+        let (action, _) = core
+            .store
+            .condense_artifact(&id, None, "shorter", None, &[], serde_json::json!({}))
+            .await
+            .unwrap()
+            .expect("no revision was pinned");
+        let at = core.store.action(&action).await.unwrap().unwrap().at;
+        // Four easy questions, answered at rank 1, all of them before the
+        // condensation — and then retired, so nothing replays them again.
+        for p in &old_probes {
+            result_at(&core, p, &g, Some(1), at - 10).await;
+            core.store.retire_rehearsal(p, at).await.unwrap();
+        }
+        // Four harder questions minted after it, none of them ever asked
+        // before it, each landing at rank 5.
+        for p in &probes_on(&core, &id, &g, 4).await {
+            result_at(&core, p, &g, Some(5), at + 10).await;
+        }
+
+        let (reconsidered, undone, _) = rule_one(&core, &g, crate::store::now()).await.unwrap();
+        assert_eq!(
+            (reconsidered, undone),
+            (0, 0),
+            "no probe spans the condensation, so there is nothing to compare"
+        );
+        assert_ne!(
+            core.store.get_artifact(&id).await.unwrap().text,
+            text,
+            "the condensation stands"
+        );
+        assert!(
+            !core
+                .store
+                .action_was_undone(&id, Kind::Condense)
+                .await
+                .unwrap()
+        );
+    }
+
+    /// Before and after under one generation. Across an adoption the two
+    /// sides are measured at two sets of parameters, and a miss after it says
+    /// what the new settings did, not what the condensation lost.
+    #[tokio::test]
+    async fn a_condensation_is_not_judged_across_a_generation_boundary() {
+        let (mut core, order) = seeded().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let g = generation_for(&core).await;
+        let id = order[0].clone();
+        let text = core.store.get_artifact(&id).await.unwrap().text;
+        let probes = probes_on(&core, &id, &g, 3).await;
+        let (action, _) = core
+            .store
+            .condense_artifact(&id, None, "shorter", None, &[], serde_json::json!({}))
+            .await
+            .unwrap()
+            .expect("no revision was pinned");
+        let at = core.store.action(&action).await.unwrap().unwrap().at;
+        for p in &probes {
+            result_at(&core, p, &g, Some(1), at - 10).await;
+        }
+        // The tuner adopts, and under what it adopted every probe misses.
+        let adopted = generation_under(&core, "recipe-a").await;
+        for p in &probes {
+            result_at(&core, p, &adopted, None, at + 10).await;
+        }
+
+        let (reconsidered, undone, _) = rule_one(&core, &adopted, crate::store::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            (reconsidered, undone),
+            (0, 0),
+            "a rank under one generation was compared with a rank under another"
+        );
+        assert_ne!(
+            core.store.get_artifact(&id).await.unwrap().text,
+            text,
+            "the condensation stands"
+        );
+    }
+
+    /// `n` probes on one artifact, each a distinct question. Distinct because
+    /// `idx_rehearsals_live` is keyed on the query, and because a pair is a
+    /// query.
+    async fn probes_on(core: &Core, artifact: &str, g: &Generation, n: usize) -> Vec<String> {
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        let mut out = Vec::new();
+        for i in 0..n {
+            out.push(
+                core.store
+                    .record_rehearsal(&crate::store::rehearsals::NewRehearsal {
+                        class: crate::store::rehearsals::Class::Cue,
+                        query: format!("q{i}-{}", g.id),
+                        query_vec: query_vec.clone(),
+                        embed_model: core.embedder.model().to_string(),
+                        artifact_id: artifact.to_string(),
+                        source_id: None,
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        out
+    }
+
+    /// One result on one probe, with its clock set by hand.
+    async fn result_at(core: &Core, probe: &str, g: &Generation, rank: Option<i64>, at: i64) {
+        let rid = core
+            .store
+            .record_rehearsal_result(&crate::store::rehearsals::NewResult {
+                rehearsal_id: probe.to_string(),
+                generation_id: g.id.clone(),
+                rank,
+                outranked_by: vec![],
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE rehearsal_results SET at = ? WHERE id = ?")
+            .bind(at)
+            .bind(&rid)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+    }
+
+    /// The seeded base, with the top hit of the second source (`order[3]`)
+    /// hidden in favour of the last hit of the first (`order[2]`) on the
+    /// judge's word, after use had named `order[3]` at rank 1 twice.
+    async fn superseded_after_use() -> (Core, Generation, String, String) {
+        let (core, order) = seeded().await;
+        let g = generation_for(&core).await;
+        observed(&core, &g.id, &order[3], 1).await;
+        observed(&core, &g.id, &order[3], 1).await;
+        let (loser, winner) = (order[3].clone(), order[2].clone());
+        core.supersede_with(&loser, &winner, Some(supersede_row(&loser, &winner)))
+            .await
+            .unwrap();
+        (core, g, loser, winner)
+    }
+
+    #[tokio::test]
+    async fn a_supersession_whose_survivor_ranks_two_net_pairs_worse_is_taken_back_on_evidence() {
+        let (core, g, loser, winner) = superseded_after_use().await;
+        let out = rule_one(&core, &g, crate::store::now()).await.unwrap();
+        assert_eq!(out, (1, 1, false));
+        assert!(
+            core.store
+                .get_artifact(&loser)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none(),
+            "unsuperseded"
+        );
+        let row = core.store.recent_actions(1).await.unwrap().remove(0);
+        assert_eq!(row.undone_by, Some(UndoneBy::Evidence));
+        assert_eq!(row.survivor_id.as_deref(), Some(winner.as_str()));
+        assert!(
+            core.store
+                .action_was_undone(&loser, Kind::Supersede)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_supersession_nobody_had_used_has_no_evidence_and_is_left_alone() {
+        let (core, order) = seeded().await;
+        let g = generation_for(&core).await;
+        core.supersede_with(
+            &order[3],
+            &order[2],
+            Some(supersede_row(&order[3], &order[2])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rule_one(&core, &g, crate::store::now()).await.unwrap(),
+            (0, 0, false)
+        );
+        assert!(
+            core.store
+                .get_artifact(&order[3])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_survivor_that_ranks_as_well_as_the_subject_did_holds() {
+        // `order[3]` sat at rank 4 uncapped; hidden in favour of `order[0]`,
+        // which is rank 1 always: the survivor replays better, and the gate
+        // refuses to take the action back.
+        let (core, order) = seeded().await;
+        let g = generation_for(&core).await;
+        observed(&core, &g.id, &order[3], 4).await;
+        observed(&core, &g.id, &order[3], 4).await;
+        core.supersede_with(
+            &order[3],
+            &order[0],
+            Some(supersede_row(&order[3], &order[0])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rule_one(&core, &g, crate::store::now()).await.unwrap(),
+            (1, 0, false)
+        );
+        assert!(
+            core.store
+                .get_artifact(&order[3])
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rule_gets_back_to_an_action_it_has_already_walked_past() {
+        // The same base as above: one open supersession the gate holds. It
+        // stays open, so a reader that only ever looked at the oldest rows
+        // would be stuck on it for ever — and one that only walked forward
+        // would never see it again. It has to come round.
+        let (core, order) = seeded().await;
+        let g = generation_for(&core).await;
+        observed(&core, &g.id, &order[3], 4).await;
+        observed(&core, &g.id, &order[3], 4).await;
+        core.supersede_with(
+            &order[3],
+            &order[0],
+            Some(supersede_row(&order[3], &order[0])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rule_one(&core, &g, crate::store::now()).await.unwrap(),
+            (1, 0, false)
+        );
+        let cursor = core.store.meta_get(ACTED_AFTER).await.unwrap().unwrap();
+        assert_ne!(
+            crate::store::Cursor::parse(&cursor),
+            crate::store::Cursor::default(),
+            "the pass left a position behind"
+        );
+        assert_eq!(
+            rule_one(&core, &g, crate::store::now()).await.unwrap(),
+            (1, 0, false),
+            "the lap ended, so it starts over"
+        );
+    }
+
+    #[tokio::test]
+    async fn observations_from_another_era_are_not_evidence() {
+        let (core, order) = seeded().await;
+        let other = generation_under(&core, "other-recipe").await;
+        observed(&core, &other.id, &order[3], 1).await;
+        observed(&core, &other.id, &order[3], 1).await;
+        let live = generation_for(&core).await;
+        core.supersede_with(
+            &order[3],
+            &order[2],
+            Some(supersede_row(&order[3], &order[2])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rule_one(&core, &live, crate::store::now()).await.unwrap(),
+            (0, 0, false)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_is_taken_back_whole_when_one_original_is_no_longer_found() {
+        let (core, order) = seeded().await;
+        let g = generation_for(&core).await;
+        // Use named the second source's first chunk at the top, twice.
+        observed(&core, &g.id, &order[3], 1).await;
+        observed(&core, &g.id, &order[3], 1).await;
+        // A merge of that chunk with its neighbour, whose text is unrelated
+        // to the query, so the merge is not found where the original was.
+        let draft = crate::infer::prompt::MergedDraft {
+            title: Some("Merged".into()),
+            text: "unrelated words entirely".into(),
+            category: None,
+            tags: vec![],
+            caveats: vec![],
+        };
+        let sources = vec![order[3].clone(), order[4].clone()];
+        let m = crate::jobs::merge::write(&core, &draft, &sources)
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, &m.id).await.unwrap();
+        crate::jobs::merge::finish(&core, &m.id).await.unwrap();
+        for s in &sources {
+            assert!(
+                core.store
+                    .get_artifact(s)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .is_some(),
+                "the fixture needs the originals hidden"
+            );
+            core.store
+                .record_action(&NewAction {
+                    kind: Kind::Merge,
+                    ..supersede_row(s, &m.id)
+                })
+                .await
+                .unwrap();
+        }
+
+        let out = rule_one(&core, &g, crate::store::now()).await.unwrap();
+        assert_eq!(out, (1, 2, false), "one subject had evidence; both rows go");
+        for s in &sources {
+            let c = core.store.get_artifact(s).await.unwrap();
+            assert!(c.in_results(), "an original was not put back");
+        }
+        assert!(
+            core.store
+                .open_actions(&[Kind::Merge], 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A supersession after use on a base that is already in some state, so
+    /// the pass-level tests can ask what the corpus half does there. Three
+    /// observations rather than two: the watching base already holds one of
+    /// this artifact at its old rank, and the record has to clear that too.
+    async fn superseded_after_use_on(core: &Core) -> String {
+        let order = crate::eval::sweep::test_support::ranks_order(core).await;
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        for _ in 0..3 {
+            observed(core, &live.id, &order[3], 1).await;
+        }
+        core.supersede_with(
+            &order[3],
+            &order[2],
+            Some(supersede_row(&order[3], &order[2])),
+        )
+        .await
+        .unwrap();
+        order[3].clone()
+    }
+
+    #[tokio::test]
+    async fn the_corpus_half_runs_while_the_ranking_half_is_under_watch() {
+        let (core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        let loser = superseded_after_use_on(&core).await;
+        let p = crate::jobs::tune::pass(&core).await.unwrap();
+        assert_eq!(p.undone, 1, "{p:?}");
+        assert!(p.adopted.is_none(), "still under watch");
+        assert!(
+            core.store
+                .get_artifact(&loser)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_untrustworthy_anchor_stops_the_corpus_rules_too() {
+        let (core, _) = crate::jobs::tune::test_support::suspended().await;
+        let loser = superseded_after_use_on(&core).await;
+        let p = crate::jobs::tune::pass(&core).await.unwrap();
+        assert_eq!(p.undone, 0);
+        assert!(
+            core.store
+                .get_artifact(&loser)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_some(),
+            "suspended means the corpus rules act on nothing either"
+        );
+    }
+
+    /// A give-up on `QUERY` under `generation`.
+    async fn gave_up(core: &Core, generation: &str) {
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        core.store
+            .record_observation(&NewObservation {
+                generation_id: generation.into(),
+                query: QUERY.into(),
+                query_vec,
+                embed_model: core.embedder.model().to_string(),
+                artifact_id: None,
+                rank: None,
+                source: Source::GaveUp,
+                event_id: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// One note that is the answer to `QUERY` and one that is not, each its
+    /// own source: the answer has no twin, so hiding it is a loss the base can
+    /// see. `seeded()` cannot serve here — its three chunks of one source are
+    /// identical, and a hidden hit with a live twin at the same similarity is
+    /// no loss at all.
+    async fn one_answer() -> (Core, String, String) {
+        let core = crate::core::test_support::test_core().await;
+        let mut ids = Vec::new();
+        for (raw, text) in [("answer", QUERY), ("other", "unrelated words")] {
+            let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
+            let new = vec![crate::store::artifacts::NewArtifact {
+                text: text.to_string(),
+                ..Default::default()
+            }];
+            for c in core.store.insert_artifacts(&src.id, &new).await.unwrap() {
+                crate::jobs::embed::run(&core, &c.id).await.unwrap();
+                ids.push(c.id);
+            }
+        }
+        let (answer, other) = (ids.remove(0), ids.remove(0));
+        (core, answer, other)
+    }
+
+    fn discard_row(subject: &str) -> NewAction {
+        NewAction {
+            kind: Kind::Discard,
+            survivor_id: None,
+            ..supersede_row(subject, "")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_give_up_that_a_discarded_artifact_would_have_topped_restores_it() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        // The answer, discarded on the judge's word.
+        core.deprecate_with(&answer, Some(discard_row(&answer)))
+            .await
+            .unwrap();
+        gave_up(&core, &g.id).await;
+
+        let out = rule_two(&core, crate::store::now()).await.unwrap();
+        assert_eq!(out, (1, false));
+        assert!(core.store.get_artifact(&answer).await.unwrap().in_results());
+        assert!(
+            core.store
+                .action_was_undone(&answer, Kind::Discard)
+                .await
+                .unwrap()
+        );
+        let row = core.store.recent_actions(1).await.unwrap().remove(0);
+        assert_eq!(row.undone_by, Some(UndoneBy::Evidence));
+    }
+
+    #[tokio::test]
+    async fn a_give_up_the_live_list_answers_better_restores_nothing() {
+        let (core, _, other) = one_answer().await;
+        let g = generation_for(&core).await;
+        // The unrelated note, discarded: the live answer is closer.
+        core.deprecate_with(&other, Some(discard_row(&other)))
+            .await
+            .unwrap();
+        gave_up(&core, &g.id).await;
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        assert!(!core.store.get_artifact(&other).await.unwrap().in_results());
+    }
+
+    #[tokio::test]
+    async fn a_give_up_with_nothing_live_to_beat_restores_nothing() {
+        // Both notes hidden, so the replay comes back with no live hit at all.
+        // There is no bar for a buried candidate to clear here, and taking the
+        // best of nothing as zero would restore whichever artifact happened to
+        // be least unlike the query. A base that answers a query with nothing
+        // has a gap, not an action to take back.
+        let (core, answer, other) = one_answer().await;
+        let g = generation_for(&core).await;
+        core.deprecate_with(&answer, Some(discard_row(&answer)))
+            .await
+            .unwrap();
+        core.deprecate_with(&other, Some(discard_row(&other)))
+            .await
+            .unwrap();
+        gave_up(&core, &g.id).await;
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
+    }
+
+    #[tokio::test]
+    async fn a_give_up_recorded_under_another_embedder_is_not_read() {
+        // Its query vector is in one space and the live replay's hits are in
+        // another; the two similarities the rule compares would not be on the
+        // same scale, and neither would the graveyard's.
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        core.deprecate_with(&answer, Some(discard_row(&answer)))
+            .await
+            .unwrap();
+        let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
+        core.store
+            .record_observation(&NewObservation {
+                generation_id: g.id.clone(),
+                query: QUERY.into(),
+                query_vec,
+                embed_model: "some-other-model".into(),
+                artifact_id: None,
+                rank: None,
+                source: Source::GaveUp,
+                event_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
+    }
+
+    #[tokio::test]
+    async fn an_artifact_a_person_hid_is_not_the_base_s_to_restore() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        core.deprecate(&answer).await.unwrap();
+        gave_up(&core, &g.id).await;
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
+    }
+
+    /// And it stays not the base's to restore once it has been buried.
+    ///
+    /// The rule above holds because a hand-hidden artifact has no journal row,
+    /// and rule 2 works from rows. Burial writes one — every grave has a
+    /// `Kind::Reap` — so the graveyard branch found a row where the live
+    /// branch had found none, and `reactivate` forces `Active`: a search going
+    /// unanswered republished, at full visibility, something a person had
+    /// deliberately taken out of results however long ago.
+    ///
+    /// The Reap row is still there and still open. What changes is that
+    /// nothing is restored on the strength of it, and no undo is stamped.
+    #[tokio::test]
+    async fn an_artifact_a_person_hid_stays_hidden_after_it_is_buried() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        let model = core.embedder.model().to_string();
+        // By hand, through the button's own method: no journal row, which is
+        // the whole of what distinguishes this from a judged discard.
+        core.deprecate(&answer).await.unwrap();
+        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 400 * 86_400)
+            .bind(&answer)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let dense = core
+            .vectors
+            .dense_of(&answer)
+            .await
+            .unwrap()
+            .expect("a point");
+        core.store
+            .bury(
+                &answer,
+                r#"{"reason":"covered"}"#,
+                0,
+                Some(&dense),
+                Some(&model),
+                &crate::jobs::reap::test_support::row(&answer),
+            )
+            .await
+            .unwrap();
+        core.vectors
+            .delete_artifacts(std::slice::from_ref(&answer))
+            .await
+            .unwrap();
+        gave_up(&core, &g.id).await;
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false),
+            "a give-up overturned somebody's decision to hide this"
+        );
+        let row = core.store.get_artifact(&answer).await.unwrap();
+        assert!(row.reaped_at.is_some(), "the grave was opened anyway");
+        assert!(!row.in_results());
+        assert!(
+            !core
+                .store
+                .action_was_undone(&answer, Kind::Reap)
+                .await
+                .unwrap(),
+            "an undo was stamped for a restore that did not happen"
+        );
+    }
+
+    /// Bury `id` the way reap does: a judged discard, then a burial with its
+    /// vector and a journal row — the ordinary road into the graveyard,
+    /// stated through the calls that actually take it.
+    ///
+    /// The discard is journaled rather than stamped straight onto the row,
+    /// because the journal is what says a corpus job hid this and not a
+    /// person: rule 2 reads exactly that before it puts anything back. A bare
+    /// `set_artifact_status` here described a state the app has no path to.
+    async fn buried(core: &Core, id: &str, embed_model: &str) {
+        core.deprecate_with(id, Some(discard_row(id)))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
+            .bind(crate::store::now() - 400 * 86_400)
+            .bind(id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let dense = core.vectors.dense_of(id).await.unwrap().expect("a point");
+        core.store
+            .bury(
+                id,
+                r#"{"reason":"covered"}"#,
+                0,
+                Some(&dense),
+                Some(embed_model),
+                &crate::jobs::reap::test_support::row(id),
+            )
+            .await
+            .unwrap();
+        core.vectors
+            .delete_artifacts(std::slice::from_ref(&id.to_string()))
+            .await
+            .unwrap();
+    }
+
+    /// A grave whose artifact was deleted with its corpus must not be able to
+    /// stop the rule.
+    ///
+    /// Nothing cascades into `graveyard` and nothing sweeps it — a grave is
+    /// permanent so that no reap verdict is ever wrong invisibly — so the row
+    /// and its open `Reap` row outlive the artifact. Picked as the best hidden
+    /// candidate, `reactivate` answered `NotFound` and the `?` took the pass
+    /// down before `meta_set` ever ran: the cursor never moved, so the same
+    /// give-up was re-read and re-failed on every lap afterwards and no
+    /// give-up recorded after it was ever acted on again.
+    #[tokio::test]
+    async fn a_grave_whose_artifact_is_gone_neither_stops_the_rule_nor_moves_the_cursor_back() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        let model = core.embedder.model().to_string();
+        buried(&core, &answer, &model).await;
+        // The corpus goes, and the stub with it. The grave and the open `Reap`
+        // row stay, exactly as they do in production.
+        let corpus = core
+            .store
+            .get_artifact(&answer)
+            .await
+            .unwrap()
+            .corpus_id
+            .expect("a buried stub still names its corpus");
+        core.store.delete_corpus(&corpus).await.unwrap();
+        assert!(
+            matches!(
+                core.store.get_artifact(&answer).await,
+                Err(crate::error::Error::NotFound)
+            ),
+            "the premise: the stub left with its corpus"
+        );
+        assert!(
+            core.store.graveyard_row(&answer).await.unwrap().is_some(),
+            "the grave is permanent by design"
+        );
+        assert!(
+            core.store
+                .open_action_on(&answer, Kind::Reap)
+                .await
+                .unwrap()
+                .is_some(),
+            "and so is its journal row"
+        );
+        gave_up(&core, &g.id).await;
+
+        let out = rule_two(&core, crate::store::now()).await.unwrap();
+        assert_eq!(out, (0, false), "an orphan is not something to restore");
+        // The cursor moved, which is the whole point: the next pass reads
+        // what comes after this give-up rather than starting here again.
+        assert!(
+            core.store.meta_get(GAVE_UP_AFTER).await.unwrap().is_some(),
+            "the pass died before it could stamp where it had read to"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_buried_artifact_is_exhumed_by_cosine_and_re_embedded() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        let model = core.embedder.model().to_string();
+        buried(&core, &answer, &model).await;
+        assert!(
+            core.store
+                .get_artifact(&answer)
+                .await
+                .unwrap()
+                .text
+                .is_empty()
+        );
+        gave_up(&core, &g.id).await;
+
+        let out = rule_two(&core, crate::store::now()).await.unwrap();
+        assert_eq!(out, (1, false));
+        let row = core.store.get_artifact(&answer).await.unwrap();
+        assert!(row.reaped_at.is_none());
+        assert_eq!(row.text, QUERY, "the text came back out of the grave");
+        assert!(row.in_results());
+        assert!(core.store.graveyard_row(&answer).await.unwrap().is_none());
+        assert!(
+            core.store
+                .action_was_undone(&answer, Kind::Reap)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_buried_vector_from_another_model_is_not_compared() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        buried(&core, &answer, "some-other-model").await;
+        gave_up(&core, &g.id).await;
+
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        assert!(
+            core.store
+                .get_artifact(&answer)
+                .await
+                .unwrap()
+                .reaped_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn give_ups_are_read_once_and_the_cursor_moves() {
+        let (core, answer, _) = one_answer().await;
+        let g = generation_for(&core).await;
+        gave_up(&core, &g.id).await;
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        // Now hide the answer: the give-up already read is not read again,
+        // so nothing is restored until a new give-up arrives.
+        core.deprecate_with(&answer, Some(discard_row(&answer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            rule_two(&core, crate::store::now()).await.unwrap(),
+            (0, false)
+        );
+        assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
+    }
+
+    #[tokio::test]
+    async fn the_rule_stops_between_subjects_when_somebody_comes_back() {
+        let (core, g, _, _) = superseded_after_use().await;
+        // A search recorded after the pass began: whoever it was is ahead.
+        let started = crate::store::now() - 10;
+        core.store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    query: "anything".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                    fold_onto: None,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let out = rule_one(&core, &g, started).await.unwrap();
+        assert_eq!(out, (0, 0, true));
+    }
+}

@@ -17,8 +17,59 @@
    and left standing it is the heading the *next* act's results arrive under.
    Cleared here, so whichever fragment fills the rail is the one that names
    it. #}
+{# Neither swap rides anything but a swap (`oob`). The line's own poll can land
+   while someone types: it would empty the heading over their results and
+   forget the search they are folding into. On first paint they are inert
+   anyway — htmx reads out-of-band attributes only on a swapped response — so
+   one flag says both things. #}
+{% if oob %}
 <div class="rail-act" hx-swap-oob="innerHTML:#rail-head"></div>
-<p id="idle-foot" class="idle-foot muted" hx-swap-oob="true">
+{# The search the box was folding into, forgotten. Nothing was searched for
+   this answer — the box is empty, or holds a paste too long to be a query —
+   so the id `_results.html` handed over last is about text that is no longer
+   there, and a Capture pressed now would send it as this text's first draft.
+   A named search closes its gap without a distance check. #}
+<span hx-swap-oob="innerHTML:#fold-of"></span>
+{% endif %}
+{# What a paste becomes, and the two words the line below counts in. Only while
+   the base is young; see `TEACH_UNTIL_SOURCES`.
+
+   Here rather than in `workspace.html`, where it was rendered once with the
+   page: the fifth capture left it standing until a reload, and a base that
+   reached five sources by another door — MCP, the CLI, a second tab — showed
+   the list and the counts disagreeing. This fragment is swapped out of band
+   after every capture and on the line's own poll, so the list retires itself.
+
+   The element is always here and empties instead of disappearing: an
+   out-of-band swap can only replace an element the response carries, so a
+   fragment that simply left the list out would leave the stale one standing.
+   `.teach:empty` takes the grid's margin with it.
+
+   The two phrasings are glosses here and buttons under the box — see
+   `_box_hint.html` for why they stopped moving between the two. #}
+<dl id="teach" class="teach" hx-swap-oob="true">
+{%- if self.teach() %}
+  <dt>note</dt><dd>anything you keep</dd>
+  <dt>reminder</dt><dd lang="{{ example_lang }}">&ldquo;{{ example_remind }}&rdquo;</dd>
+  <dt>entry</dt><dd lang="{{ example_lang }}">&ldquo;{{ example_journal }}&rdquo;</dd>
+  <dt>event</dt><dd>a date, nothing asked</dd>
+  <dt>link</dt><dd>made on its own</dd>
+  <dt>source</dt><dd>what you pasted, unchanged</dd>
+  <dt>artifact</dt><dd>a passage search returns</dd>
+{% endif -%}
+</dl>
+{# While a capture is read the line polls itself. `hx-swap="none"`: the answer
+   is this same paragraph, out of band.
+
+   The trigger is filtered, not merely armed. A poll fires as readily inside a
+   hidden parent as a visible one and as readily in a background tab: app.js
+   hides `#idle` on the first keystroke, so the tick went on costing three
+   reads a second for a line nobody could see. `refresh` is what app.js fires
+   when the column comes back, so the line the reader returns to is current
+   rather than however old the last tick left it. #}
+<p id="idle-foot" class="idle-foot muted" hx-swap-oob="true"
+   {%- if reading %} hx-get="/ui/idle-foot" hx-swap="none"
+   hx-trigger="refresh, every 3s [!document.hidden && !this.closest('#idle')?.hidden]"{% endif %}>
 {%- if !held %}
   {# Nothing. No counts to print and no last capture to name, and the sentence
      that used to stand here was the third copy of one thought: the placeholder
@@ -27,7 +78,7 @@
      branch stays because the paragraph is the out-of-band swap target, and it
      renders empty — `.idle-foot:empty` takes the margin with it. #}
 {%- else %}
-  <span class="mono">{{ artifacts }}</span> artifact{% if artifacts != 1 %}s{% endif %}
+  {% if reading %}reading… &middot; {% endif %}<span class="mono">{{ artifacts }}</span> artifact{% if artifacts != 1 %}s{% endif %}
   from <span class="mono">{{ corpora }}</span> source{% if corpora != 1 %}s{% endif %}
   {%- if let Some(r) = recent.first() %} &middot; last kept
   <a href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>

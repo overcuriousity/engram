@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default)]
     pub pacing: PacingConfig,
     #[serde(default)]
+    pub evolve: EvolveConfig,
+    #[serde(default)]
     pub capture: CaptureConfig,
     #[serde(default)]
     pub associate: AssociateConfig,
@@ -251,6 +253,24 @@ pub struct FeedbackConfig {
     pub coalesce_secs: i64,
     /// Days captured searches are kept. `0` keeps them forever.
     pub retain_days: i64,
+    /// The share of recorded searches that explore: lift the top unshown
+    /// candidate into the last visible row. `0.0` turns it off.
+    ///
+    /// The one hole in everything else here. Every positive observation this
+    /// module records is about an artifact the live ranking chose to show, so
+    /// the tuner's replay can reward reordering what was already on screen and
+    /// can never learn about what was hidden. Two consequences follow with no
+    /// way out from inside the loop: widening the candidate pool can never be
+    /// shown to help, because nothing outside the window is ever opened; and
+    /// recency ratchets, because people click among the recency-boosted rows
+    /// they were handed and the replay reads that as recency working.
+    ///
+    /// One row of one search in ten is the price of closing it. The lifted
+    /// candidate is charged to the rank the ranking gave it, not to the row it
+    /// borrowed — see `search_candidates.explored_from` — so an open on it is
+    /// evidence the incumbent could not have produced and cannot take credit
+    /// for.
+    pub explore: f32,
     /// How often the retention sweep runs. Hours rather than minutes because
     /// `retain_days` is the only thing it enforces: a window measured in days
     /// does not need checking more than a few times a day.
@@ -264,6 +284,7 @@ impl Default for FeedbackConfig {
             candidates: 20,
             coalesce_secs: 5,
             retain_days: 0,
+            explore: 0.1,
             sweep_hours: 6,
             tune: TuneConfig::default(),
         }
@@ -320,9 +341,9 @@ pub struct AssociateConfig {
     /// How much more activated a hit must be than the one above it to pass it.
     /// Normalised within one result list, so this is a fraction, not a weight.
     pub prime_margin: f64,
-    /// Positions a hit may climb. `0` turns priming off, and it ships off: an
-    /// unmeasured feature that reorders results and makes a claim about the
-    /// person should not be on until the harness has run with it off and on.
+    /// Positions a hit may climb. `0` turns priming off, and it ships off. The
+    /// file's value is the starting rung: a base with `evolve.autonomous` on
+    /// moves it from here on what use leaves behind.
     pub prime_lift: usize,
 }
 
@@ -337,9 +358,9 @@ impl Default for AssociateConfig {
             judge_min_queries: 3,
             judge_per_sweep: 10,
             spread_from: 3,
-            spread_max: 3,
+            spread_max: default_spread_max(),
             prime_margin: 0.5,
-            prime_lift: 0,
+            prime_lift: default_prime_lift(),
         }
     }
 }
@@ -474,11 +495,23 @@ impl Default for ActivationConfig {
 pub struct SittingConfig {
     /// Let what this sitting has touched lift a result.
     ///
-    /// Off until the harness says otherwise. It is the only part of the sitting
-    /// that moves an order, and the same query ranking differently in two
-    /// sittings is exactly what is disorienting about it — so it ships off, the
-    /// lift is bounded by the same budget activation's is, and rank 0 never
-    /// moves.
+    /// The file's value is the starting rung: it is the only part of the
+    /// sitting that moves an order, and the same query ranking differently in
+    /// two sittings is exactly what is disorienting about it — so the lift is
+    /// bounded by the same budget activation's is, and rank 0 never moves.
+    /// What the sitting held is recorded whether or not this is on, so the
+    /// idle pass can replay a search with it on and find out whether it
+    /// should be; from there the live value is the generation's, not this.
+    ///
+    /// Two values, and they answer different questions. The compiled default
+    /// below is off, so an existing base that never wrote this key is not
+    /// moved by an upgrade; `config.example.toml` ships it on, so a new
+    /// deployment starts primed and its own watch decides from there. The
+    /// design that argued for measuring the sitting wanted the evidence
+    /// gathered while this was off, which is the clean counterfactual — a
+    /// base that ships primed is not gathering that. What it gathers instead
+    /// is a rung under watch, which the probe anchor and the lived watch may
+    /// take back, and that is the honest name for it.
     pub prime: bool,
 }
 
@@ -489,6 +522,149 @@ impl Default for SittingConfig {
         // reason above it, and a derived `Default` would put that reason a
         // refactor away from the value it explains.
         Self { prime: false }
+    }
+}
+
+/// How much a quiet base may do on its own. Three stages rather than a
+/// switch, because the two halves are not equally reversible: a ranking
+/// generation is a row `revert_generation` undoes exactly, while a merge, a
+/// burial or a condensation is a corpus write with an undo beside it. The
+/// reversible half can be a default; the other half is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Autonomy {
+    /// The idle pass does not run. Integration still files and writes probes.
+    Off,
+    /// Integrate, rehearse, watch; adopt and revert ranking generations. The
+    /// default: every move it makes is a row `revert` undoes exactly, and it
+    /// can no longer move where there is nothing to measure it against.
+    #[default]
+    Ranking,
+    /// Everything above, plus the corpus rules under the weekly budget.
+    Full,
+}
+
+impl Autonomy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Autonomy::Off => "off",
+            Autonomy::Ranking => "ranking",
+            Autonomy::Full => "full",
+        }
+    }
+    /// Ranking generations may be adopted and reverted.
+    pub fn moves_ranking(self) -> bool {
+        matches!(self, Autonomy::Ranking | Autonomy::Full)
+    }
+    /// The corpus rules may act: retract, interference, condense.
+    pub fn acts_on_corpus(self) -> bool {
+        matches!(self, Autonomy::Full)
+    }
+}
+
+impl<'de> Deserialize<'de> for Autonomy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = Autonomy;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(r#"true, false, "off", "ranking" or "full""#)
+            }
+            // A file written before the stages existed: `true` was the whole
+            // loop, ranking and corpus both, and stays that.
+            fn visit_bool<E: serde::de::Error>(self, b: bool) -> std::result::Result<Autonomy, E> {
+                Ok(if b { Autonomy::Full } else { Autonomy::Off })
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Autonomy, E> {
+                match s {
+                    "off" => Ok(Autonomy::Off),
+                    "ranking" => Ok(Autonomy::Ranking),
+                    "full" => Ok(Autonomy::Full),
+                    // The same back-compatibility `visit_bool` carries, spelled
+                    // for the reader that has no booleans. Every environment
+                    // value arrives as a string, so `ENGRAM__EVOLVE__AUTONOMOUS=false`
+                    // reached `visit_bool` never and `unknown_variant` always —
+                    // and the server refused to boot on a setting the release
+                    // notes said was still read.
+                    "true" => Ok(Autonomy::Full),
+                    "false" => Ok(Autonomy::Off),
+                    other => Err(E::unknown_variant(other, &["off", "ranking", "full"])),
+                }
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// Recording what use leaves behind.
+///
+/// Nothing here changes what a search or an ask returns. It decides only what
+/// is written down about how one turned out, and — once — whether the tuning
+/// sweep is allowed to read it.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct EvolveConfig {
+    /// A search nobody opened, followed by another search from the same person
+    /// inside this many seconds, is a weak negative.
+    ///
+    /// Minutes, and deliberately far above `feedback.coalesce_secs`: that one
+    /// is the length of a typing burst, this one is a person reading a list,
+    /// thinking, and asking again. Too long and an unrelated question an hour
+    /// later is scored as the failure of a search that worked.
+    ///
+    /// Zero turns the give-up signal off and leaves the rest recording.
+    pub give_up_window_secs: i64,
+    /// Let the tuning sweep read positive observations as pairs, beside the
+    /// ones a person judged.
+    ///
+    /// Off, and off is the shipped default rather than an opinion about
+    /// whether it works. Widening the sweep's evidence changes which settings
+    /// it recommends, a recommendation changes ranking, and a default that
+    /// changes ranking moves only after the harness has been run.
+    pub feed_sweep: bool,
+    /// How much a quiet base may do on its own: nothing, move its own
+    /// ranking, or also act on the corpus. See `Autonomy`.
+    ///
+    /// `"ranking"`, and only the reversible half of the loop is a default:
+    /// every move that stage makes is a row `revert` undoes exactly, while a
+    /// merge, a burial or a condensation is a corpus write and is asked for.
+    /// Under `"ranking"` the idle pass adopts a candidate that clears the
+    /// sweep's gate as a new generation, watches what it earns while serving,
+    /// and reverts it when it does not hold — on observations and on the
+    /// base's own probes both. What it may move there is the recency weight
+    /// and its half-life, the per-source cap, the candidate pool depth, the
+    /// prime lift, the sitting flip, the reranker and the width of the
+    /// associated band.
+    /// `consolidate.review_min` is on the same ladder and is *not* in that
+    /// list: stepping it down widens what the dedupe judge considers, and the
+    /// merges and supersessions that follow are corpus writes reverting the
+    /// generation row does not undo. Its "wrong" signal reads `undone` rows
+    /// that only the corpus rules produce, so under `"ranking"` the ladder
+    /// could only ever have walked one way — down. It moves under `"full"`.
+    /// Under `"full"` the corpus rules run too, behind `max_actions_per_week`.
+    /// The file is never written; the insights page says which generation is
+    /// live. `true` and `false` still read, as `"full"` and `"off"`.
+    pub autonomous: Autonomy,
+    /// Corpus actions the base may take on its own in any seven days under
+    /// `"full"`. Undone or not, an action counts: it was taken. Reached, the
+    /// corpus jobs keep finding and stop acting until the window moves.
+    pub max_actions_per_week: u32,
+    /// How long a base has to have been quiet before the idle pass runs.
+    ///
+    /// Quiet means no search and no question. The pass takes its searches on
+    /// the background lane, so a person returning gets ahead of it either way;
+    /// the window is what keeps it from starting under somebody at all.
+    pub idle_secs: i64,
+}
+
+impl Default for EvolveConfig {
+    fn default() -> Self {
+        Self {
+            give_up_window_secs: 300,
+            feed_sweep: false,
+            autonomous: Autonomy::Ranking,
+            max_actions_per_week: 10,
+            idle_secs: 1800,
+        }
     }
 }
 
@@ -745,6 +921,16 @@ pub struct ConsolidateConfig {
     pub enabled: bool,
     /// Estimated Jaccard over word shingles above which a capture is parked as
     /// a near-duplicate of an existing corpus.
+    ///
+    /// 0.60 is measured rather than chosen. Over a live base's 3916 corpus
+    /// pairs, computed with `store::shingle::similarity` itself, the one real
+    /// duplicate — a news article captured once through the web door and once
+    /// through the journal door, differing only in extraction boilerplate —
+    /// scored 0.789, and the next-highest pair in the whole base scored 0.036.
+    /// Everything between is empty, so the threshold sits in the middle of a
+    /// gap rather than on a slope. It shipped at 0.90, which is above the only
+    /// case it had to catch: two readings of one document never agree closely
+    /// enough for that, because the boilerplate each door keeps is different.
     pub near_dupe_min: f64,
     /// Cosine at or above which a pair is worth an operator's attention.
     pub review_min: f32,
@@ -791,8 +977,8 @@ impl Default for ConsolidateConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            near_dupe_min: 0.90,
-            review_min: 0.88,
+            near_dupe_min: 0.60,
+            review_min: default_review_min(),
             auto_supersede: 0.95,
             per_point: 5,
             interval_hours: 24,
@@ -889,15 +1075,44 @@ pub struct VectorConfig {
     /// file stays the one place the running configuration can be read.
     #[serde(default = "default_per_source_cap")]
     pub per_source_cap: usize,
+    /// How many times the answer size a search fetches when the cap or the
+    /// reranker will narrow it. See `RankingParams::candidate_multiplier`.
+    #[serde(default = "default_candidate_multiplier")]
+    pub candidate_multiplier: usize,
 }
-fn default_recency_weight() -> f32 {
+pub(crate) fn default_recency_weight() -> f32 {
     0.05
 }
-fn default_per_source_cap() -> usize {
+pub(crate) fn default_per_source_cap() -> usize {
     crate::core::search::MAX_PER_CORPUS
 }
-fn default_recency_half_life_days() -> u32 {
+pub(crate) fn default_recency_half_life_days() -> u32 {
     180
+}
+pub(crate) fn default_candidate_multiplier() -> usize {
+    crate::core::search::CANDIDATE_MULTIPLIER
+}
+/// The shipped `associate.prime_lift`: off. Read by the generation shapes so
+/// a row written before the knob existed decodes as what it ran under.
+pub(crate) fn default_prime_lift() -> usize {
+    0
+}
+pub(crate) fn default_spread_max() -> usize {
+    3
+}
+/// The shipped `sitting.prime`: off. Read by the generation shapes so a row
+/// written before the knob was on the ladder decodes as what it ran under.
+pub(crate) fn default_sitting_prime() -> bool {
+    false
+}
+/// A generation written before the rerank knob existed ran with whatever
+/// reranker the file named, which is "on" wherever one was configured.
+pub(crate) fn default_rerank_knob() -> bool {
+    true
+}
+/// The shipped `consolidate.review_min`, read by the generation shapes.
+pub(crate) fn default_review_min() -> f32 {
+    0.88
 }
 fn default_pinned_boost() -> f32 {
     0.15
@@ -1909,7 +2124,8 @@ pub enum ConfigError {
     Invalid(String),
 }
 
-/// Write the two runtime-tunable keys back into the file they came from.
+/// Write the file-backed runtime-tunable keys back into the file they came
+/// from.
 ///
 /// An edit to the parsed document rather than a re-serialisation of the whole
 /// configuration: every comment, every blank line and every key this does not
@@ -1929,10 +2145,19 @@ pub fn write_ranking(path: &Path, p: &crate::core::ranking::RankingParams) -> st
     let weight = (f64::from(p.recency_weight) * 1000.0).round() / 1000.0;
     doc["vector"]["recency_weight"] = toml_edit::value(weight);
     doc["vector"]["per_source_cap"] = toml_edit::value(p.per_source_cap.map_or(0, |n| n as i64));
+    doc["vector"]["candidate_multiplier"] = toml_edit::value(p.candidate_multiplier as i64);
+    doc["vector"]["recency_half_life_days"] = toml_edit::value(i64::from(p.recency_half_life_days));
+    doc["associate"]["prime_lift"] = toml_edit::value(p.prime_lift as i64);
+    doc["associate"]["spread_max"] = toml_edit::value(p.spread_max as i64);
+    doc["sitting"]["prime"] = toml_edit::value(p.sitting_prime);
+    let review = (f64::from(p.review_min) * 1000.0).round() / 1000.0;
+    doc["consolidate"]["review_min"] = toml_edit::value(review);
+    // `rerank` has no key of its own: the file says "on" by naming a reranker
+    // under `[infer]`, and that is not this function's to add or remove.
     write_beside_and_rename(path, &doc.to_string())
 }
 
-/// Whichever of the two swept keys the environment is currently setting.
+/// Whichever of the swept file keys the environment is currently setting.
 ///
 /// `load` layers `ENGRAM__*` *after* the file, so an operator who set one of
 /// these where the server starts gets that value back on the next boot whatever
@@ -1951,7 +2176,14 @@ pub fn ranking_keys_in_env() -> Vec<String> {
         .filter(|k| {
             matches!(
                 k.to_ascii_uppercase().as_str(),
-                "ENGRAM__VECTOR__RECENCY_WEIGHT" | "ENGRAM__VECTOR__PER_SOURCE_CAP"
+                "ENGRAM__VECTOR__RECENCY_WEIGHT"
+                    | "ENGRAM__VECTOR__PER_SOURCE_CAP"
+                    | "ENGRAM__VECTOR__CANDIDATE_MULTIPLIER"
+                    | "ENGRAM__VECTOR__RECENCY_HALF_LIFE_DAYS"
+                    | "ENGRAM__ASSOCIATE__PRIME_LIFT"
+                    | "ENGRAM__ASSOCIATE__SPREAD_MAX"
+                    | "ENGRAM__SITTING__PRIME"
+                    | "ENGRAM__CONSOLIDATE__REVIEW_MIN"
             )
         })
         .collect()
@@ -2175,6 +2407,26 @@ impl Config {
                     self.pursuit.min_engagement,
                     f64::INFINITY
                 );
+                // And the idle pass, which is the fourth reader and the one
+                // that reads the log hardest. `evolve.autonomous` defaults to
+                // `ranking`, so a base left at that default under `learning`
+                // walked the prime-lift ladder anyway and could adopt a
+                // generation carrying `prime_lift = 1` — the reordering this
+                // mode's whole promise is that it will not do, arrived at from
+                // underneath, with `--print-config` still reporting `0`
+                // because a resolved key is never written back to the file.
+                //
+                // `off` and not `ranking`, because "the mode to run the
+                // harness in before any of this is allowed to move a rank" is
+                // the definition of `learning`, and `Autonomy::Off` still
+                // integrates and writes probes: the evidence keeps
+                // accumulating, and the verdict-paid sweep — which is gated on
+                // `learn.enabled`, not on this — still recommends. What stops
+                // is the base moving itself.
+                if raw.get::<config::Value>("evolve.autonomous").is_err() {
+                    self.evolve.autonomous = Autonomy::Off;
+                    resolved.push(("evolve.autonomous", self.evolve.autonomous.as_str().into()));
+                }
             }
         }
         match self.learn.mode {
@@ -2231,7 +2483,19 @@ impl Config {
                  using the default"
             );
         }
-        let ceiling = crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER;
+        if self.vector.candidate_multiplier == 0 {
+            let d = default_candidate_multiplier();
+            self.vector.candidate_multiplier = d;
+            tracing::warn!(
+                using = d,
+                "vector.candidate_multiplier = 0 would fetch nothing to cap; using the default"
+            );
+        }
+        // The widest ordinary search is the top rung of the ladder the pass may
+        // climb to, not the shipped multiplier: a pass that adopted the top
+        // rung would otherwise fetch wider than the ceiling promised.
+        let ceiling = crate::core::search::MAX_LIMIT
+            * crate::core::ranking::MULTIPLIERS[crate::core::ranking::MULTIPLIERS.len() - 1];
         if self.feedback.candidates > ceiling {
             tracing::warn!(
                 configured = self.feedback.candidates,
@@ -2414,6 +2678,41 @@ impl Config {
                  are ever rewritten."
             );
         }
+        for key in self.inert_priming_keys() {
+            tracing::warn!(
+                key,
+                "{key} is on but associate.prime_lift is 0, so it does nothing: both lifts \
+                 share the one budget prime_lift bounds, and priming returns the list \
+                 untouched at zero. Raise prime_lift, or turn this off to say what you mean."
+            );
+        }
+    }
+
+    /// Keys that are switched on and cannot act, because the budget they share
+    /// is zero.
+    ///
+    /// `sitting.prime` and `time.lift` both lift by the step `prime_lift`
+    /// bounds, so at zero they are on and inert — and `time.lift` ships on,
+    /// which means the combination is reachable without anybody choosing it.
+    /// Worth saying out loud now that `config.example.toml` ships the lift
+    /// non-zero: an operator who turns priming off by zeroing one key leaves
+    /// two others claiming to do something.
+    ///
+    /// Only under `full`. At `off` and `learning` the mode itself resolves
+    /// `prime_lift` to zero on purpose, and a warning there would be the
+    /// server complaining about a choice it made.
+    fn inert_priming_keys(&self) -> Vec<&'static str> {
+        if self.learn.mode != LearnMode::Full || self.associate.prime_lift > 0 {
+            return Vec::new();
+        }
+        let mut keys = Vec::new();
+        if self.sitting.prime {
+            keys.push("sitting.prime");
+        }
+        if self.time.lift {
+            keys.push("time.lift");
+        }
+        keys
     }
 
     /// The output ceiling's name is a guess whenever `reasoning_effort` is set
@@ -2565,6 +2864,10 @@ impl Config {
         // hundred fields to work out which of them the mode decided is the
         // question this line answers directly.
         let mut head = format!("# learn.mode = \"{}\"\n", c.learn.mode.as_str());
+        head.push_str(&format!(
+            "# evolve.autonomous = \"{}\"\n",
+            c.evolve.autonomous.as_str()
+        ));
         if c.learn.resolved.is_empty() {
             head.push_str("# nothing was resolved from it: every key it stands for is set\n");
         } else {
@@ -2588,6 +2891,7 @@ impl Config {
     #[doc(hidden)]
     pub fn test_default() -> Config {
         Config {
+            evolve: EvolveConfig::default(),
             server: ServerConfig {
                 bind: "127.0.0.1:8080".into(),
                 workers: 2,
@@ -2602,6 +2906,7 @@ impl Config {
                 pinned_boost: 0.15,
                 weak_below: 0.35,
                 per_source_cap: 3,
+                candidate_multiplier: 3,
             },
             infer: InferConfig {
                 tokenizer: None,
@@ -2680,6 +2985,105 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The near-duplicate threshold sits in the gap the evidence shows rather
+    /// than above it.
+    ///
+    /// Measured over a live base's 3916 corpus pairs with
+    /// `store::shingle::similarity` itself: the one real duplicate — a news
+    /// article captured through the web door and again through the journal
+    /// door — scored 0.789, and the next-highest pair in the entire base
+    /// scored 0.036. Nothing lies between the two. It shipped at 0.90, above
+    /// the only duplicate the base actually had, which therefore stayed in it
+    /// twice.
+    #[test]
+    fn near_dupe_min_catches_a_recapture_and_not_a_related_document() {
+        let c = ConsolidateConfig::default();
+        assert!(
+            c.near_dupe_min <= 0.78,
+            "a re-capture through another door scored 0.789; {} is above it",
+            c.near_dupe_min
+        );
+        assert!(
+            c.near_dupe_min > 0.10,
+            "the highest false candidate scored 0.036; {} is not clear of it",
+            c.near_dupe_min
+        );
+    }
+
+    #[test]
+    fn autonomy_reads_the_old_bool_and_the_three_words() {
+        #[derive(Deserialize)]
+        struct Probe {
+            autonomous: Autonomy,
+        }
+        let parse = |s: &str| {
+            config::Config::builder()
+                .add_source(config::File::from_str(s, config::FileFormat::Toml))
+                .build()
+                .unwrap()
+                .try_deserialize::<Probe>()
+        };
+        let read = |s: &str| parse(s).unwrap().autonomous;
+        assert_eq!(read("autonomous = false"), Autonomy::Off);
+        assert_eq!(
+            read("autonomous = true"),
+            Autonomy::Full,
+            "true meant the whole loop"
+        );
+        assert_eq!(read(r#"autonomous = "off""#), Autonomy::Off);
+        assert_eq!(read(r#"autonomous = "ranking""#), Autonomy::Ranking);
+        assert_eq!(read(r#"autonomous = "full""#), Autonomy::Full);
+        assert!(parse(r#"autonomous = "sometimes""#).is_err());
+        // And the same two words as strings, which is the only way an
+        // environment variable can spell them: `visit_bool` is never reached
+        // from `ENGRAM__EVOLVE__AUTONOMOUS=false`, so the back-compatibility
+        // the line above proves existed only for a config file, and a server
+        // configured that way refused to boot with `unknown variant`.
+        assert_eq!(read(r#"autonomous = "false""#), Autonomy::Off);
+        assert_eq!(read(r#"autonomous = "true""#), Autonomy::Full);
+    }
+
+    /// `#[serde(default)]` on the `Config` field covers an absent section and
+    /// nothing else: with it alone, an operator reacting to the `"ranking"`
+    /// default by writing the one key they came to change got
+    /// `missing field give_up_window_secs` and a base that would not boot.
+    /// `ENGRAM__EVOLVE__AUTONOMOUS` is the same shape — the `config` crate
+    /// synthesises a table of one key from it — and it is the likelier way to
+    /// hit this, because nothing about setting an environment variable
+    /// suggests the other four keys come with it.
+    #[test]
+    fn an_evolve_section_naming_one_key_leaves_the_other_four_at_their_defaults() {
+        let parse = |s: &str| {
+            config::Config::builder()
+                .add_source(config::File::from_str(s, config::FileFormat::Toml))
+                .build()
+                .unwrap()
+                .try_deserialize::<EvolveConfig>()
+                .unwrap()
+        };
+        let one = parse(r#"autonomous = "off""#);
+        assert_eq!(one.autonomous, Autonomy::Off);
+        assert_eq!(
+            one.give_up_window_secs,
+            EvolveConfig::default().give_up_window_secs,
+        );
+        assert_eq!(
+            one.max_actions_per_week,
+            EvolveConfig::default().max_actions_per_week,
+        );
+        assert_eq!(one.idle_secs, EvolveConfig::default().idle_secs);
+        assert!(!one.feed_sweep);
+    }
+
+    #[test]
+    fn the_ranking_stage_moves_ranking_and_touches_no_corpus() {
+        assert!(!Autonomy::Off.moves_ranking());
+        assert!(Autonomy::Ranking.moves_ranking());
+        assert!(!Autonomy::Ranking.acts_on_corpus());
+        assert!(Autonomy::Full.acts_on_corpus());
+        assert_eq!(EvolveConfig::default().max_actions_per_week, 10);
+    }
 
     /// Environment variables are process-global, but `cargo test` runs tests on
     /// parallel threads. Without this, the env-override test mutates `ENGRAM__*`
@@ -2926,7 +3330,8 @@ mod tests {
         let cfg = Config::load(Some(&p)).unwrap();
         assert_eq!(
             cfg.feedback.candidates,
-            crate::core::search::MAX_LIMIT * crate::core::search::CANDIDATE_MULTIPLIER
+            crate::core::search::MAX_LIMIT
+                * crate::core::ranking::MULTIPLIERS[crate::core::ranking::MULTIPLIERS.len() - 1]
         );
     }
 
@@ -2965,6 +3370,110 @@ mod tests {
     }
 
     #[test]
+    fn a_lift_of_zero_makes_the_knobs_that_share_its_budget_inert() {
+        let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert!(
+            cfg.inert_priming_keys().is_empty(),
+            "the shipped file lifts, so nothing on it is inert"
+        );
+
+        // The way an operator turns priming off: zero the lift and leave the
+        // two keys that ride on it exactly as the file shipped them.
+        cfg.associate.prime_lift = 0;
+        assert_eq!(
+            cfg.inert_priming_keys(),
+            vec!["sitting.prime", "time.lift"],
+            "both share the budget, and both are on in the shipped file"
+        );
+
+        // Saying it properly costs no warning.
+        cfg.sitting.prime = false;
+        cfg.time.lift = false;
+        assert!(cfg.inert_priming_keys().is_empty());
+    }
+
+    #[test]
+    fn the_learn_modes_do_not_warn_about_the_lift_they_zeroed_themselves() {
+        // `off` and `learning` resolve `prime_lift` to zero on purpose. A
+        // warning there would be the server complaining about its own choice,
+        // and `time.lift` ships on, so it would fire on every such base.
+        let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        cfg.associate.prime_lift = 0;
+        for mode in [LearnMode::Off, LearnMode::Learning] {
+            cfg.learn.mode = mode;
+            assert!(cfg.inert_priming_keys().is_empty(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn applying_names_the_sitting_key() {
+        // Its own test rather than a line in the one below: the sitting is the
+        // only swept knob whose key lives outside the three tables that one
+        // writes, and a file that never mentioned it must come back naming it.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(&dir, MINIMAL);
+        write_ranking(
+            &p,
+            &crate::core::ranking::RankingParams {
+                sitting_prime: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("prime = true"), "{out}");
+        assert!(Config::load(Some(&p)).unwrap().sitting.prime);
+    }
+
+    #[test]
+    fn applying_writes_all_four_knobs_and_eats_no_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n# a comment the apply path must not eat\n"),
+        );
+        write_ranking(
+            &p,
+            &crate::core::ranking::RankingParams {
+                recency_weight: 0.1,
+                per_source_cap: None,
+                candidate_multiplier: 5,
+                recency_half_life_days: 90,
+                prime_lift: 2,
+                spread_max: 5,
+                rerank: true,
+                review_min: 0.84,
+                sitting_prime: false,
+            },
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("candidate_multiplier = 5"), "{out}");
+        assert!(out.contains("prime_lift = 2"), "{out}");
+        assert!(out.contains("spread_max = 5"), "{out}");
+        assert!(out.contains("review_min = 0.84"), "{out}");
+        assert!(out.contains("recency_half_life_days = 90"), "{out}");
+        assert!(
+            out.contains("# a comment the apply path must not eat"),
+            "{out}"
+        );
+        let back = Config::load(Some(&p)).unwrap();
+        assert_eq!(back.vector.candidate_multiplier, 5);
+        assert_eq!(back.vector.recency_half_life_days, 90);
+    }
+
+    #[test]
+    fn the_environment_check_knows_all_four_keys() {
+        temp_env::with_var("ENGRAM__VECTOR__CANDIDATE_MULTIPLIER", Some("4"), || {
+            assert!(
+                ranking_keys_in_env()
+                    .iter()
+                    .any(|k| k.eq_ignore_ascii_case("ENGRAM__VECTOR__CANDIDATE_MULTIPLIER"))
+            );
+        });
+    }
+
+    #[test]
     fn applying_a_recommendation_edits_the_file_and_leaves_the_rest_of_it_alone() {
         // The file is the operator's, not the server's: a rewrite that dropped
         // their comments would be a worse answer than refusing to write at all.
@@ -2980,6 +3489,7 @@ mod tests {
         let params = crate::core::ranking::RankingParams {
             recency_weight: 0.1,
             per_source_cap: None,
+            ..Default::default()
         };
         write_ranking(&p, &params).unwrap();
 
@@ -3008,6 +3518,7 @@ mod tests {
         let params = crate::core::ranking::RankingParams {
             recency_weight: 0.1,
             per_source_cap: Some(2),
+            ..Default::default()
         };
         write_ranking(&p, &params).unwrap();
 
@@ -3035,6 +3546,7 @@ mod tests {
         let params = crate::core::ranking::RankingParams {
             recency_weight: 0.1,
             per_source_cap: Some(2),
+            ..Default::default()
         };
         assert!(write_ranking(&dir.path().join("absent.toml"), &params).is_err());
     }
@@ -3050,6 +3562,7 @@ mod tests {
             &crate::core::ranking::RankingParams {
                 recency_weight: 0.05,
                 per_source_cap: Some(3),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3256,6 +3769,45 @@ mode = "off"
         // generates while it measures is measuring its own inputs.
         assert!(cfg.pursuit.min_engagement.is_infinite());
         assert!(cfg.consolidate.enabled);
+        // And the idle pass does not move the base. `evolve.autonomous`
+        // defaults to `ranking`, so this mode's whole promise — the harness is
+        // run before any of it is allowed to move a rank — was undone by the
+        // default underneath it: the pass walked the prime-lift ladder and
+        // could adopt `prime_lift = 1` while `--print-config` went on
+        // reporting `0`. Integration and the probes still run under `off`, so
+        // the evidence keeps accumulating.
+        assert_eq!(cfg.evolve.autonomous, Autonomy::Off);
+        assert!(
+            cfg.learn
+                .resolved
+                .iter()
+                .any(|(k, v)| *k == "evolve.autonomous" && v == "off"),
+            "{:?}",
+            cfg.learn.resolved
+        );
+    }
+
+    /// The same key, written: a mode fills in what was left unsaid and never
+    /// overrides an operator who asked for the loop by name.
+    #[test]
+    fn a_learning_base_told_to_move_ranking_anyway_still_does() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!(
+                "{MINIMAL}\n[learn]\nmode = \"learning\"\n\
+                 [evolve]\nautonomous = \"full\"\n"
+            ),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.evolve.autonomous, Autonomy::Full);
+        assert!(
+            !cfg.learn
+                .resolved
+                .iter()
+                .any(|(k, _)| *k == "evolve.autonomous")
+        );
     }
 
     #[test]

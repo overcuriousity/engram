@@ -1,12 +1,8 @@
 //! `-c`: put a path, a link or a pipe into the base.
 
 use crate::cli::encode;
-use crate::cli::endpoint::Endpoint;
+use crate::cli::endpoint::{Endpoint, client};
 use crate::error::{Error, Result};
-
-/// The client's user agent, so a token's row says what asked for it and a log
-/// line says what called.
-pub(crate) const USER_AGENT: &str = concat!("engram-cli/", env!("CARGO_PKG_VERSION"));
 
 /// Does this argument address something, or is it a word somebody typed?
 ///
@@ -41,6 +37,9 @@ fn addresses_something(target: &str) -> bool {
 /// Joined, they are prose outright and are not put back through the path
 /// heuristic: "dir/file plus a comment" would find `dir` on disk and be refused
 /// as a missing file, which is the failure this is here to remove.
+///
+/// A list that is *partly* paths is read by what the rest of it is — see
+/// `reading`.
 pub async fn run(
     e: &Endpoint,
     targets: &[String],
@@ -48,17 +47,19 @@ pub async fn run(
     note: Option<&str>,
     face: &crate::cli::face::Face,
 ) -> Result<Vec<String>> {
+    let joined;
+    let (targets, as_prose) = match reading(targets)? {
+        // One argument, or every one of them a path: the ordinary readings.
+        // A single argument that names nothing is `read_target`'s to refuse,
+        // and it says which file it could not open.
+        Reading::Targets => (targets, false),
+        Reading::Prose(line) => {
+            joined = [line];
+            (&joined[..], true)
+        }
+    };
     let http = client()?;
     let mut ids = Vec::new();
-    let joined;
-    let (targets, as_prose) =
-        match targets.len() > 1 && !targets.iter().all(|t| addresses_something(t)) {
-            true => {
-                joined = [targets.join(" ")];
-                (&joined[..], true)
-            }
-            false => (targets, false),
-        };
     for target in targets {
         let read = if as_prose {
             Read {
@@ -93,6 +94,60 @@ pub async fn run(
     Ok(ids)
 }
 
+/// What a list of arguments is: each its own capture, or one note.
+enum Reading {
+    Targets,
+    Prose(String),
+}
+
+/// A word with no path shape at all: not stdin, not a link, nothing on disk,
+/// no separator and no extension. What the shell hands over for a note typed
+/// without quotes — "pay", "to", "Anna".
+fn plainly_prose(target: &str) -> bool {
+    !addresses_something(target)
+        && !target.contains('/')
+        && !target.contains(std::path::MAIN_SEPARATOR)
+}
+
+/// How `run` reads its arguments.
+///
+/// One argument, or a list in which every argument addresses something, is
+/// read as it stands. A list in which nothing does is a sentence the shell
+/// took apart, joined back.
+///
+/// A list that is partly paths is read by what the rest of it is. A single
+/// word with no path shape at all makes the whole line a note: `engram -c pay
+/// 12.50 to Anna` is a sentence with a number in it, and `12.50` looking like
+/// a file name beside "pay" and "to" is no reason to refuse it — which is what
+/// this did. Where everything that names nothing still has a path's shape, the
+/// list is refused, because that is a typo rather than a sentence: `engram -c
+/// report.pdf notes/typo/q3.pdf` — one real file and one with a typo in the
+/// directory — used to send both through as one prose note, the PDF never
+/// read, exit 0. Those arguments are named back and nothing is stored.
+///
+/// A lone `12.50` is still asked of the filesystem, and anything meant as a
+/// note is one quoted argument away.
+fn reading(targets: &[String]) -> Result<Reading> {
+    let addressing = targets.iter().filter(|t| addresses_something(t)).count();
+    if targets.len() < 2 || addressing == targets.len() {
+        return Ok(Reading::Targets);
+    }
+    if addressing == 0 || targets.iter().any(|t| plainly_prose(t)) {
+        return Ok(Reading::Prose(targets.join(" ")));
+    }
+    let strays: Vec<&str> = targets
+        .iter()
+        .filter(|t| !addresses_something(t))
+        .map(String::as_str)
+        .collect();
+    Err(Error::Validation(format!(
+        "{}: names nothing that can be read, and the other arguments are paths. \
+         Nothing was captured. Correct the path, or quote the whole line to \
+         store it as a note.",
+        strays.join(", ")
+    )))
+}
+
 /// Capture what arrived on stdin, already read.
 ///
 /// Its own entry point because deciding whether a pipe held anything consumes
@@ -124,13 +179,6 @@ pub async fn run_piped(
     )
     .await?;
     Ok(vec![id])
-}
-
-fn client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))
 }
 
 /// What a door knows about a capture beyond its bytes.
@@ -192,7 +240,7 @@ fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
     }
     let is_a_link = std::str::from_utf8(bytes)
         .ok()
-        .is_some_and(|t| crate::web::api::only_a_url(t).is_some());
+        .is_some_and(|t| crate::core::fetch::only_a_url(t).is_some());
     if is_a_link {
         return None;
     }
@@ -216,7 +264,7 @@ pub async fn run_text(
     intent: Option<&str>,
     face: &crate::cli::face::Face,
 ) -> Result<String> {
-    if crate::web::api::only_a_url(&text).is_some() {
+    if crate::core::fetch::only_a_url(&text).is_some() {
         let what = if intent == Some("remind") {
             "a reminder"
         } else {
@@ -374,10 +422,7 @@ fn tracked_body(bytes: Vec<u8>, face: &crate::cli::face::Face) -> reqwest::Body 
 /// be right half the time.
 pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Result<()> {
     use crate::store::corpora::CorpusStatus;
-    let http = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| Error::Internal(format!("http client: {err}")))?;
+    let http = client()?;
     // The three background stages, redrawn in place from each poll. The
     // generic strand that used to sit here said only "something is happening";
     // these say which of the three it is, which is the whole reason `--watch`
@@ -741,6 +786,33 @@ mod tests {
         for word in ["buy", "milk", "erinnere", "zahnarzt"] {
             assert!(!addresses_something(word), "{word}");
         }
+    }
+
+    /// A plain word anywhere in the list makes the line a note; a path-shaped
+    /// miss beside a real path is still refused as the typo it is.
+    #[test]
+    fn a_plain_word_in_the_list_makes_the_whole_line_a_note() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        match reading(&words(&["pay", "12.50", "to", "Anna"])).unwrap() {
+            Reading::Prose(line) => assert_eq!(line, "pay 12.50 to Anna"),
+            Reading::Targets => panic!("a sentence with a number in it was read as files"),
+        }
+        assert!(
+            matches!(reading(&words(&["12.50"])).unwrap(), Reading::Targets),
+            "one argument is still asked of the filesystem"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("report.pdf");
+        std::fs::write(&real, b"%PDF-1.4\n").unwrap();
+        assert!(
+            reading(&[
+                real.to_string_lossy().into_owned(),
+                "notes/typo/q3.pdf".to_string()
+            ])
+            .is_err(),
+            "a mistyped path beside a real one was stored as a note"
+        );
     }
 
     /// A paragraph is longer than a file name may be, and the kernel says so

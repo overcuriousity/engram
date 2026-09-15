@@ -1,10 +1,9 @@
 //! Why a hit is where it is.
 //!
-//! A rank is the product of eight stages (see the design record,
-//! `docs/superpowers/specs/2026-08-26-ranking-explanation-design.md`, §3).
-//! Each used to say what it did in its own way or not at all. This is the one
-//! object all three doors read, so that the rail, MCP's meta line and the API
-//! cannot disagree about what happened to a result.
+//! A rank is the product of eight stages, and each used to say what it did
+//! in its own way or not at all. This is the one object all three doors read,
+//! so that the rail, MCP's meta line and the API cannot disagree about what
+//! happened to a result.
 //!
 //! Nothing here is stored and nothing here reorders anything.
 
@@ -73,6 +72,14 @@ pub struct HitExplanation {
     pub prime: Option<StageEffect>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
+    /// Set for the one row an exploring search lifted into the window: from
+    /// the rank the ranking gave it, to the row it was lent.
+    ///
+    /// The only place in a result list where the order is not the ranking's
+    /// answer, so it is the one place that has to say so out loud. See
+    /// `Core::explore_swap`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explored: Option<StageEffect>,
     /// Set for a hit the association stage appended. Every other field is then
     /// absent: it never competed for a place, so there is no ranking story to
     /// tell.
@@ -166,18 +173,9 @@ mod tests {
         crate::vector::VectorPayload {
             artifact_id: "a".into(),
             corpus_id: "c".into(),
-            text: String::new(),
-            title: None,
-            category: None,
             tags: tags.iter().map(|t| t.to_string()).collect(),
-            created_at: 0,
-            last_seen_at: None,
-            hit_count: None,
-            status: None,
             last_verified_at,
-            superseded_by: None,
-            origin_corpora: vec![],
-            provenance: None,
+            ..Default::default()
         }
     }
 

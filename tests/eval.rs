@@ -494,6 +494,7 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
     // Built here rather than through `test_support`, which is `#[cfg(test)]` in
     // the library and so invisible to an integration test.
     let core = Core {
+        evolve: engram::config::EvolveConfig::default(),
         store: Store::memory().await.unwrap(),
         vectors: Arc::new(engram::vector::memory::MemoryVectors::new()),
         synthesizer: Arc::new(engram::infer::fake::FakeSynthesizer::default()),
@@ -508,6 +509,10 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         time: engram::config::TimeConfig::default(),
         reap: engram::config::ReapConfig::default(),
         generator: Some(Arc::new(engram::infer::fake::FakeCompleter::default())),
+        // None, as the library's own `test_core` has it: a synthesis is only
+        // ever written for a pair a person pressed, and the harness presses
+        // nothing.
+        pair_synthesizer: None,
         // The harness measures the shipped default, which is one round.
         planner: None,
         describer: None,
@@ -528,12 +533,12 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
             engram::core::ranking::RankingParams {
                 recency_weight: 0.0,
                 per_source_cap: Some(engram::core::search::MAX_PER_CORPUS),
+                ..Default::default()
             },
         )),
         tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         weak_floor: 0.0,
         line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        recency_half_life_days: 180,
         pinned_boost: 0.15,
         learn: engram::config::LearnConfig {
             enabled: false,
@@ -546,7 +551,6 @@ async fn a_pair_naming_a_frozen_artifact_can_actually_be_found() {
         promote: engram::config::PromoteConfig::default(),
         pursuit: engram::config::PursuitConfig::default(),
         schedule: engram::config::ScheduleConfig::default(),
-        sitting: engram::config::SittingConfig::default(),
         sittings: std::sync::Arc::new(Default::default()),
         // The benchmark makes no background inference call, so the pacer never
         // has anything to hold back.

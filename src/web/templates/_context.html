@@ -37,6 +37,17 @@
 <div id="context-offer" class="offer{% if offer.is_some() %} offer-filled{% endif %}"
 {%- if let Some(o) = offer %} data-rec-id="{{ o.id }}" data-rec-rung="{{ o.kind }}"{% if !o.slot.is_empty() %} data-rec-slot="{{ o.slot }}"{% endif %}{% endif %}>
 {% if let Some(o) = offer %}
+  {# The card's one link. Where the artifact has a name of its own it is the
+     name, with the text under it; where it has none — a passage carries the
+     heading of the section it was cut from, and `recommend::title_of` returns
+     nothing for it — the text *is* the link, set as text rather than in the
+     place a name would go. Dropping the heading and leaving the paragraph
+     below made a card nobody could open.
+
+     The branch relies on the snippet being there, and `context_offer` is what
+     makes that true: it makes no offer at all when the name and the text are
+     both empty, so this cannot render a link with nothing in it. #}
+  {% if !o.title.is_empty() %}
   <a class="offer-title" href="/ui/artifacts/{{ o.id }}{{ o.rec }}">{{ o.title }}</a>
   {# What the thing says, under what it is called. The reason line below is
      absent on the random card by design — it claims nothing because nothing
@@ -44,6 +55,9 @@
      to be clicked on faith. This is not a reason; it is the content. #}
   {% if !o.snippet.is_empty() %}
   <p class="offer-snippet">{{ o.snippet }}</p>
+  {% endif %}
+  {% else %}
+  <a class="offer-title name-opening" href="/ui/artifacts/{{ o.id }}{{ o.rec }}">{{ o.snippet }}</a>
   {% endif %}
   {% if !o.rung.is_empty() %}
   <div class="muted offer-why">{{ o.rung }}{% if !o.when.is_empty() %} {{ o.when }}{% endif %}

@@ -36,6 +36,32 @@ const COMPONENT_WINDOW: i64 = 5_000;
 #[cfg(test)]
 const COMPONENT_WINDOW: i64 = 3;
 
+/// The states a review card is drawn for, in the order the queue lists them —
+/// and so the only states a press on a card can still be answering.
+/// `web::ops` renders these; `ask_pair_synthesis` and `jobs::dedupe::run`
+/// refuse a Synthese press on anything else.
+pub const AWAITING_REVIEW: [PairState; 6] = [
+    PairState::Contradiction,
+    PairState::Superseded,
+    // The judge read both and found one artifact should hold what both say. A
+    // proposal rather than a merge already applied: see `PairState::Duplicate`
+    // for the measurements that took the action off this verdict. The card
+    // renders it through the same branch a pending pair uses — "these two cover
+    // the same ground" — and the Synthese button is the press that acts on it.
+    PairState::Duplicate,
+    // Only ever rows an older base filed: a vacuous verdict is now carried
+    // out where it is found (`jobs::dedupe::discard_both`) and its pair
+    // settles `Dismissed`. Still listed, because those rows are a
+    // recommendation nobody has pressed yet, and without this key they are on
+    // no queue at all.
+    PairState::Vacuous,
+    // An operator asked for one artifact and the writing was refused. Their
+    // reading is not overturned by that; what is left is the same decision
+    // they were making before they pressed, minus the one answer that failed.
+    PairState::Unmergeable,
+    PairState::Pending,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairState {
@@ -43,6 +69,18 @@ pub enum PairState {
     Pending,
     /// The fact-token prefilter or the judge found nothing to disagree about.
     NoConflict,
+    /// An operator pressed the synthesis button and the writing was refused —
+    /// a member's lineage names stored source text a merge may not rewrite, or
+    /// the draft would have dropped a value one of them states.
+    ///
+    /// Its own state because `Contradiction` was carrying it, and the card
+    /// draws that as "these two disagree". So the operator read both, said
+    /// they cover the same ground, pressed, and the card came back telling
+    /// them they disagree — the exact overload of `Contradiction` the decide
+    /// queue's own design set out to remove, re-created by the button that
+    /// design added. The judgement stands; only the automatic writing of it
+    /// was refused, and the detail says which of the two reasons it was.
+    Unmergeable,
     /// The judge found a detail the two artifacts state differently, with no
     /// clear direction — both readings could still be current.
     Contradiction,
@@ -85,6 +123,19 @@ pub enum PairState {
     /// The variant and everything that renders it stay for the rows an older
     /// base filed, which are still waiting on that press.
     Vacuous,
+    /// The judge read both and found they cover the same ground: one artifact
+    /// should hold what both say.
+    ///
+    /// A proposal, not an action. It used to merge on the spot, and the label
+    /// is not steady enough to carry that: asked twelve times about two
+    /// artifacts describing one veterinary practice — one the contact details,
+    /// the other the services — the live judge wrote the same reasoning every
+    /// time and split nine to three between `distinct` and `duplicate`. The
+    /// prompt's own categories both fit that shape. A coin flip is a poor thing
+    /// to hide two artifacts behind a third on, so the reading is the model's
+    /// and the press is the operator's — `synthesis_asked`, and the writing
+    /// follows.
+    Duplicate,
     /// A lifecycle event took one of the two artifacts out of results, so the
     /// question cannot be acted on — not because anyone answered it.
     ///
@@ -115,11 +166,13 @@ impl PairState {
             PairState::Pending => "pending",
             PairState::NoConflict => "no_conflict",
             PairState::Contradiction => "contradiction",
+            PairState::Unmergeable => "unmergeable",
             PairState::Superseded => "superseded",
             PairState::Dismissed => "dismissed",
             PairState::NearIdentical => "near_identical",
             PairState::Oversized => "oversized",
             PairState::Vacuous => "vacuous",
+            PairState::Duplicate => "duplicate",
             PairState::Stale => "stale",
         }
     }
@@ -127,11 +180,13 @@ impl PairState {
         match s {
             "no_conflict" => PairState::NoConflict,
             "contradiction" => PairState::Contradiction,
+            "unmergeable" => PairState::Unmergeable,
             "superseded" => PairState::Superseded,
             "dismissed" => PairState::Dismissed,
             "near_identical" => PairState::NearIdentical,
             "oversized" => PairState::Oversized,
             "vacuous" => PairState::Vacuous,
+            "duplicate" => PairState::Duplicate,
             "stale" => PairState::Stale,
             _ => PairState::Pending,
         }
@@ -148,6 +203,15 @@ impl PairState {
 /// `set_pair_state` writes `detail` unconditionally, so it nulled it, while
 /// `apply_supersede_ui` carries the judge's through on purpose.
 ///
+/// One score band's record: pairs the judge settled there, the base's
+/// actions in it, and how many of those were taken back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandRecord {
+    pub judged: usize,
+    pub acted: usize,
+    pub undone: usize,
+}
+
 /// Passed rather than defaulted at every call site, so that a new operator
 /// surface cannot be recorded as the model by forgetting to say otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -157,6 +221,9 @@ pub enum DecidedBy {
     Model,
     /// A person pressed something.
     Operator,
+    /// The base, on what use showed — never the judge and never a person. An
+    /// action taken back because the evidence turned.
+    Evidence,
 }
 
 impl DecidedBy {
@@ -164,6 +231,7 @@ impl DecidedBy {
         match self {
             DecidedBy::Model => "model",
             DecidedBy::Operator => "operator",
+            DecidedBy::Evidence => "evidence",
         }
     }
 
@@ -175,6 +243,7 @@ impl DecidedBy {
         match s {
             "model" => Some(DecidedBy::Model),
             "operator" => Some(DecidedBy::Operator),
+            "evidence" => Some(DecidedBy::Evidence),
             _ => None,
         }
     }
@@ -199,6 +268,14 @@ pub struct ArtifactPair {
     /// parsed as a verdict. The ceiling that stops asking is on this and not on
     /// `judge_attempts` — see `MAX_UNREADABLE_JUDGEMENTS`.
     pub judge_unreadable: i64,
+    /// An operator pressed Synthese: they have judged that these two cover the
+    /// same ground, and only the writing is left.
+    ///
+    /// A column rather than a `PairState`, because `state` records what the
+    /// judge found and this records what a person decided to do about it.
+    /// Those are two different facts about one pair, and overwriting the first
+    /// to store the second would lose the finding that put it on the queue.
+    pub synthesis_asked: bool,
     /// Which artifact the judge named obsolete, when `state` is `Superseded`.
     /// Lets the review UI offer "apply supersede" without asking the model
     /// again.
@@ -254,6 +331,7 @@ pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
         judge_unreadable: r.get("judge_unreadable"),
         obsolete_id: r.get("obsolete_id"),
         merged_into: r.get("merged_into"),
+        synthesis_asked: r.get::<i64, _>("synthesis_asked") != 0,
     }
 }
 
@@ -409,15 +487,58 @@ impl Store {
         Ok(rows.iter().map(row_to_pair).collect())
     }
 
-    /// How many pairs sit in a state, for a page that shows only the first few
-    /// of them and has to say how many it is not showing.
-    pub async fn count_pairs_by_state(&self, state: PairState) -> Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_pairs WHERE state = ?")
-                .bind(state.as_str())
-                .fetch_one(&self.pool)
-                .await?,
+    /// Pairs the judge settled with a cosine in `[lo, hi)`, and, from the
+    /// corpus journal, how many of those pairs the base acted on and how many
+    /// of those it took back. What the review threshold's rule reads: two of
+    /// these, for the band just above the threshold and for everything above
+    /// that.
+    ///
+    /// All three counts are pairs, because the rule divides them by each other
+    /// and a rate needs one unit. The journal is per *artifact* — a merge
+    /// writes a row for each original and "discard both" one for each side,
+    /// while a supersession writes one — so counting its rows would make
+    /// `acted / judged` run to two in a band that merges and to one in a band
+    /// that supersedes, and the rule would be reading each band's mix of
+    /// outcomes rather than how often it leads anywhere. The pair is named in
+    /// the row's own evidence.
+    ///
+    /// And all three are counted over one set of pairs, so that `acted` and
+    /// `undone` can never name a pair `judged` left out. A pair is in the set
+    /// where a verdict settled it — `decided_by` is `model`, or `evidence`,
+    /// which only `merge::undo` taking one of these actions back writes — or
+    /// where the judge's verdict led to a journal row. The second half is for
+    /// an operator's undo, which rewrites `decided_by` to `operator`: read off
+    /// `decided_by` alone, the pair left `judged` while its row went on
+    /// counting as acted and undone, and every undo inflated the band's action
+    /// rate. A row an operator asked for — Synthese, marked `asked_by` — is
+    /// not a verdict's doing and is not counted at all.
+    pub async fn band_record(&self, lo: f32, hi: f32) -> Result<BandRecord> {
+        let r = sqlx::query(
+            "WITH acts AS (
+               SELECT json_extract(evidence_json, '$.pair_id') AS pair_id,
+                      MAX(undone_at IS NOT NULL) AS undone
+                 FROM corpus_actions
+                WHERE job = 'dedupe'
+                  AND json_extract(evidence_json, '$.pair_id') IS NOT NULL
+                  AND json_extract(evidence_json, '$.asked_by') IS NULL
+                GROUP BY json_extract(evidence_json, '$.pair_id'))
+             SELECT COUNT(*) AS judged,
+                    COUNT(acts.pair_id) AS acted,
+                    COALESCE(SUM(acts.undone), 0) AS undone
+               FROM artifact_pairs p
+               LEFT JOIN acts ON acts.pair_id = p.id
+              WHERE p.score >= ? AND p.score < ? AND p.state <> 'pending'
+                AND (p.decided_by IN ('model', 'evidence') OR acts.pair_id IS NOT NULL)",
         )
+        .bind(lo)
+        .bind(hi)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(BandRecord {
+            judged: r.get::<i64, _>("judged") as usize,
+            acted: r.get::<i64, _>("acted") as usize,
+            undone: r.get::<i64, _>("undone") as usize,
+        })
     }
 
     /// The pairs in a state that a person can still act on: both artifacts are
@@ -551,6 +672,78 @@ impl Store {
             return Err(crate::error::Error::NotFound);
         }
         Ok(())
+    }
+
+    /// Record that a person asked for this pair to be synthesized.
+    ///
+    /// The press is the judgement: an operator has read both sides and decided
+    /// they cover the same ground. The dedupe unit reads this and takes the
+    /// write-only prompt instead of the verdict prompt, because asking the
+    /// model to decide again invites it to overturn them — and on this class of
+    /// pair it does not decide reliably: asked twelve times about one pair of
+    /// artifacts about the same veterinary practice, the judge wrote the same
+    /// reasoning every time and labelled it `distinct` nine times and
+    /// `duplicate` three.
+    ///
+    /// Only on a pair still awaiting review, and `false` — nothing written —
+    /// on one that is not. Asked in the statement rather than read first, so
+    /// an answer landing between the read and the write cannot slip past.
+    pub async fn ask_pair_synthesis(&self, id: i64) -> Result<bool> {
+        let holes = vec!["?"; AWAITING_REVIEW.len()].join(", ");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE artifact_pairs SET synthesis_asked = 1 WHERE id = ? AND state IN ({holes})"
+        )))
+        .bind(id);
+        for state in AWAITING_REVIEW {
+            q = q.bind(state.as_str());
+        }
+        Ok(q.execute(&self.pool).await?.rows_affected() == 1)
+    }
+
+    /// Clear it. Called when the merge path refuses the draft, so the card
+    /// stops promising a synthesis that will not arrive.
+    pub async fn clear_pair_synthesis(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE artifact_pairs SET synthesis_asked = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Pairs an operator pressed Synthese on and nothing has written yet.
+    ///
+    /// Not `state = 'pending'`, which is the one thing that separates this from
+    /// `pairs_to_judge`: the press is offered on every card the queue renders,
+    /// and by the time it is pressed the pair is far more often `Duplicate` —
+    /// the judge read both sides, said they cover the same ground, and left the
+    /// action to a person. So the state says nothing about whether the writing
+    /// is owed; `synthesis_asked` does, and `merged_into` says whether it has
+    /// happened.
+    ///
+    /// This exists because the press alone cannot keep the promise the card
+    /// makes. `ask_pair_synthesis_ui` arms the unit once, and the unit is
+    /// allowed to come back having written nothing — the week's budget is
+    /// spent, no `pair_synthesizer` is configured yet — at which point the row
+    /// is closed and nothing would ever arm it again. The card would go on
+    /// saying "it is written on the next pass" for ever. The sweep re-arming
+    /// these is what makes that sentence true.
+    ///
+    /// Held back past `MAX_UNREADABLE_JUDGEMENTS` for the reason
+    /// `pairs_to_judge` gives: a reply that cannot be parsed is a reply that
+    /// will not parse next time either, and a pair nothing can write must stop
+    /// buying model calls at some point.
+    pub async fn pairs_awaiting_synthesis(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifact_pairs
+              WHERE synthesis_asked = 1 AND merged_into IS NULL
+                AND judge_unreadable < ?
+              ORDER BY judge_attempts ASC, score DESC, created_at DESC LIMIT ?",
+        )
+        .bind(MAX_UNREADABLE_JUDGEMENTS)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_pair).collect())
     }
 
     /// Settle a pair as answered by an applied merge. `merged_into` names the
@@ -850,15 +1043,33 @@ impl Store {
     ///
     /// `score` is left alone and is now stale, exactly as in
     /// `repoint_open_pairs`: it orders the judge queue and gates nothing here.
+    /// The pair states that are still somebody's to answer, as a SQL list.
+    ///
+    /// Written once because three queries ask it and each of them is a way for
+    /// a pair to be carried, listed or repaired — a state missing from one of
+    /// them is a question that quietly stops being asked. `Duplicate` was
+    /// missing from all three: it is the judge's proposal awaiting an
+    /// operator's Synthese press, so it is as open as `Pending` is, but a
+    /// `Duplicate` pair whose member was later superseded was carried nowhere,
+    /// listed nowhere and could not be refiled — `record_pair` is
+    /// `INSERT OR IGNORE` over `UNIQUE(a_id, b_id)`, so the row that already
+    /// exists is the only one there will ever be.
+    ///
+    /// `NoConflict`, `Dismissed` and `Oversized` are answered questions, and
+    /// `NearIdentical` is the sweep's own filing, which recomputes liveness for
+    /// the whole cluster before it acts (`jobs::consolidate`).
+    const OPEN_STATES: &str = "('pending', 'contradiction', 'superseded', 'vacuous', 'duplicate')";
+
     pub async fn follow_supersession(&self, loser: &str, winner: &str) -> Result<Followed> {
         if loser == winner {
             return Ok(Followed::default());
         }
-        let rows = sqlx::query(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifact_pairs
-              WHERE state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+              WHERE state IN {}
                 AND (a_id = ? OR b_id = ?)",
-        )
+            Self::OPEN_STATES
+        )))
         .bind(loser)
         .bind(loser)
         .fetch_all(&self.pool)
@@ -995,8 +1206,7 @@ impl Store {
     /// takes 200 supersessions a sweep so a backlog drains over a few ticks; an
     /// unbounded settle running straight afterwards reached the other 200-and-up
     /// first and marked them `Stale`. That is a one-way door:
-    /// `supersessions_with_open_pairs` selects only
-    /// `('pending','contradiction','superseded','vacuous')`, so a stale row is
+    /// `supersessions_with_open_pairs` selects only `Self::OPEN_STATES`, so a stale row is
     /// invisible to the repair for ever, and `reopen_stale_pairs` needs both
     /// sides back in results, which a superseded loser never is. The verdict
     /// was never carried onto the winner and no later tick could carry it —
@@ -1013,19 +1223,20 @@ impl Store {
     /// `decided_by` is overwritten rather than left alone, which is the same
     /// distinction one level down: the *state* is nobody's answer, but the row
     /// still has to say who last wrote it. These candidates come from
-    /// `('pending','contradiction','superseded','vacuous')`, and a
+    /// `Self::OPEN_STATES`, and a
     /// contradiction an operator escalated carries their name — left standing
     /// beside `'stale'` it reads "an operator decided this went stale", which
     /// they did not. `'model'`, like every other rule this file applies
     /// unattended (`follow_supersession` settles `Stale` exactly so).
     pub async fn stale_unreachable_pairs(&self) -> Result<u64> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT p.id AS pair_id, x.id AS side, x.superseded_by AS winner
                FROM artifact_pairs p
                JOIN artifacts x ON x.id IN (p.a_id, p.b_id)
-              WHERE p.state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+              WHERE p.state IN {}
                 AND (x.status <> 'active' OR x.superseded_by IS NOT NULL)",
-        )
+            Self::OPEN_STATES
+        )))
         .fetch_all(&self.pool)
         .await?;
 
@@ -1147,14 +1358,15 @@ impl Store {
     /// instead (`stale_unreachable_pairs`), which is what keeps them findable
     /// again if the end of the chain comes back.
     pub async fn supersessions_with_open_pairs(&self, limit: i64) -> Result<Vec<(String, String)>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT DISTINCT loser.id AS loser, loser.superseded_by AS winner
                FROM artifacts loser
                JOIN artifact_pairs p ON p.a_id = loser.id OR p.b_id = loser.id
               WHERE loser.superseded_by IS NOT NULL
-                AND p.state IN ('pending', 'contradiction', 'superseded', 'vacuous')
+                AND p.state IN {}
               LIMIT ?",
-        )
+            Self::OPEN_STATES
+        )))
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -1367,6 +1579,161 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The operator's judgement, kept beside the judge's rather than on top of
+    /// it. `state` says what the model found; this says what a person decided
+    /// to do about it, and both are worth having.
+    #[tokio::test]
+    async fn a_pair_remembers_that_a_person_asked_for_a_synthesis() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].clone();
+        assert!(!p.synthesis_asked, "nobody has asked yet");
+
+        s.ask_pair_synthesis(p.id).await.unwrap();
+        let after = s.get_pair(p.id).await.unwrap();
+        assert!(after.synthesis_asked);
+        assert_eq!(
+            after.state,
+            PairState::Pending,
+            "the judge's finding is not overwritten by the operator's ask"
+        );
+
+        s.clear_pair_synthesis(p.id).await.unwrap();
+        assert!(!s.get_pair(p.id).await.unwrap().synthesis_asked);
+    }
+
+    #[tokio::test]
+    async fn a_band_record_counts_judged_pairs_and_the_journal_s_actions_in_its_score_range() {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        let s = Store::memory().await.unwrap();
+        // Four pairs at four scores, three settled by the judge, one pending.
+        let mut ids = Vec::new();
+        for (i, score) in [0.81f32, 0.86, 0.90, 0.82].into_iter().enumerate() {
+            let (a, b) = two_artifacts(&s).await;
+            s.record_pair(&a, &b, score).await.unwrap();
+            let id = s
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|p| (p.score - score).abs() < 1e-6)
+                .unwrap()
+                .id;
+            if i < 3 {
+                s.set_pair_state(id, PairState::Dismissed, None, DecidedBy::Model)
+                    .await
+                    .unwrap();
+            }
+            ids.push(id);
+        }
+        // The base acted on two of them; the lower one was taken back.
+        let row = |score: f32, pair: i64, subject: &str| NewAction {
+            job: Job::Dedupe,
+            kind: Kind::Supersede,
+            subject_id: subject.to_string(),
+            survivor_id: None,
+            detail: None,
+            evidence: serde_json::json!({ "pair_id": pair }),
+            pair_score: Some(score),
+        };
+        s.record_action(&row(0.81, ids[0], "s0.81")).await.unwrap();
+        s.record_action(&row(0.90, ids[2], "s0.90")).await.unwrap();
+        s.undo_action_on("s0.81", Kind::Supersede, UndoneBy::Operator, "back")
+            .await
+            .unwrap();
+        // A merge writes one row per original. Both name the same pair, so the
+        // band counts one action, not two.
+        s.record_action(&row(0.86, ids[1], "s0.86-a"))
+            .await
+            .unwrap();
+        s.record_action(&row(0.86, ids[1], "s0.86-b"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            s.band_record(0.80, 0.88).await.unwrap(),
+            BandRecord {
+                judged: 2,
+                acted: 2,
+                undone: 1
+            },
+            "the pending pair is not judged, and one pair is one action"
+        );
+        assert_eq!(
+            s.band_record(0.88, 1.0).await.unwrap(),
+            BandRecord {
+                judged: 1,
+                acted: 1,
+                undone: 0
+            }
+        );
+    }
+
+    /// One set of pairs under all three counts, whoever touched a pair last.
+    #[tokio::test]
+    async fn a_band_record_counts_an_operators_undo_and_not_an_operators_press() {
+        use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
+        let s = Store::memory().await.unwrap();
+        let mut ids = Vec::new();
+        for score in [0.84f32, 0.85] {
+            let (a, b) = two_artifacts(&s).await;
+            s.record_pair(&a, &b, score).await.unwrap();
+            let id = s
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|p| (p.score - score).abs() < 1e-6)
+                .unwrap()
+                .id;
+            ids.push(id);
+        }
+        let row = |subject: &str, evidence: serde_json::Value| NewAction {
+            job: Job::Dedupe,
+            kind: Kind::Supersede,
+            subject_id: subject.to_string(),
+            survivor_id: None,
+            detail: None,
+            evidence,
+            pair_score: Some(0.84),
+        };
+        // The judge acted on the first, and a person took it back — which
+        // settles the pair again, in their name.
+        s.set_pair_state(ids[0], PairState::Superseded, None, DecidedBy::Model)
+            .await
+            .unwrap();
+        s.record_action(&row("judged", serde_json::json!({ "pair_id": ids[0] })))
+            .await
+            .unwrap();
+        s.undo_action_on("judged", Kind::Supersede, UndoneBy::Operator, "back")
+            .await
+            .unwrap();
+        s.set_pair_state(ids[0], PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        // A person asked for the second to be written as one.
+        s.set_pair_state(ids[1], PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        s.record_action(&row(
+            "asked",
+            serde_json::json!({ "pair_id": ids[1], "asked_by": "operator" }),
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            s.band_record(0.80, 0.88).await.unwrap(),
+            BandRecord {
+                judged: 1,
+                acted: 1,
+                undone: 1
+            },
+            "the undone pair left `judged` and the press counted as an action"
+        );
+    }
     use crate::store::Store;
     use crate::store::artifacts::NewArtifact;
 
@@ -1377,12 +1744,7 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i as i64,
                 text: format!("artifact {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         s.insert_artifacts(&src.id, &new)
@@ -1400,24 +1762,13 @@ mod tests {
                 &src.id,
                 &[
                     NewArtifact {
-                        ordinal: 0,
                         text: "one".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                     NewArtifact {
                         ordinal: 1,
                         text: "two".into(),
-                        corpus_span: None,
-                        title: None,
-                        category: None,
-                        tags: vec![],
-                        segment_idx: None,
-                        caveats: vec![],
+                        ..Default::default()
                     },
                 ],
             )
@@ -1692,12 +2043,7 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i,
                 text: format!("artifact {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         s.insert_artifacts(&src.id, &new)
@@ -2006,12 +2352,7 @@ mod tests {
             .map(|i| NewArtifact {
                 ordinal: i,
                 text: format!("artifact {i}"),
-                corpus_span: None,
-                title: None,
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = s.insert_artifacts(&src.id, &new).await.unwrap();
@@ -2657,6 +2998,46 @@ mod tests {
             found,
             vec![(a.clone(), c.clone())],
             "the repair stopped at the middle of the chain"
+        );
+    }
+
+    /// Every state a person still owes an answer to is carried, listed and
+    /// repaired — including the one that waits on a press rather than a sweep.
+    ///
+    /// `Duplicate` is the judge's proposal that one artifact should hold what
+    /// both say, and it sits in the queue until somebody presses Synthese. It
+    /// was in none of the three open-state lists, so when a member was later
+    /// superseded the pair was carried nowhere and listed nowhere — and could
+    /// not be filed again either, because `record_pair` is `INSERT OR IGNORE`
+    /// over `UNIQUE(a_id, b_id)` and the row that already exists is the only
+    /// one there will ever be. The question was simply gone.
+    #[tokio::test]
+    async fn a_duplicate_pair_is_carried_onto_the_winner_like_any_other_open_one() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        let (a, other, winner) = (&ids[0], &ids[1], &ids[2]);
+        s.record_pair(a, other, 0.91).await.unwrap();
+        let id = s.pair_between(a, other).await.unwrap().unwrap().id;
+        s.set_pair_state(
+            id,
+            PairState::Duplicate,
+            Some("covers the same ground"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
+        s.set_superseded_by(a, Some(winner)).await.unwrap();
+
+        assert_eq!(
+            s.supersessions_with_open_pairs(10).await.unwrap(),
+            vec![(a.clone(), winner.clone())],
+            "a duplicate awaiting a press was invisible to the repair"
+        );
+        s.follow_supersession(a, winner).await.unwrap();
+        let moved = s.pair_between(winner, other).await.unwrap();
+        assert!(
+            moved.is_some(),
+            "the question was not carried onto the artifact that now answers for it"
         );
     }
 

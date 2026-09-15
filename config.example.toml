@@ -101,10 +101,17 @@ recency_half_life_days = 180
 # decay curve.
 pinned_boost = 0.15
 # Chunks one document may contribute to a result list, so a long document
-# cannot fill it. 0 lets one document supply every result. This and
-# recency_weight above are the two knobs the tuning sweep measures, and
-# applying its recommendation rewrites them here — see [feedback.tune].
+# cannot fill it. 0 lets one document supply every result. This, recency_weight,
+# recency_half_life_days and candidate_multiplier are the four knobs here the
+# tuning sweep and the idle pass may move — with `associate.prime_lift`,
+# `associate.spread_max` and whether the configured reranker runs, seven in
+# all; applying a recommendation rewrites the file-backed ones here — see
+# [feedback.tune] and [evolve].
 per_source_cap = 3
+# How many times the answer size a search fetches when the cap or the reranker
+# will narrow the list. Wider gives the cap more to choose from and costs a
+# bigger vector read; at 1 a capped search has nothing to refill from.
+candidate_multiplier = 3
 
 # ── Inference roles ─────────────────────────────────────────────────────────
 # Three independent roles. They may all point at one server, or at three
@@ -465,7 +472,13 @@ enabled = true
 # Estimated overlap of word shingles above which a new capture is parked as a
 # near-duplicate of an existing corpus rather than segmented. It is stored
 # either way; parking only withholds the model call until you decide on Ops.
-near_dupe_min = 0.90
+#
+# Measured, not chosen: over one base's 3916 corpus pairs the single real
+# duplicate — one article captured through two different doors — scored 0.789,
+# and the next-highest pair scored 0.036. Two readings of one document never
+# agree more closely than that, because the boilerplate each door keeps is
+# different, so a threshold up at 0.90 catches nothing that matters.
+near_dupe_min = 0.60
 # Cosine at or above which a pair of artifacts goes on the review queue.
 #
 # A floor, not an admission. Clearing it is necessary and not sufficient: a pair
@@ -478,11 +491,18 @@ near_dupe_min = 0.90
 #
 # Passages are outside this entirely: they are the verbatim substrate and are
 # never one side of a pair, whatever they score.
+#
+# The starting rung. A base with `evolve.autonomous` on lowers this when the
+# pairs just above it lead to a merge, a replacement or a discard as often as
+# the pairs higher up do, and raises it when the actions taken just above it
+# are taken back more often; the database holds what is live, and
+# /ui/insights says which generation that is.
 review_min = 0.88
-# Cosine at or above which the older artifact is hidden without asking. Well
-# clear of `review_min` on purpose: two genuinely distinct artifacts about one
-# subsystem sit around 0.88 routinely, and hiding at that score costs knowledge
-# rather than duplication. Ops lists what was hidden, with an undo.
+# The lane judged first. It hides nothing on its own: a pair at or above it
+# goes to the judge before one below it, and the judge decides. Well clear of
+# `review_min` on purpose: two genuinely distinct artifacts about one
+# subsystem sit around 0.88 routinely, and the pairs worth asking about first
+# are the ones that are not. Ops lists what was hidden, with an undo.
 auto_supersede = 0.95
 # Neighbours considered per artifact when it looks for duplicates.
 per_point = 5
@@ -556,6 +576,28 @@ retain_days = 0
 # How often retention is enforced. A window measured in days does not need
 # checking more often than this, and the sweep is a single DELETE.
 sweep_hours = 6
+# The share of recorded searches that explore. 0 turns it off.
+#
+# An exploring search lifts the top candidate that just missed the window into
+# the last visible row, and pushes the row it displaced out. One row of one
+# search in ten, at the bottom of the list, where a person is least likely to
+# be interrupted by it.
+#
+# It is there because the self-tuning loop has one blind spot it cannot see out
+# of on its own. Every positive observation is an open or a citation, and both
+# can only happen to an artifact the ranking already put on screen — so
+# replaying those observations under a different setting rewards reordering
+# what was shown and says nothing whatever about what was hidden. Two things
+# follow: a wider candidate pool can never be measured as an improvement,
+# because nothing outside the window is ever opened; and recency weight
+# ratchets upward, because people click among the recency-boosted rows they
+# were given and the replay reads that back as recency working.
+#
+# The lifted row is charged to the rank the ranking gave it and not to the row
+# it borrowed, so opening it is evidence the current setting could not have
+# produced and does not get the credit for. That is the whole mechanism; there
+# is no bandit and no model.
+explore = 0.1
 
 # What judged searches are spent on: a background sweep of recency_weight and
 # per_source_cap over every judged pair, which recommends a better setting when
@@ -590,17 +632,30 @@ judge_min_queries = 3
 judge_per_sweep = 10
 # How many top hits are asked what they are linked to, and how many associated
 # hits may be appended after the ranked list — outside `limit`, never instead
-# of a ranked hit.
+# of a ranked hit. `spread_max` is the starting rung: a base with
+# `evolve.autonomous` on widens or narrows the band from here on whether the
+# band is used more or less than the ranked tail beside it, and the database
+# holds what is live.
 spread_from = 3
 spread_max = 3
 # How much more accessible a hit must be than the one above it to pass it, as a
 # fraction of the most accessible hit in that list; and how many places it may
-# climb. 0 turns priming off, and it ships off: a feature that reorders results
-# and says something about you does not go on until the eval harness has been
-# run with it off and on against the frozen corpus. Accessibility here is use
-# — opened, confirmed, cited — never how often something was listed.
+# climb. 0 turns priming off. Accessibility here is use — opened, confirmed,
+# cited — never how often something was listed, so a hit nobody has reached
+# cannot be primed at all.
+#
+# This file ships the lowest non-zero rung: one place, never past rank 1, and
+# only for a hit that beats the one above it by more than half the top
+# engagement. It is a starting rung and not a verdict — the idle pass replays
+# what use left behind at every rung and moves from here on what it finds, the
+# probe anchor refuses a rung that loses on the base's own probes, and the
+# lived watch reverts one whose observations get worse.
+#
+# The compiled default is still 0, and that is deliberate: it is what an
+# existing base falls back to, so upgrading a deployment that never wrote this
+# key moves nothing. Only a base started from this file begins primed.
 prime_margin = 0.5
-prime_lift = 0
+prime_lift = 1
 
 [activation]
 half_life_days = 14
@@ -765,7 +820,25 @@ month_cycle = 0.0
 # differently in two sittings is exactly what is disorienting about it — so it
 # is off, the lift shares the one budget `associate.prime_lift` bounds, rank 0
 # never moves, and a hit it lifted says so on the row.
-prime = false
+#
+# On in this file, and a starting rung rather than a verdict. Every search
+# records what the sitting held whether or not this is on, so the evidence
+# accumulates from the first day; a base with `evolve.autonomous` on replays it
+# and moves this from here on what it finds. It needs `associate.prime_lift`
+# above zero to do anything at all — below that there is no budget for the
+# sitting to share — and the server says so at startup if you zero one without
+# the other.
+#
+# The compiled default is still off, for the reason under `prime_lift`: an
+# existing base that never wrote this key is not moved by an upgrade.
+#
+# Worth saying plainly, because the design that argued for measuring this
+# assumed the opposite: evidence gathered while the sitting is live is not the
+# clean counterfactual that design described. It is a starting rung under
+# watch — what the loop replays is a base that was already primed — and what
+# stands behind it is the base's own probe anchor and lived watch, either of
+# which may take it back. Start from `false` if you want the clean reading.
+prime = true
 
 [time]
 # A due reminder inside this many hours is shown on the front page, and may
@@ -805,6 +878,11 @@ default_tz = ""
 # does not run the sweep, whatever the default below says. It is the one stage
 # that destroys captured text, so an upgrade never turns it on for you — you
 # do, by writing this block.
+#
+# Buried is not gone: the text and the vector go to the graveyard, /ui/insights
+# lists it under Reaped with a Restore button, and a base with
+# `evolve.autonomous` on restores a buried artifact itself when a search given
+# up on would have been answered by it.
 enabled = true
 # How often the sweep runs. Once a day: the backlog it drains accumulated over
 # months, and there is nothing to be gained by draining it faster.
@@ -872,6 +950,145 @@ age_after_mins = 60
 # what this paces is mostly promotion, the judged links, and the one synthesis
 # call a small capture arms.
 cooldown_secs = 0
+
+# ── What use leaves behind ───────────────────────────────────────────────────
+# Nothing here changes what a search or an ask returns. It decides only what is
+# written down about how one turned out.
+#
+# Four things are recorded, and three of them were already being computed and
+# thrown away: an excerpt an answer actually drew on, a result somebody opened,
+# and an answer carrying a command or path none of its excerpts held. The
+# fourth is below.
+#
+# What is deliberately *not* recorded is silence. A search nobody acted on may
+# have failed, or may have been answered off the rail without anything being
+# opened, and those are indistinguishable — so neither is written rather than
+# one being guessed at.
+[evolve]
+# A search nobody opened, followed by another search from the same person
+# inside this many seconds, is recorded as a weak negative: the first one did
+# not answer, and the second attempt is the evidence of it.
+#
+# Minutes, and far above `feedback.coalesce_secs` on purpose. That one is the
+# length of a typing burst; this one is a person reading a list, thinking, and
+# asking again. Too long and an unrelated question an hour later is scored as
+# the failure of a search that worked.
+#
+# Weak because the search rail shows snippets: a search read and walked away
+# from satisfied looks exactly like one given up on. A weak negative is never
+# enough to change a setting — only ever enough to take one back.
+#
+# 0 turns this one signal off and leaves the other three recording.
+give_up_window_secs = 300
+
+# Let the tuning sweep read positive observations as pairs, beside the ones you
+# judged by hand.
+#
+# This is the whole point of recording any of it, and it ships off — not as an
+# opinion about whether it works, but because widening the sweep's evidence
+# changes which settings it recommends, and a recommendation changes ranking.
+# Turn it on deliberately. What tells you what it did is the base itself:
+# /ui/insights journals every sweep with the settings that produced it, and the
+# probe anchor and the lived watch will take a move back that does not hold up.
+# (The cargo harness is deprecated and would not see this anyway — it ranks a
+# frozen corpus nobody has opened. See docs/evaluation.md.)
+#
+# Positive observations only. A weak negative is never enough to bring a change
+# about.
+feed_sweep = false
+
+# How much a quiet base may do on its own. Three stages:
+#
+#   "off"     — nothing. The base still files each new capture (what was near
+#               it when it arrived) and writes probes, so /ui/insights can say
+#               which artifacts nothing has ever asked for; it replays nothing.
+#   "ranking" — it may move its own ranking parameters — the recency weight,
+#               the per-source cap, the candidate pool depth, the recency
+#               half-life, the prime lift, whether the sitting takes part in
+#               it, whether the configured reranker runs, the width of the
+#               associated band —
+#               on what use left behind, and take a move back on the same
+#               evidence. Every move is a row `revert` undoes exactly, and no
+#               move is made where there is nothing to measure it against.
+#   "full"    — everything above, and the corpus rules: taking its own merges,
+#               replacements, discards and burials back where the evidence
+#               says so, counting what outranks what in its own replays, and
+#               condensing an artifact into a shorter version of itself that
+#               loses no value, command or path — behind `max_actions_per_week`.
+#               `consolidate.review_min` moves here too, and not under
+#               "ranking": stepping it down widens what the dedupe judge
+#               considers, and the merges and supersessions that follow are
+#               corpus writes that reverting the generation row does not undo.
+#               Its "raise it" signal also reads actions taken back, which
+#               only the corpus rules produce, so under "ranking" the ladder
+#               could only ever have walked one way — down.
+#
+# `true` and `false` still read, as "full" and "off".
+#
+# "ranking" by default: the reversible half, on, because every move it makes
+# is a row `revert` undoes exactly and it can no longer move where there is
+# nothing to measure it against — no judged search and no rehearsed probe
+# means no move. "full" is asked for, because a merge, a burial or a
+# condensation is a corpus write, undo beside it or not. Under either, an idle
+# pass replays the positive
+# observations under every neighbouring setting, and a candidate that clears the
+# same gate the sweep uses — two net better, no aggregate loss — becomes the
+# live generation. The base then watches what that generation earns while it is
+# actually serving, compared with what its predecessor earned, and puts the
+# predecessor back when it does not hold. A candidate taken back is not offered
+# again until the models change — or until the corpus has more than doubled
+# since, because a setting refused on the base you had is not refused on the
+# base you have.
+#
+# This file is never written by that loop. It holds your starting point; the
+# database holds what is live, and /ui/insights says which generation that is.
+# Turning this off returns the base to the file at the next start, and every
+# move it made is in the history there.
+#
+# One knob per adoption, and nothing proposed while the last one is watched.
+# Slower, and it keeps the history readable and every revert exact.
+#
+# What a quiet base spends on this: nineteen vector searches per replayed
+# observation — the running settings and every other rung of each knob's
+# ladder, one knob moved at a time — and it stops between observations the
+# moment a search or a question arrives, writing nothing. The next quiet period
+# starts it over. The pass spends inference in exactly one case: a reranker is
+# configured, the live generation runs without it, and the pass asks what one
+# call per observation would have changed. The band is not replayed at all; it
+# moves on what it earned while serving.
+#
+# Under "full" the base also takes its own corpus actions back. Every merge,
+# replacement, discard, burial and condensation the corpus jobs make is
+# journaled, and the quiet pass reads the journal against the same
+# observations: a merge or a replacement whose survivor is no longer found
+# where the original was is undone, and anything hidden or buried that a
+# search given up on would have been answered by is restored. An action taken
+# back is not taken again on the same artifact. The review threshold under
+# [consolidate] moves on the same pass. Every action and every undo is on
+# /ui/insights, with what you undid told apart from what the base undid.
+autonomous = "ranking"
+
+# Corpus actions the base may take on its own in any seven days, under
+# "full": merges, supersessions, discards, burials and condensations it
+# journals. Undos are never counted — taking something back is not spending.
+# Reached, the corpus jobs keep finding and stop acting: pairs stay queued,
+# nominees stay nominated, and the journal says "budget spent" until the
+# window moves. Small on purpose. The worst week the base can have is this
+# many actions, each with an undo beside it.
+max_actions_per_week = 10
+
+# How long the base has to have been quiet — no search, no question — before
+# it sleeps. A sleep is four things in order: it *integrates* every new
+# artifact (one neighbour read each — was anything near it when it came? new,
+# known, or a conflict for you), *rehearses* what it holds (the wording of
+# your later captures replayed as questions for your earlier ones, the base's
+# own probes), *reorganises* on what that showed (under "ranking" the ranking
+# generations; under "full" the corpus rules too), and *wakes* with one row
+# on /ui/insights under "Last night" saying what it did. Its searches embed
+# nothing and take the background lane, so a person who comes back gets ahead
+# of it; this is what keeps it from starting under somebody at all. Half an
+# hour is a sitting having ended, not a pause in one.
+idle_secs = 1800
 
 [capture]
 # The upload, paste-a-link and extension doors.

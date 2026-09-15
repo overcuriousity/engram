@@ -48,12 +48,12 @@
     <div class="lin-body">
       <div class="lin-head">
         {% if f.n.missing %}
-        <span class="lin-title muted">{{ f.n.title }}</span>
+        <span class="lin-title{% if !f.n.named %} name-opening{% endif %} muted">{{ f.n.title }}</span>
         {% else %}
         {# Swaps the pane for that artifact's, the same way Related does: the
            partial is also the whole standalone page, where naming `#pane`
            would leave the link dead. #}
-        <a class="lin-title" href="/ui/artifacts/{{ f.n.id }}"
+        <a class="lin-title{% if !f.n.named %} name-opening{% endif %}" href="/ui/artifacts/{{ f.n.id }}"
            hx-get="/ui/artifacts/{{ f.n.id }}"
            hx-target="closest [data-terms]" hx-swap="outerHTML"
            hx-push-url="true">{{ f.n.title }}</a>
@@ -85,9 +85,9 @@
     <div class="lin-body">
       <div class="lin-head">
         {% if f.n.missing %}
-        <span class="lin-title muted">{{ f.n.title }}</span>
+        <span class="lin-title{% if !f.n.named %} name-opening{% endif %} muted">{{ f.n.title }}</span>
         {% else %}
-        <a class="lin-title" href="/ui/artifacts/{{ f.n.id }}"
+        <a class="lin-title{% if !f.n.named %} name-opening{% endif %}" href="/ui/artifacts/{{ f.n.id }}"
            hx-get="/ui/artifacts/{{ f.n.id }}"
            hx-target="closest [data-terms]" hx-swap="outerHTML"
            hx-push-url="true">{{ f.n.title }}</a>

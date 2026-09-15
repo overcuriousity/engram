@@ -15,7 +15,6 @@ pub enum Stage {
     /// Splits a corpus into windows and arms one `SegmentWindow` per window.
     /// Makes no inference call itself.
     Synthesize,
-    Enrich,
     /// One window, one call. The unit the job model is built around.
     SegmentWindow,
     /// Naming one document. One call.
@@ -79,15 +78,23 @@ pub enum Stage {
     /// like `Consolidate`, so at most one sits in the queue; model calls are
     /// bounded by `reap.max_judged_per_run`.
     Reap,
+    /// One model-written artifact, its cues embedded as probes. An embedding
+    /// per cue, no generation. Armed at `mark_indexed`, idle-only, its own
+    /// failure domain for the reason `Relate` is: a failed cue embed must not
+    /// fail the artifact's embed.
+    Probe,
+    /// One model-written artifact, rewritten shorter as a new version of
+    /// itself. One generation, under "full" and the weekly budget; a draft
+    /// that would lose a value or a literal is refused without writing.
+    Condense,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 19] = [
+    pub const ALL: [Stage; 20] = [
         Stage::Synthesize,
-        Stage::Enrich,
         Stage::SegmentWindow,
         Stage::Title,
         Stage::Embed,
@@ -105,12 +112,13 @@ impl Stage {
         Stage::Context,
         Stage::Remind,
         Stage::Reap,
+        Stage::Probe,
+        Stage::Condense,
     ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Stage::Synthesize => "synthesize",
-            Stage::Enrich => "enrich",
             Stage::SegmentWindow => "segment_window",
             Stage::Title => "title",
             Stage::Embed => "embed",
@@ -128,6 +136,8 @@ impl Stage {
             Stage::Context => "context",
             Stage::Remind => "remind",
             Stage::Reap => "reap",
+            Stage::Probe => "probe",
+            Stage::Condense => "condense",
         }
     }
     /// Is someone waiting on this? `0` foreground, `1` background.
@@ -143,10 +153,7 @@ impl Stage {
     /// rather than inherit an answer from a wildcard arm.
     pub fn class(self) -> i64 {
         match self {
-            // `Enrich` shares `synthesize::plan` with `Synthesize` and is
-            // foreground for the same reason: it is a capture in flight.
             Stage::Synthesize
-            | Stage::Enrich
             | Stage::SegmentWindow
             | Stage::Title
             | Stage::Embed
@@ -163,14 +170,50 @@ impl Stage {
             | Stage::ArmDedupe
             | Stage::Context
             | Stage::Remind
-            | Stage::Reap => 1,
+            | Stage::Reap
+            | Stage::Probe
+            | Stage::Condense => 1,
+        }
+    }
+
+    /// Is this stage a capture being read — the steps between a paste and the
+    /// base holding it?
+    ///
+    /// Exactly the class-0 stages today, and asked separately because the two
+    /// questions come apart in the queue: `age_background` writes `class = 0`
+    /// onto a background unit that has waited too long, so a promoted sweep is
+    /// indistinguishable from a capture by class alone. The line that matters
+    /// to a person watching a paste land is the stage, which nothing rewrites.
+    ///
+    /// Exhaustive for the reason `class` is.
+    pub fn reads_a_capture(self) -> bool {
+        match self {
+            Stage::Synthesize
+            | Stage::SegmentWindow
+            | Stage::Title
+            | Stage::Embed
+            | Stage::Describe
+            | Stage::Extract => true,
+            Stage::Consolidate
+            | Stage::Dedupe
+            | Stage::Relate
+            | Stage::Associate
+            | Stage::LinkJudge
+            | Stage::Pursuit
+            | Stage::Generate
+            | Stage::Retention
+            | Stage::ArmDedupe
+            | Stage::Context
+            | Stage::Remind
+            | Stage::Reap
+            | Stage::Probe
+            | Stage::Condense => false,
         }
     }
 
     pub fn parse(s: &str) -> Option<Stage> {
         match s {
             "synthesize" => Some(Stage::Synthesize),
-            "enrich" => Some(Stage::Enrich),
             "segment_window" => Some(Stage::SegmentWindow),
             "title" => Some(Stage::Title),
             "embed" => Some(Stage::Embed),
@@ -188,6 +231,8 @@ impl Stage {
             "context" => Some(Stage::Context),
             "remind" => Some(Stage::Remind),
             "reap" => Some(Stage::Reap),
+            "probe" => Some(Stage::Probe),
+            "condense" => Some(Stage::Condense),
             _ => None,
         }
     }
@@ -234,6 +279,39 @@ pub struct RetryingJob {
 pub fn backoff_secs(attempts: i64) -> i64 {
     let exp = attempts.clamp(1, 16) as u32;
     2i64.saturating_pow(exp).min(21_600)
+}
+
+/// The same gap, spread over the half-second band above it.
+///
+/// `infer::retry::jitter` makes this argument at length for the interactive
+/// lane, and it is the same argument here: the thing being backed off from is
+/// usually a limiter shared by everything this server talks to, and units that
+/// failed in the same instant re-arm on the same curve unless something breaks
+/// the tie. A document whose eight windows are all refused at once comes back
+/// as eight simultaneous calls, is refused again together, and the blip is a
+/// stampede. Nothing in the queue itself needed this — one worker pool over one
+/// SQLite file has no thundering herd — which is why the interactive lane got
+/// jitter and the queue did not.
+///
+/// Additive, never subtractive, and that is the difference from `retry`'s. That
+/// one draws from `[0, gap]` under a deadline, where sleeping *less* is a
+/// courtesy. Here the gap is a floor somebody reasoned about — a refusal must
+/// never be cheaper to retry than a failure to connect — so the spread goes on
+/// top. Half a gap, so a jittered attempt can still never overtake the next
+/// rung: 1.5 × 2ⁿ is below 2ⁿ⁺¹.
+///
+/// The clock hashed through a fresh `RandomState`, for the reason
+/// `infer::retry::jitter` gives: it is seeded per process and stepped per
+/// instance, so two calls in the same nanosecond differ, which is exactly the
+/// pair this has to separate. Not worth a dependency, and not worth one
+/// function across two crates' worth of layering for two different units under
+/// two different rules.
+fn spread_backoff(attempts: i64) -> i64 {
+    use std::hash::{BuildHasher, Hasher};
+    let gap = backoff_secs(attempts);
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_i64(now());
+    gap + (h.finish() % (gap.max(1) as u64 / 2 + 1)) as i64
 }
 
 /// Which existing rows an arming upsert may disturb.
@@ -753,7 +831,7 @@ impl Store {
         Ok(oldest.map(|t| (now() - t).max(0)))
     }
 
-    /// Is a capture of this tenant's still moving through the pipeline?
+    /// Is a capture of this tenant's still being read?
     ///
     /// Not `oldest_pending_age().is_some()`, which is what the due band asked
     /// and is true on every live install forever: `rearm_periodic` parks each
@@ -762,21 +840,49 @@ impl Store {
     /// job. A caller asking "is the operator waiting for something" got "yes",
     /// always, and polled at the two-second rate meant for a capture in flight.
     ///
-    /// `class = 0` is the column that already draws this line — the capture
-    /// pipeline the operator is watching, against work nobody stands in front
-    /// of — and `run_after` excludes a unit whose turn has not come.
+    /// Nor `class = 0`, which was the next answer and is a different question:
+    /// `age_background` writes that class onto a background unit that has
+    /// waited past its threshold, so a promoted consolidation sweep made the
+    /// page say "reading…" with nothing being read. `Stage::reads_a_capture`
+    /// is the line, and nothing rewrites a row's stage.
     ///
-    pub async fn foreground_work_in_flight(&self) -> Result<bool> {
-        let r: Option<i64> = sqlx::query_scalar(
+    /// Three states count, and one that looks like it does not:
+    ///
+    ///   - `running`, unless the claim is older than `STUCK_AFTER_SECS`. A row
+    ///     left `running` by a crashed process stays that way until the next
+    ///     `reclaim_stuck`, which is once at startup — so a restart claimed a
+    ///     capture was being read for ten minutes after the fact.
+    ///   - `pending` and due.
+    ///   - `pending` with `attempts > 0`, whatever `run_after` says. `fail_job`
+    ///     re-arms a failed unit with a backoff, and during that backoff the
+    ///     flag went false: the line stopped polling for good, the retry ran,
+    ///     and nothing on screen ever said so. No reading stage is periodic, so
+    ///     a pending row that has already been tried is a retry and never a
+    ///     sweep parked months out.
+    pub async fn capture_being_read(&self) -> Result<bool> {
+        // Written out from the stage list so a stage added later answers
+        // `reads_a_capture` rather than inheriting silence from a literal.
+        let stages: Vec<&str> = Stage::ALL
+            .iter()
+            .filter(|s| s.reads_a_capture())
+            .map(|s| s.as_str())
+            .collect();
+        // `AssertSqlSafe`: the only thing interpolated is `Stage::as_str`,
+        // which is a `&'static str` from a match arm.
+        let sql = sqlx::AssertSqlSafe(format!(
             "SELECT 1 FROM jobs
-              WHERE subject = ? AND class = 0
-                AND (state = 'running' OR (state = 'pending' AND run_after <= ?))
+              WHERE subject = ? AND stage IN ('{}')
+                AND (   (state = 'running' AND claimed_at > ?)
+                     OR (state = 'pending' AND (run_after <= ? OR attempts > 0)))
               LIMIT 1",
-        )
-        .bind(&self.subject)
-        .bind(now())
-        .fetch_optional(&self.control.pool)
-        .await?;
+            stages.join("','")
+        ));
+        let r: Option<i64> = sqlx::query_scalar(sql)
+            .bind(&self.subject)
+            .bind(now() - crate::jobs::STUCK_AFTER_SECS)
+            .bind(now())
+            .fetch_optional(&self.control.pool)
+            .await?;
         Ok(r.is_some())
     }
 }
@@ -870,7 +976,7 @@ impl Control {
         sqlx::query(
             "UPDATE jobs SET state = 'pending', run_after = ?, last_error = ?, claimed_at = NULL WHERE id = ?",
         )
-        .bind(now() + backoff_secs(attempts))
+        .bind(now() + spread_backoff(attempts))
         .bind(err)
         .bind(id)
         .execute(&self.pool)
@@ -1023,6 +1129,27 @@ mod tests {
         assert_eq!(backoff_secs(3), 8);
         assert_eq!(backoff_secs(4), 16);
         assert_eq!(backoff_secs(100), 21_600, "must cap, not grow unbounded");
+    }
+
+    /// Spread upward only, and never far enough to overtake the next rung.
+    ///
+    /// The floor matters: `a_refused_window_backs_off_further_each_time` reads
+    /// the gaps out of the queue and asserts none is below
+    /// `backoff_secs(MAX_ATTEMPTS)`, because a refusal must never be cheaper to
+    /// retry than a failure to connect.
+    #[test]
+    fn a_spread_gap_never_falls_below_its_rung_or_reaches_the_next() {
+        for attempts in 1..=MAX_ATTEMPTS {
+            let gap = backoff_secs(attempts);
+            for _ in 0..64 {
+                let spread = spread_backoff(attempts);
+                assert!(spread >= gap, "{spread} fell below rung {attempts}");
+                assert!(
+                    spread < backoff_secs(attempts + 1),
+                    "{spread} overtook the rung above {attempts}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1664,10 +1791,7 @@ mod tests {
     #[tokio::test]
     async fn a_parked_sweep_is_not_a_capture_in_flight() {
         let s = Store::memory().await.unwrap();
-        assert!(
-            !s.foreground_work_in_flight().await.unwrap(),
-            "an idle base"
-        );
+        assert!(!s.capture_being_read().await.unwrap(), "an idle base");
 
         // What every live install looks like: the periodic units sit `pending`
         // with their turn months away. `oldest_pending_age` says yes to this
@@ -1686,7 +1810,7 @@ mod tests {
             "the old question says yes"
         );
         assert!(
-            !s.foreground_work_in_flight().await.unwrap(),
+            !s.capture_being_read().await.unwrap(),
             "and it is nobody's capture"
         );
 
@@ -1694,38 +1818,35 @@ mod tests {
         s.enqueue(Stage::Synthesize, "corpus", "src-1")
             .await
             .unwrap();
-        assert!(s.foreground_work_in_flight().await.unwrap());
+        assert!(s.capture_being_read().await.unwrap());
         // Still true once claimed: it is in flight, not waiting to be.
         let j = s.claim_job().await.unwrap().unwrap();
-        assert!(
-            s.foreground_work_in_flight().await.unwrap(),
-            "running counts"
-        );
+        assert!(s.capture_being_read().await.unwrap(), "running counts");
         s.control.complete_job(j.id).await.unwrap();
         assert!(
-            !s.foreground_work_in_flight().await.unwrap(),
+            !s.capture_being_read().await.unwrap(),
             "and it is over when it is done"
         );
     }
 
     #[tokio::test]
-    async fn foreground_work_is_the_capture_pipeline_and_nothing_parked() {
+    async fn reading_is_the_capture_pipeline_and_nothing_parked() {
         // Since the reshape, the reminder is written by the capture
-        // pipeline's own window job — class 0 — so class alone draws the
-        // line the band polls against.
+        // pipeline's own window job, so the reading stages draw the line the
+        // band polls against.
         let s = Store::memory().await.unwrap();
         while let Some(j) = s.claim_job().await.unwrap() {
             s.control.complete_job(j.id).await.unwrap();
         }
-        assert!(!s.foreground_work_in_flight().await.unwrap());
+        assert!(!s.capture_being_read().await.unwrap());
         s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
         assert!(
-            s.foreground_work_in_flight().await.unwrap(),
+            s.capture_being_read().await.unwrap(),
             "the operator is waiting for this one"
         );
         let j = s.claim_job().await.unwrap().unwrap();
         s.control.complete_job(j.id).await.unwrap();
-        assert!(!s.foreground_work_in_flight().await.unwrap());
+        assert!(!s.capture_being_read().await.unwrap());
 
         // Class 1 is what the query was narrowed to escape: `remind` is the
         // periodic notifier, parked months out.
@@ -1738,8 +1859,70 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            !s.foreground_work_in_flight().await.unwrap(),
+            !s.capture_being_read().await.unwrap(),
             "a parked sweep is nobody's capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_unit_backing_off_after_a_failure_is_still_being_read() {
+        // The reading is not over because the endpoint refused once: the retry
+        // is coming. Read from `run_after` alone this went false for the whole
+        // backoff, and the line that polls on it stopped for good — the retry
+        // ran and nothing on screen ever said so.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        s.fail_job(j.id, j.attempts, "the model was unreachable")
+            .await
+            .unwrap();
+
+        let run_after: i64 = sqlx::query_scalar("SELECT run_after FROM jobs WHERE id = ?")
+            .bind(j.id)
+            .fetch_one(&s.control.pool)
+            .await
+            .unwrap();
+        assert!(run_after > now(), "the retry is parked, not due");
+        assert!(
+            s.capture_being_read().await.unwrap(),
+            "a capture waiting out its backoff is still being read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promoted_sweep_is_not_a_capture_being_read() {
+        // What `age_background` does to a sweep nobody stands in front of: it
+        // writes `class = 0`, which is why class alone could not answer this
+        // and the page said "reading…" over a consolidation pass.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Relate, "artifact", "a-1").await.unwrap();
+        s.age_background(now() + 60, 10).await.unwrap();
+        let class: i64 = sqlx::query_scalar("SELECT class FROM jobs WHERE stage = 'relate'")
+            .fetch_one(&s.control.pool)
+            .await
+            .unwrap();
+        assert_eq!(class, 0, "the backlog unit was promoted");
+        assert!(!s.capture_being_read().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_claim_older_than_the_stuck_threshold_is_nobody_reading() {
+        // A row left `running` by a crashed process. `reclaim_stuck` runs once
+        // at startup, so without the age check a restart claimed a capture was
+        // being read for the ten minutes before it fired.
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
+        let j = s.claim_job().await.unwrap().unwrap();
+        assert!(s.capture_being_read().await.unwrap(), "a fresh claim");
+        sqlx::query("UPDATE jobs SET claimed_at = ? WHERE id = ?")
+            .bind(now() - crate::jobs::STUCK_AFTER_SECS - 1)
+            .bind(j.id)
+            .execute(&s.control.pool)
+            .await
+            .unwrap();
+        assert!(
+            !s.capture_being_read().await.unwrap(),
+            "nothing is reading this one; the process that claimed it is gone"
         );
     }
 

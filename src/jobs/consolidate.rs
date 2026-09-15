@@ -477,10 +477,47 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
+    // Dedupe's own week, before anything is armed. `dedupe::run` reads the
+    // same budget and returns with the pair still `Pending` — correct for the
+    // unit, but it meant this pass re-armed the same pairs every interval for
+    // the rest of the week and reported `armed = n` each time, so the
+    // empty-run backoff that exists to stop exactly this treadmill never
+    // engaged. Arming nothing is what lets it engage.
+    if !core.may_act(crate::store::actions::Job::Dedupe).await? {
+        tracing::info!("budget spent; no pairs armed until the window moves");
+        return Ok(0);
+    }
+    // Pairs an operator pressed Synthese on lead, and they are not `Pending`:
+    // the press is offered on every card the queue draws, and the state a card
+    // most often carries when it is pressed is `Duplicate` — the judge read
+    // both sides, said they cover the same ground, and left the writing to a
+    // person.
+    //
+    // They lead because the press is somebody waiting. `ask_pair_synthesis_ui`
+    // arms the unit once itself, so this is not what makes the writing happen
+    // the first time; it is what keeps the promise the card makes when that
+    // run comes back having written nothing — the week's budget was spent,
+    // `[infer.pair_synthesizer]` had not arrived yet. The unit closes, and
+    // without this nothing would ever arm it again while the card went on
+    // saying "it is written on the next pass" for ever.
+    //
+    // `pairs_awaiting_synthesis` excludes anything already merged and holds
+    // back a pair whose replies will not parse, so this cannot loop.
+    let asked = core.store.pairs_awaiting_synthesis(200).await?;
     let pending = core.store.pairs_to_judge(200).await?;
+    // An asked pair that is still `Pending` is in both lists. Deduped by id so
+    // it takes one slot of the per-tick budget rather than two — the second
+    // pass would find its unit already live and skip it, but only after
+    // spending two point lookups to say so.
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let queue: Vec<_> = asked
+        .into_iter()
+        .chain(pending)
+        .filter(|p| seen.insert(p.id))
+        .collect();
 
     let mut armed = 0usize;
-    for p in pending {
+    for p in queue {
         if armed >= core.consolidate.max_dedupe_per_tick {
             tracing::info!(
                 budget = core.consolidate.max_dedupe_per_tick,
@@ -505,6 +542,12 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
         // `Core::supersede` would refuse to apply it. The unit checks again,
         // because a pair can be retired while it waits.
         if !a_live || !b_live {
+            // With the ask, if there was one: the card reads a standing flag
+            // as "the writing is queued", and nothing is going to write a pair
+            // one of whose sides has left results.
+            if p.synthesis_asked {
+                core.store.clear_pair_synthesis(p.id).await?;
+            }
             core.store
                 .set_pair_state(
                     p.id,
@@ -583,12 +626,8 @@ pub(crate) mod tests {
             .map(|(i, (title, text, _))| NewArtifact {
                 ordinal: i as i64,
                 text: (*text).to_string(),
-                corpus_span: None,
                 title: title.map(str::to_string),
-                category: None,
-                tags: vec![],
-                segment_idx: None,
-                caveats: vec![],
+                ..Default::default()
             })
             .collect();
         let made = core.store.insert_artifacts(&src.id, &new).await.unwrap();
@@ -603,16 +642,8 @@ pub(crate) mod tests {
                     corpus_id: c.corpus_id.clone().unwrap_or_default(),
                     text: (*text).to_string(),
                     title: title.map(str::to_string),
-                    category: None,
-                    tags: vec![],
                     created_at: c.created_at,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
+                    ..Default::default()
                 },
             })
             .collect();
@@ -1204,7 +1235,17 @@ pub(crate) mod tests {
         // A negative age floor, because the row was retired this same second
         // and `bury` re-checks `reap_candidates`' predicate — the sweep's own
         // `min_age_days` is what stands there in production.
-        core.store.bury(&ids[0], "{}", -60).await.unwrap();
+        core.store
+            .bury(
+                &ids[0],
+                "{}",
+                -60,
+                None,
+                None,
+                &crate::jobs::reap::test_support::row(&ids[0]),
+            )
+            .await
+            .unwrap();
         core.store.mark_lifecycle_dirty(&ids[0]).await.unwrap();
 
         assert_eq!(repair_lifecycle_drift(&core).await.unwrap(), 1);
@@ -2178,6 +2219,29 @@ pub(crate) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_spent_week_arms_no_pairs_rather_than_arming_the_same_ones_for_ever() {
+        // `dedupe::run` reads the budget too and returns with the pair still
+        // `Pending` — correct for the unit, but this pass then re-armed the
+        // same pairs every interval for the rest of the week and reported
+        // `armed = n` each time, so the empty-run backoff that exists to stop
+        // exactly this treadmill never engaged.
+        let mut core = test_core().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_week = 0;
+        disagreeing(&core).await;
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 0, "nothing is armed");
+        assert_eq!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "and the pair waits, exactly as it was"
+        );
+    }
+
     #[test]
     fn an_unreadable_member_leaves_the_filed_pair_alone() {
         // A transient BUSY on one member used to read as "gone", closing the
@@ -2202,6 +2266,62 @@ pub(crate) mod tests {
         );
     }
 
+    /// A merge that landed and was condensed since is not stranded when the
+    /// condensed text will not embed. Its roots are already behind it, so
+    /// retiring it would hide them behind a row nothing restores.
+    #[tokio::test]
+    async fn a_condensed_merge_whose_new_embed_fails_keeps_what_it_replaced() {
+        use crate::store::artifacts::NewMerged;
+        let core = test_core().await;
+        let ids = seed_related(&core, &[("first", [1.0, 0.0]), ("second", [0.0, 1.0])]).await;
+        let m = core
+            .store
+            .insert_merged_artifact(
+                &NewMerged {
+                    text: "both".into(),
+                    ..Default::default()
+                },
+                &[ids[0].clone(), ids[1].clone()],
+            )
+            .await
+            .unwrap();
+        for id in &ids {
+            core.store.set_superseded_by(id, Some(&m.id)).await.unwrap();
+        }
+        // Condensed since: the text waits on an embed again, and that one has
+        // run out of attempts.
+        core.store
+            .enqueue(crate::store::jobs::Stage::Embed, "artifact", &m.id)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET attempts = ? WHERE target_id = ?")
+            .bind(crate::store::jobs::MAX_ATTEMPTS)
+            .bind(&m.id)
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        assert_eq!(
+            core.store.get_artifact(&m.id).await.unwrap().status,
+            ArtifactStatus::Active,
+            "a merge that had landed was retired as though it never had"
+        );
+        for id in &ids {
+            assert_eq!(
+                core.store
+                    .get_artifact(id)
+                    .await
+                    .unwrap()
+                    .superseded_by
+                    .as_deref(),
+                Some(m.id.as_str()),
+                "what it replaced is still behind it"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_merge_that_can_never_embed_is_reaped_and_its_pairs_reopened() {
         // The pairs are settled the moment the merge is written. If the embed
@@ -2218,10 +2338,7 @@ pub(crate) mod tests {
             .insert_merged_artifact(
                 &NewMerged {
                     text: "both".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[ids[0].clone(), ids[1].clone()],
             )
@@ -2284,10 +2401,7 @@ pub(crate) mod tests {
             .insert_merged_artifact(
                 &NewMerged {
                     text: "x".into(),
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[ids[0].clone(), ids[1].clone()],
             )

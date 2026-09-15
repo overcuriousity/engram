@@ -175,6 +175,16 @@ pub struct Core {
     /// judges, its own response shape, background only. `None` with no
     /// synthesize role.
     pub generator: Option<Arc<dyn Completer>>,
+    /// The model that writes one artifact from a pair an operator asked to have
+    /// synthesized. Same endpoint as the judges, its own response shape.
+    ///
+    /// Separate from `judge` because it is not asked for a verdict: the press
+    /// was the verdict. Under the dedupe grammar the reply would have to carry
+    /// a `relation`, and the judge does not decide this class reliably — asked
+    /// twelve times about two artifacts describing one veterinary practice, it
+    /// wrote the same reasoning every time and split nine to three between
+    /// `distinct` and `duplicate`. `None` with no synthesize role.
+    pub pair_synthesizer: Option<Arc<dyn Completer>>,
     /// The model that says, once, which subjects an answer still lacks — and
     /// with it, whether an ask gets a fanned-out second round of retrieval at
     /// all.
@@ -216,12 +226,12 @@ pub struct Core {
     /// the registry hands back on reopen. See `Working::line` for why that
     /// matters and `core::gaps::unrelated_line` for what is measured.
     pub line: Arc<std::sync::atomic::AtomicU32>,
-    /// The recency decay's half-life and the pinned tag's boost — the two
-    /// terms the vector store folds into one score and never reports back.
-    /// Held here so the explanation reconstructs them from the same
-    /// configuration the store was built from, rather than from a second
-    /// reading that could drift. See `core::explain::scoring_terms`.
-    pub recency_half_life_days: u32,
+    /// The pinned tag's boost — a term the vector store folds into one score
+    /// and never reports back. Held here so the explanation reconstructs it
+    /// from the same configuration the store was built from, rather than from
+    /// a second reading that could drift. The recency terms used to sit beside
+    /// it; they travel in `ranking` now, because the idle pass moves them. See
+    /// `core::explain::scoring_terms`.
     pub pinned_boost: f32,
     /// The one switch over everything learned from what happens here. Read on
     /// the search path and by every sweep downstream of it, so it lives here
@@ -230,6 +240,10 @@ pub struct Core {
     /// How real searches are recorded for later judging. Read on the search
     /// path, so it lives here rather than being threaded down.
     pub feedback: crate::config::FeedbackConfig,
+    /// What is written down about how a retrieval turned out. Read by
+    /// `jobs::observe` and by the sweep's pair gathering; never on a path a
+    /// person waits on.
+    pub evolve: crate::config::EvolveConfig,
     /// Limits for the upload, link and extension capture paths. Read on the
     /// request path, so it lives here rather than being threaded down.
     pub capture: crate::config::CaptureConfig,
@@ -246,8 +260,6 @@ pub struct Core {
     /// What the queue does with work nobody is waiting on. Read by the repair
     /// pass, which is where ageing happens.
     pub schedule: crate::config::ScheduleConfig,
-    /// Whether the sitting may move a result. Carrying needs no setting.
-    pub sitting: crate::config::SittingConfig,
     pub time: crate::config::TimeConfig,
     pub reap: crate::config::ReapConfig,
     /// Whether and how the area under the search box is filled. Read by the
@@ -291,7 +303,90 @@ pub struct Core {
     pub tuning: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// What the idle pass has written to the corpus on its own in the last seven
+/// days, against the week's cap. A bound on the blast radius, not a rate limit
+/// on finding.
+///
+/// The pass's own writes and no others — see `sleep_actions_since`. Dedupe,
+/// reap and promotion were autonomous before this budget existed and keep
+/// their own gates; charging them here meant condense, which runs last in the
+/// pass, found the week already spent in every week the base had been used.
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    pub used: u32,
+    pub cap: u32,
+}
+
+impl Budget {
+    pub fn spent(&self) -> bool {
+        self.used >= self.cap
+    }
+}
+
 impl Core {
+    /// One job's week: what it has written, and what it may.
+    pub async fn budget(&self, job: crate::store::actions::Job) -> crate::error::Result<Budget> {
+        let used = self
+            .store
+            .actions_since(job, crate::store::now() - 7 * 86_400)
+            .await?;
+        Ok(Budget {
+            used: used.clamp(0, u32::MAX as i64) as u32,
+            cap: self.evolve.max_actions_per_week,
+        })
+    }
+
+    /// Whether `job` may write to the corpus now: it is permitted to act at
+    /// all, and it has not spent its own week.
+    ///
+    /// Per job, because a shared count meant four independent units spent one
+    /// another's allowance and the one that ran last never had any — see
+    /// `Store::actions_since`. Each caller names itself, so nothing here has
+    /// to guess which budget a write belongs to.
+    ///
+    /// Only under `"full"`: below it the sweeps that were autonomous before
+    /// these stages existed are held by their own switches, as they were.
+    pub async fn may_act(&self, job: crate::store::actions::Job) -> crate::error::Result<bool> {
+        if !self.evolve.autonomous.acts_on_corpus() {
+            return Ok(true);
+        }
+        Ok(!self.budget(job).await?.spent())
+    }
+
+    /// Put the version a condensation retired back, and stamp the row. One
+    /// method, called by the button and by the base.
+    pub async fn uncondense(
+        &self,
+        action_id: &str,
+        by: crate::store::actions::UndoneBy,
+    ) -> crate::error::Result<()> {
+        use crate::error::Error;
+        let a = self.store.action(action_id).await?.ok_or(Error::NotFound)?;
+        if a.kind != crate::store::actions::Kind::Condense {
+            return Err(Error::Validation("not a condensation".into()));
+        }
+        if a.undone_at.is_some() {
+            return Ok(());
+        }
+        let n = serde_json::from_str::<serde_json::Value>(&a.evidence_json)
+            .ok()
+            .and_then(|v| v.get("version").and_then(|n| n.as_i64()))
+            .ok_or_else(|| Error::Store("a condense row names its version".into()))?;
+        self.store.restore_version(&a.subject_id, n, &a.id).await?;
+        self.store
+            .undo_action_on(
+                &a.subject_id,
+                crate::store::actions::Kind::Condense,
+                by,
+                "the earlier version is back",
+            )
+            .await?;
+        self.store
+            .enqueue(crate::store::jobs::Stage::Embed, "artifact", &a.subject_id)
+            .await?;
+        Ok(())
+    }
+
     /// The measured line, or zero while unmeasured.
     fn measured_line(&self) -> f32 {
         f32::from_bits(self.line.load(std::sync::atomic::Ordering::Relaxed))
@@ -426,6 +521,7 @@ impl Core {
             std::path::Path::new(&cfg.store.dir),
         ));
         Core {
+            evolve: cfg.evolve.clone(),
             store,
             vectors,
             synthesizer: Arc::new(
@@ -463,6 +559,9 @@ impl Core {
             generator: Some(Arc::new(
                 HttpCompleter::for_generating(synth).with_counter(counter.clone()),
             )),
+            pair_synthesizer: Some(Arc::new(
+                HttpCompleter::for_pair_synthesis(synth).with_counter(counter.clone()),
+            )),
             planner: cfg.infer.ask.as_ref().and_then(|a| {
                 a.plan.then(|| {
                     Arc::new(HttpCompleter::for_plan(&a.plan_on()).with_counter(counter.clone()))
@@ -486,7 +585,13 @@ impl Core {
             query_cache: working.query_cache,
             consolidate: cfg.consolidate.clone(),
             ranking: Arc::new(std::sync::RwLock::new(
-                crate::core::ranking::RankingParams::from_vector(&cfg.vector),
+                crate::core::ranking::RankingParams::from_config(
+                    &cfg.vector,
+                    &cfg.associate,
+                    &cfg.consolidate,
+                    &cfg.sitting,
+                    cfg.infer.rerank.is_some(),
+                ),
             )),
             tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             weak_floor: cfg.vector.weak_below,
@@ -494,7 +599,6 @@ impl Core {
             // `Working::line`. A core built for one pass and dropped after it
             // still hands its measurement to whichever core is serving.
             line: working.line,
-            recency_half_life_days: cfg.vector.recency_half_life_days.max(1),
             pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
             feedback: cfg.feedback.clone(),
@@ -504,7 +608,6 @@ impl Core {
             promote: cfg.promote.clone(),
             pursuit: cfg.pursuit.clone(),
             schedule: cfg.schedule.clone(),
-            sitting: cfg.sitting.clone(),
             time: cfg.time.clone(),
             reap: cfg.reap.clone(),
             recommend: cfg.recommend.clone(),
@@ -619,6 +722,79 @@ pub mod test_support {
 
     pub const TEST_DIM: usize = 8;
 
+    /// A core with the recommender and the learning layer on, and a clock
+    /// that does not move.
+    ///
+    /// `core::recommend` and `jobs::context` both need one and each had grown
+    /// its own — `core_at` and `recommending_core`, the same five lines under
+    /// two names.
+    pub async fn recommending_core(now: i64) -> Core {
+        let mut core = test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        core.clock = crate::core::context::Clock::Fixed(now);
+        core
+    }
+
+    /// The client bundle of a phone, for the two modules that profile one.
+    pub fn phone_bundle() -> crate::core::context::Bundle {
+        crate::core::context::Bundle {
+            tz: Some("Europe/Berlin".into()),
+            platform: Some("Android".into()),
+            ua_family: Some("Chrome".into()),
+            screen_w: Some(390.0),
+            screen_h: Some(844.0),
+            viewport_w: Some(390.0),
+            viewport_h: Some(844.0),
+            dpr: Some(3.0),
+            cores: Some(8.0),
+            memory_gb: Some(4.0),
+            language: Some("de-DE".into()),
+            color_scheme: Some("dark".into()),
+            touch: Some(true),
+            orientation: Some("portrait".into()),
+            network: Some("cellular".into()),
+            ..Default::default()
+        }
+    }
+
+    /// One artifact with a vector point behind it.
+    ///
+    /// The point is not optional in either caller: `context_query` renders
+    /// from the payload, and `resurface` needs a `created_at` of 0 with
+    /// nothing shown against it.
+    pub async fn seed_artifact(core: &Core, title: &str) -> String {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: format!("text of {title}"),
+                    title: Some(title.into()),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        core.vectors
+            .upsert(vec![crate::vector::VectorPoint {
+                vector: vec![1.0; TEST_DIM],
+                sparse: Default::default(),
+                payload: crate::vector::VectorPayload {
+                    artifact_id: a.id.clone(),
+                    corpus_id: src.id.clone(),
+                    text: a.text.clone(),
+                    title: Some(title.into()),
+                    ..Default::default()
+                },
+            }])
+            .await
+            .unwrap();
+        a.id
+    }
+
     pub async fn test_core() -> Core {
         build(Arc::new(FakeSynthesizer::default()), None).await
     }
@@ -684,6 +860,7 @@ pub mod test_support {
     async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {
+            evolve: crate::config::EvolveConfig::default(),
             store,
             vectors: Arc::new(MemoryVectors::new()),
             synthesizer,
@@ -702,6 +879,10 @@ pub mod test_support {
             })),
             reaper: Some(Arc::new(FakeCompleter::default())),
             generator: Some(Arc::new(FakeCompleter::default())),
+            // No default writer: a synthesis is only ever written for a pair a
+            // person pressed, and a test that means to exercise that path says
+            // so by setting this.
+            pair_synthesizer: None,
             // Off, unlike the shipped default: a test that wants a fan-out puts
             // a completer here, and every other test gets one round and no
             // extra call to account for.
@@ -723,6 +904,7 @@ pub mod test_support {
                 crate::core::ranking::RankingParams {
                     recency_weight: 0.0,
                     per_source_cap: Some(crate::core::search::MAX_PER_CORPUS),
+                    ..Default::default()
                 },
             )),
             tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -732,7 +914,6 @@ pub mod test_support {
             // about the labelling set it themselves.
             weak_floor: 0.0,
             line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            recency_half_life_days: 180,
             pinned_boost: 0.15,
             // Off in tests, whatever ships: the tests that need a log switch
             // it on and the rest assert nothing is recorded.
@@ -749,7 +930,6 @@ pub mod test_support {
             promote: crate::config::PromoteConfig::default(),
             pursuit: crate::config::PursuitConfig::default(),
             schedule: crate::config::ScheduleConfig::default(),
-            sitting: crate::config::SittingConfig::default(),
             // The fake embedder hashes text into eight dimensions, where two
             // unrelated strings clear 0.80 by chance and the classifier fires on
             // noise. Tests of the classifier hand it vectors directly.
@@ -826,6 +1006,7 @@ mod tests {
                         embed_model: core.embedder.model().into(),
                         candidates: vec![],
                         answered: false,
+                        context: None,
                     },
                     0,
                 )
@@ -898,6 +1079,44 @@ mod tests {
             0.6,
             "a measurement taken on a transient core did not reach the one serving"
         );
+    }
+
+    /// Both halves of one decision, which is why they are asserted together.
+    ///
+    /// A new deployment is told to `cp config.example.toml config.toml`, so
+    /// this file is what a fresh base ranks by, and it ships primed: the
+    /// lowest rung of the lift, with the sitting taking part in it.
+    ///
+    /// The compiled defaults stay off, and that is the other half. An existing
+    /// base does not rank by the file — `boot_generation` serves what the base
+    /// adopted — but it does compare the file it booted under against the one
+    /// it sees now, and a change there supersedes the live generation. Had the
+    /// compiled default moved, every base that never wrote these keys would
+    /// have been pulled to the new value on upgrade, discarding whatever its
+    /// own idle pass had earned. Moving the file and not the default is what
+    /// keeps "new deployments only" true.
+    #[tokio::test]
+    async fn the_example_config_ships_primed_and_the_compiled_defaults_do_not() {
+        let cfg = Config::load(std::path::Path::new("config.example.toml").into()).unwrap();
+        assert_eq!(
+            cfg.associate.prime_lift, 1,
+            "a base started from this file begins on the lowest non-zero rung"
+        );
+        assert!(
+            crate::core::ranking::PRIME_LIFTS.contains(&cfg.associate.prime_lift),
+            "and that rung is one the idle pass can walk away from"
+        );
+        assert!(
+            cfg.sitting.prime,
+            "with the sitting taking part in the lift it shares"
+        );
+
+        assert_eq!(
+            crate::config::default_prime_lift(),
+            0,
+            "the compiled default stays off, so an upgrade moves no existing base"
+        );
+        assert!(!crate::config::default_sitting_prime());
     }
 
     /// The one wiring decision `from_config` makes that is not a straight

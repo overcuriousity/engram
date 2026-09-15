@@ -1,3 +1,4 @@
+use crate::core::fetch::only_a_url;
 use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::jobs::{FailedJob, Stage};
@@ -237,23 +238,14 @@ async fn ingest(
         ));
     }
 
-    let parsed_url = match &req.url {
-        Some(raw) => {
-            let u = url::Url::parse(raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
-            // `Url::parse` accepts `javascript:` and `data:` happily, and the
-            // scheme allowlist lives in `fetch_html` — which the `html` plus
-            // `url` path never calls. This value is stored and rendered as a
-            // link on the corpus page, so the check belongs here too.
-            if !matches!(u.scheme(), "http" | "https") {
-                return Err(Error::Validation(format!(
-                    "url: `{}` is not a scheme a page is read over",
-                    u.scheme()
-                )));
-            }
-            Some(u)
-        }
-        None => None,
-    };
+    // Checked here and not only in `fetch_html`, which the `html` plus `url`
+    // path never calls: this value is stored and rendered as a link on the
+    // corpus page. See `core::fetch::parse_readable`.
+    let parsed_url = req
+        .url
+        .as_deref()
+        .map(crate::core::fetch::parse_readable)
+        .transpose()?;
 
     // A highlighted fragment is exempt from the floor. See `floor_exempt`.
     let floor = if floor_exempt(&req) {
@@ -419,22 +411,6 @@ pub(crate) fn refuse_time_fields(
          and its origin and any date in it come from what it turns out to be",
         named.join(", ")
     )))
-}
-
-/// Whether a body is one link and nothing else.
-///
-/// The single guess this endpoint makes, and it is made because every share
-/// sheet on both platforms hands a shared link over as `text/plain`. Narrow on
-/// purpose: one whitespace-separated token, parsing as a URL, over http or
-/// https. A line of prose that opens with a link is prose, and a caller who
-/// wants the other reading has `POST /corpora`, which asks in as many words.
-pub(crate) fn only_a_url(body: &str) -> Option<url::Url> {
-    let trimmed = body.trim();
-    if trimmed.split_whitespace().count() != 1 {
-        return None;
-    }
-    let u = url::Url::parse(trimmed).ok()?;
-    matches!(u.scheme(), "http" | "https").then_some(u)
 }
 
 /// The code a stored capture answers with, in the one place the doors that now
@@ -1820,8 +1796,13 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
 
 #[derive(serde::Deserialize)]
 pub struct MomentsQuery {
+    /// The window's lower bound, and `kind=event`'s alone — see `list_moments`
+    /// for why a `due` query has none. Accepted on a `due` query and not
+    /// consulted there.
     #[serde(default)]
     pub from: Option<i64>,
+    /// The window's upper bound, on both kinds. Defaults to the base's
+    /// `time.horizon_hours` out.
     #[serde(default)]
     pub to: Option<i64>,
     /// `due` (the default) or `event`.
@@ -1831,6 +1812,15 @@ pub struct MomentsQuery {
 
 /// Reminders and dates in a window. `due` answers what the front page shows —
 /// open rows only, undated last; `event` answers what refers to the window.
+///
+/// `from` bounds an `event` query and only that one. A `due` query has no lower
+/// bound by design: an overdue reminder is the one that most deserves to be
+/// listed, so a client asking for next week is still told about the row that
+/// went past three weeks ago. Said here because the parameter is accepted on
+/// both and consulted on one, which is not a thing a caller can see from the
+/// answer — and because giving `due` the bound instead would both hide those
+/// overdue rows and, passed as `open_due`'s first argument, un-hide everything
+/// snoozed between here and the window as though it were currently due.
 async fn list_moments(
     tenant: Tenant,
     Query(q): Query<MomentsQuery>,
@@ -1855,8 +1845,17 @@ async fn list_moments(
     ))
 }
 
+/// Strike a reminder. `404` where there was no open row to strike, exactly as
+/// `moment_snooze` answers it.
+///
+/// The `bool` used to be discarded and every call answered `204`. A phone
+/// client posting to an id that a re-read or another device had already
+/// settled was told it had succeeded, struck the row locally, and went on
+/// being pushed at by a reminder its own screen no longer showed.
 async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
-    tenant.core.complete_moment(&id).await?;
+    if !tenant.core.complete_moment(&id).await? {
+        return Err(Error::NotFound);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1915,7 +1914,8 @@ async fn moment_snooze(
         && m.at.is_none()
     {
         return Err(Error::Validation(
-            "this reminder has no date, so there is nothing to put it aside until;              set a date first"
+            "this reminder has no date, so there is nothing to put it aside until; \
+             set a date first"
                 .into(),
         ));
     }
@@ -1932,10 +1932,7 @@ async fn moment_unsnooze(tenant: Tenant, Path(id): Path<String>) -> Result<Statu
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The instants a moment may name: the range a calendar year can be spelled
-/// in, which is also the range every reader of a moment can do arithmetic in.
-const YEAR_ONE: i64 = -62_135_596_800;
-const END_OF_9999: i64 = 253_402_300_799;
+use crate::core::moments::{END_OF_9999, YEAR_ONE};
 
 #[derive(serde::Deserialize)]
 pub struct NewMomentBody {
@@ -2313,6 +2310,53 @@ pub(crate) mod tests {
             !core.store.is_retired(&cid).await.unwrap(),
             "and undoing brings it back"
         );
+    }
+
+    /// `moment_done` discarded the `bool` and answered `204` whatever it did,
+    /// so a phone client posting to an id a re-read or another device had
+    /// already settled was told it succeeded, struck the row locally, and went
+    /// on being pushed at by a reminder its own screen no longer showed. The
+    /// sibling `moment_snooze` answers `404` for exactly this case.
+    #[tokio::test]
+    async fn striking_a_reminder_that_is_not_there_is_a_404_and_not_a_204() {
+        let (app, token, core) = app_token_and_core().await;
+        let (_, id) = corpus_with_due(&core, None).await;
+
+        let first = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::NO_CONTENT, "there was a row");
+
+        let again = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/v1/moments/{id}/done"),
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            again.status(),
+            StatusCode::NOT_FOUND,
+            "and now there is not"
+        );
+
+        let never = app
+            .oneshot(post_json(
+                "/api/v1/moments/no-such-moment/done",
+                &token,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(never.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -4599,14 +4643,11 @@ mod patch_tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "the body".into(),
-                    corpus_span: None,
                     title: Some("a title".into()),
                     category: Some("concept".into()),
                     tags: vec!["old".into()],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -4857,14 +4898,8 @@ mod patch_tests {
             .insert_artifacts(
                 &src.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "the older copy".into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await

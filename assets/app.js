@@ -1210,6 +1210,11 @@
     show('kind-row', false);
     var due = document.getElementById('due');
     if (due) htmx.trigger(due, 'refresh');
+    // The idle line's poll is filtered on the column being visible, so while
+    // the column was hidden it fired nothing. What the reader comes back to
+    // would otherwise be however old the last tick left it.
+    var foot = document.getElementById('idle-foot');
+    if (foot && foot.getAttribute('hx-get')) htmx.trigger(foot, 'refresh');
   }
 
   function show(id, on) {
@@ -1293,16 +1298,38 @@
   // — an embedder that is down, a vector store that cannot answer, a body over
   // the limit. `textContent`, because an error string is the one payload on
   // this page that went through no sanitizing renderer.
+  // A search whose endpoint was merely busy — rate limited, or a model still
+  // loading. The server has already retried it for as long as a keystroke's
+  // answer is worth retrying (see `infer::retry`), so reaching here means the
+  // limiter is still shedding.
+  //
+  // Not `failedSwap`, because a keystroke's answer is disposable and the rail
+  // under it is not: typing one character into a box that is showing eight
+  // results must not replace them with an error box. The results stay, a line
+  // above them says why they did not move, and the next keystroke tries again
+  // — which is exactly what a person typing is about to do anyway.
+  //
+  // Silence would be the other mistake, and the handler below has a comment
+  // about it: a door that fails invisibly reads as a base with nothing in it.
+  function busyNote(target) {
+    if (!target || target.id !== 'results') return false;
+    // One note however many keystrokes are refused. The next successful search
+    // swaps the rail's innerHTML and takes it away with everything else, so
+    // nothing has to remove it.
+    if (target.querySelector('.flag-busy')) return true;
+    var box = document.createElement('div');
+    box.className = 'flag flag-busy';
+    box.setAttribute('role', 'status');
+    box.textContent =
+      'The model endpoint is busy. This search has not run — the next thing you type will try again.';
+    target.insertBefore(box, target.firstChild);
+    return true;
+  }
+
   function failedSwap(target, xhr) {
     if (!target || !target.id) return;
     var reason = 'engram is unreachable.';
-    if (xhr) {
-      try {
-        reason = JSON.parse(xhr.responseText).error || ('engram answered ' + xhr.status + '.');
-      } catch (err) {
-        reason = 'engram answered ' + xhr.status + '.';
-      }
-    }
+    if (xhr) reason = reasonOf(xhr) || ('engram answered ' + xhr.status + '.');
     var box = document.createElement('div');
     box.className = 'flag';
     box.setAttribute('role', 'status');
@@ -1323,6 +1350,26 @@
     // The heading names the act that filled the rail, and nothing filled it.
     var head = document.getElementById('rail-head');
     if (head && target.id === 'results') head.textContent = '';
+  }
+
+  // What the server said went wrong, out of whichever body it sent. The API
+  // answers `{"error": …}`; a `/ui` route answers with the error page, which
+  // marks its one sentence of what happened with `data-error-detail`
+  // (`error.html`, `not_found.html`). Reading only the first shape turned
+  // every `/ui` failure into a bare status code once those routes started
+  // answering with a page — "chunk text is empty" became "engram answered 400".
+  function reasonOf(xhr) {
+    var type = xhr.getResponseHeader('content-type') || '';
+    try {
+      if (type.indexOf('application/json') !== -1) {
+        return JSON.parse(xhr.responseText).error || null;
+      }
+      var page = new DOMParser().parseFromString(xhr.responseText, 'text/html');
+      var said = page.querySelector('[data-error-detail]');
+      return said ? said.textContent.trim() : null;
+    } catch (err) {
+      return null;
+    }
   }
 
   // The two example phrasings under the box. A chip fills the box and stops
@@ -2053,6 +2100,14 @@
       var text = box.value.trim();
       if (!text) return Promise.resolve();
       var fromAsk = document.querySelector('input[name="from_ask"]');
+      // The search this text was typed into, which the results fragment fills
+      // out of band on every answer (see `_results.html`). The box searches
+      // while it is typed, so that event is this capture's first draft — and
+      // it found nothing, because nothing was there yet. Sent so the hole it
+      // would otherwise become closes against the text that answers it.
+      // Absent before the first answer comes back, and then this is an
+      // ordinary capture: the coverage check still has its own say.
+      var fromSearch = document.querySelector('#fold-of input[name="fold"]');
       // htmx settles this promise for every answer the server gives, a 500
       // among them — it rejects only for a request that never completed at
       // all — so the promise on its own says nothing about whether anything
@@ -2081,6 +2136,7 @@
         values: {
           text: text,
           from_ask: fromAsk ? fromAsk.value : '',
+          from_search: fromSearch ? fromSearch.value : '',
           tz: (document.getElementById('box-tz') || {}).value || ''
         }
       // A transport failure rejects, and nothing catching it was an unhandled
@@ -2097,6 +2153,12 @@
         // citations — for words the operator typed themselves.
         var kept = document.getElementById('kept-from');
         if (kept && kept.parentNode) kept.parentNode.removeChild(kept);
+        // The same for the search this text was typed into: it has had its
+        // answer. Left standing, the next paste too long to be searched went
+        // out naming it, and a named search closes its gap with no distance
+        // check. The idle answer below clears it too; this does not wait on it.
+        var foldOf = document.getElementById('fold-of');
+        if (foldOf) foldOf.textContent = '';
         box.value = '';
         box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
         refreshRail();
@@ -2473,6 +2535,33 @@
     return !!(params && params.rerank === 'true');
   }
 
+  // Was this the idle line's own poll? Same question as `wasRefine` and for the
+  // same reason: nobody asked for this request. It fires every three seconds
+  // while a capture is read, so a 500 wrote "That did not work" into the
+  // paragraph on every tick, and an expired session navigated a reader to the
+  // login page from a timer, mid-sentence.
+  function wasIdlePoll(e) {
+    var cfg = e.detail && e.detail.requestConfig;
+    return String((cfg && cfg.path) || '').indexOf('/ui/idle-foot') === 0;
+  }
+
+  // The read landed. The rail may be standing at "No matches yet · still
+  // reading", which is a dead end: the search that drew it ran against a base
+  // that was still taking the answer in, and nothing re-ran it. The idle line's
+  // last poll — the one that reports the reading over — fires this.
+  //
+  // Only from that state, and only over a box that is not mid-request: a search
+  // somebody is in the middle of typing is already on its way, and re-running
+  // it would be a second one for the same keystroke.
+  function rerunAfterRead() {
+    document.body.addEventListener('engram:read-landed', function () {
+      if (!document.querySelector('#results .still-reading')) return;
+      var form = document.getElementById('box-form');
+      if (!form || form.classList.contains('htmx-request')) return;
+      htmx.trigger(form, 'submit');
+    });
+  }
+
   // The rail's selected row, recomputed from the URL. Run after any swap that
   // repaints the list while an artifact is open: the fragment renders every
   // row `aria-selected="false"`, and the open artifact's highlight must
@@ -2829,6 +2918,7 @@
     micButton();
     askDriver();
     refinePass();
+    rerunAfterRead();
     trackDwell();
     window.addEventListener('pagehide', flushDwell);
     document.addEventListener('visibilitychange', function () {
@@ -2848,12 +2938,17 @@
       // typing must not replace their results with an error box — and an
       // expired session must not navigate them to a login mid-read; the next
       // thing they actually do will land here and redirect with intent.
-      if (wasRefine(e)) return;
+      if (wasRefine(e) || wasIdlePoll(e)) return;
       if (e.detail.xhr.status === 401) {
         var here = window.location.pathname + window.location.search;
         window.location.assign('/auth/login?go=' + encodeURIComponent(here));
         return;
       }
+      // 503 is the one status that means "ask again" rather than "this is
+      // broken" — `Error::InferenceBusy`, and nothing else in the app answers
+      // with it. Handled before `failedSwap` so a rate-limited keystroke keeps
+      // the rail it was typed over.
+      if (e.detail.xhr.status === 503 && busyNote(e.detail.target)) return;
       failedSwap(e.detail.target, e.detail.xhr);
     });
     // The other half of the same problem. htmx swaps nothing on an error of
@@ -2865,8 +2960,9 @@
     document.body.addEventListener('htmx:sendError', function (e) {
       if (!e.detail) return;
       // Same exemption as above: a refine that never reached the server
-      // leaves the list it was refining alone.
-      if (wasRefine(e)) return;
+      // leaves the list it was refining alone, and so does a poll nobody asked
+      // for.
+      if (wasRefine(e) || wasIdlePoll(e)) return;
       failedSwap(e.detail.target, null);
     });
     // Out-of-band content arrives on its own event, and the day link is only

@@ -119,6 +119,11 @@ pub struct NewMoment {
 pub struct DueRow {
     pub moment: Moment,
     pub title: String,
+    /// Whether `title` is a name somebody wrote or the opening of the text
+    /// standing in for one — see `ui::RowLabel`. A due row is a link and its
+    /// time, with no snippet beside it, so the label can never be empty; it
+    /// can say it is not a name.
+    pub named: bool,
     pub opening: String,
 }
 
@@ -153,12 +158,18 @@ fn row_of(r: &sqlx::sqlite::SqliteRow) -> DueRow {
         .chars()
         .take(120)
         .collect::<String>();
+    // A passage carries the heading of the section it was cut from and a note
+    // carries none — neither is a name for this text, so neither is offered as
+    // one and the row falls to its opening. See
+    // `Provenance::names_its_own_text`.
+    let named = crate::store::artifacts::Provenance::parse(&r.get::<String, _>("provenance"))
+        .names_its_own_text();
     let title: Option<String> = r.get("title");
+    let title = title.filter(|t| !t.is_empty() && named);
     DueRow {
         moment: moment_of(r),
-        title: title
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| opening.clone()),
+        named: title.is_some(),
+        title: title.unwrap_or_else(|| opening.clone()),
         opening,
     }
 }
@@ -170,8 +181,7 @@ fn eff_at(r: &DueRow) -> i64 {
     r.moment.snoozed_until.or(r.moment.at).unwrap_or(0)
 }
 
-const JOINED: &str =
-    "SELECT m.*, a.title, a.text FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
+const JOINED: &str = "SELECT m.*, a.title, a.text, a.provenance FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
 
 impl Store {
     /// The note this moment was read out of.
@@ -390,10 +400,33 @@ impl Store {
     /// Open rows only. A done row is the history of a thing that happened to
     /// the artifact it happened on, and moving it would rewrite that.
     ///
-    /// And never onto an instant the winner already carries, which is the same
-    /// uniqueness every insert on an artifact asks about: a promotion whose
-    /// artifacts were themselves read as the reminder has the row already, and
-    /// the passage's copy stays where it is rather than becoming a second one.
+    /// And never onto an instant the winner already carries *open*, which is
+    /// the same uniqueness every insert on an artifact asks about: a promotion
+    /// whose artifacts were themselves read as the reminder has the row
+    /// already, and the passage's copy stays where it is rather than becoming a
+    /// second one.
+    ///
+    /// `w.done_at IS NULL` on that side too, and for the reason the outer
+    /// filter carries it: a *completed* row on the winner at the same instant
+    /// is the history of something that already happened, not a duplicate of
+    /// the loser's open one. Without it the loser's row was left behind on an
+    /// artifact about to go non-active, and `open_due`, `uncovered` and
+    /// `next_notify_at` all filter on `a.status = 'active'` — so the reminder
+    /// left the band with nothing anywhere saying it had gone, which is the
+    /// exact failure this method exists to prevent.
+    ///
+    /// `w.rule IS moments.rule` for the other half of the same test. A
+    /// recurrence and a one-shot standing at one instant are two reminders,
+    /// not one written twice: "every Tuesday at nine" and "on Tuesday at nine"
+    /// say different things about every Tuesday after this one. Matching on
+    /// the instant alone dropped the recurring row whenever the winner
+    /// happened to hold a one-shot there — and dropping it is not a no-op,
+    /// because the loser is about to go non-active: the series left the band,
+    /// and `complete_moment` never ran on it to arm a successor, so the
+    /// recurrence ended there with nothing saying so. The rule is what tells
+    /// the two apart; `series_id` deliberately is not, since the winner's own
+    /// copy of a reminder read out of the same note carries an id of its own
+    /// and is exactly the duplicate this guard is for.
     pub async fn carry_moments(&self, loser: &str, winner: &str) -> Result<u64> {
         if loser == winner {
             return Ok(0);
@@ -404,7 +437,9 @@ impl Store {
                 AND NOT EXISTS (SELECT 1 FROM moments w
                                  WHERE w.artifact_id = ?
                                    AND w.kind = moments.kind
-                                   AND w.at IS moments.at)",
+                                   AND w.at IS moments.at
+                                   AND w.rule IS moments.rule
+                                   AND w.done_at IS NULL)",
         )
         .bind(winner)
         .bind(loser)
@@ -578,6 +613,45 @@ impl Store {
         .await?)
     }
 
+    /// Give a row that carries a rule but no series its own id as one.
+    ///
+    /// The head of a recurrence names the series — that is `insert_moment`'s
+    /// rule for a new one — but rows written before the column existed carry
+    /// NULL, and nothing since has adopted them. Called when such a row arms
+    /// its successor, so that both ends of the recurrence are in one series
+    /// and `occurrences_in_series` counts the occurrence that has just
+    /// happened rather than starting from the next one.
+    ///
+    /// A row that already belongs to a series keeps it, and so do its
+    /// siblings, so this is safe to call without asking first.
+    ///
+    /// And every earlier row of the same recurrence joins with it. Every row
+    /// written before the column carries NULL, not only the one being
+    /// completed: adopting that one alone moved the count onto the series,
+    /// where the occurrences already done were not, and a `COUNT=3` whose
+    /// first two predated the column fired four times. The siblings are found
+    /// the way `occurrences_of_rule` has always counted them — the due rows on
+    /// this artifact under this rule — which is the count the series replaces.
+    pub async fn adopt_into_own_series(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE moments SET series_id = ?
+              WHERE series_id IS NULL
+                AND (id = ?
+                     OR (kind = 'due'
+                         AND artifact_id = (SELECT artifact_id FROM moments
+                                             WHERE id = ? AND series_id IS NULL)
+                         AND rule = (SELECT rule FROM moments
+                                      WHERE id = ? AND series_id IS NULL)))",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// How many occurrences one recurrence has had, counted by its series and
     /// so immune to the artifact its rows sit on.
     ///
@@ -634,8 +708,14 @@ impl Store {
     /// it deserves a place on a list.
     pub async fn open_due_for_artifact(&self, artifact_id: &str) -> Result<Option<Moment>> {
         Ok(sqlx::query(
+            // `COALESCE(snoozed_until, at)`, and not the raw `at`, because that
+            // is the instant this row is *rendered* at two lines below and the
+            // instant `due_for` and `open_due` both order on. Ordering on `at`
+            // picked the earliest row as captured and then displayed its snooze:
+            // a Monday row snoozed to next Friday beat a Wednesday one, so the
+            // pane said "in 10 days" while the band correctly said Wednesday.
             "SELECT * FROM moments WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL
-             ORDER BY at IS NULL, at LIMIT 1",
+             ORDER BY COALESCE(snoozed_until, at) IS NULL, COALESCE(snoozed_until, at) LIMIT 1",
         )
         .bind(artifact_id)
         .fetch_optional(&self.pool)
@@ -738,14 +818,24 @@ impl Store {
     }
 
     /// Open reminders: undone, on an active artifact, and either undated or
-    /// due before `to` and not snoozed past `now`. Dated first, by time —
-    /// the *effective* time: a row whose snooze has elapsed re-enters the
-    /// band at the instant the operator named, not sorted as most overdue by
-    /// the date they put aside.
+    /// effectively due before `to` and not snoozed past `now`. Dated first, by
+    /// time — the *effective* time: a row whose snooze has elapsed re-enters
+    /// the band at the instant the operator named, not sorted as most overdue
+    /// by the date they put aside.
+    ///
+    /// The horizon reads that same effective instant, which is the one the
+    /// ordering below has always used and the one `uncovered` and
+    /// `next_notify_at` push on. Compared against `at`, a reminder three days
+    /// out and snoozed to an hour from now fell outside a 48-hour horizon on
+    /// the strength of a date the operator had just put aside: the push fired
+    /// at the hour, and the Due page and the search badge had nothing on them
+    /// until the original date drifted into range days later.
     pub async fn open_due(&self, now: i64, to: i64) -> Result<Vec<DueRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{JOINED} WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'
-               AND (m.at IS NULL OR (m.at < ? AND (m.snoozed_until IS NULL OR m.snoozed_until <= ?)))
+               AND (m.at IS NULL
+                    OR (COALESCE(m.snoozed_until, m.at) < ?
+                        AND (m.snoozed_until IS NULL OR m.snoozed_until <= ?)))
              ORDER BY m.at IS NULL, COALESCE(m.snoozed_until, m.at), m.created_at"
         )))
         .bind(to)
@@ -776,8 +866,13 @@ impl Store {
             // to Friday is correctly re-admitted on Friday, and reading `at`
             // here made the badge say "4 days ago" for a reminder due in an
             // hour and gave the search lift the instant the operator put aside.
+            //
+            // The horizon reads it too, for the reason `open_due` gives: a
+            // reminder snoozed *forward* from beyond the horizon to inside it
+            // is due inside it, whatever date it was moved off.
             "SELECT artifact_id, MIN(COALESCE(snoozed_until, at)) AS at FROM moments
-             WHERE kind = 'due' AND done_at IS NULL AND at IS NOT NULL AND at < ?
+             WHERE kind = 'due' AND done_at IS NULL AND at IS NOT NULL
+               AND COALESCE(snoozed_until, at) < ?
                AND (snoozed_until IS NULL OR snoozed_until <= ?) AND artifact_id IN ({marks})
              GROUP BY artifact_id"
         )))
@@ -1124,14 +1219,9 @@ mod tests {
             .insert_artifacts(
                 &c.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: "Remind me friday to send the invoice".into(),
-                    corpus_span: None,
                     title: Some("Invoice".into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1159,9 +1249,7 @@ mod tests {
                 &crate::store::artifacts::NewMerged {
                     text: "both halves".into(),
                     title: Some("merged".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[made[0].id.clone(), made[1].id.clone()],
             )
@@ -1194,9 +1282,7 @@ mod tests {
                 &crate::store::artifacts::NewMerged {
                     text: "both notes".into(),
                     title: Some("merged".into()),
-                    category: None,
-                    tags: vec![],
-                    caveats: vec![],
+                    ..Default::default()
                 },
                 &[one[0].id.clone(), two[0].id.clone()],
             )
@@ -1212,12 +1298,8 @@ mod tests {
         NewArtifact {
             ordinal,
             text: text.into(),
-            corpus_span: None,
             title: Some(text.into()),
-            category: None,
-            tags: vec![],
-            segment_idx: None,
-            caveats: vec![],
+            ..Default::default()
         }
     }
 
@@ -1242,14 +1324,8 @@ mod tests {
             .insert_artifacts(
                 &c.id,
                 &[NewArtifact {
-                    ordinal: 0,
                     text: text.into(),
-                    corpus_span: None,
-                    title: None,
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
+                    ..Default::default()
                 }],
             )
             .await
@@ -1448,6 +1524,154 @@ mod tests {
                 .await
                 .unwrap(),
             "three occurrences is three, wherever the rows ended up"
+        );
+    }
+
+    /// A *completed* row on the winner at the same instant is not the winner
+    /// already carrying that reminder — it is the history of something that
+    /// happened. Matching it left the loser's open row behind on an artifact
+    /// about to go non-active, and the band filters on `a.status = 'active'`,
+    /// so the reminder went dark with nothing saying so.
+    #[tokio::test]
+    async fn a_done_row_on_the_winner_at_the_same_instant_does_not_block_the_carry() {
+        let (s, aid) = store_with_artifact().await;
+        let winner = other_artifact(&s, "the promoted rewrite").await;
+        let at = Some(1_000);
+        let row = |artifact: &str| NewMoment {
+            artifact_id: artifact.to_string(),
+            kind: Kind::Due,
+            at,
+            tz: "Europe/Berlin".into(),
+            rule: None,
+            source: Source::Classified,
+            span: None,
+            series_id: None,
+        };
+        let finished = s.insert_moment(&row(&winner)).await.unwrap();
+        s.mark_done(&finished, 1_100).await.unwrap();
+        let open = s.insert_moment(&row(&aid)).await.unwrap();
+
+        assert_eq!(
+            s.carry_moments(&aid, &winner).await.unwrap(),
+            1,
+            "an open row is carried past a done one at the same instant"
+        );
+        assert_eq!(
+            s.moment(&open).await.unwrap().unwrap().artifact_id,
+            winner,
+            "and it is the winner that carries it now"
+        );
+    }
+
+    /// The other half of the same rule: an *open* row the winner already
+    /// carries at that instant is the duplicate the guard is for, and the
+    /// loser's copy stays where it is.
+    #[tokio::test]
+    async fn an_open_row_on_the_winner_at_the_same_instant_still_blocks_the_carry() {
+        let (s, aid) = store_with_artifact().await;
+        let winner = other_artifact(&s, "the promoted rewrite").await;
+        let at = Some(1_000);
+        let row = |artifact: &str| NewMoment {
+            artifact_id: artifact.to_string(),
+            kind: Kind::Due,
+            at,
+            tz: "Europe/Berlin".into(),
+            rule: None,
+            source: Source::Classified,
+            span: None,
+            series_id: None,
+        };
+        s.insert_moment(&row(&winner)).await.unwrap();
+        let loser_row = s.insert_moment(&row(&aid)).await.unwrap();
+
+        assert_eq!(s.carry_moments(&aid, &winner).await.unwrap(), 0);
+        assert_eq!(
+            s.moment(&loser_row).await.unwrap().unwrap().artifact_id,
+            aid,
+            "not moved, and not doubled on the winner"
+        );
+    }
+
+    /// And the half the instant alone could not tell apart: a recurrence and a
+    /// one-shot standing at the same moment are two reminders. Matching on
+    /// `(kind, at)` dropped the recurring row whenever the winner happened to
+    /// hold a one-shot there — and the loser is about to go non-active, so the
+    /// series left the band with nothing arming a successor.
+    #[tokio::test]
+    async fn a_recurrence_is_carried_past_a_one_shot_standing_at_the_same_instant() {
+        let (s, aid) = store_with_artifact().await;
+        let winner = other_artifact(&s, "the promoted rewrite").await;
+        let at = Some(1_000);
+        let row = |artifact: &str, rule: Option<&str>| NewMoment {
+            artifact_id: artifact.to_string(),
+            kind: Kind::Due,
+            at,
+            tz: "Europe/Berlin".into(),
+            rule: rule.map(str::to_string),
+            source: Source::Classified,
+            span: None,
+            series_id: None,
+        };
+        s.insert_moment(&row(&winner, None)).await.unwrap();
+        let weekly = s
+            .insert_moment(&row(&aid, Some("FREQ=WEEKLY")))
+            .await
+            .unwrap();
+
+        assert_eq!(s.carry_moments(&aid, &winner).await.unwrap(), 1);
+        assert_eq!(
+            s.moment(&weekly).await.unwrap().unwrap().artifact_id,
+            winner,
+            "every Tuesday at nine is not the same reminder as on Tuesday at nine"
+        );
+    }
+
+    /// The horizon reads the *effective* instant, which is what the ordering
+    /// beside it and every push already read. Against `at`, a reminder three
+    /// days out and snoozed to an hour from now sat outside a 48-hour window
+    /// on the strength of a date the operator had just put aside: the push
+    /// fired at the hour and the Due page had nothing on it.
+    #[tokio::test]
+    async fn a_reminder_snoozed_into_the_horizon_from_beyond_it_is_on_the_band() {
+        let (s, aid) = store_with_artifact().await;
+        let now = 1_000_000;
+        let horizon = now + 48 * 3_600;
+        let id = s
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(now + 3 * 86_400),
+                tz: "Europe/Berlin".into(),
+                rule: None,
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            s.open_due(now, horizon).await.unwrap().is_empty(),
+            "three days out is past the horizon, as it should be"
+        );
+
+        s.snooze(&id, now + 3_600).await.unwrap();
+        assert!(
+            s.open_due(now, horizon).await.unwrap().is_empty(),
+            "and a snooze that has not elapsed is still put aside"
+        );
+
+        let after = now + 2 * 3_600;
+        let rows = s.open_due(after, after + 48 * 3_600).await.unwrap();
+        assert_eq!(rows.len(), 1, "the hour passed; it is due now");
+        assert_eq!(rows[0].moment.id, id);
+        let lift = s
+            .due_for(std::slice::from_ref(&aid), after, after + 48 * 3_600)
+            .await
+            .unwrap();
+        assert_eq!(
+            lift.get(&aid).copied(),
+            Some(now + 3_600),
+            "and the badge reads the instant it was snoozed to"
         );
     }
 
@@ -1782,6 +2006,30 @@ mod tests {
     /// Unlike `due_for`, no horizon: an artifact's own pane asks whether it
     /// carries a reminder at all, not whether one is close enough to belong
     /// on a list.
+    #[tokio::test]
+    async fn open_due_for_artifact_reads_a_snooze_as_the_rows_own_instant() {
+        // The pane renders `snoozed_until.or(at)`, so ordering on the raw `at`
+        // picked the earliest row *as captured* and then displayed its snooze:
+        // a Monday row put aside until next Friday beat a Wednesday one, and
+        // the pane said "in 10 days" while the band — which orders on
+        // `COALESCE(snoozed_until, at)`, as `due_for` does — said Wednesday.
+        let (s, aid) = store_with_artifact().await;
+        let monday = s.insert_moment(&due(&aid, Some(1_000))).await.unwrap();
+        let wednesday = s.insert_moment(&due(&aid, Some(3_000))).await.unwrap();
+        assert_eq!(
+            s.open_due_for_artifact(&aid).await.unwrap().unwrap().id,
+            monday,
+            "the earlier row, while nothing is put aside"
+        );
+
+        assert!(s.snooze(&monday, 10_000).await.unwrap());
+        let hit = s.open_due_for_artifact(&aid).await.unwrap().unwrap();
+        assert_eq!(
+            hit.id, wednesday,
+            "a snooze past the other row hands the pane that row instead"
+        );
+    }
+
     #[tokio::test]
     async fn open_due_for_artifact_ignores_the_horizon_but_not_done_or_undated() {
         let (s, aid) = store_with_artifact().await;

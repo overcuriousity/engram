@@ -468,7 +468,7 @@ mod tests {
     }
 
     use crate::core::context::{Bundle, CTX_DIM, device_key, encoder_version, parse_bundle};
-    use crate::core::test_support::test_core;
+    use crate::core::test_support::{phone_bundle, recommending_core, seed_artifact};
 
     /// 2026-08-21T13:52:00Z — a Friday, 15:52 in Berlin.
     const FRIDAY_SEVENTH: i64 = 1_787_320_320;
@@ -476,85 +476,6 @@ mod tests {
     /// A Friday at ~15:00 Berlin time, `weeks_back` weeks before the seventh.
     fn friday(weeks_back: i64) -> i64 {
         FRIDAY_SEVENTH - weeks_back * 7 * 86_400 - 52 * 60
-    }
-
-    /// A core with the recommender on and a clock that does not move.
-    async fn recommending_core(now: i64) -> Core {
-        let mut core = test_core().await;
-        core.recommend.enabled = true;
-        core.learn.enabled = true;
-        core.clock = crate::core::context::Clock::Fixed(now);
-        core
-    }
-
-    fn phone() -> Bundle {
-        Bundle {
-            tz: Some("Europe/Berlin".into()),
-            platform: Some("Android".into()),
-            ua_family: Some("Chrome".into()),
-            screen_w: Some(390.0),
-            screen_h: Some(844.0),
-            viewport_w: Some(390.0),
-            viewport_h: Some(844.0),
-            dpr: Some(3.0),
-            cores: Some(8.0),
-            memory_gb: Some(4.0),
-            language: Some("de-DE".into()),
-            color_scheme: Some("dark".into()),
-            touch: Some(true),
-            orientation: Some("portrait".into()),
-            network: Some("cellular".into()),
-            ..Default::default()
-        }
-    }
-
-    /// One artifact with a vector point behind it, because `context_query`
-    /// renders from the payload and an artifact whose embedding never ran has
-    /// none.
-    async fn seed_artifact(core: &Core, title: &str) -> String {
-        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let a = core
-            .store
-            .insert_artifacts(
-                &src.id,
-                &[crate::store::artifacts::NewArtifact {
-                    ordinal: 0,
-                    text: format!("text of {title}"),
-                    corpus_span: None,
-                    title: Some(title.into()),
-                    category: None,
-                    tags: vec![],
-                    segment_idx: None,
-                    caveats: vec![],
-                }],
-            )
-            .await
-            .unwrap()
-            .remove(0);
-        core.vectors
-            .upsert(vec![crate::vector::VectorPoint {
-                vector: vec![1.0; 8],
-                sparse: Default::default(),
-                payload: crate::vector::VectorPayload {
-                    artifact_id: a.id.clone(),
-                    corpus_id: src.id.clone(),
-                    text: a.text.clone(),
-                    title: Some(title.into()),
-                    category: None,
-                    tags: vec![],
-                    created_at: 0,
-                    last_seen_at: None,
-                    hit_count: None,
-                    status: None,
-                    last_verified_at: None,
-                    superseded_by: None,
-                    origin_corpora: vec![],
-                    provenance: None,
-                },
-            }])
-            .await
-            .unwrap();
-        a.id
     }
 
     /// One page view and the open that followed it.
@@ -582,7 +503,7 @@ mod tests {
 
     async fn seed_six_fridays(core: &Core, aid: &str) {
         for w in 1..=6 {
-            seen_and_opened(core, aid, friday(w), &phone(), "opened").await;
+            seen_and_opened(core, aid, friday(w), &phone_bundle(), "opened").await;
         }
     }
 
@@ -635,7 +556,14 @@ mod tests {
 
         // Six more Fridays, every one of them an open of the offer.
         for w in 1..=6 {
-            seen_and_opened(&core, &aid, friday(w) + 60, &phone(), "recommended_open").await;
+            seen_and_opened(
+                &core,
+                &aid,
+                friday(w) + 60,
+                &phone_bundle(),
+                "recommended_open",
+            )
+            .await;
         }
 
         let after = run(&core).await.unwrap();
