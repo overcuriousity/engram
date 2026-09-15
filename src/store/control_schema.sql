@@ -21,8 +21,11 @@ CREATE TABLE IF NOT EXISTS users (
   -- sets it.
   can_judge    INTEGER NOT NULL DEFAULT 0,
   -- Where a due reminder is pushed, namespaced JSON: {"gotify": {"url",
-  -- "token"}, "unifiedpush": {"endpoint"}}. '{}' means nowhere, and the
-  -- Remind unit is never armed for this user.
+  -- "token"}, "unifiedpush": {"endpoint", "p256dh", "auth", "device",
+  -- "registered_at"}}. '{}' means nowhere, and the Remind unit is never
+  -- armed for this user. A `unifiedpush` entry with an endpoint and no keys
+  -- is a registration from before Web Push, and it is pushed to in
+  -- plaintext — see `jobs::remind::push`.
   notify       TEXT NOT NULL DEFAULT '{}',
   -- Which of the ten languages this account's captures are read in. '' means
   -- automatic: the browser's Accept-Language decides, per capture, which is
@@ -32,6 +35,22 @@ CREATE TABLE IF NOT EXISTS users (
   -- read this column when it matters.
   lang         TEXT NOT NULL DEFAULT '',
   created_at   INTEGER NOT NULL
+);
+
+-- One row of facts about the deployment itself, which the tables above have
+-- no home for: they hold people and their work, and this holds what the
+-- instance is. `CHECK (id = 1)` is what makes it one row. The VAPID keypair
+-- identifies the *sender* to a push service (RFC 8292), and the sender is
+-- the deployment, not the user — so it is instance-wide, generated on first
+-- boot by `Control::ensure_instance`, and never rotated by anything here.
+CREATE TABLE IF NOT EXISTS instance (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  -- base64url without padding: the 32-byte P-256 scalar, and the 65-byte
+  -- uncompressed point — the form a push client is handed as its
+  -- `applicationServerKey`.
+  vapid_private TEXT NOT NULL,
+  vapid_public  TEXT NOT NULL,
+  created_at    INTEGER NOT NULL
 );
 
 -- ── Auth ─────────────────────────────────────────────────────────────────────

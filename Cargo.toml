@@ -87,6 +87,23 @@ encoding_rs = "0.8.35"
 docling = { version = "=1.14.2", default-features = false, features = ["pdf-text"] }
 
 url = "2"
+
+# RFC 8291 payload encryption and the RFC 8030 request around it, for the
+# UnifiedPush channel. Pure RustCrypto (`aes-gcm`, `hkdf`, `p256`, the last
+# two already in the tree by way of openidconnect), and it builds an
+# `http::Request` rather than sending one, so the push goes out on the same
+# reqwest client whose redirect policy `jobs::remind::http_client` argues
+# for. Default features off: `vapid` would pull `jwt-simple`, which brings
+# about thirty crates — ML-DSA, secp256k1, Ed25519, an RSA shim — to sign a
+# three-claim ES256 token, and `serialization` is a browser subscription
+# shape this tree never receives. `web-push` 0.11 was the other candidate:
+# Mozilla's `ece` under it wants OpenSSL by default, and it carries its own
+# HTTP client.
+web-push-native = { version = "0.5.0", default-features = false }
+# The VAPID signature (RFC 8292) is one ES256 signature over a JWT, and the
+# `ecdsa` feature is what signs it. Already here through openidconnect; named
+# so the feature is this crate's to keep, not borrowed from another's defaults.
+p256 = { version = "0.13.2", features = ["ecdsa"] }
 # Rewriting config.toml in place when a tuning recommendation is applied.
 # `config` reads the file and cannot write it; a serialize-and-overwrite would
 # return the operator's commented file as a machine's, so the edit is made to
