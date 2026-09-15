@@ -1137,12 +1137,6 @@ impl HttpCompleter {
         Self::judging(cfg, ("link", prompt::link_schema()))
     }
 
-    /// The claim check behind the ask harness: same endpoint and settings as
-    /// the judges, its own response shape.
-    pub fn for_claim_checking(cfg: &SynthesizeRole) -> Self {
-        Self::judging(cfg, ("claims", prompt::claims_schema()))
-    }
-
     /// The model that names a knowledge gap, on the judges' endpoint.
     pub fn for_gap_naming(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))

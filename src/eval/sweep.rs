@@ -1843,7 +1843,10 @@ mod tests {
                 + (CAPS.len() - 1)
                 + (crate::core::ranking::MULTIPLIERS.len() - 1)
                 + (crate::core::ranking::HALF_LIVES.len() - 1)
-                + (crate::core::ranking::PRIME_LIFTS.len() - 1),
+                + (crate::core::ranking::PRIME_LIFTS.len() - 1)
+                // The shipped lift is above zero, so the sitting flip is on
+                // offer from the shipped parameters.
+                + 1,
             "every rung on every ladder, once, and nothing off them"
         );
     }
@@ -1855,7 +1858,13 @@ mod tests {
         // tried the nearest step. The budget has to reach the whole ladder —
         // including the sitting flip, which only exists above a zero lift, so
         // the widest grid is the one the budget has to cover.
-        let at_zero = candidates(RankingParams::default(), &[], usize::MAX);
+        // The lift ships above zero; the narrowest grid is the one at zero,
+        // where the sitting flip is withheld.
+        let zero = RankingParams {
+            prime_lift: 0,
+            ..RankingParams::default()
+        };
+        let at_zero = candidates(zero, &[], usize::MAX);
         assert_eq!(at_zero.len(), crate::jobs::tune::BUDGET - 1, "{at_zero:?}");
         // The other widest grid, and the reason the budget is not `BUDGET - 1`:
         // a base at a zero lift whose sitting is on is offered the flip that
@@ -1863,7 +1872,7 @@ mod tests {
         let primed_at_zero = candidates(
             RankingParams {
                 sitting_prime: true,
-                ..RankingParams::default()
+                ..zero
             },
             &[],
             usize::MAX,
@@ -1884,7 +1893,7 @@ mod tests {
         // that comparison would be either wrong or vacuous. Each grid is
         // checked against its own baseline in the test above.
         for c in &at_zero {
-            assert!(moved(*c, RankingParams::default()) <= 1, "{c:?}");
+            assert!(moved(*c, zero) <= 1, "{c:?}");
         }
         for c in &lifted {
             assert!(moved(*c, lifted_base) <= 1, "{c:?}");
@@ -1892,15 +1901,19 @@ mod tests {
     }
 
     #[test]
-    fn the_chooser_walks_the_lift_ladder_upward_from_zero() {
+    fn the_chooser_walks_the_lift_ladder_both_ways_from_the_shipped_rung() {
+        // Shipped at one: off is one step down and on offer, the way two is
+        // one step up. Nearest first, so the pass can turn priming off on
+        // evidence as readily as it can raise it.
         let current = RankingParams::default();
+        assert_eq!(current.prime_lift, 1, "the shipped rung");
         let grid = candidates(current, &[], crate::jobs::tune::BUDGET);
         let lifts: Vec<usize> = grid
             .iter()
             .map(|c| c.prime_lift)
             .filter(|l| *l != current.prime_lift)
             .collect();
-        assert_eq!(lifts, vec![1, 2, 4]);
+        assert_eq!(lifts, vec![0, 2, 4]);
     }
 
     #[test]
@@ -1911,8 +1924,10 @@ mod tests {
         // and the refused. Offered here it would be re-measured every quiet
         // period forever, at one rank per pair, to settle something the
         // arithmetic settles for free.
-        let current = RankingParams::default();
-        assert_eq!(current.prime_lift, 0, "the shipped rung");
+        let current = RankingParams {
+            prime_lift: 0,
+            ..RankingParams::default()
+        };
         let grid = candidates(current, &[], crate::jobs::tune::BUDGET);
         assert!(
             grid.iter().all(|c| !c.sitting_prime),

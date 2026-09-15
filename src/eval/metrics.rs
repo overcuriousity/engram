@@ -2,7 +2,7 @@
 //!
 //! Recall asks whether the answer was on the page at all. MRR asks how far
 //! down it was. A ranking change can improve one and hurt the other, and which
-//! matters is a judgement about what a search page is for — so the harness
+//! matters is a judgement about what a search page is for — so every sweep
 //! reports both rather than choosing.
 
 /// Fraction of queries whose expected chunk landed within the first `k`
@@ -32,122 +32,9 @@ pub fn mrr(ranks: &[Option<usize>]) -> f64 {
     total / ranks.len() as f64
 }
 
-/// One question's citation recall: the fraction of its carriers that were
-/// cited. Each carrier is a list of ids that satisfy it — itself and whatever
-/// superseded it. No carriers is nothing to miss, and scores 1.
-pub fn fraction_cited(carriers: &[Vec<String>], cited: &[String]) -> f64 {
-    if carriers.is_empty() {
-        return 1.0;
-    }
-    let hit = carriers
-        .iter()
-        .filter(|alts| alts.iter().any(|a| cited.contains(a)))
-        .count();
-    hit as f64 / carriers.len() as f64
-}
-
-/// The four corners of "did it say nothing here when it should have".
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Abstention {
-    pub should_and_did: usize,
-    pub should_and_did_not: usize,
-    pub should_not_did: usize,
-    pub should_not_did_not: usize,
-}
-
-impl Abstention {
-    /// `(expected, observed)` per question.
-    pub fn tally(pairs: &[(bool, bool)]) -> Self {
-        let mut t = Self::default();
-        for &(expected, observed) in pairs {
-            match (expected, observed) {
-                (true, true) => t.should_and_did += 1,
-                (true, false) => t.should_and_did_not += 1,
-                (false, true) => t.should_not_did += 1,
-                (false, false) => t.should_not_did_not += 1,
-            }
-        }
-        t
-    }
-}
-
-/// `(answers with no unsupported item, answers)`.
-pub fn fully_supported(unsupported_counts: &[usize]) -> (usize, usize) {
-    (
-        unsupported_counts.iter().filter(|n| **n == 0).count(),
-        unsupported_counts.len(),
-    )
-}
-
-/// Answers carrying at least one literal none of their excerpts did.
-///
-/// The number phase 2 exists to move. Zero is the target; a rise after a
-/// retrieval change means the change fed the model excerpts it then
-/// over-reached from. `counts` is one entry per judged answer: how many
-/// unsupported literals it carried.
-///
-/// The complement of `fully_supported`, as a single number: that one reports a
-/// pair for a reader, and this one is the thing to compare between runs.
-pub fn unsupported_rate(counts: &[usize]) -> f32 {
-    if counts.is_empty() {
-        return 0.0;
-    }
-    counts.iter().filter(|n| **n > 0).count() as f32 / counts.len() as f32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fraction_cited_counts_each_carrier_once_and_accepts_a_successor() {
-        let carriers = vec![
-            vec!["a".to_string()],
-            vec!["b".to_string(), "b2".to_string()],
-        ];
-        assert_eq!(fraction_cited(&carriers, &["a".into(), "x".into()]), 0.5);
-        assert_eq!(fraction_cited(&carriers, &["a".into(), "b2".into()]), 1.0);
-        assert_eq!(
-            fraction_cited(&[], &["a".into()]),
-            1.0,
-            "no carriers is nothing to miss"
-        );
-    }
-
-    #[test]
-    fn abstention_tallies_the_four_corners() {
-        let t = Abstention::tally(&[
-            (true, true),
-            (true, false),
-            (false, true),
-            (false, false),
-            (false, false),
-        ]);
-        assert_eq!(
-            (
-                t.should_and_did,
-                t.should_and_did_not,
-                t.should_not_did,
-                t.should_not_did_not
-            ),
-            (1, 1, 1, 2)
-        );
-    }
-
-    #[test]
-    fn fully_supported_counts_answers_with_nothing_unsupported() {
-        assert_eq!(fully_supported(&[0, 2, 0]), (2, 3));
-        assert_eq!(fully_supported(&[]), (0, 0));
-    }
-
-    #[test]
-    fn the_unsupported_rate_counts_answers_not_literals() {
-        // An answer that invented five literals is one bad answer, not five.
-        // Counting literals would let a single florid answer swamp the number.
-        assert!((unsupported_rate(&[0, 5, 0, 1]) - 0.5).abs() < 1e-6);
-        assert_eq!(unsupported_rate(&[0, 0]), 0.0);
-        assert_eq!(unsupported_rate(&[]), 0.0);
-    }
 
     #[test]
     fn recall_counts_a_hit_anywhere_within_k() {

@@ -569,7 +569,7 @@ candidates = 20
 coalesce_secs = 5
 # Days an unjudged captured search is kept. 0 keeps them forever. A judged hit
 # or gap is exempt: it is the labelled pair the whole feature exists to produce,
-# and expiring it would empty `--export-eval` a month at a time. A `discard` is
+# and expiring it would empty the sweep's evidence a month at a time. A `discard` is
 # not exempt — that verdict says the search was never real. The purge button on
 # Ops still takes everything.
 retain_days = 0
@@ -651,9 +651,9 @@ spread_max = 3
 # probe anchor refuses a rung that loses on the base's own probes, and the
 # lived watch reverts one whose observations get worse.
 #
-# The compiled default is still 0, and that is deliberate: it is what an
-# existing base falls back to, so upgrading a deployment that never wrote this
-# key moves nothing. Only a base started from this file begins primed.
+# The compiled default is the same 1, so a base that never wrote this key is
+# primed too. Set it to 0 to turn priming off; `learn.mode = off` and
+# `learning` zero it on their own.
 prime_margin = 0.5
 prime_lift = 1
 
@@ -829,8 +829,8 @@ month_cycle = 0.0
 # sitting to share — and the server says so at startup if you zero one without
 # the other.
 #
-# The compiled default is still off, for the reason under `prime_lift`: an
-# existing base that never wrote this key is not moved by an upgrade.
+# The compiled default is still off: the lift ships on, and whether what a
+# sitting touched may share it is a second decision, taken here.
 #
 # Worth saying plainly, because the design that argued for measuring this
 # assumed the opposite: evidence gathered while the sitting is live is not the

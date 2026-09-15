@@ -341,7 +341,7 @@ pub struct AssociateConfig {
     /// How much more activated a hit must be than the one above it to pass it.
     /// Normalised within one result list, so this is a fraction, not a weight.
     pub prime_margin: f64,
-    /// Positions a hit may climb. `0` turns priming off, and it ships off. The
+    /// Positions a hit may climb. `0` turns priming off; it ships at one. The
     /// file's value is the starting rung: a base with `evolve.autonomous` on
     /// moves it from here on what use leaves behind.
     pub prime_lift: usize,
@@ -1092,9 +1092,18 @@ pub(crate) fn default_recency_half_life_days() -> u32 {
 pub(crate) fn default_candidate_multiplier() -> usize {
     crate::core::search::CANDIDATE_MULTIPLIER
 }
-/// The shipped `associate.prime_lift`: off. Read by the generation shapes so
-/// a row written before the knob existed decodes as what it ran under.
+/// The shipped `associate.prime_lift`: the lowest non-zero rung, one place.
+/// Same as `config.example.toml`, so a base that never wrote the key is
+/// primed the way one started from the file is. `learn.mode = off` and
+/// `learning` still resolve it to zero, and the idle pass may walk it back
+/// down on what the base's own probes and observations say.
 pub(crate) fn default_prime_lift() -> usize {
+    1
+}
+/// What a generation row written before the knob existed ran under. Not the
+/// shipped default: that moved to one, and a row from before the ladder had
+/// the knob at all served with priming off, whatever the file ships now.
+pub(crate) fn legacy_prime_lift() -> usize {
     0
 }
 pub(crate) fn default_spread_max() -> usize {
@@ -4172,7 +4181,7 @@ mode = "off"
         assert_eq!(a.half_life_days, 30.0);
         assert_eq!((a.show_min, a.judge_min, a.prune_below), (2.0, 4.0, 0.5));
         assert_eq!((a.spread_from, a.spread_max), (3, 3));
-        assert_eq!((a.prime_margin, a.prime_lift), (0.5, 0));
+        assert_eq!((a.prime_margin, a.prime_lift), (0.5, 1));
         let v = ActivationConfig::default();
         assert_eq!(v.half_life_days, 14.0);
         assert_eq!((v.retrieved, v.opened, v.confirmed), (0.0, 1.0, 3.0));

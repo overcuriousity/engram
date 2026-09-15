@@ -27,8 +27,9 @@ pub struct GenerationParams {
     #[serde(default = "crate::config::default_recency_half_life_days")]
     pub recency_half_life_days: u32,
     /// The three knobs stage 3a put on the ladder. Absent in rows written
-    /// before, which ran under the shipped values.
-    #[serde(default = "crate::config::default_prime_lift")]
+    /// before, which ran under the values shipped *then*: the lift was off,
+    /// and a row from that era must not decode as the one the file ships now.
+    #[serde(default = "crate::config::legacy_prime_lift")]
     pub prime_lift: usize,
     #[serde(default = "crate::config::default_spread_max")]
     pub spread_max: usize,
@@ -574,7 +575,13 @@ mod tests {
     fn a_generation_row_written_before_the_late_knobs_still_reads() {
         let old = r#"{"recency_weight":0.05,"per_source_cap":3,"candidate_multiplier":3,"recency_half_life_days":180}"#;
         let p: GenerationParams = serde_json::from_str(old).unwrap();
-        assert_eq!(p.prime_lift, crate::config::default_prime_lift());
+        assert_eq!(p.prime_lift, crate::config::legacy_prime_lift());
+        assert_eq!(p.prime_lift, 0, "a row from before the lift ran unprimed");
+        assert_ne!(
+            p.prime_lift,
+            crate::config::default_prime_lift(),
+            "and the shipped default is not what it decodes to"
+        );
         assert_eq!(p.spread_max, crate::config::default_spread_max());
         assert!(p.rerank);
         // The sitting flip joined the ladder later still, and a row from

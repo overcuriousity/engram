@@ -986,9 +986,9 @@ async fn search_verdict(
     }
     let state = match f.verdict.as_str() {
         "hit" => {
-            // `eval::export` drops any pair naming an artifact search will
-            // not return, so recording one here would raise the recall on
-            // Insights while contributing nothing to `pairs.json`. The bar is
+            // A pair naming an artifact search will not return is one no
+            // replay can satisfy, so recording it here would raise the recall
+            // on Insights over a result nothing can give again. The bar is
             // not drawn over such an artifact at all — see
             // `ui::artifact_detail` — so this is the write refusing what the
             // page already refuses to offer.

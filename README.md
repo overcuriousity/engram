@@ -193,9 +193,9 @@ that are shown: a primed hit says so, an associated hit says what recalled it,
 and no exact match is ever buried.
 
 **Lean beats clever.** Anything that adds a storage tier, a model dependency or
-a layer crossing without a measured retrieval gain does not go in. The
-evaluation harness is the only figure comparable across months; a default that
-changes ranking moves only after it has been run.
+a layer crossing without a measured retrieval gain does not go in. A default
+that changes ranking moves only against evidence, and the commit that moves it
+says what the evidence was.
 
 Decided against, and not coming back: generated answer cards or answers stored
 as artifacts without the operator asking (a digest competing with the wording it
@@ -289,7 +289,6 @@ authenticates in front of it.
 | | |
 |---|---|
 | `--reindex` | Copies every vector into a fresh collection generation and swaps the alias onto it |
-| `--export-eval DIR` | Writes the judged evaluation pairs out for the offline harness |
 | `--recompute-coverage` | Re-measures corpus coverage from stored artifacts |
 
 Each exits when done, and each requires `--user <SUBJECT>` naming the base it
@@ -387,10 +386,9 @@ mode = "full"     # "off" | "learning" | "full"
   written, and nothing reads any of it on the query path: no priming, no
   associative spread, no promotion, no offers under the search box, and no
   pursuit generation — the corpus holds still as well as the ranking. This is
-  the mode to run `cargo test --test eval` in. A default that changes ranking
-  moves only after it has been measured, and it cannot be measured while its
-  own inputs are moving the ranking it is measured against, or growing the
-  corpus it is measured over.
+  the mode to gather evidence in before anything is allowed to move a rank:
+  a change cannot be measured while its own inputs are moving the ranking it
+  is measured against, or growing the corpus it is measured over.
 - `full` — the defaults, unchanged.
 
 Every key the mode stands for is still a key, and one written in the file wins

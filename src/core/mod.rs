@@ -1087,16 +1087,16 @@ mod tests {
     /// this file is what a fresh base ranks by, and it ships primed: the
     /// lowest rung of the lift, with the sitting taking part in it.
     ///
-    /// The compiled defaults stay off, and that is the other half. An existing
-    /// base does not rank by the file — `boot_generation` serves what the base
-    /// adopted — but it does compare the file it booted under against the one
-    /// it sees now, and a change there supersedes the live generation. Had the
-    /// compiled default moved, every base that never wrote these keys would
-    /// have been pulled to the new value on upgrade, discarding whatever its
-    /// own idle pass had earned. Moving the file and not the default is what
-    /// keeps "new deployments only" true.
+    /// The compiled lift is the same rung, so a base that never wrote the key
+    /// is primed too. What that costs is said in `boot_generation`: the file
+    /// params it compares are the *resolved* ones, so on the first boot after
+    /// the default moved, a base that never wrote `prime_lift` sees a changed
+    /// file and its live generation is restated to it — every knob the idle
+    /// pass had adopted on that base goes back to the file, once. The sitting
+    /// flip stays off in the binary: it is a second decision, taken in the
+    /// file.
     #[tokio::test]
-    async fn the_example_config_ships_primed_and_the_compiled_defaults_do_not() {
+    async fn the_example_config_and_the_compiled_default_ship_primed() {
         let cfg = Config::load(std::path::Path::new("config.example.toml").into()).unwrap();
         assert_eq!(
             cfg.associate.prime_lift, 1,
@@ -1113,8 +1113,8 @@ mod tests {
 
         assert_eq!(
             crate::config::default_prime_lift(),
-            0,
-            "the compiled default stays off, so an upgrade moves no existing base"
+            cfg.associate.prime_lift,
+            "the compiled default is the file's rung, so an unwritten key is primed too"
         );
         assert!(!crate::config::default_sitting_prime());
     }

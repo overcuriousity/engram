@@ -22,7 +22,8 @@ pub const MULTIPLIERS: [usize; 5] = [1, 2, 3, 5, 8];
 /// The rungs for the recency half-life, in days.
 pub const HALF_LIVES: [u32; 5] = [30, 90, 180, 365, 730];
 /// The rungs for `prime_lift`: how many places an accessible hit may climb.
-/// Starts at the shipped zero, because a lift cannot be negative.
+/// Zero is the off rung; the shipped value is one step above it, so the pass
+/// can walk it either way.
 pub const PRIME_LIFTS: [usize; 4] = [0, 1, 2, 4];
 /// The rungs for `sitting_prime`. Two, because it is a switch — the ladder
 /// shape is kept so the chooser can treat it like every other axis.
@@ -201,9 +202,10 @@ mod tests {
         assert!(PRIME_LIFTS.contains(&p.prime_lift));
         assert!(SPREADS.contains(&p.spread_max));
         assert!(SITTING_PRIMES.contains(&p.sitting_prime));
-        // Lift cannot be negative, so its ladder starts at the shipped value
-        // and can only be walked up; that is a fact about the knob, not a bias.
-        assert_eq!(PRIME_LIFTS[0], p.prime_lift);
+        // Zero is off, and the shipped rung sits one above it so the pass can
+        // step priming off as well as up.
+        assert_eq!(PRIME_LIFTS[0], 0);
+        assert_eq!(PRIME_LIFTS[1], p.prime_lift);
         assert!(PRIME_LIFTS.windows(2).all(|w| w[0] < w[1]), "ascending");
         assert!(SPREADS.windows(2).all(|w| w[0] < w[1]), "ascending");
     }

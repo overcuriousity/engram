@@ -27,21 +27,14 @@ struct Args {
     /// generation in place.
     #[arg(long)]
     reindex: bool,
-    /// Write artifacts.json and pairs.json for the evaluation harness into DIR,
-    /// then exit. Reads only SQLite: no inference, no vector store. The pairs
-    /// are the searches you judged; the artifacts keep their production ids, so
-    /// re-exporting does not invalidate them.
-    #[arg(long, value_name = "DIR")]
-    export_eval: Option<std::path::PathBuf>,
     /// Re-measure every corpus's coverage from the artifacts already stored,
     /// then exit. Local work over existing rows: no inference, no vector calls,
     /// nothing re-synthesised. Run it after upgrading past a change to how
     /// coverage is measured, since the figure is otherwise written once.
     #[arg(long)]
     recompute_coverage: bool,
-    /// Which tenant a data command acts on. Required by --reindex,
-    /// --export-eval and --recompute-coverage: there is no longer one base for
-    /// them to mean.
+    /// Which tenant a data command acts on. Required by --reindex and
+    /// --recompute-coverage: there is no longer one base for them to mean.
     #[arg(long, value_name = "SUBJECT")]
     user: Option<String>,
     /// List the users this instance knows, with their slug and judge grant.
@@ -386,7 +379,6 @@ async fn main() -> anyhow::Result<()> {
         || args.reindex
         || args.recompute_coverage
         || args.list_users
-        || args.export_eval.is_some()
         || args.grant_judge.is_some()
         || args.revoke_judge.is_some()
         || args.delete_user.is_some()
@@ -433,26 +425,6 @@ async fn main() -> anyhow::Result<()> {
             .await?;
         let target = vectors.reindex(cfg.infer.embed.dim).await?;
         println!("{alias} now serves `{target}`");
-        return Ok(());
-    }
-
-    if let Some(dir) = &args.export_eval {
-        // SQLite only. The artifacts are already synthesised and the pairs are
-        // already judged, so this costs nothing and needs neither Qdrant nor an
-        // inference endpoint to be up.
-        let user = require_user(&control, args.user.as_deref()).await?;
-        let store = tenant_store(&cfg, &control, &user).await?;
-        let (artifacts, pairs, questions) = engram::eval::export::export(&store, dir).await?;
-        println!(
-            "wrote {artifacts} artifacts, {pairs} pairs and {questions} questions to {}",
-            dir.display()
-        );
-        if pairs == 0 {
-            println!(
-                "no judged searches yet — set learn.enabled, use the base, then \
-                 answer 'Was this what you were looking for?' under the results"
-            );
-        }
         return Ok(());
     }
 

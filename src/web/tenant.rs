@@ -57,8 +57,8 @@ impl FromRequestParts<AppState> for CanJudge {
         // of it, the way the ask bar does, and `event_is_mine` is what stands
         // there instead. So `--revoke-judge` means "no tuning", not "cannot
         // label a pair": a revoked user can still say yes, no or gap about a
-        // search they just ran, and those rows do reach `feedback_stats`,
-        // `--export-eval` and the sweep. Taking that away as well means taking
+        // search they just ran, and those rows do reach `feedback_stats`
+        // and the sweep. Taking that away as well means taking
         // the bar off their own results.
         let live = state
             .tenants

@@ -860,24 +860,6 @@ impl Store {
             .collect())
     }
 
-    /// Every artifact an ordinary search could return.
-    ///
-    /// Superseded and deprecated stay out, so a benchmark built from this sees
-    /// the same base the search page does. Each artifact carries its
-    /// `corpus_id`, which is what the per-corpus cap groups by: a title hint
-    /// reads better but is not unique, and two captures of the same document
-    /// merged into one source made the cap apply across both.
-    pub async fn all_active_artifacts(&self) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
-            "SELECT * FROM artifacts
-             WHERE status = 'active' AND superseded_by IS NULL
-             ORDER BY corpus_id, ordinal",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
-    }
-
     /// The nearest *active* artifact either side of `ordinal` in the same
     /// corpus — not the rows at `ordinal ± 1`.
     ///
