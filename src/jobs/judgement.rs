@@ -228,12 +228,30 @@ pub async fn apply(
             // No arm of its own: an instant that is no instant leaves `at`
             // unset, and every reading of an undated judgement below already
             // says what that means.
-            let future = |at: &i64| *at > core.clock.now();
+            //
+            // Measured against the instant only when the answer named one. A
+            // `when` of `2026-09-15` names a day, and `DEFAULT_HOUR` is this
+            // module's reading of it rather than anything the note said — so
+            // "erinnere mich heute an X", written at three in the afternoon,
+            // became nine that morning and was thrown out as a reminder for
+            // the past. What it is is a reminder for today whose hour has
+            // gone by, and the band draws a past instant as due at once and
+            // the ladder's last rung pushes it: filed, and it fires. The
+            // echoes this arm exists to catch are untouched, because an echo
+            // of `Current local time` carries the hour with it.
+            let now = core.clock.now();
             let at = j
                 .when
                 .as_deref()
-                .and_then(|w| parse_local(w, tz))
-                .filter(future);
+                .and_then(|w| parse_stated(w, tz))
+                .filter(|s| {
+                    if s.timed {
+                        s.at > now
+                    } else {
+                        day_not_past(s.at, now, tz)
+                    }
+                })
+                .map(|s| s.at);
             let valid_rule = j
                 .rule
                 .clone()
@@ -249,17 +267,20 @@ pub async fn apply(
             // the only date the answer had: `when: null` with
             // `FREQ=WEEKLY;BYDAY=FR;COUNT=1` left `at` and `rule` both unset
             // and the reminder was filed away as an ordinary capture.
-            // Held to the same line: a rule anchored at an old capture can
-            // yield an occurrence that is itself behind us, and a date the
-            // rule carries is no better a reminder for having been computed
-            // than for having been stated.
-            let at = at
-                .or_else(|| {
-                    valid_rule
-                        .as_deref()
-                        .and_then(|r| first_occurrence(r, src.created_at, tz))
-                })
-                .filter(future);
+            // Anchored at the later of the capture and the clock, because a
+            // recurrence has a next occurrence whatever the date of the note
+            // it was read off. Anchoring at `src.created_at` alone and then
+            // holding the answer to the clock threw the date away instead:
+            // re-read an older capture, or run synthesis an hour behind the
+            // paste, and "every Friday" yielded a Friday already behind us,
+            // was filtered to `None`, and left a rule with no date — a row
+            // that can never fire (`uncovered` wants `m.at IS NOT NULL`) and
+            // can never arm its successor (`complete_moment` wants both).
+            let at = at.or_else(|| {
+                valid_rule
+                    .as_deref()
+                    .and_then(|r| first_occurrence(r, src.created_at.max(now), tz))
+            });
             let rule = valid_rule
                 // A rule that yields one occurrence is not a repetition, it is
                 // the date `when` already carries. Asked to judge "Freitag
@@ -273,7 +294,12 @@ pub async fn apply(
             // *forced* remind is somebody saying "remind me" at the door,
             // and an undated one is a question the band asks them.
             let forced_remind = forced == Some("remind");
-            if at.is_none() && rule.is_none() && !forced_remind {
+            // A rule with no date is no better: that pair is the dead row
+            // described above, and the reading that produced it is a reading
+            // with no date in it however much recurrence it also found. Only a
+            // *forced* remind still files undated, and the band asks that one
+            // for the date it is missing.
+            if at.is_none() && !forced_remind {
                 // And the previous reading stands. This is the arm the window
                 // retry walks into when its second reply is vaguer than the
                 // first: "a reminder, but I cannot date it" is not a statement
@@ -518,13 +544,62 @@ async fn confirm_created(
 /// discarded: it says what instant was meant, and the reader's zone is then
 /// none of the answer's business.
 pub(crate) fn parse_local(s: &str, tz: chrono_tz::Tz) -> Option<i64> {
+    parse_stated(s, tz).map(|s| s.at)
+}
+
+/// An instant a judgement stated, and whether the words behind it named a
+/// time of day at all.
+///
+/// The distinction is the whole of what tells an answer that means *today*
+/// from an answer that means *now*. A bare date carries no time and is given
+/// `DEFAULT_HOUR`, so "erinnere mich heute" written at three in the afternoon
+/// resolves to nine that morning — an instant the note never named and that
+/// the clock has already passed. An echo of the prompt's own `Current local
+/// time`, which is the thing the comparison in the remind arm exists to
+/// catch, is always a full wall clock: a model handing that line back hands
+/// back the hour with it. Reading the two the same way meant either keeping
+/// the echoes or losing the same-day reminders, and `timed` is what separates
+/// them without guessing at the words.
+pub(crate) struct Stated {
+    pub at: i64,
+    /// False for `2026-09-04`, true for `2026-09-04T09:00` — and read off
+    /// the wall clock in front of a stated offset, so `2026-09-04Z` is still
+    /// a day and `2026-09-04T09:00Z` is still an hour.
+    pub timed: bool,
+}
+
+pub(crate) fn parse_stated(s: &str, tz: chrono_tz::Tz) -> Option<Stated> {
     let s = s.trim();
     match split_offset(s) {
         Some((head, off)) => {
             use chrono::TimeZone;
-            Some(off.from_local_datetime(&naive(head)?).single()?.timestamp())
+            let (n, timed) = naive(head)?;
+            Some(Stated {
+                at: off.from_local_datetime(&n).single()?.timestamp(),
+                timed,
+            })
         }
-        None => crate::core::moments::resolve_local(naive(s)?, tz),
+        None => {
+            let (n, timed) = naive(s)?;
+            Some(Stated {
+                at: crate::core::moments::resolve_local(n, tz)?,
+                timed,
+            })
+        }
+    }
+}
+
+/// Is `at` on `now`'s day, or a later one, in the reader's zone?
+///
+/// What "past" means for an answer that named a day and no hour. Comparing
+/// the instants instead asks whether `DEFAULT_HOUR` has been and gone, which
+/// is a question about the default and not about the note.
+fn day_not_past(at: i64, now: i64, tz: chrono_tz::Tz) -> bool {
+    use chrono::TimeZone;
+    let day = |t: i64| Some(tz.timestamp_opt(t, 0).single()?.date_naive());
+    match (day(at), day(now)) {
+        (Some(a), Some(n)) => a >= n,
+        _ => false,
     }
 }
 
@@ -534,13 +609,14 @@ pub(crate) fn parse_local(s: &str, tz: chrono_tz::Tz) -> Option<i64> {
 /// hands back often enough, `split_offset` takes the `Z` off it, and the
 /// remaining `.000` matched none of the three formats — so the reminder was
 /// dropped on the floor with a `debug!` line for a record.
-fn naive(s: &str) -> Option<chrono::NaiveDateTime> {
+fn naive(s: &str) -> Option<(chrono::NaiveDateTime, bool)> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f"))
+        .map(|n| (n, true))
         .or_else(|_| {
             chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .map(|d| d.and_hms_opt(DEFAULT_HOUR, 0, 0).unwrap())
+                .map(|d| (d.and_hms_opt(DEFAULT_HOUR, 0, 0).unwrap(), false))
         })
         .ok()
 }
@@ -971,6 +1047,109 @@ mod tests {
         assert!(
             rows.is_empty(),
             "a reading whose only date has passed leaves the note a capture: {rows:?}"
+        );
+    }
+
+    /// A `when` that names a day and no hour, on the day it was written.
+    ///
+    /// `DEFAULT_HOUR` is this module's reading of a bare date, not something
+    /// the note said, so measuring it against the clock asks whether nine in
+    /// the morning has been and gone. "Erinnere mich heute an X" written at
+    /// three in the afternoon was thrown out by that question and became an
+    /// ordinary capture with no reminder and no reason given. The echo the
+    /// comparison exists to catch always carries an hour with it, which is
+    /// what lets the two be told apart.
+    #[tokio::test]
+    async fn a_bare_date_is_past_only_when_the_day_is() {
+        // 2026-09-15T15:00Z, and the same day at `DEFAULT_HOUR` is behind it.
+        const AFTERNOON: i64 = 1_789_484_400;
+        for (when, filed) in [
+            ("2026-09-15", true),
+            // The prompt's own clock, handed back: an hour was named, and it
+            // has passed.
+            ("2026-09-15T14:00", false),
+            // And a day that is genuinely behind us stays no date at all.
+            ("2026-09-14", false),
+        ] {
+            let mut core = test_core().await;
+            core.clock = crate::core::context::Clock::Fixed(AFTERNOON);
+            core.synthesizer = judged_core_reply(Judgement {
+                intent: Some("remind".into()),
+                when: Some(when.into()),
+                rule: None,
+                events: vec![],
+                links: vec![],
+            });
+            let mut c = Capture::new("erinnere mich heute an die Anmeldung", "web");
+            c.metadata["tz"] = serde_json::Value::String("UTC".into());
+            core.ingest_capture(c).await.unwrap();
+            drain(&core).await;
+            let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+            assert_eq!(rows.len(), usize::from(filed), "when = {when}: {rows:?}");
+            if filed {
+                use chrono::{TimeZone, Timelike};
+                let at = rows[0].moment.at.expect("the day was filed with its hour");
+                let local = chrono_tz::UTC.timestamp_opt(at, 0).single().unwrap();
+                assert_eq!(local.hour(), crate::core::moments::DEFAULT_HOUR);
+                assert!(
+                    at < AFTERNOON,
+                    "and the hour it names is already behind the clock, which the \
+                     band draws as due at once"
+                );
+            }
+        }
+    }
+
+    /// A recurrence read off a capture the clock has long since left behind.
+    ///
+    /// `first_occurrence` anchors at `src.created_at`, so a re-read of an old
+    /// note — or a synthesis job running well after the paste — yields an
+    /// occurrence that is itself behind us. Dropping it left `at` unset while
+    /// `rule` stood, and that pair is a row that can never fire (`uncovered`
+    /// wants `m.at IS NOT NULL`) and can never arm its successor
+    /// (`complete_moment` wants both): a weekly reminder, silently dead, with
+    /// a "Reminder set" push already sent for it.
+    #[tokio::test]
+    async fn a_recurrence_older_than_the_clock_advances_instead_of_dying() {
+        let mut core = test_core().await;
+        // Ten years past the capture this reading is made of.
+        let late = crate::store::now() + 10 * 365 * 24 * 3600;
+        core.clock = crate::core::context::Clock::Fixed(late);
+        core.synthesizer = judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: None,
+            rule: Some("FREQ=WEEKLY;BYDAY=FR".into()),
+            events: vec![],
+            links: vec![],
+        });
+        let mut c = Capture::new("freitags den müll rausstellen", "web");
+        c.metadata["tz"] = serde_json::Value::String("UTC".into());
+        core.ingest_capture(c).await.unwrap();
+        drain(&core).await;
+
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let at = rows[0]
+            .moment
+            .at
+            .expect("a rule with no date is a dead row");
+        assert!(
+            at > late,
+            "the recurrence advanced past the clock rather than being dropped"
+        );
+        use chrono::{Datelike, TimeZone};
+        assert_eq!(
+            chrono_tz::UTC
+                .timestamp_opt(at, 0)
+                .single()
+                .unwrap()
+                .weekday(),
+            chrono::Weekday::Fri
+        );
+        assert_eq!(
+            rows[0].moment.rule.as_deref(),
+            Some("FREQ=WEEKLY;BYDAY=FR"),
+            "and it is still the repetition the note states"
         );
     }
 

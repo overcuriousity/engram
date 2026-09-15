@@ -131,7 +131,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 18] = [
+        const ADDITIVE: [(&str, &str, &str); 19] = [
             (
                 "artifacts",
                 "updated_at",
@@ -231,6 +231,14 @@ impl Store {
                 "search_candidates",
                 "band",
                 "ALTER TABLE search_candidates ADD COLUMN band INTEGER NOT NULL DEFAULT 0",
+            ),
+            // Nullable, no default, and NULL is the truth about every row
+            // written before it: nothing was exploring, so no row was lent a
+            // rank it had not earned and there is none to charge back.
+            (
+                "search_candidates",
+                "explored_from",
+                "ALTER TABLE search_candidates ADD COLUMN explored_from INTEGER",
             ),
             // Nullable, no default, and NULL is the truth about every search
             // recorded before it: nothing wrote down which generation drew the
@@ -546,6 +554,45 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((verdict.as_str(), by, opened), ("gap", None, None));
+    }
+
+    #[tokio::test]
+    async fn a_base_that_never_explored_gains_the_borrowed_rank_column() {
+        // `search_candidates.explored_from` is nullable with no default, and
+        // NULL is the truth about every row written before it: nothing was
+        // exploring, so no row was lent a rank it had not earned. A base with
+        // a search log in it must keep the log rather than be told to recreate
+        // itself.
+        let store = Store::memory().await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO search_events (id, query, door, query_vec, vec_dim, embed_model,
+                                        created_at)
+                  VALUES ('e', 'fat32', 'ui', x'00', 0, 'fake', 1);
+             INSERT INTO corpora (id, raw_text, origin, content_hash, status, created_at,
+                                  updated_at)
+                  VALUES ('c', 'hours', 'web', 'h', 'ready', 1, 1);
+             INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)
+                  VALUES ('a', 'c', 0, 'hours', 1);
+             INSERT INTO search_candidates (event_id, rank, artifact_id, score, shown)
+                  VALUES ('e', 0, 'a', 0.5, 1);
+             ALTER TABLE search_candidates DROP COLUMN explored_from;",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        store.migrate().await.unwrap();
+        let (shown, explored): (i64, Option<i64>) = sqlx::query_as(
+            "SELECT shown, explored_from FROM search_candidates WHERE event_id = 'e'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (shown, explored),
+            (1, None),
+            "the candidate kept its row and gained a rank nobody borrowed"
+        );
     }
 
     #[tokio::test]

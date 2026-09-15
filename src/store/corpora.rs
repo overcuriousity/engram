@@ -671,6 +671,38 @@ impl Store {
         Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
     }
 
+    /// The captures somebody typed while one of these searches was on screen.
+    ///
+    /// `(corpus_id, event_id)`, the pair `jobs::gaps::cover_answering` needs:
+    /// the note, and the search its link names. The link is written by the box
+    /// into `metadata.search.event_id` — see `core::ingest::typed_from`, which
+    /// is the one reader of that path and the shape this mirrors.
+    ///
+    /// Retired notes included on purpose. A reminder that is done is still the
+    /// answer somebody wrote to the query they were typing, and the hole it
+    /// filled did not re-open when they ticked it off.
+    pub async fn captures_typed_from(&self, event_ids: &[String]) -> Result<Vec<(String, String)>> {
+        if event_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let marks = std::iter::repeat_n("?", event_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        // `AssertSqlSafe` because the only thing spliced in is a run of `?`
+        // this function counted itself; every value is bound. Same idiom as
+        // `retired_among`.
+        let mut q = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(format!(
+            "SELECT id, json_extract(metadata, '$.search.event_id') AS event_id
+               FROM corpora
+              WHERE json_extract(metadata, '$.search.event_id') IN ({marks})
+              ORDER BY created_at, id"
+        )));
+        for id in event_ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool).await?)
+    }
+
     /// The newest few captures, by the columns a list row shows. This is the
     /// idle rail's read, and the idle rail renders on every box-clear:
     /// `list_corpora` is `SELECT *`, and `raw_text` there is the whole
