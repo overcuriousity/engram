@@ -23,6 +23,7 @@ pub mod retract;
 pub mod sleep;
 pub mod synthesize;
 pub mod tune;
+pub mod webpush;
 pub mod window;
 
 use crate::core::Core;
