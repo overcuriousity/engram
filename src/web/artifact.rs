@@ -442,10 +442,6 @@ pub(crate) async fn build_artifact_detail(
                     .map(|n| format!(" ({})", crate::web::insights::short(n)))
                     .unwrap_or_default()
             ),
-            crate::store::integrations::Tag::Conflict => format!(
-                "When it arrived, it disagreed with something the base held: {}",
-                i.detail.unwrap_or_default()
-            ),
         }),
         None => None,
     };
@@ -539,11 +535,11 @@ async fn artifact_detail(
     // here rather than looked up: the id is on the link, so this open is
     // attributed to the search it came from and to no other.
     //
-    // Not for an artifact search will no longer return. `eval::export` freezes
-    // only active, un-superseded artifacts and drops any pair naming something
-    // else, so a hit recorded here would raise the recall and MRR on Insights
-    // while contributing nothing to `pairs.json`. The verdict write refuses
-    // one for that reason; so does this. Without `search_event` the bar
+    // Not for an artifact search will no longer return. A hit recorded
+    // against a hidden artifact would raise the recall and MRR on Insights
+    // over a result no search can give again, and the sweep replays it as a
+    // pair nothing can satisfy. The verdict write refuses one for that
+    // reason; so does this. Without `search_event` the bar
     // is not drawn, which is the only way a verdict can be given at all.
     // And only the searcher's own event: the id arrives on a link, so it is
     // whatever the caller sent. See `Store::event_is_mine`.
@@ -2732,10 +2728,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_deprecated_result_is_never_asked_about() {
-        // `eval::export` drops any pair naming an artifact search will not
-        // return, so a hit recorded against one raises the recall on Insights
-        // and contributes nothing to `pairs.json`. The verdict write refuses
-        // one, and the bar under a result must not be a way around it.
+        // A hit recorded against an artifact search will not return raises
+        // the recall on Insights over a result no search can give again. The
+        // verdict write refuses one, and the bar under a result must not be
+        // a way around it.
         let (app, cookie, handle, a, event) = searched_app().await;
         handle
             .store

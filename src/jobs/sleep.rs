@@ -9,12 +9,8 @@
 //! generation.
 //!
 //! Integration files each new artifact as novel or known and mints a capture
-//! probe per near hit. There is no third tag: `Tag::Conflict` has no detector
-//! any more and nothing here produces one. `tag_for` says why — a token
-//! heuristic filed 130 pairs of lecture slides as contradictions on their
-//! footer dates, and whether two artifacts disagree is not a question
-//! anything that splits on whitespace can be asked. The variant survives so
-//! the rows written before it was deleted still read back as what they were.
+//! probe per near hit. There is no third tag — `store::integrations::Tag`
+//! says what happened to the one there was.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -27,7 +23,6 @@ pub struct Integrated {
     pub integrated: usize,
     pub novel: usize,
     pub known: usize,
-    pub conflicts: usize,
     /// Capture probes written.
     pub probes: usize,
     /// Somebody came back; the rest waits for the next quiet period.
@@ -168,11 +163,6 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
         match tag {
             Tag::Novel => out.novel += 1,
             Tag::Known => out.known += 1,
-            // Nothing here writes this any more, and `Integrated::conflicts`
-            // stays at zero for the same reason. The variant and the column
-            // survive so the integrations and sleep runs recorded before the
-            // evidence heuristic was retired still read back as what they were.
-            Tag::Conflict => {}
         }
     }
     Ok(out)
@@ -902,7 +892,6 @@ mod tests {
         // thing there is to merge, and which of them is current is the judge's
         // question. Reading the answer off the digits in the text is what filed
         // a lecture archive's slide dates as contradictions nobody could clear.
-        assert_eq!(r.conflicts, 0, "{r:?}");
         assert_eq!(r.known, 2, "{r:?}");
         assert!(
             core.store

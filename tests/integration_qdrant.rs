@@ -2308,11 +2308,6 @@ async fn integration_tags_a_two_corpus_fixture_the_way_the_rule_says() {
     let r = engram::jobs::sleep::integrate(&core, now).await.unwrap();
     assert_eq!((r.integrated, r.known), (1, 1), "{r:?}");
     assert_eq!(
-        r.conflicts, 0,
-        "nothing writes a conflict any more; the field survives so older \
-         rows still read back as what they were: {r:?}"
-    );
-    assert_eq!(
         core.store.integration_of(&b).await.unwrap().unwrap().tag,
         Tag::Known
     );

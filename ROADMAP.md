@@ -105,11 +105,11 @@ kind of tier `lean beats clever` refuses.
 Two backends is two behaviours, and the ones that differ are the subtle ones:
 the recency term folded into the score, the lifecycle filters, the generation
 and alias dance behind `--reindex`. A local backend that ranks *nearly* the
-same is worse than one that ranks visibly differently, because it moves the one
-figure comparable across months without anyone noticing.
+same is worse than one that ranks visibly differently, because the difference
+is then found by a person's search rather than by a test.
 
-The rule for this item, then, and it is not negotiable by convenience: the
-evaluation harness runs on both backends, over the same exported corpus, and
-the two reports are read side by side before the local one is offered as a
-default. A harness that exists to hold ranking still cannot be exempted by the
-change most likely to move it.
+So the `#[ignore]`d Qdrant tests are not only the design record for the local
+backend: they run against both, unchanged, before the local one is offered as
+a default. What they cannot say — whether the two order a real base the same —
+is per base, and a base that changes backend is a new era to the runtime loop
+the way a change of embedder is: evidence from before it stops counting.

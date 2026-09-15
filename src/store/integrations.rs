@@ -5,11 +5,18 @@ use super::artifacts::Chunk;
 use crate::error::{Error, Result};
 use sqlx::Row;
 
+/// Two answers, not three. There used to be a `conflict`: two artifacts at or
+/// above the supersede line whose value-shaped tokens differed, filed as a
+/// contradiction without a model reading either. In a base of lecture slides
+/// the tokens that differed were footer dates, and 130 near-identical pairs
+/// settled into a state no sweep reopened. Whether two artifacts disagree is
+/// a question about what they say, and nothing that splits on whitespace can
+/// be asked it. The rows it wrote still read — as `Known`, which is what they
+/// were: something near, at or above the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tag {
     Novel,
     Known,
-    Conflict,
 }
 
 impl Tag {
@@ -17,14 +24,14 @@ impl Tag {
         match self {
             Tag::Novel => "novel",
             Tag::Known => "known",
-            Tag::Conflict => "conflict",
         }
     }
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
             "novel" => Tag::Novel,
-            "known" => Tag::Known,
-            "conflict" => Tag::Conflict,
+            // A row from before the detector was retired. It was near
+            // something, which is all the tag can honestly say now.
+            "known" | "conflict" => Tag::Known,
             other => return Err(Error::Store(format!("integrations: unknown tag {other}"))),
         })
     }

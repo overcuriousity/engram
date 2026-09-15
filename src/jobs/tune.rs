@@ -158,7 +158,9 @@ async fn journal(core: &Core, started: i64, p: &Pass) -> Result<()> {
             integrated: p.integrated.integrated as i64,
             novel: p.integrated.novel as i64,
             known: p.integrated.known as i64,
-            conflicts: p.integrated.conflicts as i64,
+            // The column outlives the detector: rows from before it was
+            // retired still carry a count, and new ones carry none.
+            conflicts: 0,
             rehearsed: p.replayed.rehearsed as i64,
             found: p.replayed.found as i64,
             adopted: p.adopted.clone(),
