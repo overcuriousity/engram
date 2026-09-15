@@ -21,3 +21,23 @@
   transition: opacity 400ms ease;
 }
 html.typing #vec-bg { opacity: 0.18; }
+
+/* Behind the idle column, and around it. The field is drawn centred in the
+   window and the column now stands in the same place, so without this the
+   text sat on the densest part of the cloud. A soft clearing where the column
+   is, the field at full strength in a ring around it, and a fade to nothing
+   at the edges: the column reads as sitting on the picture rather than in
+   front of it. Wide windows only — on a phone the column is the window and
+   there is no ring to draw. The mask goes with the first keystroke, when the
+   opacity above has already stepped the field back. */
+@media (width >= 62rem) {
+  html:not(.typing) body:has(.regions-rail-focus-source) #vec-bg {
+    /* A little louder than the ceiling above, because the mask takes the
+       densest part of the cloud away: what is left is the ring. */
+    opacity: 0.88;
+    /* Centred on the column, which sits above the middle of the window, so
+       the cloud's own lower half stays in view under the closing line. */
+    mask-image: radial-gradient(ellipse 60% 70% at 50% 40%,
+      transparent 0 20%, black 48%, black 78%, transparent 100%);
+  }
+}

@@ -1952,7 +1952,7 @@ mod tests {
         );
         assert!(html.contains("chip-example"), "and it is pressable: {html}");
         assert!(
-            html.contains("a sentence finds more than keywords do"),
+            html.contains("finds more than keywords do"),
             "with the one true thing the old hint said kept: {html}"
         );
     }

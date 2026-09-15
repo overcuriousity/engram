@@ -2402,7 +2402,19 @@
 
     function start(pts) {
       if (!pts || !pts.length) { canvas.parentNode.removeChild(canvas); return; }
-      points = pts;
+      // Centred on its own centroid. The projection is a random one and its
+      // origin is wherever the embedding space happens to put it, so the
+      // cloud arrived off to one side of the axes and off to one side of the
+      // window — behind nothing, beside the page. The centroid is subtracted
+      // once here, so the object turns about its own middle and the middle is
+      // the middle of the window, where the idle column now is.
+      var cx = 0, cyy = 0, cz = 0;
+      for (var i = 0; i < pts.length; i++) { cx += pts[i][0]; cyy += pts[i][1]; cz += pts[i][2]; }
+      cx /= pts.length; cyy /= pts.length; cz /= pts.length;
+      points = [];
+      for (var j = 0; j < pts.length; j++) {
+        points.push([pts[j][0] - cx, pts[j][1] - cyy, pts[j][2] - cz]);
+      }
       resize();
       pickAxis(0);
       window.addEventListener('resize', function () {

@@ -923,8 +923,12 @@ body { overflow-x: hidden; }
    click target, while this holds a link and a `<details>` beside it. So no
    hover on the box — the card is a container, and lighting it up under the
    cursor would promise a click that only the title answers. */
+/* Quieter than the band under it, on purpose. The offer is a guess and the
+   band is a fact, and with the same border on both they were two cards of
+   equal weight — the subtle rule is what lets the band's one accent be the
+   only colour on the page. */
 .offer-filled {
-  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
 }
 
@@ -934,7 +938,7 @@ body { overflow-x: hidden; }
    page's links already use. */
 .offer-title {
   font-size: var(--text-base); color: var(--color-fg-primary);
-  font-weight: 600; text-decoration: none;
+  font-weight: 500; text-decoration: none;
 }
 .offer-title:hover, .offer-title:focus-visible {
   text-decoration: underline; text-decoration-color: var(--color-border-strong);
@@ -1176,33 +1180,67 @@ body { overflow-x: hidden; }
 
 /* ── The idle column ─────────────────────────────────────────────────────── */
 
-/* One measure wide, so the four short things under a full-width box read as a
-   column rather than as four bands across the page. */
-#idle { max-width: 46rem; }
+/* One measure, and in the middle of the window. The bar holds everything an
+   idle page shows — the box, the offer, the band, the closing line — and it
+   used to sit at the shell's left edge in a 46rem column: at 1800px that was
+   a box, a card and three reminders in the left third of the window and the
+   vector field standing to the right of them as a separate picture. Centred,
+   the column is the page and the field is the ground behind it. The width
+   goes back to the shell's on the first keystroke, when the rail and the pane
+   arrive under it and need it, and the box grows into it from the middle
+   rather than from one side.
 
-/* And the box itself, while it is idle. `#idle` above is one measure because
-   short lines under a full-bleed box read as bands rather than as a column —
-   but the box was the widest band of all: at 1440px the workspace opened on a
-   1408px textarea above a 736px column, with 670px of nothing to the right of
-   everything the page had to say. It takes the same measure while there is
-   nothing beside it to line up with, and takes the width back on the first
-   keystroke, when the rail and the pane arrive under it and need it. */
-html:not(.typing) .regions-rail-focus-source .region-bar { max-width: 46rem; }
+   `width: 100%` because the bar is a grid item: `max-width` alone would let
+   it shrink to its content and the auto margins would centre a box the width
+   of its placeholder. */
+html:not(.typing) .regions-rail-focus-source .region-bar {
+  max-width: 52rem; width: 100%; margin-inline: auto;
+}
+
+/* And on a window with room, the column sits a little way down rather than
+   pressed under the top row: a box at the very top of an otherwise empty
+   window reads as a toolbar. Inside the pinned grid, so the band and the line
+   under it still fit. Given back on the first keystroke, when the results
+   want the height. */
+@media (width >= 62rem) {
+  html:not(.typing) .regions-rail-focus-source { padding-top: clamp(1rem, 8vh, 5.5rem); }
+  .regions-rail-focus-source { transition: padding-top 200ms ease; }
+}
+
+/* The box, idle: three lines tall and a larger placeholder, because it is the
+   one thing this page is about and at one line it read as a search field
+   rather than as a place to write. The height is the floor `grow()` in app.js
+   sizes above; it drops back to the one-line floor with the first keystroke,
+   and the transition is what stops that reading as a collapse. Only the
+   placeholder is set larger: the text somebody types keeps the size the
+   results and the pane are read at, so nothing re-flows under the caret. */
+html:not(.typing) .regions-rail-focus-source .box {
+  min-height: 6.25rem; padding: 0.875rem 1rem;
+}
+.box { transition: min-height 200ms ease, padding 200ms ease; }
+.box::placeholder { font-size: var(--text-lg); }
 
 /* The closing line, and the only place an idle page says what the base holds.
    It replaced a block of counts and a list of five captures in the rail — the
-   same five the middle column was already rendering in another shape. */
-.idle-foot { margin: 0.75rem 0 0; font-size: var(--text-xs); }
+   same five the middle column was already rendering in another shape.
+
+   Body size, not the smallest type on the page: this is the sentence that
+   says the base is yours and how much of you it holds. The two counts are
+   set in the primary ink, and the last thing kept is the one link in it. */
+.idle-foot { margin: 1rem 0 0; font-size: var(--text-base); color: var(--color-fg-secondary); }
+.idle-foot .mono { color: var(--color-fg-primary); }
 /* An empty base prints no foot at all — the hint under the box says the one
    thing there is to say — and an empty paragraph would still take its margin. */
 .idle-foot:empty { display: none; }
 /* The last kept note is a link, and a note's first line can be a paragraph.
    One line, cut with an ellipsis; the title on the far side is the same
-   text in full. */
+   text in full. The day beside it stays in the line's own colour: one link
+   is the invitation, two are a list. */
 .idle-foot a {
-  color: inherit; display: inline-block; max-width: 20rem; vertical-align: bottom;
+  color: var(--color-accent); display: inline-block; max-width: 22rem; vertical-align: bottom;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.idle-foot a[data-day-link] { color: inherit; }
 /* What a paste becomes: a term and its gloss, two columns. */
 .teach {
   display: grid; grid-template-columns: max-content minmax(0, 1fr);
