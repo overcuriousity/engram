@@ -243,7 +243,7 @@ struct NotifyForm {
 /// words. That mattered more here, not less: nothing fetches a captured URL on
 /// a schedule, and `jobs::remind::run` POSTs to whatever is saved here on a
 /// timer, from the server, for as long as it stands.
-fn push_url(field: &str, raw: &str) -> Result<()> {
+pub(crate) fn push_url(field: &str, raw: &str) -> Result<()> {
     let u = url::Url::parse(raw).map_err(|e| Error::Validation(format!("{field}: {e}")))?;
     if !matches!(u.scheme(), "http" | "https") {
         return Err(Error::Validation(format!(

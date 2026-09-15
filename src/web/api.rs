@@ -1790,6 +1790,7 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/moments/{id}/snooze", post(moment_snooze))
         .route("/moments/{id}/unsnooze", post(moment_unsnooze))
         .route("/artifacts/{id}/moments", post(set_moment))
+        .merge(crate::web::push::routes())
 }
 
 // ── Moments ──────────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ pub mod lineage_view;
 pub mod markdown;
 pub mod ops;
 pub mod pair;
+pub mod push;
 pub mod settings;
 pub mod share;
 pub mod state;
