@@ -114,9 +114,18 @@ reading, and search from a panel beside it.</p>
      notification. Made in the NextPush app, not here. #}
   <label>UnifiedPush endpoint
     <input class="input" name="up_endpoint" value="{{ up_endpoint }}" placeholder="https://nextcloud.example/index.php/apps/uppush/push/…"></label>
+  {# The same row, two ways in: the app registers it with its keys over the
+     API, a person pastes one here without them. The field cannot show the
+     difference, so this line does. #}
+  {% if up_legacy %}
+  <p class="muted" style="margin:0">Legacy endpoint · plaintext. Pair the app to encrypt.</p>
+  {% else if up_device.is_some() %}
+  <p class="muted" style="margin:0">Registered by {{ up_device.as_deref().unwrap_or_default() }} · encrypted</p>
+  {% else %}
   <p class="muted" style="margin:0">Any URL that takes the message as the request body. With
     NextPush: open the app, add a notification channel, long-press it to copy its endpoint,
     and paste it here.</p>
+  {% endif %}
   <div class="row">
     <button class="btn btn-accent" type="submit">Save</button>
     <button class="btn btn-ghost" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"gotify"}' hx-target="#notify-result">Test Gotify</button>
