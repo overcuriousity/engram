@@ -1740,7 +1740,6 @@ dependencies = [
  "mime_guess",
  "openidconnect",
  "pulldown-cmark",
- "regex",
  "reqwest 0.13.4",
  "rmcp",
  "rust-embed",
