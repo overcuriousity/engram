@@ -77,6 +77,24 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   user_agent   TEXT
 );
 
+-- A code drawn on a screen for the app to scan, and nothing more: two
+-- minutes of life, spent by one claim, exchanged for a real `api_tokens` row
+-- over TLS (`auth::grants::claim`). Only the SHA-256 of the code is kept, so
+-- a reader of this table holds nothing a photographer of the screen did not.
+-- SHA-256 and not argon2id, deliberately: argon2 exists to slow the guessing
+-- of low-entropy secrets, and this one has 256 bits and is dead in two
+-- minutes. A fast hash also makes the claim one indexed lookup rather than a
+-- pass hashing every live row. Expired rows are purged at every mint — the
+-- table only grows when someone presses the button, so no reaper is needed.
+CREATE TABLE IF NOT EXISTS pair_grants (
+  id         TEXT PRIMARY KEY,
+  code_hash  TEXT NOT NULL UNIQUE,
+  subject    TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  claimed_at INTEGER
+);
+
 -- ── Queue ───────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS jobs (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,

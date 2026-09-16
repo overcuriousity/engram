@@ -10,6 +10,7 @@ pub mod eval_runs;
 pub mod feedback;
 pub mod gaps;
 pub mod generations;
+pub mod grants;
 pub mod insights;
 pub mod integrations;
 pub mod jobs;
