@@ -96,9 +96,9 @@ an engram pairing code.
 `internal class Transport(connection: Connection)` owns one `OkHttpClient`:
 
 - a bearer interceptor adds `Authorization: Bearer <token>` to every request
-  except the claim, and a `User-Agent` of `engram for Android <version>
-  (<Build.MODEL>)` to all of them, which is what the server records as the
-  device on tokens and push registrations;
+  except the claim, and a `User-Agent` of `engram-android/<version>
+  (<Build.MODEL>)` to all of them, which Settings prints under the token and
+  the push row. It identifies nothing else; see *Situation* below.
 - when `connection.pin` is set, a `CertificatePinner` for the origin's host
   with `sha256/<pin>`; a mismatch surfaces as `PinMismatch(expected, served)`;
 - a `Refused` exception for any `401`, so callers can tell *the server said
@@ -177,6 +177,42 @@ State transitions, the only ones allowed:
 
 A row's files are deleted when the row leaves `queued`, except a `held` row,
 whose files stay so the person can see what was refused.
+
+### Situation
+
+The offer card on the web (`_context.html`, the anticipation layer) does not
+know a device by its user agent. It knows it by `device_key` in
+`core::context`, a hash over the stable fields of the bundle the browser posts
+to `/ui/context`: platform, browser family, screen size, cores, memory,
+language. The situation fields — time zone, colour scheme, orientation,
+battery, charging, network — are encoded beside it, so one phone across a day
+is one device in many situations.
+
+A browser's bundle drifts under a hardened browser. The app's must not, and
+it controls every field, so `Situation.bundle()` in `core` produces the same
+JSON shape with the stable fields fixed by construction:
+
+| Field | Value |
+|---|---|
+| `platform` | `Android` |
+| `ua_family` | `engram-android` |
+| `screen_w`, `screen_h` | the display's pixels, portrait order regardless of rotation |
+| `cores` | `Runtime.availableProcessors()` |
+| `memory_gb` | `ActivityManager.MemoryInfo.totalMem`, rounded to a half |
+| `language` | the first system locale, as a BCP 47 tag |
+
+and the situation fields from the platform each time it is asked: `tz` and
+`tz_offset_mins` from `ZoneId.systemDefault()`, `color_scheme` from the night
+mode configuration, `orientation`, `battery_level` and `charging` from
+`BatteryManager`, `network` as `wifi`, `cellular` or `wired` from
+`ConnectivityManager`, `touch` true, `dpr` from the display density, and
+`languages` as the full locale list.
+
+Part D builds it and tests that the stable half is identical across two calls
+that differ in every situation field. Nothing in D posts it: the routes it
+would go to answer HTML, and the card is a reading surface. Part E draws the
+card on the app's home screen through the JSON door Part B gives it, and the
+phone has been one stable device from the day it was paired.
 
 ### Cache
 
