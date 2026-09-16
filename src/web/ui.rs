@@ -3327,6 +3327,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wide_bundle_is_stored_whole_and_read_by_no_block() {
+        // The new fields are stored, not encoded: the row carries them
+        // verbatim, and the encoder's output is the same with or without.
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let weights = core.recommend.weights.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let narrow = r#"{"tz":"Europe/Berlin","platform":"Android"}"#;
+        let wide = r#"{"tz":"Europe/Berlin","platform":"Android","place":"u33dc0","audio_route":"car","dnd":true}"#;
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/context",
+                &cookie,
+                &format!("bundle={}", crate::web::pair::urlencode(wide)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        background.wait_idle().await;
+
+        let rows = store.context_events_since(0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].bundle.contains("u33dc0"), "stored whole");
+        assert!(rows[0].bundle.contains("\"audio_route\":\"car\""));
+
+        let at = 1_700_000_000;
+        let a =
+            crate::core::context::encode(at, &crate::core::context::parse_bundle(narrow), &weights);
+        let b =
+            crate::core::context::encode(at, &crate::core::context::parse_bundle(wide), &weights);
+        assert_eq!(a, b, "no block reads the new fields");
+    }
+
+    #[tokio::test]
     async fn a_bundle_the_browser_could_not_build_does_not_break_the_page() {
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
