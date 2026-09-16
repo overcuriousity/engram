@@ -1,3 +1,4 @@
+pub mod app;
 pub mod api;
 pub mod artifact;
 pub mod assets;
@@ -148,6 +149,7 @@ pub fn router(state: AppState) -> Router {
         .merge(ops::routes())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
+        .merge(app::app_router())
         .merge(share::share_router(
             state.config.capture.image_max_bytes,
             state.config.capture.pdf_max_bytes,

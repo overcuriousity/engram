@@ -88,6 +88,12 @@ docling = { version = "=1.14.2", default-features = false, features = ["pdf-text
 
 url = "2"
 
+# The pairing QR, drawn on the server as inline SVG so the page needs no
+# script and no image route. Pure Rust. Default features off: `image` pulls
+# the raster stack in to write a PNG nobody serves, and `svg` is the
+# renderer this page uses, so it is named on its own.
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+
 # RFC 8291 payload encryption and the RFC 8030 request around it, for the
 # UnifiedPush channel. Pure RustCrypto (`aes-gcm`, `hkdf`, `p256`, the last
 # two already in the tree by way of openidconnect), and it builds an
