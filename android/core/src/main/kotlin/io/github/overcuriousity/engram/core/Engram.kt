@@ -3,10 +3,12 @@ package io.github.overcuriousity.engram.core
 import android.content.Context
 import android.os.Build
 import io.github.overcuriousity.engram.core.db.Db
+import io.github.overcuriousity.engram.core.db.MomentRow
 import io.github.overcuriousity.engram.core.outbox.Drainer
 import io.github.overcuriousity.engram.core.outbox.Outbox
 import io.github.overcuriousity.engram.core.push.Push
 import io.github.overcuriousity.engram.core.sync.Sync
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.File
 import java.time.ZoneId
@@ -19,6 +21,9 @@ class Engram private constructor(val app: Context, versionName: String) {
     val db = Db.open(app)
     val outbox = Outbox(db, File(app.filesDir, "outbox"))
     val push = Push(store, { transport() }, db)
+
+    /** The last reminder a push carried. Room stays inside this module; the screens read this. */
+    val latestMoment: Flow<MomentRow?> get() = db.momentsDao().latest()
     private val prefs = app.getSharedPreferences("engram", Context.MODE_PRIVATE)
     val counters = ViewCounters(prefs)
     val situation = Situation(AndroidSituationSource(app, counters), Stable.of(app))
