@@ -17,6 +17,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     testOptions.unitTests.isReturnDefaultValues = true
+    testOptions.unitTests.isIncludeAndroidResources = true
 }
 
 
@@ -28,7 +29,6 @@ dependencies {
     implementation(libs.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.room.runtime)
-    implementation(libs.sqlite.bundled)
     ksp(libs.room.compiler)
     implementation(libs.work.runtime)
     implementation(libs.unifiedpush)
@@ -36,6 +36,10 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
     testImplementation(libs.mockwebserver)
+    // Room's Android builder wants a Context; Robolectric lends one so the DAO
+    // tests stay on the JVM instead of needing an emulator.
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.junit)
