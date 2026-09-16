@@ -80,8 +80,7 @@ async fn app_grant(
     headers: HeaderMap,
 ) -> UiResult<Response> {
     let origin = request_origin(&headers).unwrap_or_default();
-    let code =
-        crate::auth::grants::mint(&tenant.core.store.control, &tenant.user.subject).await?;
+    let code = crate::auth::grants::mint(&tenant.core.store.control, &tenant.user.subject).await?;
     // Validated at load, so `Err` here is unreachable; `ok().flatten()`
     // rather than an unwrap because a page must not panic over config.
     let fingerprint = st.config.server.fingerprint().ok().flatten();

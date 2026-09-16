@@ -36,12 +36,7 @@ pub async fn mint(control: &Control, subject: &str) -> Result<String> {
     let code = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let id = crate::store::new_id();
     control
-        .insert_grant(
-            &id,
-            &hash_code(&code),
-            subject,
-            crate::store::now() + TTL,
-        )
+        .insert_grant(&id, &hash_code(&code), subject, crate::store::now() + TTL)
         .await?;
     tracing::info!(grant_id = %id, "pairing grant minted");
     Ok(code)
@@ -106,7 +101,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            crate::auth::tokens::verify(&c, &token).await.unwrap().subject,
+            crate::auth::tokens::verify(&c, &token)
+                .await
+                .unwrap()
+                .subject,
             "alice"
         );
         let listed = c.list_tokens("alice").await.unwrap();

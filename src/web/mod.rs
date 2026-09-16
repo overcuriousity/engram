@@ -1,5 +1,5 @@
-pub mod app;
 pub mod api;
+pub mod app;
 pub mod artifact;
 pub mod assets;
 pub mod auth_routes;
