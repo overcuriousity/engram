@@ -188,9 +188,68 @@ language. The situation fields — time zone, colour scheme, orientation,
 battery, charging, network — are encoded beside it, so one phone across a day
 is one device in many situations.
 
-A browser's bundle drifts under a hardened browser. The app's must not, and
-it controls every field, so `Situation.bundle()` in `core` produces the same
-JSON shape with the stable fields fixed by construction:
+The server stores every bundle whole and the encoder reads only the blocks it
+knows, so the vocabulary can grow now and be encoded later with a reindex and
+a sweep. Nothing in this part touches the encoder, `BLOCKS`, `device_key` or
+ranking. What it does is widen what is collected, on both senders, under one
+vocabulary.
+
+**The vocabulary is `Bundle` in `src/core/context.rs`.** Every field the
+browser or the phone sends is a named `Option` on that struct, with a doc line
+saying what it means and whether a block reads it yet. The fields already
+there stay as they are. These are added, all stored and none encoded:
+
+| Field | Meaning | Web | Phone |
+|---|---|---|---|
+| `place` | geohash, 6 characters, about 1 km; only with location permission | yes | yes |
+| `net_effective` | `slow-2g` … `4g`, from `connection.effectiveType` | yes | from bandwidth |
+| `net_downlink` | Mbit/s estimate | yes | yes |
+| `save_data` | the data-saver flag | yes | yes |
+| `reduced_motion`, `high_contrast` | accessibility preferences | yes | yes |
+| `pointer` | `coarse` or `fine`; `hover` beside it | yes | `coarse` |
+| `display_mode` | `standalone` (installed) or `browser`; the app sends `app` | yes | `app` |
+| `nav_type` | `navigate`, `reload`, `back_forward`, from the Navigation Timing entry | yes | — |
+| `window_state` | `maximised` or `windowed`, outer size against screen | yes | — |
+| `focused` | the document had focus when the bundle was built | yes | — |
+| `since_last_view_s` | seconds since this browser or app last built a bundle | yes | yes |
+| `views_today` | bundles this sender built since local midnight | yes | yes |
+| `audio_route` | `speaker`, `wired`, `bluetooth`, `car` | — | yes |
+| `dnd` | do-not-disturb on | — | yes |
+| `ringer` | `normal`, `vibrate`, `silent` | — | yes |
+| `power_save` | battery saver on | — | yes |
+| `brightness` | 0.0..1.0 | — | yes |
+| `lux` | ambient light, last sensor reading | — | yes |
+| `docked` | in a dock or on a wireless charger | — | yes |
+| `headset` | wired or Bluetooth headset connected | — | yes |
+
+Not collected, on either side, for the reason the module note gives: canvas,
+WebGL, fonts, plugin lists and anything else that identifies a machine across
+a population. The population here is one person, those values are constant
+for them, and a hardened browser rotates them.
+
+**Place** is the one field behind a permission. On the web, a switch in
+Settings asks for geolocation once and remembers the answer in
+`localStorage`; the bundle then carries a low-accuracy position, cached for
+ten minutes, reduced to a geohash in `app.js` before it leaves the browser.
+On the phone, the same switch in Settings requests coarse location; the
+bundle uses the last known position from the passive provider and never
+starts the GPS. Nothing else in the app or the web asks for a permission.
+
+**Drift is refused by tests.** A Rust test lists `Bundle`'s field names and
+asserts that `assets/app.js` assigns each one the web column marks, and that
+the list equals `android/core/src/test/resources/bundle-fields.txt`. A Kotlin
+test asserts `Situation.bundle()` emits no key outside that file. A field
+added to one side without the others fails a build.
+
+**The web change lands in this part**, on this branch: `Bundle` grows the
+fields, `app.js` fills the web column, a `_settings` row holds the place
+switch, `_context.html` is untouched, and the test above ties them. The
+`device_key` stays a hash over the six original stable fields, and a Rust
+test says so by building two bundles that differ in every new field and
+asserting one key.
+
+**On the phone**, `Situation.bundle()` in `core` produces the same JSON with
+the stable fields fixed by construction:
 
 | Field | Value |
 |---|---|
@@ -203,10 +262,15 @@ JSON shape with the stable fields fixed by construction:
 
 and the situation fields from the platform each time it is asked: `tz` and
 `tz_offset_mins` from `ZoneId.systemDefault()`, `color_scheme` from the night
-mode configuration, `orientation`, `battery_level` and `charging` from
-`BatteryManager`, `network` as `wifi`, `cellular` or `wired` from
-`ConnectivityManager`, `touch` true, `dpr` from the display density, and
-`languages` as the full locale list.
+mode configuration, `orientation`, `battery_level`, `charging`, `power_save`
+and `docked` from `BatteryManager` and the `ACTION_DOCK_EVENT` sticky
+broadcast, `network`, `net_downlink` and `save_data` from
+`ConnectivityManager`, `audio_route` and `headset` from `AudioManager`'s
+output devices (which name a car kit without a Bluetooth permission), `dnd`
+and `ringer` from `NotificationManager` and `AudioManager`, `brightness` from
+`Settings.System`, `lux` from the light sensor's last event, `touch` true,
+`dpr` from the display density, `languages` as the full locale list, and
+`place` when the switch is on.
 
 Part D builds it and tests that the stable half is identical across two calls
 that differ in every situation field. Nothing in D posts it: the routes it
@@ -347,6 +411,15 @@ JVM unit tests in `core`:
   IOException → queued with `next_at` on the schedule; 400 → held with the
   message; 401 → every queued row refused and the worker stopped.
 - The backoff schedule, as a pure function of `attempts`.
+- `Situation.bundle()`: the stable half identical across two situations, and
+  no key outside `bundle-fields.txt`.
+
+Rust tests on the server, in `context.rs` and `ui.rs`:
+
+- every `Bundle` field is assigned in `app.js` or marked phone-only, and the
+  field list equals `bundle-fields.txt`;
+- `device_key` ignores every new field;
+- a posted bundle with the new fields is stored whole.
 
 Instrumentation tests in `core`, on a device or the CI emulator:
 
@@ -362,5 +435,5 @@ the server did with a capture beyond its status code.
 
 Reading screens, the home-screen widget, the vector background, the watch,
 the Play Store, a local alarm fallback, API token management in the app, and
-any change to the server. The server side of D is Parts A and C, already on
-the branch.
+any server change beyond the situation vocabulary above. Encoding any new
+field into a block, which is a ranking change and has its own process.
