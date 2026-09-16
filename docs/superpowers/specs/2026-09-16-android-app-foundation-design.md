@@ -197,7 +197,9 @@ vocabulary.
 **The vocabulary is `Bundle` in `src/core/context.rs`.** Every field the
 browser or the phone sends is a named `Option` on that struct, with a doc line
 saying what it means and whether a block reads it yet. The fields already
-there stay as they are. These are added, all stored and none encoded:
+there stay as they are. These are added, all stored and none encoded. Everything a browser gives
+without a prompt and that says something about the moment is in; what only
+says which machine this is (canvas, WebGL, fonts, plugins) is not:
 
 | Field | Meaning | Web | Phone |
 |---|---|---|---|
@@ -213,6 +215,16 @@ there stay as they are. These are added, all stored and none encoded:
 | `focused` | the document had focus when the bundle was built | yes | — |
 | `since_last_view_s` | seconds since this browser or app last built a bundle | yes | yes |
 | `views_today` | bundles this sender built since local midnight | yes | yes |
+| `screen_x`, `screen_y`, `screens` | where the window sits, and how many screens there are | yes | — |
+| `avail_w`, `avail_h` | the screen less the taskbar | yes | — |
+| `video_inputs`, `audio_inputs` | cameras and microphones, beside `audio_outputs` | yes | yes |
+| `rtt` | round-trip estimate in ms | yes | — |
+| `zoom` | `visualViewport.scale` | yes | — |
+| `fullscreen` | a fullscreen element is active | yes | — |
+| `referrer_kind` | `none`, `same_origin`, `external` | yes | — |
+| `online` | `navigator.onLine` | yes | — |
+| `keyboard_layout` | the Chromium keyboard map's layout, where offered | yes | — |
+| `hour_cycle` | `h12` or `h23`, from `Intl` | yes | yes |
 | `audio_route` | `speaker`, `wired`, `bluetooth`, `car` | — | yes |
 | `dnd` | do-not-disturb on | — | yes |
 | `ringer` | `normal`, `vibrate`, `silent` | — | yes |
