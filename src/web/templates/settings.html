@@ -132,6 +132,11 @@ reading, and search from a panel beside it.</p>
     <button class="btn btn-ghost" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"unifiedpush"}' hx-target="#notify-result">Test UnifiedPush</button>
   </div>
 </form>
+<h2>Place</h2>
+<p class="muted">A one-kilometre cell in the situation the offer card learns from. Asked for once; never stored more finely.</p>
+<label class="row" style="gap:0.5rem;align-items:center;margin-bottom:1rem">
+  <input type="checkbox" id="place-switch"> Send my place
+</label>
 {% match feedback %}
 {% when Some with (f) %}
 {# "Feedback" named this section, which on a settings page reads as a box for
