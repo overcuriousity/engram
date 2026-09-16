@@ -11,7 +11,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "21" }
-      - uses: android-actions/setup-android@v3
+      # ubuntu-latest ships an SDK at $ANDROID_HOME; AGP fetches the platform
+      # and build-tools it needs, given the licences are accepted. The
+      # setup-android action is not used: it runs `sdkmanager tools`, a
+      # package that no longer exists, and fails before the build starts.
+      - name: accept SDK licences
+        run: yes | "$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager" --licenses > /dev/null || true
       - uses: gradle/actions/setup-gradle@v4
       - run: cd android && ./gradlew :core:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
@@ -22,7 +27,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "21" }
-      - uses: android-actions/setup-android@v3
+      # ubuntu-latest ships an SDK at $ANDROID_HOME; AGP fetches the platform
+      # and build-tools it needs, given the licences are accepted. The
+      # setup-android action is not used: it runs `sdkmanager tools`, a
+      # package that no longer exists, and fails before the build starts.
+      - name: accept SDK licences
+        run: yes | "$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager" --licenses > /dev/null || true
       - uses: gradle/actions/setup-gradle@v4
       - name: enable KVM
         run: |
