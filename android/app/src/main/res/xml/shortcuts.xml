@@ -1,0 +1,7 @@
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="compose" android:enabled="true" android:icon="@drawable/ic_tile"
+        android:shortcutShortLabel="@string/shortcut_compose">
+        <intent android:action="android.intent.action.MAIN" android:targetPackage="io.github.overcuriousity.engram"
+            android:targetClass="io.github.overcuriousity.engram.MainActivity" />
+    </shortcut>
+</shortcuts>
