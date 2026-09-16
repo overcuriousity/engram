@@ -995,6 +995,49 @@ pub struct ServerConfig {
     pub bind: String,
     #[serde(default = "default_workers")]
     pub workers: usize,
+    /// The SHA-256 of the SubjectPublicKeyInfo of the certificate a phone is
+    /// shown, base64 in either alphabet, padded or not. Unset by default and
+    /// meant to stay that way for most deployments: the app pins on first use
+    /// during the two-minute pairing window, which is good enough when the
+    /// operator is standing at the screen. Set, the QR carries it and the app
+    /// pins on it from the first byte. A config key and not an `instance` row
+    /// because the certificate belongs to whatever terminates TLS in front of
+    /// this process, which the process cannot see.
+    #[serde(default)]
+    pub tls_fingerprint: Option<String>,
+}
+
+impl ServerConfig {
+    /// The fingerprint as the QR carries it: base64url, no padding, 43
+    /// characters. `Err` names the key so `validate` can refuse it at load.
+    pub fn fingerprint(&self) -> std::result::Result<Option<String>, String> {
+        use base64::Engine;
+        let Some(raw) = self.tls_fingerprint.as_deref().map(str::trim) else {
+            return Ok(None);
+        };
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let cleaned: String = raw.chars().filter(|c| *c != '=').collect();
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&cleaned)
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&cleaned))
+            .map_err(|_| {
+                format!(
+                    "server.tls_fingerprint {raw:?} is not base64: it should be the SHA-256 \
+                     of the certificate's SubjectPublicKeyInfo"
+                )
+            })?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "server.tls_fingerprint decodes to {} bytes, and a SHA-256 is 32",
+                bytes.len()
+            ));
+        }
+        Ok(Some(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+        ))
+    }
 }
 fn default_workers() -> usize {
     2
@@ -2612,6 +2655,7 @@ impl Config {
                  silently read and stamped in UTC"
             )));
         }
+        self.server.fingerprint().map_err(ConfigError::Invalid)?;
         Ok(())
     }
 
@@ -2904,6 +2948,7 @@ impl Config {
             server: ServerConfig {
                 bind: "127.0.0.1:8080".into(),
                 workers: 2,
+                tls_fingerprint: None,
             },
             store: StoreConfig::default(),
             vector: VectorConfig {
@@ -3992,6 +4037,51 @@ mode = "off"
             Config::load(Some(&p)),
             Err(ConfigError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn a_fingerprint_that_is_not_32_bytes_is_refused_at_startup() {
+        // The QR carries it and the phone pins on it, so a typo here is a
+        // phone that refuses every connection with nothing saying why. The
+        // load is the one moment an operator is looking.
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let body = MINIMAL.replace(
+            "bind = \"127.0.0.1:8080\"",
+            "bind = \"127.0.0.1:8080\"\ntls_fingerprint = \"not-a-digest\"",
+        );
+        let p = write(&dir, &body);
+        match Config::load(Some(&p)) {
+            Err(ConfigError::Invalid(msg)) => {
+                assert!(msg.contains("server.tls_fingerprint"), "{msg}")
+            }
+            other => panic!("expected an Invalid error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fingerprint_is_normalised_to_unpadded_base64url() {
+        // Operators paste what `openssl` prints, which is standard base64
+        // with padding. The QR wants the URL-safe unpadded form. Both are
+        // accepted; one is stored.
+        use base64::Engine;
+        let padded = base64::engine::general_purpose::STANDARD.encode([0xABu8; 32]);
+        let cfg = ServerConfig {
+            bind: "127.0.0.1:8080".into(),
+            workers: 1,
+            tls_fingerprint: Some(padded),
+        };
+        let got = cfg.fingerprint().unwrap().unwrap();
+        assert_eq!(got.len(), 43);
+        assert!(!got.contains('='));
+        assert!(!got.contains('+') && !got.contains('/'));
+
+        let unset = ServerConfig {
+            bind: "127.0.0.1:8080".into(),
+            workers: 1,
+            tls_fingerprint: None,
+        };
+        assert_eq!(unset.fingerprint().unwrap(), None);
     }
 
     #[test]
