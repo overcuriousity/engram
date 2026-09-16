@@ -94,6 +94,52 @@ async fn app_grant(
     .into_response())
 }
 
+#[derive(serde::Deserialize)]
+pub struct Claim {
+    #[serde(default)]
+    pub code: String,
+    /// How the app names itself — it is the token's name in Settings, and
+    /// the only thing telling two phones apart there.
+    #[serde(default)]
+    pub device: String,
+}
+
+/// Spend a scanned code for a token. No bearer: the code is the credential.
+///
+/// The device name is checked before the grant is touched, so a malformed
+/// request does not burn a code the person then has to press for again.
+async fn claim(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(c): axum::Json<Claim>,
+) -> crate::error::Result<(axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    let device = c.device.trim();
+    if device.is_empty() {
+        return Err(Error::Validation("device: empty".into()));
+    }
+    let token = crate::auth::grants::claim(
+        st.tenants.control(),
+        c.code.trim(),
+        device,
+        headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok()),
+    )
+    .await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "token": token,
+            "version": env!("CARGO_PKG_VERSION"),
+        })),
+    ))
+}
+
+/// The API side, mounted under `/api/v1`.
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/pair/claim", post(claim))
+}
+
 pub fn app_router() -> Router<AppState> {
     Router::new()
         .route("/ui/app", get(app_page))
@@ -202,5 +248,138 @@ mod tests {
         assert!(body.contains("<svg"), "no picture");
         // The picture is not the credential.
         assert!(!body.contains("engram_"), "a token was drawn on the page");
+    }
+
+    fn claim_req(body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .uri("/api/v1/pair/claim")
+            .method("POST")
+            .header("content-type", "application/json")
+            .header("user-agent", "engram-android/0.1 (Pixel 8)")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// Press the button and read the code out of the page.
+    async fn press_and_read_code(app: &axum::Router, cookie: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(with_cookie("POST", "/ui/app/grant", cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = crate::web::test_support::body_of(res).await;
+        body.split("&#38;c=")
+            .nth(1)
+            .map(|rest| rest.split(['&', '<', '"', ' ']).next().unwrap().to_string())
+            .expect("a code on the page")
+    }
+
+    #[tokio::test]
+    async fn a_scanned_code_becomes_a_token_named_for_the_device() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core.clone()).await;
+        let code = press_and_read_code(&app, &cookie).await;
+
+        let res = app
+            .clone()
+            .oneshot(claim_req(serde_json::json!({
+                "code": code, "device": "engram for Android · Pixel 8"
+            })))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let body = crate::web::test_support::json_of(res).await;
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        let token = body["token"].as_str().expect("a token").to_string();
+        assert!(token.starts_with("engram_"));
+
+        // The token opens the door the app will post to.
+        let res = app
+            .clone()
+            .oneshot(crate::web::api::tests::raw_post(
+                "/api/v1/capture",
+                &token,
+                "text/plain",
+                b"shared from the app",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        // And it is listed under the device's name, with its user agent.
+        let listed = core.store.control.list_tokens("user-1").await.unwrap();
+        let row = listed
+            .iter()
+            .find(|t| t.name == "engram for Android · Pixel 8")
+            .expect("the app's token in the list");
+        assert_eq!(
+            row.user_agent.as_deref(),
+            Some("engram-android/0.1 (Pixel 8)")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_code_claims_once() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let code = press_and_read_code(&app, &cookie).await;
+        let body = serde_json::json!({ "code": code, "device": "phone" });
+        let first = app.clone().oneshot(claim_req(body.clone())).await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let second = app.oneshot(claim_req(body)).await.unwrap();
+        assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn an_expired_or_invented_code_is_unauthorized() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core.clone()).await;
+        let code = press_and_read_code(&app, &cookie).await;
+        // Age the row directly: the clock is not the test's to move.
+        sqlx::query("UPDATE pair_grants SET expires_at = ? WHERE code_hash = ?")
+            .bind(crate::store::now() - 1)
+            .bind(crate::auth::grants::hash_code(&code))
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
+        let res = app
+            .clone()
+            .oneshot(claim_req(
+                serde_json::json!({ "code": code, "device": "phone" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .oneshot(claim_req(
+                serde_json::json!({ "code": "invented", "device": "phone" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn an_unnamed_device_is_refused_before_the_code_is_spent() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let code = press_and_read_code(&app, &cookie).await;
+        for body in [
+            serde_json::json!({ "code": code }),
+            serde_json::json!({ "code": code, "device": "   " }),
+        ] {
+            let res = app.clone().oneshot(claim_req(body)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        }
+        // The grant survived the malformed requests.
+        let res = app
+            .oneshot(claim_req(
+                serde_json::json!({ "code": code, "device": "phone" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
     }
 }
