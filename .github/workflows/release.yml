@@ -165,7 +165,7 @@ jobs:
           cp config.example.toml cli.example.toml engram.service README.md "dist/$name/"
           tar -czf "dist/${name}.tar.gz" -C dist "$name"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: engram-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -184,7 +184,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
