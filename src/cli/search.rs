@@ -212,8 +212,15 @@ async fn plain(
                 .into(),
         ));
     }
-    let hits: Vec<SearchResult> =
-        serde_json::from_str(&body).map_err(|err| Error::Internal(format!("results: {err}")))?;
+    // The list envelope every API list answers with. `next` is always null
+    // here — a search is bounded by `limit`, not paged — so it is not read.
+    #[derive(serde::Deserialize)]
+    struct Listed {
+        items: Vec<SearchResult>,
+    }
+    let hits = serde_json::from_str::<Listed>(&body)
+        .map_err(|err| Error::Internal(format!("results: {err}")))?
+        .items;
     Ok((hits, began.elapsed().as_millis(), body))
 }
 

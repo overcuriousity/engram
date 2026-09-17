@@ -406,8 +406,9 @@ async function runSearch() {
     // `door=extension` is how the judging page tells a query typed while
     // reading from one typed in the web UI. Only this value is honoured
     // server-side; a client cannot claim to be `ask` or `judge`.
-    const hits = await engramApi.call(
-      '/api/v1/search?door=extension&q=' + encodeURIComponent(q));
+    // `.items`: every list the API answers is `{ items, next }`.
+    const hits = (await engramApi.call(
+      '/api/v1/search?door=extension&q=' + encodeURIComponent(q))).items;
     if (mine !== turn) return;
     say('');
     clearResults();
@@ -435,8 +436,8 @@ async function refineSearch(q, owner, fast) {
   if (owner !== turn) return;
   let hits;
   try {
-    hits = await engramApi.call(
-      '/api/v1/search?door=extension&rerank=true&q=' + encodeURIComponent(q));
+    hits = (await engramApi.call(
+      '/api/v1/search?door=extension&rerank=true&q=' + encodeURIComponent(q))).items;
   } catch (e) {
     return;
   }

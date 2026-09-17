@@ -941,8 +941,45 @@ async fn upload_image(
 /// The bytes as uploaded, whatever they are. The image door's `?original=1`
 /// answers the same thing for a photo and stays where it is; this is the name
 /// that does not lie about a PDF.
-async fn get_file(tenant: Tenant, Path(id): Path<String>) -> Result<axum::response::Response> {
-    use axum::response::IntoResponse;
+/// The tag of a corpus's bytes, or the `304` that ends the request.
+///
+/// From the `content_hash` the row already holds, so a phone revalidating a
+/// five-megabyte photo is answered from one indexed column and the blob is
+/// never read. `variant` separates the preview from the original, which are
+/// different bytes at one id; the preview's also carries this build's version,
+/// because a preview is derived and a later build may derive it differently.
+async fn bytes_tag(
+    tenant: &Tenant,
+    id: &str,
+    variant: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<std::result::Result<String, Response>> {
+    let Some(hash) = tenant.core.store.content_hash_of(id).await? else {
+        return Err(Error::NotFound);
+    };
+    let tag = format!("\"{variant}-{hash}\"");
+    let asked = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    if asked.is_some_and(|a| crate::web::etag::matches(a, &tag)) {
+        let mut res = StatusCode::NOT_MODIFIED.into_response();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&tag) {
+            res.headers_mut().insert(axum::http::header::ETAG, v);
+        }
+        return Ok(Err(res));
+    }
+    Ok(Ok(tag))
+}
+
+async fn get_file(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<axum::response::Response> {
+    let tag = match bytes_tag(&tenant, &id, "file", &headers).await? {
+        Ok(tag) => tag,
+        Err(not_modified) => return Ok(not_modified),
+    };
     let Some((mime, bytes)) = tenant.core.store.attachment_original(&id).await? else {
         return Err(Error::NotFound);
     };
@@ -953,6 +990,7 @@ async fn get_file(tenant: Tenant, Path(id): Path<String>) -> Result<axum::respon
                 axum::http::header::CACHE_CONTROL,
                 "private, max-age=3600".to_string(),
             ),
+            (axum::http::header::ETAG, tag),
         ],
         bytes,
     )
@@ -968,14 +1006,23 @@ struct ImageQuery {
 /// The preview by default; `?original=1` for the bytes as uploaded.
 async fn get_image(
     tenant: Tenant,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<ImageQuery>,
 ) -> Result<axum::response::Response> {
-    use axum::response::IntoResponse;
     let want_original = q
         .original
         .as_deref()
         .is_some_and(|v| v == "1" || v == "true");
+    let variant = if want_original {
+        "original".to_string()
+    } else {
+        format!("preview-{}", env!("CARGO_PKG_VERSION"))
+    };
+    let tag = match bytes_tag(&tenant, &id, &variant, &headers).await? {
+        Ok(tag) => tag,
+        Err(not_modified) => return Ok(not_modified),
+    };
     let found = if want_original {
         tenant.core.store.attachment_original(&id).await?
     } else {
@@ -991,6 +1038,7 @@ async fn get_image(
                 axum::http::header::CACHE_CONTROL,
                 "private, max-age=3600".to_string(),
             ),
+            (axum::http::header::ETAG, tag),
         ],
         bytes,
     )
@@ -1300,12 +1348,33 @@ async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<se
     let cap = search_cap(&tenant);
     let (query, origin, explain) = search_request(&tenant, q);
     let (results, outcome) = tenant.core.search_with(&query, cap, origin).await?;
-    Ok(Json(if explain {
-        serde_json::json!({ "results": results, "explanation": outcome.explanation })
-    } else {
-        serde_json::to_value(results)
-            .map_err(|e| Error::Internal(format!("serialising search results: {e}")))?
-    }))
+    Ok(Json(search_body(
+        &results,
+        explain.then_some(&outcome.explanation),
+    )?))
+}
+
+/// What the search door answers: the list envelope, and the pool beside it
+/// when it was asked for.
+///
+/// `explain` adds a key beside `items` and changes nothing else. It used to
+/// turn a bare array into an object, which is a shape a client can only handle
+/// by remembering what it sent.
+///
+/// The rows go out as `SearchResult` serialises them and are not re-shaped
+/// here. `weak` and `past_cliff` are the two facts a rail's honesty is drawn
+/// from — the loose-match badge and the *relevance falls off here* rule — and
+/// a door that rebuilt its rows field by field is a door that can forget one.
+fn search_body(
+    results: &[crate::core::search::SearchResult],
+    explanation: Option<&crate::core::explain::SearchExplanation>,
+) -> Result<serde_json::Value> {
+    let mut body = serde_json::json!({ "items": results, "next": null });
+    if let Some(e) = explanation {
+        body["explanation"] = serde_json::to_value(e)
+            .map_err(|e| Error::Internal(format!("serialising the explanation: {e}")))?;
+    }
+    Ok(body)
 }
 
 #[derive(serde::Deserialize)]
@@ -1375,8 +1444,10 @@ pub struct ResurfaceParams {
 async fn resurface(
     tenant: Tenant,
     Query(p): Query<ResurfaceParams>,
-) -> Result<Json<Vec<crate::core::search::SearchResult>>> {
-    Ok(Json(tenant.core.resurface(p.limit.unwrap_or(5)).await?))
+) -> Result<Json<Page<crate::core::search::SearchResult>>> {
+    Ok(Json(Page::whole(
+        tenant.core.resurface(p.limit.unwrap_or(5)).await?,
+    )))
 }
 
 /// Enough of a corpus to say where a passage came from, and no more.
@@ -1884,7 +1955,7 @@ pub struct MomentsQuery {
 async fn list_moments(
     tenant: Tenant,
     Query(q): Query<MomentsQuery>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<Page<crate::store::moments::DueRow>>> {
     let now = tenant.core.clock.now();
     let from = q.from.unwrap_or(now);
     let to =
@@ -1900,9 +1971,7 @@ async fn list_moments(
         "event" => tenant.core.store.event_moments_between(from, to).await?,
         other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
     };
-    Ok(Json(
-        serde_json::to_value(rows).map_err(|e| Error::Internal(e.to_string()))?,
-    ))
+    Ok(Json(Page::whole(rows)))
 }
 
 /// Strike a reminder. `404` where there was no open row to strike, exactly as
@@ -2638,22 +2707,19 @@ pub(crate) mod tests {
         );
     }
 
-    /// The shape four clients read. It is not this change's to alter.
+    /// The shape the CLI and the extension read: the list envelope. The
+    /// streaming door beside it is a different conversation and must not be
+    /// what changes this one.
     #[tokio::test]
-    async fn the_plain_search_door_still_answers_a_bare_array() {
+    async fn the_plain_search_door_answers_the_list_envelope() {
         let (app, token) = app_and_token().await;
         let res = app
             .oneshot(get("/api/v1/search?q=journal", Some(&token)))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let v: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(v.is_array(), "{v}");
+        let v = json_of(res).await;
+        assert!(v["items"].is_array() && v["next"].is_null(), "{v}");
     }
 
     fn bg_point(id: &str, v: Vec<f32>) -> crate::vector::VectorPoint {
@@ -2919,7 +2985,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn a_pdf() -> Vec<u8> {
+    pub(crate) fn a_pdf() -> Vec<u8> {
         include_bytes!("../../tests/fixtures/one-heading.pdf").to_vec()
     }
 
@@ -4025,35 +4091,34 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(json_of(res).await.is_array());
+        assert!(json_of(res).await["items"].is_array());
     }
 
+    /// `explain` adds a key and changes nothing else. It used to turn an array
+    /// into an object, which a client could only handle by remembering what
+    /// it had sent.
     #[tokio::test]
-    async fn the_bare_search_response_is_still_an_array() {
+    async fn explain_adds_the_pool_beside_the_items_and_changes_nothing_else() {
         let (app, token) = app_and_token().await;
-        let res = app
-            .oneshot(get("/api/v1/search?q=anything", Some(&token)))
-            .await
-            .unwrap();
+        let plain = json_of(
+            app.clone()
+                .oneshot(get("/api/v1/search?q=anything", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let explained = json_of(
+            app.oneshot(get("/api/v1/search?q=anything&explain=1", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(plain.get("explanation").is_none(), "got {plain}");
+        assert_eq!(plain["items"], explained["items"]);
+        assert_eq!(plain["next"], explained["next"]);
         assert!(
-            json_of(res).await.is_array(),
-            "no existing client passes `explain`, so no existing client may see \
-             a different envelope"
-        );
-    }
-
-    #[tokio::test]
-    async fn explain_wraps_the_results_and_adds_the_pool() {
-        let (app, token) = app_and_token().await;
-        let res = app
-            .oneshot(get("/api/v1/search?q=anything&explain=1", Some(&token)))
-            .await
-            .unwrap();
-        let body = json_of(res).await;
-        assert!(body["results"].is_array(), "got {body}");
-        assert!(
-            body["explanation"]["candidates_fetched"].is_number(),
-            "the pool's shape is what a caller asks `explain` for: got {body}"
+            explained["explanation"]["candidates_fetched"].is_number(),
+            "the pool's shape is what a caller asks `explain` for: got {explained}"
         );
     }
 
@@ -5099,6 +5164,65 @@ mod patch_tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// The divider and the demoted rows are drawn from two facts on the row,
+    /// and a client can only draw them if both arrive. Named here because the
+    /// failure is silent: a list without them still looks like a list.
+    #[test]
+    fn the_envelope_carries_a_rows_weakness_and_the_cliff() {
+        let rows = vec![
+            crate::cli::search::fixture::hit("sure", 0.9, false, false),
+            crate::cli::search::fixture::hit("loose", 0.2, true, true),
+        ];
+        let body = super::search_body(&rows, None).unwrap();
+        assert!(
+            body["items"][0].get("past_cliff").is_none(),
+            "absent means false"
+        );
+        assert_eq!(body["items"][1]["weak"], true);
+        assert_eq!(body["items"][1]["past_cliff"], true);
+        assert!(body["next"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_file_revalidates_by_its_content_hash() {
+        let (app, token, core) = app_token_and_core().await;
+        let id = core
+            .ingest_pdf(crate::core::ingest::PdfCapture {
+                bytes: super::tests::a_pdf(),
+                filename: Some("plan.pdf".into()),
+                title_hint: None,
+                note: None,
+                lang: crate::infer::lang::Lang::default(),
+            })
+            .await
+            .unwrap()
+            .id;
+        let uri = format!("/api/v1/corpora/{id}/file");
+        let first = app.clone().oneshot(bearer_get(&uri, &token)).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let tag = first.headers()["etag"].to_str().unwrap().to_string();
+
+        let again = app
+            .clone()
+            .oneshot(bearer_get_if(&uri, &token, &tag))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        assert!(crate::web::test_support::body_of(again).await.is_empty());
+
+        // The preview and the original are different bytes at one id, so the
+        // file's tag must not pass for the image's.
+        let image = app
+            .oneshot(bearer_get_if(
+                &format!("/api/v1/corpora/{id}/image?original=1"),
+                &token,
+                &tag,
+            ))
+            .await
+            .unwrap();
+        assert_ne!(image.status(), StatusCode::NOT_MODIFIED);
+    }
+
     fn bearer_get_if(uri: &str, token: &str, tag: &str) -> Request<Body> {
         Request::builder()
             .uri(uri)
@@ -5220,6 +5344,7 @@ mod patch_tests {
                 .unwrap(),
         )
         .await;
+        let list = list["items"].clone();
         assert_eq!(list[0]["moment"]["id"], id);
         assert_eq!(list[0]["opening"], "Pay rent");
         assert!(!list[0]["title"].as_str().unwrap_or_default().is_empty());
@@ -5243,6 +5368,7 @@ mod patch_tests {
                 .unwrap(),
         )
         .await;
+        let list = list["items"].clone();
         assert_eq!(list.as_array().unwrap().len(), 1, "the next occurrence");
         assert_ne!(list[0]["moment"]["id"], id);
         let next = list[0]["moment"]["id"].as_str().unwrap().to_string();
@@ -5394,6 +5520,7 @@ mod patch_tests {
                 .unwrap(),
         )
         .await;
+        let list = list["items"].clone();
         assert!(
             list.as_array().unwrap().is_empty(),
             "the row is put aside until it is not: {list}"

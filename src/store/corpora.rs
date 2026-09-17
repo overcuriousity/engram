@@ -408,6 +408,19 @@ impl Store {
         }))
     }
 
+    /// The hash a corpus was captured under, and nothing else of the row.
+    ///
+    /// What the byte routes tag their answer with, so a revalidation is
+    /// answered before the blob is read rather than after.
+    pub async fn content_hash_of(&self, id: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT content_hash FROM corpora WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
     /// The title hints of these corpora, by id, for the ones that have one.
     ///
     /// What a passage with no heading of its own is shown under: the note it

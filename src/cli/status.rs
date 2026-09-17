@@ -46,7 +46,10 @@ pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
         && res.status().is_success()
         && let Ok(due) = res.json::<serde_json::Value>().await
     {
-        print!("{}", render_due(face, &due));
+        // `items`: the list envelope. An older server's bare array has no
+        // such key, reads as null, and prints nothing — the same silence the
+        // 404 above gets.
+        print!("{}", render_due(face, &due["items"]));
     }
     Ok(0)
 }
