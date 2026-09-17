@@ -238,6 +238,12 @@ the API pages. And every read route answers `ETag` and honours
 case here, and a 304 is the difference between a usable app on a train and a
 spinner.
 
+*2026-09-17: slice one landed — the read contract (`docs/api.md`) over the
+existing read routes, and the day, lineage, versions and the offer beside
+them. Slice two — pairs with their undo, gaps, insights, the sleep journal,
+version restore, preferences — waits for Part F's screens to say what they
+read.*
+
 This part is large enough to want its own document when it starts, and it can
 be sliced by consumer: Part E only needs the routes the screens it draws
 actually read. It does not have to land whole to be useful.
