@@ -4,6 +4,30 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// The version the release workflow stamps in, as `-PengramVersion=YYYY.MMDD.N`
+// — the same CalVer the server binaries carry, so a phone and its server can
+// be spoken about in one number. Absent for every local build, which is what
+// the fallback is for.
+val engramVersion = providers.gradleProperty("engramVersion").orNull ?: "0.1.0"
+
+// Android will not install an APK whose `versionCode` is below the installed
+// one, and Obtainium offers whatever the newest release holds — so this has to
+// climb with the calendar and never repeat. `YYYY.MMDD.N` packs into one int
+// with room for 99 releases a day: 2026.917.0 is 26_091_700, and the last year
+// this can express, 2099, lands at 99_123_199 — an order of magnitude below
+// the 2_100_000_000 ceiling.
+fun versionCodeOf(v: String): Int {
+    val p = v.split(".")
+    val (year, mmdd, n) = listOf(0, 1, 2).map { p.getOrNull(it)?.toIntOrNull() ?: 0 }
+    if (year < 2000) return 1
+    return (year - 2000) * 1_000_000 + mmdd * 100 + n
+}
+
+// The signing key, handed in by the environment and never committed. Its
+// absence is not an error here — a local `assembleRelease` still builds, and
+// comes out unsigned. The workflow is what refuses to publish one.
+val keystorePath = providers.environmentVariable("ENGRAM_KEYSTORE").orNull
+
 android {
     namespace = "io.github.overcuriousity.engram"
     compileSdk = 37
@@ -11,14 +35,25 @@ android {
         applicationId = "io.github.overcuriousity.engram"
         minSdk = 34
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = versionCodeOf(engramVersion)
+        versionName = engramVersion
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    signingConfigs {
+        if (keystorePath != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = providers.environmentVariable("ENGRAM_KEYSTORE_PASSWORD").orNull
+                keyAlias = providers.environmentVariable("ENGRAM_KEY_ALIAS").orNull
+                keyPassword = providers.environmentVariable("ENGRAM_KEY_PASSWORD").orNull
+            }
+        }
     }
     buildTypes {
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     // Every launch-time crash this app had was an API newer than minSdk, which

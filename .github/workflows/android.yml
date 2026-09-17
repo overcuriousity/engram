@@ -18,7 +18,12 @@ jobs:
       - name: accept SDK licences
         run: yes | "$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager" --licenses > /dev/null || true
       - uses: gradle/actions/setup-gradle@v4
-      - run: cd android && ./gradlew :core:lintDebug :app:lintDebug :core:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon
+      # `assembleRelease` is here for R8: the release build strips and rewrites
+      # what the debug build ships whole, and Room, kotlinx.serialization and
+      # Compose all have corners it can take away. Finding that out on a
+      # release is finding it out in front of everyone. Unsigned — the key
+      # lives in the release workflow and nowhere near a pull request.
+      - run: cd android && ./gradlew :core:lintDebug :app:lintDebug :core:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --no-daemon
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
