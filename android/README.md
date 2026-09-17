@@ -58,14 +58,19 @@ recovered from by making a new one — it ends that install base.
 The key lives in four repository secrets and nowhere else. To mint it:
 
 ```sh
-keytool -genkeypair -keystore engram.jks -alias engram \
-  -keyalg RSA -keysize 4096 -validity 10000
-base64 -w0 engram.jks   # → ANDROID_KEYSTORE_B64
+# Outside the repository: a signing key in the tree is a signing key one
+# `git add -A` away from being public. `-dname` is there to skip keytool's
+# certificate questionnaire, which nothing ever reads for an app key.
+keytool -genkeypair -keystore ~/engram.jks -alias engram \
+  -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=engram"
+base64 -w0 ~/engram.jks   # → ANDROID_KEYSTORE_B64
 ```
 
 Then set `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`
 and `ANDROID_KEY_PASSWORD` under Settings → Secrets → Actions, and keep
-`engram.jks` somewhere a lost laptop does not take with it. The release job
+`engram.jks` somewhere a lost laptop does not take with it. A keystore made
+this way is PKCS12, where keytool holds the key password and the store password
+to the same value — so the two password secrets take the same string. The release job
 fails rather than publishing when the secrets are absent, because an unsigned
 APK is one nothing will install and a release without an installable APK is an
 update the phones cannot see.

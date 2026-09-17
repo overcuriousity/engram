@@ -41,3 +41,8 @@ android/.gradle/
 android/**/build/
 android/local.properties
 android/.kotlin/
+
+# The app signing key. It belongs outside this tree entirely — see
+# android/README.md — and this is the backstop for the day it is not.
+*.jks
+*.keystore
