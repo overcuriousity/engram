@@ -264,15 +264,20 @@ class ViewCounters(private val prefs: SharedPreferences) {
     fun sinceLastViewS(): Float? =
         prefs.getLong("last_view", 0L).takeIf { it > 0 }?.let { (System.currentTimeMillis() - it) / 1000f }
 
+    /** What `mark` has counted today. A reading, like `sinceLastViewS` beside it. */
     fun viewsToday(): Int {
         val day = LocalDate.now().toString()
-        val n = if (prefs.getString("views_day", "") == day) prefs.getInt("views_n", 0) else 0
-        return n + 1
+        return if (prefs.getString("views_day", "") == day) prefs.getInt("views_n", 0) else 0
     }
 
+    /** This view. The count the next bundle reports is the one this leaves behind. */
     fun mark() {
         val day = LocalDate.now().toString()
-        prefs.edit().putLong("last_view", System.currentTimeMillis()).putString("views_day", day).putInt("views_n", viewsToday()).apply()
+        prefs.edit()
+            .putLong("last_view", System.currentTimeMillis())
+            .putString("views_day", day)
+            .putInt("views_n", viewsToday() + 1)
+            .apply()
     }
 }
 

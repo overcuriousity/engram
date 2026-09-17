@@ -89,6 +89,36 @@ class DrainerTest {
         assertEquals("/api/v1/moments/m2/snooze", server.takeRequest().target)
     }
 
+    @Test fun aMomentTheServerNoLongerHasIsSettled() = runTest {
+        box.enqueueDone("gone")
+        server.enqueue(MockResponse(code = 404, body = """{"error":"no such moment"}"""))
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        assertEquals(State.sent, box.rows.first().single().state)
+    }
+
+    @Test fun aRefusedSnoozeIsHeldRatherThanRetriedForever() = runTest {
+        box.enqueueSnooze("m1", 1L)
+        server.enqueue(MockResponse(code = 400, body = """{"error":"until must be in the future"}"""))
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        val r = box.rows.first().single()
+        assertEquals(State.held, r.state); assertEquals(400, r.status)
+        assertEquals("until must be in the future", r.error)
+    }
+
+    @Test fun aRowWithNoMomentIsHeldAndTheRestGo() = runTest {
+        box.enqueueDone("m1"); now += 1; box.enqueueText("good", null, null)
+        // The payload of the first row, emptied behind the outbox's back: the
+        // shapes a sloppy provider or an older build can leave in the table.
+        val bad = box.rows.first().minBy { it.createdAt }.id
+        db.outboxDao().let { dao -> dao.update(dao.get(bad)!!.copy(payload = "{}")) }
+        server.enqueue(MockResponse(code = 201, body = "{}"))
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        val rows = box.rows.first().sortedBy { it.createdAt }
+        assertEquals(State.held, rows[0].state); assertEquals("the row carries no moment", rows[0].error)
+        assertEquals(State.sent, rows[1].state)
+        assertEquals(1, server.requestCount)
+    }
+
     @Test fun nothingDueIsLater() = runTest {
         box.enqueueText("a", null, null); box.failed(box.rows.first().single().id, "x")
         val out = drainer.drainOnce()

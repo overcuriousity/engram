@@ -19,7 +19,8 @@ object Intake {
     suspend fun uris(engram: Engram, uris: List<Uri>, title: String? = null, note: String? = null): String {
         val ctx = engram.app
         val incoming = uris.map { uri ->
-            Incoming(displayName(ctx, uri), ctx.contentResolver.getType(uri) ?: "application/octet-stream") {
+            val mime = ctx.contentResolver.getType(uri)?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+            Incoming(displayName(ctx, uri), mime) {
                 ctx.contentResolver.openInputStream(uri) ?: throw IOException("cannot open $uri")
             }
         }

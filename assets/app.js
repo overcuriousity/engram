@@ -1056,16 +1056,40 @@
     primePlace();
   }
 
-  // Place is the one field behind a permission, and the switch is the only
-  // way it is ever asked for. Low accuracy, ten minutes of cache, and the
-  // position is reduced to a geohash here — the coordinates never leave.
+  // How long a kept geohash still describes where this browser is. A fix from
+  // last week is not a place, it is a memory of one.
+  var PLACE_GOOD_FOR = 86400000;
+
+  // Place is the one field behind a permission, and the switch is the only way
+  // it is ever asked for. Low accuracy, ten minutes of cache, and the position
+  // is reduced to a geohash here — the coordinates never leave.
+  //
+  // The fix arrives in a callback, and the bundle is built on load, in this
+  // same turn: whatever this asks for now can only reach the bundle after it
+  // has gone. So the geohash is kept and read back on the next load, which is
+  // the app's own shape — `AndroidSituationSource.place` reads a last known
+  // position too, and never waits for a fresh one.
   function primePlace() {
-    var on = false;
-    try { on = localStorage.getItem('engram:place') === 'on'; } catch (e) {}
-    if (!on || !navigator.geolocation) return;
+    if (!placeOn()) return;
+    try {
+      var kept = (localStorage.getItem('engram:place_hash') || '').split(':');
+      if (kept[0] && Date.now() - (parseInt(kept[1], 10) || 0) < PLACE_GOOD_FOR) slow.place = kept[0];
+    } catch (e) {}
+    if (!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition(function (pos) {
       slow.place = geohash(pos.coords.latitude, pos.coords.longitude, 6);
+      try { localStorage.setItem('engram:place_hash', slow.place + ':' + Date.now()); } catch (e) {}
     }, function () {}, { enableHighAccuracy: false, maximumAge: 600000, timeout: 8000 });
+  }
+
+  function placeOn() {
+    try { return localStorage.getItem('engram:place') === 'on'; } catch (e) { return false; }
+  }
+
+  // The switch off is a withdrawal, not a pause: what was kept goes with it.
+  function forgetPlace() {
+    slow.place = null;
+    try { localStorage.removeItem('engram:place_hash'); } catch (e) {}
   }
 
   function placeSwitch() {
@@ -1076,7 +1100,7 @@
       try { localStorage.setItem('engram:place', el.checked ? 'on' : 'off'); } catch (e) {}
       // Asking now, while the person is looking at the switch they pressed,
       // is the one moment a permission prompt makes sense.
-      if (el.checked) primePlace();
+      if (el.checked) primePlace(); else forgetPlace();
     });
   }
 

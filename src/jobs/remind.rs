@@ -163,15 +163,26 @@ pub struct Message {
 
 impl Message {
     /// Not on the ladder: a confirmation or a test.
+    ///
+    /// The payload is cut to what one record holds, for the same reason
+    /// `due` cuts its own: the title here is the artifact's, capped nowhere,
+    /// and a long enough one made `webpush::request` refuse the message. A
+    /// user whose only channel is a keyed endpoint then heard nothing at
+    /// all — and a confirmation, unlike a rung, is never tried again. The
+    /// prose channels have no such limit and still say the whole thing.
     pub fn notice(title: &str, body: &str, now: i64) -> Message {
+        let mut cap = title.chars().count().max(body.chars().count());
+        let mut payload = notice_payload(title, body, now, usize::MAX);
+        // Three quarters each pass reaches zero from any length, and the
+        // JSON escaping makes the arithmetic inexact, so measure.
+        while cap > 0 && payload.to_bytes().len() > MAX_PLAINTEXT {
+            cap = cap * 3 / 4;
+            payload = notice_payload(title, body, now, cap);
+        }
         Message {
             title: title.into(),
             body: body.into(),
-            payload: Payload::new(Kind::Notice {
-                at: now,
-                title: title.into(),
-                body: body.into(),
-            }),
+            payload,
         }
     }
 
@@ -209,6 +220,15 @@ impl Message {
             payload,
         }
     }
+}
+
+/// A notice's payload with both halves cut to `cap` characters.
+fn notice_payload(title: &str, body: &str, now: i64, cap: usize) -> Payload {
+    Payload::new(Kind::Notice {
+        at: now,
+        title: title.chars().take(cap).collect(),
+        body: body.chars().take(cap).collect(),
+    })
 }
 
 /// The payload for the first `take` rows, each title cut to `cap` characters,
@@ -596,6 +616,47 @@ mod tests {
             rows.len(),
             "what was dropped is counted, and the band has it"
         );
+    }
+
+    /// `confirm_created` builds its title from the artifact's, which is capped
+    /// nowhere. A confirmation is sent once and never retried, so one that does
+    /// not fit is one nobody ever hears.
+    #[test]
+    fn a_notice_past_one_record_is_shortened_and_still_sent() {
+        let now = 1_787_320_320;
+        let title = format!("Reminder set: {}", "ü".repeat(MAX_PLAINTEXT));
+        let msg = Message::notice(&title, "in an hour", now);
+        assert!(
+            msg.payload.to_bytes().len() <= MAX_PLAINTEXT,
+            "{} bytes",
+            msg.payload.to_bytes().len()
+        );
+        let crate::jobs::webpush::Kind::Notice {
+            title: t, body: b, ..
+        } = &msg.payload.kind
+        else {
+            panic!("a notice payload")
+        };
+        assert!(!t.is_empty(), "shortened, not emptied");
+        assert_eq!(b, "in an hour", "the short half is left alone");
+        assert_eq!(
+            msg.title, title,
+            "the prose channels have no such limit and still say everything"
+        );
+    }
+
+    /// One that fits is untouched: the trimming is a ceiling, not a policy.
+    #[test]
+    fn a_notice_that_fits_is_left_whole() {
+        let msg = Message::notice("Reminder set: milk", "tomorrow at nine", 1_787_320_320);
+        let crate::jobs::webpush::Kind::Notice {
+            title: t, body: b, ..
+        } = &msg.payload.kind
+        else {
+            panic!("a notice payload")
+        };
+        assert_eq!(t, "Reminder set: milk");
+        assert_eq!(b, "tomorrow at nine");
     }
 
     /// One title alone past the record. Shortened rather than dropped: a

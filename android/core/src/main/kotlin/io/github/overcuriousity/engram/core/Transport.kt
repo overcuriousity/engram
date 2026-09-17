@@ -10,6 +10,7 @@ import okhttp3.CertificatePinner
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -29,6 +30,9 @@ class PinMismatch(val expected: String, val served: String) :
     IOException("pinned $expected, served $served")
 
 data class Answer(val status: Int, val body: String)
+
+/** What a file whose declared type does not parse is sent as. */
+private val OCTET_STREAM = "application/octet-stream".toMediaType()
 data class OutFile(val path: String, val name: String, val mime: String)
 
 fun userAgent(versionName: String, model: String) = "engram-android/$versionName ($model)"
@@ -92,7 +96,12 @@ internal class Transport(
             addFormDataPart("tz", tz)
             if (title != null) addFormDataPart("title", title)
             if (note != null) addFormDataPart("note", note)
-            files.forEach { f -> addFormDataPart("file", f.name, File(f.path).asRequestBody(f.mime.toMediaType())) }
+            // A provider is free to hand back a type no parser accepts, and one
+            // of those must not cost the capture: unreadable is untyped.
+            files.forEach { f ->
+                val mime = f.mime.toMediaTypeOrNull() ?: OCTET_STREAM
+                addFormDataPart("file", f.name, File(f.path).asRequestBody(mime))
+            }
         }.build()
         return send(Request.Builder().url(url("/api/v1/capture")).post(body).build())
     }
@@ -113,18 +122,15 @@ internal class Transport(
         send(Request.Builder().url(url("/api/v1/push/unifiedpush")).delete().build())
     }
 
-    suspend fun momentDone(id: String) {
-        val a = send(Request.Builder().url(url("/api/v1/moments/$id/done")).post(jsonBody("")).build())
-        if (a.status !in 200..299 && a.status != 404) throw IOException("done: ${a.status}")
-    }
+    /** The answer as it came. What a status means to the outbox is the outbox's to say. */
+    suspend fun momentDone(id: String): Answer =
+        send(Request.Builder().url(url("/api/v1/moments/$id/done")).post(jsonBody("")).build())
 
-    suspend fun momentSnooze(id: String, until: Long) {
-        val a = send(
+    suspend fun momentSnooze(id: String, until: Long): Answer =
+        send(
             Request.Builder().url(url("/api/v1/moments/$id/snooze"))
                 .post(jsonBody("""{"until":$until}""")).build(),
         )
-        if (a.status !in 200..299 && a.status != 404) throw IOException("snooze: ${a.status}")
-    }
 
     private fun jsonBody(s: String): RequestBody = s.toRequestBody("application/json".toMediaType())
     private fun q(s: String) = Json.encodeToString(String.serializer(), s)

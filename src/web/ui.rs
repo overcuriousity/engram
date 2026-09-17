@@ -6714,6 +6714,58 @@ mod tests {
         );
     }
 
+    /// The bundle is built on load, in the same turn `primePlace` runs, so a
+    /// place can only ever reach it from a fix an earlier load already had.
+    ///
+    /// This is the half of that a Rust test can see: the geohash is read back
+    /// from storage synchronously, before the asynchronous request whose answer
+    /// no bundle in this turn will live to see, and the request keeps what it
+    /// gets. Without the read the switch prompts for a permission and every
+    /// `b.place` is null forever — which is what it did.
+    #[test]
+    fn the_place_switch_reads_a_kept_geohash_before_it_asks_for_a_new_one() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        let prime = js
+            .split_once("function primePlace() {")
+            .expect("app.js has no primePlace()")
+            .1;
+        let prime = &prime[..prime.find("\n  }").expect("primePlace() does not end")];
+        let read = prime
+            .find("getItem('engram:place_hash')")
+            .expect("primePlace() never reads the kept geohash, so no bundle can carry one");
+        let ask = prime
+            .find("getCurrentPosition")
+            .expect("primePlace() no longer asks for a position");
+        assert!(
+            read < ask,
+            "the kept geohash must be read before the request, not in its callback: {prime}"
+        );
+        assert!(
+            prime.contains("setItem('engram:place_hash'"),
+            "a fix that arrives is not kept, so the next load has nothing to read: {prime}"
+        );
+
+        // Consent withdrawn is a place forgotten, not a place held back.
+        let switch = js
+            .split_once("function placeSwitch() {")
+            .expect("app.js has no placeSwitch()")
+            .1;
+        assert!(
+            switch[..switch.find("\n  }").unwrap()].contains("forgetPlace()"),
+            "turning the switch off leaves the kept geohash on disk: {switch}"
+        );
+        let forget = js
+            .split_once("function forgetPlace() {")
+            .expect("app.js has no forgetPlace()")
+            .1;
+        assert!(
+            forget[..forget.find("\n  }").unwrap()].contains("removeItem('engram:place_hash')"),
+            "forgetPlace() does not remove the kept geohash: {forget}"
+        );
+    }
+
     /// Every `from:` in a template names one element, in one word.
     ///
     /// htmx reads a `from:` selector up to the first space or comma. A
