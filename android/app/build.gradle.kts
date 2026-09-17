@@ -58,6 +58,12 @@ android {
     }
     // Every launch-time crash this app had was an API newer than minSdk, which
     // the compiler cannot see and only lint does. Fatal, and run in CI.
+    testOptions.unitTests.isIncludeAndroidResources = true
+    // `-Pengram.pictures=1` makes PicturesTest write PNGs of the screens' parts
+    // to app/build/pictures/. Off otherwise.
+    testOptions.unitTests.all { t ->
+        providers.gradleProperty("engram.pictures").orNull?.let { t.systemProperty("engram.pictures", it) }
+    }
     lint {
         abortOnError = true
         error += "NewApi"
@@ -102,6 +108,14 @@ dependencies {
     implementation(libs.camerax.view)
     implementation(libs.zxing)
     testImplementation(libs.junit)
+    // The screens, composed on the JVM: Robolectric lends the Android half and
+    // the Compose test rule reads what was actually drawn. No emulator, so
+    // this runs wherever the unit tests do.
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test)
+    debugImplementation(libs.compose.ui.test.manifest)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.junit)

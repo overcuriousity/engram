@@ -9,7 +9,7 @@ import io.github.overcuriousity.engram.MainActivity
 /** The quick-settings tile: the empty composer, one pull-down away. */
 class CaptureTile : TileService() {
     override fun onClick() {
-        val i = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val i = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("screen", "compose")
         // The PendingIntent form is API 34, and from 34 on the Intent form
         // throws — so each side of the line gets the one it has.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

@@ -17,6 +17,9 @@ class MainActivity : ComponentActivity() {
         val app = application as App
         val pairText = intent?.data?.toString()?.takeIf { it.startsWith("engram://pair") }
         val start = when (intent?.getStringExtra("screen")) {
+            // The tile and the launcher shortcut. They reached the composer
+            // by default while it was home; Search is home now, so they say so.
+            "compose" -> Screen.Compose
             "queue" -> Screen.Queue
             "settings" -> Screen.Settings
             else -> null
