@@ -6,8 +6,9 @@ JVM tests: `./gradlew :core:test`. Device tests: `./gradlew :core:connectedDebug
 with a phone attached or an emulator running.
 
 The specs are `docs/superpowers/specs/2026-09-16-android-app-foundation-design.md`
-(the foundation: capture, the outbox, notifications) and Part E of
-`docs/superpowers/specs/2026-09-08-android-companion-design.md` (reading).
+(the foundation: capture, the outbox, notifications) and Parts E and F of
+`docs/superpowers/specs/2026-09-08-android-companion-design.md` (reading, and
+the decisions a person makes about the base).
 
 ## The screens
 
@@ -30,6 +31,38 @@ off here*, and the rows beneath it that hold their rank and stop claiming to be
 answers. A loose hit is badged rather than ranked. That is not decoration —
 retrieval always returns its best candidates however bad they are, and a list
 without the rule shows a typo exactly as it shows an answer.
+
+## Judging, and why it is quiet
+
+The decisions rather than the reads — which of two near-identical artifacts
+stays, which questions the base could not answer are worth answering, what the
+base did on its own while nobody was looking — live behind Settings. Not a tab,
+not a section on home, and with no count anywhere until somebody has opened the
+screen that fetched one.
+
+That is on purpose and it is the whole design. This is the part of the system
+meant to shrink: the human in the loop here is one to work towards removing,
+not one to build a habit around. A queue of chores on the screen the app opens
+on is an interface asking to be served, and an app that badges it teaches a
+person to serve it.
+
+A pair card offers all five answers the web offers — keep either side, write
+one from both, discard both, dismiss — and says only what somebody actually
+established about the pair. Where the sweep filed a pair on a score and nothing
+has read it since, the card prints the measurement and no finding, because
+*these two cover the same ground* is a finding nobody made. Where a pair came
+from repeated co-retrieval no similarity was ever computed, so no percentage is
+shown. Where a merge would be refused, there is no button to press.
+
+What a set-aside row admits is decided by its `kind` and nothing else — never
+by reading its wording — so a `kind` this build has never heard of draws no
+buttons and is still shown. What the base did is worth knowing even where this
+app cannot answer it.
+
+Every answer is an outbox row, like every other write the device owes: a
+decision made on a train is a decision. It is also where undo comes from. Until
+the row is delivered, taking an answer back is deleting a row — not a second
+write undoing the first, which would be a different and less honest thing.
 
 ## When the server cannot be reached
 

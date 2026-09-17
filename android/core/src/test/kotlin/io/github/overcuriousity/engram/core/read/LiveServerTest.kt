@@ -93,6 +93,48 @@ class LiveServerTest {
         assertNotNull(r.ask(Api.CONTEXT, """{"tz":"UTC"}""", Decode.offer).value)
     }
 
+    @Test fun theThreeJudgingReadsDecodeFromWhateverTheBaseHappensToHold() = runBlocking {
+        assumeNotNull(origin, token)
+        val r = reader()
+        // Asserted by property, never by count: a base with no open pairs and
+        // no unanswered questions is a base in a perfectly ordinary state, and
+        // a test that demands work be waiting is a test of the fixture.
+        val pairs = r.read(Api.pairs(), Decode.pairs).toList().last()
+        assertEquals(Reach.Fresh, pairs.reach)
+        pairs.value!!.items.forEach { c ->
+            assertTrue("a cluster is at least the pair it holds", c.members >= c.pairs.size)
+            c.pairs.forEach { p ->
+                assertTrue(p.a.id.isNotEmpty() && p.b.id.isNotEmpty())
+                if (p.unjudged) assertNull("a finding nobody made", findingOfLive(p))
+            }
+        }
+
+        val gaps = r.read(Api.gaps(), Decode.gaps).toList().last().value!!
+        gaps.items.forEach { c ->
+            assertTrue(c.labelledBy in setOf("model", "terms"))
+            assertTrue(c.members.all { it.kind.isNotEmpty() && it.id.isNotEmpty() })
+        }
+
+        val insights = r.read(Api.insights(), Decode.insights).toList().last().value!!
+        assertTrue("a base being read has something in it", insights.held.corpora > 0)
+        // Null where nothing was judged, and never 0.00.
+        insights.retrieval?.let { if (it.judged == 0L) assertNull(it.recallAt10) }
+
+        val aside = r.read(Api.setAside(), Decode.setAside).toList().last().value!!
+        aside.items.forEach { row ->
+            assertTrue(row.subjectId.isNotEmpty())
+            assertTrue(row.why.isNotEmpty())
+            // Every kind this server sends is one this build can answer. A
+            // seventh appearing here is the server having grown one, which the
+            // app survives — but it is worth knowing that it has.
+            assertTrue("unknown set-aside kind ${row.kind}", actionsFor(row.kind).isNotEmpty())
+        }
+        println("LIVE judging: ${pairs.value!!.items.size} pair clusters, ${gaps.items.size} gap clusters, ${aside.items.size} set aside")
+    }
+
+    /** `findingOf` lives in the app module; the rule it enforces is checked here against a real answer. */
+    private fun findingOfLive(p: Pair): String? = p.finding?.takeIf { !p.unjudged && it.isNotBlank() }
+
     @Test fun anAskEndsOneWayOrTheOtherAndNeverHangs() = runBlocking {
         assumeNotNull(origin, token)
         val last = Ask({ transport() }, db.askedDao()) { now }.run("what is in here?").toList().last()

@@ -240,9 +240,16 @@ spinner.
 
 *2026-09-17: slice one landed — the read contract (`docs/api.md`) over the
 existing read routes, and the day, lineage, versions and the offer beside
-them. Slice two — pairs with their undo, gaps, insights, the sleep journal,
-version restore, preferences — waits for Part F's screens to say what they
-read.*
+them. Slice two landed the same day: thirteen judging routes — pairs with
+their undo, gaps, insights read-only, the sleep journal — under the same five
+rules, written up in `docs/api.md` under `## Judging`. Version restore and
+preferences did not cross and nothing has asked for them yet.*
+
+*Three shapes in that slice are worth reading before writing a client. A pair
+says who has looked at it (`unjudged`, `via_link`, `mergeable`), so a card can
+say only what somebody established. A set-aside row carries its `kind`, not its
+buttons, so the list can grow a seventh kind without breaking an older app. And
+a gap is a question, not an error.*
 
 This part is large enough to want its own document when it starts, and it can
 be sliced by consumer: Part E only needs the routes the screens it draws
@@ -416,6 +423,26 @@ go where this document's enthusiasm would have put it — it lives behind
 Settings, off the home screen, with no count badge anywhere, because the human
 in the loop is a mechanic the base is meant to grow out of rather than a habit
 the app should build. Applying a tuning recommendation still does not cross.*
+
+*2026-09-17: the app half built too (plan
+`docs/superpowers/plans/2026-09-17-judging.md`, Tasks 6–8). Three screens
+behind one Settings section: the pair review, the gaps, and the journal. A
+count appears on a Settings line only once somebody has opened the screen that
+fetched it, from what that read held — nothing polls and nothing badges.*
+
+*Every answer is an outbox row rather than a call from the screen, which is
+what makes a decision made offline a decision, and is where undo comes from:
+until the row is delivered, taking an answer back is deleting a queued row, not
+a second write undoing the first. Room went to schema 3 for the new kinds.*
+
+*Two things this document's framing got wrong, corrected in the building. The
+phone's advantage is not "three buttons" — the card keeps five, and the count
+of buttons was never what made a desk a bad fit. And the rules about what a
+card may claim are not screen work: they are pure functions in `Judging.kt`
+beside `railOf`, because a claim about honesty that only exists inside a
+composable is one nobody can check. Insights is read as `/insights` and
+`/insights/set-aside`; the set-aside list is the sleep journal this document
+names.*
 
 ---
 
