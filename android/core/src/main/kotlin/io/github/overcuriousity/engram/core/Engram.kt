@@ -2,6 +2,7 @@ package io.github.overcuriousity.engram.core
 
 import android.content.Context
 import android.os.Build
+import io.github.overcuriousity.engram.core.ask.Ask
 import io.github.overcuriousity.engram.core.db.Db
 import io.github.overcuriousity.engram.core.db.MomentRow
 import io.github.overcuriousity.engram.core.outbox.Drainer
@@ -53,6 +54,9 @@ class Engram private constructor(val app: Context, versionName: String) {
      * reader instead, and nothing outside this class can tell the difference.
      */
     val reader: Reader = server
+
+    /** The one thing that is not a read: a question put to the server, answered as a stream. */
+    val ask = Ask({ transport() }, db.askedDao(), { refused.value = true }, { pinMismatch.value = it })
 
     /** Housekeeping the app runs once when it opens: what has not been current for a month goes. */
     suspend fun prune() = server.prune()

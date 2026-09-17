@@ -129,8 +129,9 @@ internal class Transport(
      * A POST that answers as server-sent events, read by hand: `event:` names
      * the frame, `data:` lines join with a newline, a blank line dispatches,
      * and a line opening with `:` is a comment the server keeps the socket
-     * warm with. Returns the status; an answer that is not a stream dispatches
-     * nothing, and its status is the caller's to put into words.
+     * warm with. An answer that is not a stream dispatches nothing and comes
+     * back whole — status and body — because the body is the server saying why.
+     * A stream comes back as its status and an empty body.
      *
      * Cancelling the caller cancels the call. A blocked socket read does not
      * notice a coroutine being cancelled, and an ask nobody is reading goes on
@@ -142,7 +143,7 @@ internal class Transport(
         query: Map<String, String?>,
         json: String,
         onFrame: suspend (event: String, data: String) -> Unit,
-    ): Int = coroutineScope {
+    ): Answer = coroutineScope {
         val req = Request.Builder().url(url(path, query)).post(jsonBody(json))
             .header("Accept", "text/event-stream").build()
         val call = streaming.newCall(authed(req))
@@ -152,7 +153,7 @@ internal class Transport(
                 try {
                     call.execute().use { res ->
                         if (res.code == 401) throw Refused()
-                        if (!res.isSuccessful) return@use res.code
+                        if (!res.isSuccessful) return@use Answer(res.code, res.body.string())
                         val source = res.body.source()
                         var event = "message"
                         val data = StringBuilder()
@@ -173,7 +174,7 @@ internal class Transport(
                                 }
                             }
                         }
-                        res.code
+                        Answer(res.code, "")
                     }
                 } catch (e: SSLPeerUnverifiedException) {
                     throw mismatch(e)

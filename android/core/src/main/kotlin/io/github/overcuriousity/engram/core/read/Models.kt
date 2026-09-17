@@ -248,7 +248,7 @@ object Decode {
 
 /** The reads, by name. One place knows a path; a screen knows what it wants. */
 object Api {
-    fun search(q: String) = Request("/api/v1/search", mapOf("q" to q, "door" to "android"))
+    fun search(q: String) = Request("/api/v1/search", mapOf("q" to q))
     fun resurface() = Request("/api/v1/resurface", mapOf("limit" to "5"))
     fun due() = Request("/api/v1/moments", mapOf("kind" to "due"))
     fun corpora(after: String?) = Request("/api/v1/corpora", mapOf("limit" to "50", "after" to after))

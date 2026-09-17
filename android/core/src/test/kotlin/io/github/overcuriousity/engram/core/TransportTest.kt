@@ -106,7 +106,7 @@ class TransportTest {
         server.enqueue(MockResponse.Builder().code(200).addHeader("Content-Type", "text/event-stream").body(sse).build())
         val seen = mutableListOf<Pair<String, String>>()
         val status = t.stream("/api/v1/ask/stream", mapOf("door" to "android"), """{"q":"why"}""") { e, d -> seen += e to d }
-        assertEquals(200, status)
+        assertEquals(Answer(200, ""), status)
         assertEquals(
             listOf("token" to """{"text":"a"}""", "token" to "line one\nline two", "done" to "{}"),
             seen,
@@ -121,7 +121,10 @@ class TransportTest {
     @Test fun aStreamThatIsNotOneIsItsStatusAndNoFrames() = runTest {
         server.enqueue(MockResponse(code = 502, body = """{"error":"inference[ask]: down"}"""))
         var frames = 0
-        assertEquals(502, t.stream("/api/v1/ask/stream", emptyMap(), "{}") { _, _ -> frames++ })
+        assertEquals(
+            Answer(502, """{"error":"inference[ask]: down"}"""),
+            t.stream("/api/v1/ask/stream", emptyMap(), "{}") { _, _ -> frames++ },
+        )
         assertEquals(0, frames)
     }
 
