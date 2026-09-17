@@ -7,6 +7,8 @@ import io.github.overcuriousity.engram.core.db.MomentRow
 import io.github.overcuriousity.engram.core.outbox.Drainer
 import io.github.overcuriousity.engram.core.outbox.Outbox
 import io.github.overcuriousity.engram.core.push.Push
+import io.github.overcuriousity.engram.core.read.Reader
+import io.github.overcuriousity.engram.core.read.ServerReader
 import io.github.overcuriousity.engram.core.sync.Sync
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +39,23 @@ class Engram private constructor(val app: Context, versionName: String) {
         set(v) = prefs.edit().putBoolean("place", v).apply()
 
     internal fun transport(): Transport? = store.current.value?.let { Transport(it, userAgent) }
+
+    private val server = ServerReader(
+        transport = { transport() },
+        dao = db.cacheDao(),
+        onRefused = { refused.value = true },
+        onPinMismatch = { pinMismatch.value = it },
+    )
+
+    /**
+     * Where every screen gets what it shows. Typed as the interface on
+     * purpose: this line is where a self-contained app chooses its on-device
+     * reader instead, and nothing outside this class can tell the difference.
+     */
+    val reader: Reader = server
+
+    /** Housekeeping the app runs once when it opens: what has not been current for a month goes. */
+    suspend fun prune() = server.prune()
     internal fun drainer(): Drainer? =
         transport()?.let { Drainer(outbox, it, { ZoneId.systemDefault().id }, System::currentTimeMillis) }
 
@@ -57,6 +76,10 @@ class Engram private constructor(val app: Context, versionName: String) {
     suspend fun unpair() {
         Sync.cancel(app)
         push.onUnregistered()
+        // What was read from this server leaves with it. The outbox does not:
+        // what is owed stays owed, and a re-pair delivers it.
+        server.forget()
+        db.askedDao().clear()
         store.clear()
         refused.value = false
         pinMismatch.value = null
