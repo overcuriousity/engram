@@ -1,6 +1,9 @@
 package io.github.overcuriousity.engram.core
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -30,6 +33,9 @@ class PinMismatch(val expected: String, val served: String) :
     IOException("pinned $expected, served $served")
 
 data class Answer(val status: Int, val body: String)
+
+/** A read's answer. `304` carries no body and the tag that was sent. */
+internal data class Got(val status: Int, val body: String, val etag: String?)
 
 /** What a file whose declared type does not parse is sent as. */
 private val OCTET_STREAM = "application/octet-stream".toMediaType()
@@ -69,17 +75,112 @@ internal class Transport(
             query.forEach { (k, v) -> if (v != null) addQueryParameter(k, v) }
         }.build()
 
+    private fun authed(req: Request): Request =
+        req.newBuilder().header("Authorization", "Bearer ${connection.token}").build()
+
+    // OkHttp's message names the pins it saw; the served one is on its second
+    // line. Good enough for a screen that only has to be loud.
+    private fun mismatch(e: SSLPeerUnverifiedException) =
+        PinMismatch(connection.pin ?: "", e.message?.lines()?.getOrNull(1)?.trim() ?: "?")
+
     private suspend fun send(req: Request): Answer = withContext(Dispatchers.IO) {
-        val authed = req.newBuilder().header("Authorization", "Bearer ${connection.token}").build()
         try {
-            client.newCall(authed).execute().use { res ->
+            client.newCall(authed(req)).execute().use { res ->
                 if (res.code == 401) throw Refused()
                 Answer(res.code, res.body.string())
             }
         } catch (e: SSLPeerUnverifiedException) {
-            // OkHttp's message names the pins it saw; the served one is on its
-            // second line. Good enough for a screen that only has to be loud.
-            throw PinMismatch(connection.pin ?: "", e.message?.lines()?.getOrNull(1)?.trim() ?: "?")
+            throw mismatch(e)
+        }
+    }
+
+    /**
+     * A read, revalidating when `etag` is what was held. Every JSON read on the
+     * server answers a tag and honours `If-None-Match`; a `304` costs a round
+     * trip and no body, which is the whole reason the cache keeps tags.
+     */
+    suspend fun get(path: String, query: Map<String, String?> = emptyMap(), etag: String? = null): Got =
+        withContext(Dispatchers.IO) {
+            val req = Request.Builder().url(url(path, query)).get()
+                .apply { if (etag != null) header("If-None-Match", etag) }
+                .build()
+            try {
+                client.newCall(authed(req)).execute().use { res ->
+                    if (res.code == 401) throw Refused()
+                    if (res.code == 304) Got(304, "", etag) else Got(res.code, res.body.string(), res.header("ETag"))
+                }
+            } catch (e: SSLPeerUnverifiedException) {
+                throw mismatch(e)
+            }
+        }
+
+    /** A POST whose answer is data rather than an outcome — the offer. Not a write the device owes. */
+    suspend fun post(path: String, json: String): Answer =
+        send(Request.Builder().url(url(path)).post(jsonBody(json)).build())
+
+    // An answer may think for longer than any read timeout worth having on an
+    // ordinary call; the stream's own silence is bounded by the server's
+    // keep-alive comments, and by the person leaving the screen.
+    private val streaming: OkHttpClient by lazy {
+        this.client.newBuilder().readTimeout(0, TimeUnit.SECONDS).build()
+    }
+
+    /**
+     * A POST that answers as server-sent events, read by hand: `event:` names
+     * the frame, `data:` lines join with a newline, a blank line dispatches,
+     * and a line opening with `:` is a comment the server keeps the socket
+     * warm with. Returns the status; an answer that is not a stream dispatches
+     * nothing, and its status is the caller's to put into words.
+     *
+     * Cancelling the caller cancels the call. A blocked socket read does not
+     * notice a coroutine being cancelled, and an ask nobody is reading goes on
+     * holding the server's lane until its timeout — so a watcher closes the
+     * socket, and the read fails out from under the loop.
+     */
+    suspend fun stream(
+        path: String,
+        query: Map<String, String?>,
+        json: String,
+        onFrame: suspend (event: String, data: String) -> Unit,
+    ): Int = coroutineScope {
+        val req = Request.Builder().url(url(path, query)).post(jsonBody(json))
+            .header("Accept", "text/event-stream").build()
+        val call = streaming.newCall(authed(req))
+        val watcher = launch { try { awaitCancellation() } finally { call.cancel() } }
+        try {
+            withContext(Dispatchers.IO) {
+                try {
+                    call.execute().use { res ->
+                        if (res.code == 401) throw Refused()
+                        if (!res.isSuccessful) return@use res.code
+                        val source = res.body.source()
+                        var event = "message"
+                        val data = StringBuilder()
+                        var has = false
+                        while (true) {
+                            val line = source.readUtf8Line() ?: break
+                            when {
+                                line.isEmpty() -> {
+                                    if (has) onFrame(event, data.toString())
+                                    event = "message"; data.setLength(0); has = false
+                                }
+                                line.startsWith(":") -> {}
+                                line.startsWith("event:") -> event = line.substring(6).trim()
+                                line.startsWith("data:") -> {
+                                    if (has) data.append('\n')
+                                    data.append(line.substring(5).removePrefix(" "))
+                                    has = true
+                                }
+                            }
+                        }
+                        res.code
+                    }
+                } catch (e: SSLPeerUnverifiedException) {
+                    throw mismatch(e)
+                }
+            }
+        } finally {
+            watcher.cancel()
         }
     }
 

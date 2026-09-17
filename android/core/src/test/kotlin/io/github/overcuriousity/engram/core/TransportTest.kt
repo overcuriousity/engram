@@ -75,4 +75,58 @@ class TransportTest {
         server.enqueue(MockResponse(code = 200, body = """{"public_key":"BKEY"}"""))
         assertEquals("BKEY", t.vapid())
     }
+
+    // ── Reads ────────────────────────────────────────────────────────────────
+
+    @Test fun aReadReturnsItsTagAndSendsItBack() = runTest {
+        server.enqueue(MockResponse.Builder().code(200).body("""{"items":[]}""").addHeader("ETag", "\"abc\"").build())
+        server.enqueue(MockResponse(code = 304))
+        val first = t.get("/api/v1/corpora", mapOf("limit" to "2", "after" to null))
+        assertEquals(Got(200, """{"items":[]}""", "\"abc\""), first)
+        assertEquals("/api/v1/corpora?limit=2", server.takeRequest().target)
+
+        val again = t.get("/api/v1/corpora", mapOf("limit" to "2"), etag = first.etag)
+        assertEquals(304, again.status)
+        assertEquals("", again.body)
+        assertEquals("\"abc\"", server.takeRequest().headers["If-None-Match"])
+    }
+
+    @Test fun aReadRefusedIsRefused() = runTest {
+        server.enqueue(MockResponse(code = 401))
+        try { t.get("/api/v1/status"); fail() } catch (e: Refused) {}
+    }
+
+    // ── The stream ───────────────────────────────────────────────────────────
+
+    @Test fun framesArriveInOrderWithCommentsDroppedAndDataJoined() = runTest {
+        val sse = ": keep-alive\n\n" +
+            "event: token\ndata: {\"text\":\"a\"}\n\n" +
+            "event: token\ndata: line one\ndata: line two\n\n" +
+            "event: done\ndata: {}\n\n"
+        server.enqueue(MockResponse.Builder().code(200).addHeader("Content-Type", "text/event-stream").body(sse).build())
+        val seen = mutableListOf<Pair<String, String>>()
+        val status = t.stream("/api/v1/ask/stream", mapOf("door" to "android"), """{"q":"why"}""") { e, d -> seen += e to d }
+        assertEquals(200, status)
+        assertEquals(
+            listOf("token" to """{"text":"a"}""", "token" to "line one\nline two", "done" to "{}"),
+            seen,
+        )
+        val r = server.takeRequest()
+        assertEquals("POST", r.method)
+        assertEquals("/api/v1/ask/stream?door=android", r.target)
+        assertEquals("Bearer engram_tok", r.headers["Authorization"])
+        assertEquals("""{"q":"why"}""", r.body!!.utf8())
+    }
+
+    @Test fun aStreamThatIsNotOneIsItsStatusAndNoFrames() = runTest {
+        server.enqueue(MockResponse(code = 502, body = """{"error":"inference[ask]: down"}"""))
+        var frames = 0
+        assertEquals(502, t.stream("/api/v1/ask/stream", emptyMap(), "{}") { _, _ -> frames++ })
+        assertEquals(0, frames)
+    }
+
+    @Test fun aStreamRefusedIsRefused() = runTest {
+        server.enqueue(MockResponse(code = 401))
+        try { t.stream("/api/v1/ask/stream", emptyMap(), "{}") { _, _ -> }; fail() } catch (e: Refused) {}
+    }
 }
