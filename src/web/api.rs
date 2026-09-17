@@ -1512,6 +1512,59 @@ async fn get_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<Ar
     }))
 }
 
+/// How an artifact came to exist: what it was written from, nested by
+/// generation, and what it replaced without being written from it.
+///
+/// A sub-resource rather than a key on `GET /artifacts/{id}`: that door is the
+/// cheap one and says so, a tree is up to two hundred reads, and the two
+/// revalidate on their own. Reading a tree is not opening an artifact, so
+/// nothing is recorded here.
+///
+/// An artifact with no history answers the empty tree, not a 404 — it exists,
+/// and "written from nothing, replaced nothing" is a true thing to say about
+/// it. `truncated` crosses for the reason it is on the page: a tree that
+/// quietly stops reads as a complete history.
+async fn artifact_lineage(
+    tenant: Tenant,
+    Path(id): Path<String>,
+) -> Result<Json<crate::web::lineage_view::Lineage>> {
+    tenant.core.store.get_artifact(&id).await?;
+    Ok(Json(
+        crate::web::lineage_view::build(&tenant.core.store, &id).await?,
+    ))
+}
+
+/// One earlier wording of an artifact.
+#[derive(serde::Serialize)]
+pub struct VersionRow {
+    pub n: i64,
+    pub title: Option<String>,
+    pub text: String,
+    pub caveats: Vec<String>,
+    pub created_at: i64,
+}
+
+/// The wordings an artifact has had, oldest first. Read-only: putting one back
+/// is a decision, and lives with the other decisions.
+async fn artifact_versions(
+    tenant: Tenant,
+    Path(id): Path<String>,
+) -> Result<Json<Page<VersionRow>>> {
+    tenant.core.store.get_artifact(&id).await?;
+    let rows = tenant.core.store.versions_of(&id).await?;
+    Ok(Json(Page::whole(
+        rows.into_iter()
+            .map(|v| VersionRow {
+                n: v.n,
+                title: v.title,
+                text: v.text,
+                caveats: v.caveats,
+                created_at: v.created_at,
+            })
+            .collect(),
+    )))
+}
+
 async fn patch_artifact(
     tenant: Tenant,
     Path(cid): Path<String>,
@@ -1909,6 +1962,8 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
                 .patch(patch_artifact)
                 .delete(delete_artifact),
         )
+        .route("/artifacts/{id}/lineage", get(artifact_lineage))
+        .route("/artifacts/{id}/versions", get(artifact_versions))
         .route("/vectors/sample", get(crate::web::vbg::sample))
         .route("/status", get(status))
         .route("/moments", get(list_moments))
