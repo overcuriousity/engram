@@ -2,6 +2,7 @@ package io.github.overcuriousity.engram.doors
 
 import android.content.Context
 import android.media.MediaRecorder
+import android.os.Build
 import java.io.File
 
 /** The microphone door: one recording at a time, to an .m4a the server transcribes. */
@@ -12,7 +13,15 @@ class AudioNote(private val context: Context) {
 
     fun start(): File {
         val f = File.createTempFile("note", ".m4a", context.cacheDir)
-        recorder = MediaRecorder(context).apply {
+        // The constructor taking a Context is API 31; before it there is only
+        // the bare one, deprecated since and the same recorder.
+        val r = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(context)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaRecorder()
+        }
+        recorder = r.apply {
             setAudioSource(MediaRecorder.AudioSource.MIC)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)

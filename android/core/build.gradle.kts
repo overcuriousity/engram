@@ -9,7 +9,7 @@ android {
     namespace = "io.github.overcuriousity.engram.core"
     compileSdk = 37
     defaultConfig {
-        minSdk = 34
+        minSdk = 29
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     // Every launch-time crash this app had was an API newer than minSdk, which

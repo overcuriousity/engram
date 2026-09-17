@@ -33,7 +33,7 @@ android {
     compileSdk = 37
     defaultConfig {
         applicationId = "io.github.overcuriousity.engram"
-        minSdk = 34
+        minSdk = 29
         targetSdk = 37
         versionCode = versionCodeOf(engramVersion)
         versionName = engramVersion
