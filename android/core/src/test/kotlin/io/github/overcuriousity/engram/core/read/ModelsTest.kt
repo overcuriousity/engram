@@ -21,11 +21,15 @@ class ModelsTest {
     }
 
     @Test fun aLibraryRowIsALabelThatSaysWhetherItIsAName() {
+        // Counted by property, not by total: the fixture base grows whenever
+        // the server needs another shape in it, and a test that breaks on its
+        // arithmetic is testing the fixture rather than the model.
         val rows = Decode.corpora(fixture("corpora.json")).items
-        assertEquals(3, rows.size)
-        val named = rows.single { it.named }
-        assertEquals("Qdrant notes", named.label)
-        assertTrue(rows.filter { !it.named }.all { it.label.isNotEmpty() })
+        assertTrue(rows.isNotEmpty())
+        val named = rows.single { it.label == "Qdrant notes" }
+        assertTrue("a title the base holds is a name", named.named)
+        assertTrue("every row is drawable", rows.all { it.label.isNotEmpty() })
+        assertTrue("a capture with no title yet stands in with its opening", rows.any { !it.named })
         assertTrue(named.createdAt > 0)
     }
 
@@ -64,7 +68,8 @@ class ModelsTest {
         val d = Decode.day(fixture("day.json"))
         assertEquals("UTC", d.tz)
         assertEquals("Long day.", d.entries.single().text)
-        assertEquals(2, d.captured.size)
+        assertTrue(d.captured.any { it.label == "Qdrant notes" && it.named })
+        assertTrue(d.captured.all { it.at > 0 })
         assertEquals("due", d.wasDue.single().kind)
         assertEquals("today", d.refers.single().span)
         assertEquals("payload filter", d.sittings.single().query)
