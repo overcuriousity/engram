@@ -1512,6 +1512,75 @@ async fn get_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<Ar
     }))
 }
 
+/// The card the home screen may show, for the situation in the body.
+#[derive(serde::Serialize)]
+pub struct OfferCard {
+    pub artifact_id: String,
+    /// The artifact's name, or — with `named: false` — its snippet standing in.
+    pub label: String,
+    pub named: bool,
+    pub snippet: String,
+    /// The ladder's own word: `pattern`, `similar`, `tentative`, `random`. Not
+    /// a sentence — a client owns its wording — and what `seen` and an open
+    /// send back, so the shown and the open agree about what was offered.
+    pub rung: &'static str,
+    pub slot: Option<i64>,
+    /// How many earlier occasions the offer rests on. Zero on `random`.
+    pub events: i64,
+    /// The signals that decided it, largest first. Empty on `random`.
+    pub blocks: Vec<&'static str>,
+    /// The earlier occasion this one is like, and the zone it happened in.
+    pub at: Option<i64>,
+    pub at_tz: Option<String>,
+}
+
+/// `POST /context` — the situation in, the offer out.
+///
+/// A POST because it carries the bundle and because it writes: the situation
+/// is recorded whether or not anything is offered. So no tag — an offer
+/// belongs to a moment. The body is the bundle itself, the JSON the form
+/// field of `/ui/context` holds, read as text so it is stored as it was sent.
+///
+/// `{"offer": null}` is the ordinary answer, not an error: the faculty off,
+/// nothing learned yet, or nothing a card could say.
+async fn context(tenant: Tenant, bundle: String) -> Json<serde_json::Value> {
+    let offer = crate::web::ui::compute_offer(&tenant, &bundle)
+        .await
+        .map(|(o, snippet)| OfferCard {
+            named: !o.title.is_empty(),
+            label: if o.title.is_empty() {
+                snippet.clone()
+            } else {
+                o.title
+            },
+            artifact_id: o.artifact_id,
+            snippet,
+            rung: o.rung.as_str(),
+            slot: o.slot,
+            events: o.events,
+            blocks: o.blocks,
+            at: o.at,
+            at_tz: o.at_tz,
+        });
+    Json(serde_json::json!({ "offer": offer }))
+}
+
+#[derive(serde::Deserialize)]
+struct SeenBody {
+    artifact_id: String,
+    rung: String,
+    slot: Option<i64>,
+}
+
+/// `POST /context/seen` — the client confirming the card reached the screen.
+/// What writes `recommended_shown`, and so what keeps the hit rate on Ops a
+/// hit rate: a client calls it when the card is on screen and not before.
+/// Always `204`; see `ui::record_seen`.
+async fn context_seen(tenant: Tenant, Json(b): Json<SeenBody>) -> StatusCode {
+    crate::web::ui::record_seen(&tenant, &b.artifact_id, &b.rung, b.slot).await;
+    StatusCode::NO_CONTENT
+}
+
 /// How an artifact came to exist: what it was written from, nested by
 /// generation, and what it replaced without being written from it.
 ///
@@ -1954,6 +2023,8 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/ask/stream", post(ask_stream))
         .route("/resurface", get(resurface))
         .route("/days/{date}", get(crate::web::day::api_day))
+        .route("/context", post(context))
+        .route("/context/seen", post(context_seen))
         .route("/consolidation", get(consolidation))
         .route("/consolidation/stale", get(stale))
         .route(

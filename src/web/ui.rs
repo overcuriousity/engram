@@ -917,22 +917,28 @@ struct ContextForm {
     bundle: String,
 }
 
-/// One endpoint, two jobs: it writes the situation and answers with the
-/// fragment. Recording happens even when nothing is recommended — a base that
-/// has learned nothing yet is exactly the one that most needs its situations
-/// written down.
-async fn context_offer(tenant: Tenant, Form(f): Form<ContextForm>) -> UiResult<Response> {
+/// The offer for this situation and the snippet its card reads, or `None`.
+///
+/// What both doors share — the fragment and `POST /api/v1/context`. One call,
+/// two jobs: it writes the situation and computes the offer. Recording happens
+/// even when nothing is recommended — a base that has learned nothing yet is
+/// exactly the one that most needs its situations written down. And it makes
+/// no offer nobody could read.
+pub(crate) async fn compute_offer(
+    tenant: &Tenant,
+    raw_bundle: &str,
+) -> Option<(crate::core::recommend::Offer, String)> {
     if !tenant.core.recommends() {
-        return Ok(HtmlTemplate(ContextTemplate::default()).into_response());
+        return None;
     }
-    let bundle = crate::core::context::parse_bundle(&f.bundle);
+    let bundle = crate::core::context::parse_bundle(raw_bundle);
     tenant
         .core
-        .record_context_event(&f.bundle, &bundle, Some(&tenant.user.subject));
+        .record_context_event(raw_bundle, &bundle, Some(&tenant.user.subject));
 
     // A recommendation that cannot be computed is not worth a 500: the area is
     // what it was yesterday, which is empty.
-    let offer = tenant
+    let o = tenant
         .core
         .offer(Some(&tenant.user.subject), &bundle)
         .await
@@ -967,16 +973,19 @@ async fn context_offer(tenant: Tenant, Form(f): Form<ContextForm>) -> UiResult<R
     // and is not what this guards: `context_clusters` cascades with the
     // artifact, so a deleted one is dropped where its clusters are read and
     // never reaches a card. See `recommend::tests`.
-    let offer = match offer {
-        Some(o) => {
-            let snippet = match tenant.core.store.get_artifact(&o.artifact_id).await {
-                Ok(c) => markdown::snippet(&c.text, 160),
-                Err(_) => String::new(),
-            };
-            (!o.title.is_empty() || !snippet.is_empty()).then(|| offer_view(o, snippet))
-        }
-        None => None,
+    let o = o?;
+    let snippet = match tenant.core.store.get_artifact(&o.artifact_id).await {
+        Ok(c) => markdown::snippet(&c.text, 160),
+        Err(_) => String::new(),
     };
+    (!o.title.is_empty() || !snippet.is_empty()).then_some((o, snippet))
+}
+
+/// The fragment door onto `compute_offer`.
+async fn context_offer(tenant: Tenant, Form(f): Form<ContextForm>) -> UiResult<Response> {
+    let offer = compute_offer(&tenant, &f.bundle)
+        .await
+        .map(|(o, snippet)| offer_view(o, snippet));
     Ok(HtmlTemplate(ContextTemplate { offer }).into_response())
 }
 
@@ -1001,27 +1010,27 @@ struct SeenForm {
 /// artifact must exist. Neither failure is worth a status code, because
 /// nothing is waiting on the answer.
 async fn context_seen(tenant: Tenant, Form(f): Form<SeenForm>) -> UiResult<Response> {
+    record_seen(&tenant, &f.artifact_id, &f.rung, f.slot).await;
+    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+}
+
+/// The write behind both `seen` doors. Silent on every failure, for the reason
+/// above: nothing is waiting on the answer.
+pub(crate) async fn record_seen(tenant: &Tenant, artifact_id: &str, rung: &str, slot: Option<i64>) {
     use crate::core::recommend::Rung;
-    let Some(rung) = Rung::parse(&f.rung) else {
-        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
+    let Some(rung) = Rung::parse(rung) else {
+        return;
     };
-    if tenant
-        .core
-        .store
-        .get_artifact(&f.artifact_id)
-        .await
-        .is_err()
-    {
-        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
+    if tenant.core.store.get_artifact(artifact_id).await.is_err() {
+        return;
     }
     tenant.core.record_recommendation(
-        &f.artifact_id,
+        artifact_id,
         "recommended_shown",
         rung.as_str(),
-        f.slot,
+        slot,
         Some(&tenant.user.subject),
     );
-    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
 fn offer_view(o: crate::core::recommend::Offer, snippet: String) -> OfferView {
@@ -3589,6 +3598,97 @@ mod tests {
             "{:?}",
             shown[0].detail
         );
+    }
+
+    fn json_post(uri: &str, cookie: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("cookie", cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// The JSON door onto the same offer, held to what the fragment is held
+    /// to: the card names its artifact and its rung, computing it records
+    /// nothing, and `seen` is what writes `recommended_shown`.
+    #[tokio::test]
+    async fn the_json_offer_is_the_fragments_offer_and_seen_is_what_counts_it() {
+        let (app, cookie, store, aid) = app_recommending().await;
+
+        let res = app
+            .clone()
+            .oneshot(json_post("/api/v1/context", &cookie, serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers().get("etag").is_none(),
+            "an offer belongs to a moment; there is nothing to revalidate"
+        );
+        let body = crate::web::test_support::json_of(res).await;
+        assert_eq!(body["offer"]["artifact_id"], aid.as_str(), "{body}");
+        // The ladder's own word, not the fragment's sentence: the client owns
+        // its wording, and `seen` wants this value back verbatim.
+        assert_eq!(body["offer"]["rung"], "random");
+        assert!(body["offer"]["slot"].is_null());
+        assert!(
+            body["offer"]["label"]
+                .as_str()
+                .is_some_and(|l| !l.is_empty())
+        );
+        drain().await;
+        let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+        assert!(!rows.iter().any(|r| r.kind == "recommended_shown"));
+
+        // An unknown rung is a 204 that records nothing.
+        for (rung, expect) in [("confident", 0), ("random", 1)] {
+            let res = app
+                .clone()
+                .oneshot(json_post(
+                    "/api/v1/context/seen",
+                    &cookie,
+                    serde_json::json!({ "artifact_id": aid, "rung": rung }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NO_CONTENT);
+            drain().await;
+            let rows = store.interactions_between(0, i64::MAX).await.unwrap();
+            let shown = rows
+                .iter()
+                .filter(|r| r.kind == "recommended_shown")
+                .count();
+            assert_eq!(shown, expect, "after rung={rung}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_json_door_makes_no_offer_nobody_could_read_and_none_when_off() {
+        let (app, cookie, _aid) =
+            app_with_a_learned_situation_over("![](figure.png)", None, Some("passage")).await;
+        let res = app
+            .oneshot(json_post(
+                "/api/v1/context",
+                &cookie,
+                serde_json::json!({ "tz": "Europe/Berlin" }),
+            ))
+            .await
+            .unwrap();
+        let body = crate::web::test_support::json_of(res).await;
+        assert!(body["offer"].is_null(), "a card around nothing: {body}");
+
+        // The faculty off: the same shape, saying nothing.
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(json_post("/api/v1/context", &cookie, serde_json::json!({})))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = crate::web::test_support::json_of(res).await;
+        assert!(body.get("offer").is_some_and(|o| o.is_null()), "{body}");
     }
 
     #[tokio::test]
