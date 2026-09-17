@@ -223,7 +223,7 @@ async fn plain(
     // here — a search is bounded by `limit`, not paged — so it is not read.
     let mut body: serde_json::Value =
         serde_json::from_str(&body).map_err(|err| Error::Internal(format!("results: {err}")))?;
-    let items = body["items"].take();
+    let items = items_of(&mut body);
     let hits: Vec<SearchResult> = serde_json::from_value(items.clone())
         .map_err(|err| Error::Internal(format!("results: {err}")))?;
     // The rows as the server serialised them, and nothing this client built:
@@ -232,6 +232,19 @@ async fn plain(
     // dropped, which is the one thing this door does take apart — see the
     // print site in `run`.
     Ok((hits, began.elapsed().as_millis(), items.to_string()))
+}
+
+/// The rows out of the list envelope.
+///
+/// `get_mut`, not `body["items"]`: indexing a `Value` by name panics outright
+/// on anything that is not an object or null — and the one body that is not is
+/// an older server's bare array, which is the very skew this door has to
+/// survive. Absent reads as null and fails at the deserialize with the message
+/// the caller is written around, as `status.rs` does for the same skew.
+fn items_of(body: &mut serde_json::Value) -> serde_json::Value {
+    body.get_mut("items")
+        .map(serde_json::Value::take)
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// The form a pipe, a test and a script see.
@@ -386,6 +399,17 @@ pub(crate) mod fixture {
 mod tests {
     use super::*;
     use fixture::hit;
+
+    /// A CLI from this branch against a server that predates the envelope.
+    /// `body["items"]` panicked there — `cannot access key "items" in JSON …`
+    /// — instead of failing as a shape this door does not understand.
+    #[test]
+    fn an_older_servers_bare_array_is_not_a_panic() {
+        let mut bare = serde_json::json!([{ "id": "a" }]);
+        assert!(items_of(&mut bare).is_null());
+        let mut enveloped = serde_json::json!({ "items": [{ "id": "a" }], "next": null });
+        assert_eq!(items_of(&mut enveloped), serde_json::json!([{ "id": "a" }]));
+    }
 
     /// Same budget, same rule, in the form a pipe sees.
     #[test]

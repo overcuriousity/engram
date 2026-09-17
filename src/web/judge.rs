@@ -431,6 +431,7 @@ async fn undo_condensation(
 
 #[cfg(test)]
 mod tests {
+    use crate::store::artifacts::ArtifactStatus;
     use crate::store::pairs::PairState;
     use crate::web::test_support::{app_session_and_core, artifacts, json_of};
     use axum::body::Body;
@@ -944,6 +945,50 @@ mod tests {
                 .unwrap(),
             "and nothing records that a person took it back"
         );
+    }
+
+    /// Hidden twice, returned once — the state a row filed before the two
+    /// guards existed can still be in.
+    ///
+    /// `reactivate` routes a superseded artifact through `unsupersede`, which
+    /// returns before the status write, so this reads like a press that clears
+    /// one hiding and leaves the other. It is not: `set_superseded_by` writes
+    /// `status` in the same UPDATE as `superseded_by`, so clearing the winner
+    /// *is* the status write and the row comes back active whatever it read
+    /// before. Asserted because nothing else says so, and the next reader of
+    /// that early return will draw the same wrong conclusion.
+    #[tokio::test]
+    async fn reactivating_an_artifact_hidden_both_ways_takes_one_press() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
+        // Straight to the store, because both doors refuse to make this state
+        // now: `supersede` refuses a deprecated loser and `deprecate` refuses a
+        // superseded one. Rows filed before those guards existed are still in
+        // live bases, and this is the shape they have.
+        core.deprecate(&ids[0]).await.unwrap();
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+
+        let res = app
+            .oneshot(post(
+                &format!("/api/v1/artifacts/{}/reactivate", ids[0]),
+                &cookie,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let back = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(back.superseded_by.is_none(), "still hidden behind a winner");
+        assert_eq!(
+            back.status,
+            ArtifactStatus::Active,
+            "the deprecation outlived a press that said it returned this to results"
+        );
+        assert!(back.in_results());
     }
 
     #[tokio::test]

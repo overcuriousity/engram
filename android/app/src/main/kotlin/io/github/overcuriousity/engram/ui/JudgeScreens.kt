@@ -126,9 +126,17 @@ fun PairReview(
     modifier: Modifier = Modifier.verticalScroll(rememberScrollState()),
 ) {
     val scope = rememberCoroutineScope()
-    val answered = remember(cards) { mutableStateListOf<Long>() }
-    var undo by remember(cards) { mutableStateOf<Undoable?>(null) }
-    var confirming by remember(cards) { mutableStateOf<PairAnswer?>(null) }
+    // Kept across reads, not keyed on `cards`. A read emits twice — the held
+    // answer, then the server's — and the second is a different object, so
+    // keying on it threw away every answer given while the progress bar was
+    // still up: the pair came back into the deck (its outbox row has not been
+    // delivered, so the server still lists it), could be answered a second
+    // time into a second and possibly contrary write, and the Undo bar for
+    // the first answer was gone. A pair's id is the same across reads, which
+    // is what these hold.
+    val answered = remember { mutableStateListOf<Long>() }
+    var undo by remember { mutableStateOf<Undoable?>(null) }
+    var confirming by remember { mutableStateOf<Confirming?>(null) }
 
     val deck = cards.filter { it.pair.id !in answered }
     val card = deck.firstOrNull()
@@ -191,7 +199,10 @@ fun PairReview(
                 val keeps = card.pair.keeps
                 val proposed = (a == PairAnswer.KeepA && keeps == card.pair.a.id) ||
                     (a == PairAnswer.KeepB && keeps == card.pair.b.id)
-                val press = { if (answerCost(a, card.pair) == null) answer(card, a) else confirming = a }
+                val press = {
+                    if (answerCost(a, card.pair) == null) answer(card, a)
+                    else confirming = Confirming(card.pair.id, a)
+                }
                 if (proposed) {
                     Button(onClick = press) { Text(answerWords(a, card.pair)) }
                 } else {
@@ -200,13 +211,20 @@ fun PairReview(
             }
         }
 
-        confirming?.let { a ->
+        // Only over the card it was raised from. The dialog outlives a read,
+        // and a read that drops the pair underneath it would otherwise put
+        // this question over the next card and answer that one instead.
+        confirming?.takeIf { it.subject == card.pair.id }?.let { (_, a) ->
             AlertDialog(
                 onDismissRequest = { confirming = null },
                 title = { Text(answerWords(a, card.pair)) },
                 text = { Text(answerCost(a, card.pair).orEmpty()) },
                 confirmButton = { TextButton(onClick = { answer(card, a) }) { Text("Do it") } },
-                dismissButton = { TextButton(onClick = { confirming = null }) { Text("Keep both") } },
+                // A cancel word, and no answer's name. This read "Keep both",
+                // which is itself an answer this card admits, so the way out
+                // of the dialog looked like the way to a decision it does not
+                // make.
+                dismissButton = { TextButton(onClick = { confirming = null }) { Text("Cancel") } },
             )
         }
     }
@@ -358,8 +376,12 @@ fun Journal(
     modifier: Modifier = Modifier.verticalScroll(rememberScrollState()),
 ) {
     val scope = rememberCoroutineScope()
-    val answered = remember(rows) { mutableStateListOf<String>() }
-    var undo by remember(rows) { mutableStateOf<Undoable?>(null) }
+    // Kept across reads, as in `PairReview` and for the same reason: `rows`
+    // is a new object on the server's emission, and an answer given during
+    // the held one would otherwise be forgotten and the row answerable twice.
+    // `keyOf` is stable across reads, which is what this holds.
+    val answered = remember { mutableStateListOf<String>() }
+    var undo by remember { mutableStateOf<Undoable?>(null) }
 
     Column(modifier) {
         undo?.let { u ->
@@ -415,6 +437,12 @@ fun Journal(
 
 /** An answer that is on its way and can still be taken back. */
 data class Undoable(val outboxId: String, val subject: Any, val words: String)
+
+/**
+ * A confirmation and the card it was raised from. The pair is named so the
+ * dialog cannot be answered over a card that arrived after it was opened.
+ */
+data class Confirming(val subject: Long, val answer: PairAnswer)
 
 /**
  * The window an outbox row gives for free. It stays until the next answer, and

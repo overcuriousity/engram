@@ -11,7 +11,8 @@ import io.github.overcuriousity.engram.core.read.Hit
 import io.github.overcuriousity.engram.core.read.ServerReader
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonObject
@@ -174,12 +175,20 @@ class Ask internal constructor(
         }
     }
 
-    /** Earlier questions on this server, newest first. Readable without it. */
-    val history: Flow<List<Kept>>
-        get() {
-            val origin = transport()?.connection?.origin ?: return emptyFlow()
-            return dao.recent(origin).map { rows -> rows.mapNotNull(::kept) }
-        }
+    /**
+     * Earlier questions on this server, newest first. Readable without it.
+     *
+     * One flow, built once. As a getter this handed back a new instance on
+     * every read, and a screen collecting it keys the collection on the
+     * instance — so the Room query was torn down and re-subscribed on every
+     * recomposition, which on Ask is every keystroke and every streamed token.
+     * The origin is still read when the flow is collected, not now, so a
+     * collection restarted after a change of server reads the new one.
+     */
+    val history: Flow<List<Kept>> = flow {
+        val origin = transport()?.connection?.origin ?: return@flow
+        emitAll(dao.recent(origin).map { rows -> rows.mapNotNull(::kept) })
+    }
 
     suspend fun kept(question: String): Kept? {
         val origin = transport()?.connection?.origin ?: return null

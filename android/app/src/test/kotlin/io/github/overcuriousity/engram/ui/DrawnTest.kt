@@ -6,6 +6,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import io.github.overcuriousity.engram.core.read.Hit
 import io.github.overcuriousity.engram.core.read.Pair
 import io.github.overcuriousity.engram.core.read.PairSide
@@ -117,6 +118,58 @@ class DrawnTest {
         compose.onNodeWithText("""Keep "Timeout 0"""").assertExists()
         compose.onNodeWithText("Discard both").assertExists()
         compose.onNodeWithText("Dismiss").assertExists()
+    }
+
+    /**
+     * A read emits twice — the held answer, then the server's — and the second
+     * is a different object holding the same pair. An answer given while the
+     * progress bar was still up used to be thrown away with it: the pair came
+     * back into the deck, could be answered again into a second and possibly
+     * contrary write, and the Undo bar for the first answer was gone.
+     */
+    @Test fun anAnswerGivenBeforeTheServersReadArrivesIsNotAskedAgain() {
+        val cards = mutableStateOf(listOf(PairCard(pair(), 1)))
+        compose.setContent {
+            EngramTheme {
+                PairReview(
+                    cards = cards.value,
+                    onAnswer = { _, _ -> "row-1" },
+                    onUndo = { true },
+                    onArtifact = {},
+                )
+            }
+        }
+        compose.onNodeWithText("Dismiss").performClick()
+        compose.waitForIdle()
+        // The server's read, landing on the answer: the same pair, a new list.
+        cards.value = listOf(PairCard(pair(), 1))
+        compose.waitForIdle()
+
+        // The card is gone — asserted on its own words, because "Dismiss" is
+        // also what the Undo bar for that answer says.
+        compose.onNodeWithText("the timeout is 30 seconds").assertDoesNotExist()
+        compose.onNodeWithText("Answered").assertExists()
+        // And the way to take it back outlived the read that landed on it.
+        compose.onNodeWithText("Undo").assertExists()
+    }
+
+    /**
+     * The way out of the confirmation is a cancel word and never an answer's
+     * name. It read "Keep both", which is what dismissing the pair does, so
+     * the button that makes no decision looked like the one that makes that
+     * one.
+     */
+    @Test fun theConfirmationIsCancelledByAWordThatNamesNoAnswer() {
+        compose.setContent { review(listOf(PairCard(pair(), 1))) }
+        compose.onNodeWithText("Discard both").performClick()
+        compose.waitForIdle()
+
+        compose.onNodeWithText("Retires both.").assertExists()
+        compose.onNodeWithText("Keep both").assertDoesNotExist()
+        compose.onNodeWithText("Cancel").performClick()
+        compose.waitForIdle()
+        // Nothing was answered: the card is still the one on screen.
+        compose.onNodeWithText("Discard both").assertExists()
     }
 
     @Test fun anUnjudgedPairDrawsTheMeasurementAndNotAFindingNobodyMade() {
