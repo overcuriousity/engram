@@ -28,7 +28,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 #[derive(serde::Deserialize)]
-struct TzQuery {
+pub(crate) struct TzQuery {
     #[serde(default)]
     tz: String,
 }
@@ -57,6 +57,7 @@ pub(crate) struct Line {
 /// could not say whether the label was a name or the opening of the text
 /// standing in for one — see `ui::RowLabel` — and the row is a link and
 /// nothing else, so it needs both.
+#[derive(serde::Serialize)]
 pub(crate) struct Opened {
     pub id: String,
     pub label: String,
@@ -157,13 +158,65 @@ async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> UiResult<Response> {
     .into_response())
 }
 
-async fn page(
-    tenant: Tenant,
-    Path(date): Path<String>,
-    Query(q): Query<TzQuery>,
-) -> UiResult<Response> {
-    let Ok(day) = NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
-        return Err(Error::NotFound.into());
+/// One day, as facts: ids, instants and labels, and nothing that belongs to a
+/// rendering. No `href`, no "14:32" — the HTML page builds those from this,
+/// and the JSON door serialises it as it stands, so the two are one
+/// computation and cannot disagree about what happened on a day.
+#[derive(serde::Serialize)]
+pub(crate) struct Day {
+    pub date: String,
+    pub tz: String,
+    /// The day's `[from, to)` in Unix seconds, in `tz`.
+    pub from: i64,
+    pub to: i64,
+    pub entries: Vec<DayCorpus>,
+    pub captured: Vec<DayCorpus>,
+    pub was_due: Vec<DayMoment>,
+    pub refers: Vec<DayMoment>,
+    pub sittings: Vec<DaySitting>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct DayCorpus {
+    pub id: String,
+    pub label: String,
+    /// Whether `label` is a name somebody gave it — see `ui::RowLabel`.
+    pub named: bool,
+    pub at: i64,
+    /// The whole text. A day is the one list that carries bodies: an entry is
+    /// read on the day page, not behind it.
+    pub text: String,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct DayMoment {
+    pub id: String,
+    pub artifact_id: String,
+    pub label: String,
+    /// Whether `label` is a name somebody gave the artifact.
+    pub named: bool,
+    /// `due` or `event`.
+    pub kind: &'static str,
+    /// `None` for a reminder with no time of its own.
+    pub at: Option<i64>,
+    pub done: bool,
+    pub span: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct DaySitting {
+    pub opened_at: i64,
+    pub closed_at: i64,
+    pub query: String,
+    pub searches: usize,
+    pub opened: Vec<Opened>,
+}
+
+/// What happened on `date`, read in `tz`. `NotFound` for a date that is not
+/// one, which is what both doors answer it with.
+pub(crate) async fn facts(tenant: &Tenant, date: &str, tz: Tz) -> Result<Day, Error> {
+    let Ok(day) = NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return Err(Error::NotFound);
     };
     // Round-tripped through the parse, the way `entry` does it and for the
     // same reason: chrono reads `%Y-%m-%d` leniently, so `/ui/day/2026-8-30`
@@ -173,13 +226,8 @@ async fn page(
     // on this day" for a day that has entries, over a form that then posted
     // the non-canonical segment back.
     let date = day.format("%Y-%m-%d").to_string();
-    let tz = zone(Some(&q.tz));
-    // The zone as the zone table spells it, never as the query string spelled
-    // it: it goes back out on every `prev`/`next` href and in the entry form's
-    // hidden field, and `due.rs::render` normalises for the same reason.
-    let tz_name = tz.name().to_string();
     let Some((from, to)) = bounds(day, tz) else {
-        return Err(Error::NotFound.into());
+        return Err(Error::NotFound);
     };
     let store = &tenant.core.store;
 
@@ -196,38 +244,39 @@ async fn page(
         if c.metadata["day"].as_str().is_some_and(|d| d != date) {
             continue;
         }
-        let line = Line {
+        let journal = c.origin == ORIGIN_JOURNAL;
+        let row = DayCorpus {
             id: c.id.clone(),
-            href: format!("/ui/corpora/{}", c.id),
+            named: c.title_hint.is_some(),
             label: crate::web::ui::corpus_label(c.title_hint.clone(), &c.raw_text, &c.origin),
-            when: hm(c.created_at, tz),
-            detail: c.raw_text.clone(),
+            at: c.created_at,
+            text: c.raw_text,
         };
-        if c.origin == ORIGIN_JOURNAL {
-            entries.push(line)
+        if journal {
+            entries.push(row)
         } else {
-            captured.push(line)
+            captured.push(row)
         }
     }
 
     let mut was_due = vec![];
     let mut refers = vec![];
     for m in store.moments_between(from, to).await? {
-        let detail = match m.moment.kind {
-            Kind::Due if m.moment.done_at.is_some() => "done".to_string(),
-            Kind::Due => "still open".to_string(),
-            Kind::Event => m.moment.span.clone().unwrap_or_default(),
-        };
-        let line = Line {
+        let due = matches!(m.moment.kind, Kind::Due);
+        let row = DayMoment {
             id: m.moment.id.clone(),
-            href: format!("/ui/artifacts/{}", m.moment.artifact_id),
+            artifact_id: m.moment.artifact_id.clone(),
             label: m.title,
-            when: hm(m.moment.at.unwrap_or(from), tz),
-            detail,
+            named: m.named,
+            kind: if due { "due" } else { "event" },
+            at: m.moment.at,
+            done: m.moment.done_at.is_some(),
+            span: m.moment.span.clone(),
         };
-        match m.moment.kind {
-            Kind::Due => was_due.push(line),
-            Kind::Event => refers.push(line),
+        if due {
+            was_due.push(row)
+        } else {
+            refers.push(row)
         }
     }
 
@@ -251,13 +300,85 @@ async fn page(
                 });
             }
         }
-        sittings.push(Sitting {
-            span: format!("{}–{}", hm(p.opened_at, tz), hm(end, tz)),
+        sittings.push(DaySitting {
+            opened_at: p.opened_at,
+            closed_at: end,
             query: p.queries.first().cloned().unwrap_or_default(),
             searches: n,
             opened,
         });
     }
+
+    Ok(Day {
+        date,
+        tz: tz.name().to_string(),
+        from,
+        to,
+        entries,
+        captured,
+        was_due,
+        refers,
+        sittings,
+    })
+}
+
+/// The JSON door onto the same day. `GET /api/v1/days/{date}?tz=`.
+pub(crate) async fn api_day(
+    tenant: Tenant,
+    Path(date): Path<String>,
+    Query(q): Query<TzQuery>,
+) -> crate::error::Result<axum::Json<Day>> {
+    Ok(axum::Json(facts(&tenant, &date, zone(Some(&q.tz))).await?))
+}
+
+async fn page(
+    tenant: Tenant,
+    Path(date): Path<String>,
+    Query(q): Query<TzQuery>,
+) -> UiResult<Response> {
+    let tz = zone(Some(&q.tz));
+    let d = facts(&tenant, &date, tz).await?;
+    // `facts` answered, so the date parses; canonical, because `facts` made it so.
+    let day = NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").map_err(|_| Error::NotFound)?;
+    let from = d.from;
+    // The zone as the zone table spells it, never as the query string spelled
+    // it: it goes back out on every `prev`/`next` href and in the entry form's
+    // hidden field, and `due.rs::render` normalises for the same reason.
+    let tz_name = d.tz;
+    let date = d.date;
+
+    let corpus_line = |c: DayCorpus| Line {
+        href: format!("/ui/corpora/{}", c.id),
+        id: c.id,
+        label: c.label,
+        when: hm(c.at, tz),
+        detail: c.text,
+    };
+    let moment_line = |m: DayMoment| Line {
+        href: format!("/ui/artifacts/{}", m.artifact_id),
+        id: m.id,
+        label: m.label,
+        when: hm(m.at.unwrap_or(from), tz),
+        detail: match (m.kind, m.done) {
+            ("due", true) => "done".to_string(),
+            ("due", false) => "still open".to_string(),
+            _ => m.span.unwrap_or_default(),
+        },
+    };
+    let entries: Vec<Line> = d.entries.into_iter().map(corpus_line).collect();
+    let captured: Vec<Line> = d.captured.into_iter().map(corpus_line).collect();
+    let was_due: Vec<Line> = d.was_due.into_iter().map(moment_line).collect();
+    let refers: Vec<Line> = d.refers.into_iter().map(moment_line).collect();
+    let sittings: Vec<Sitting> = d
+        .sittings
+        .into_iter()
+        .map(|s| Sitting {
+            span: format!("{}–{}", hm(s.opened_at, tz), hm(s.closed_at, tz)),
+            query: s.query,
+            searches: s.searches,
+            opened: s.opened,
+        })
+        .collect();
 
     let t = DayTemplate {
         prev: day
@@ -679,6 +800,56 @@ mod tests {
         );
     }
 
+    /// The JSON door, for the same three things the page is held to: an entry
+    /// belongs to the day it was written about, a lenient spelling names the
+    /// same day, and a day that is not a date is a 404.
+    #[tokio::test]
+    async fn the_json_day_holds_to_what_the_page_holds_to() {
+        let core = test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        app.clone()
+            .oneshot(form(
+                "/ui/day/2026-08-28/entry",
+                &cookie,
+                "text=Long+day.&tz=Europe/Berlin",
+            ))
+            .await
+            .unwrap();
+        for spelled in ["2026-08-28", "2026-8-28"] {
+            let day = crate::web::test_support::json_of(
+                app.clone()
+                    .oneshot(get(
+                        &format!("/api/v1/days/{spelled}?tz=Europe/Berlin"),
+                        &cookie,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(day["date"], "2026-08-28", "asked as {spelled}");
+            assert_eq!(day["entries"][0]["text"], "Long day.", "asked as {spelled}");
+            assert!(day["captured"].as_array().unwrap().is_empty());
+        }
+        // Written today about the 28th: today's day must not list it.
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let day = crate::web::test_support::json_of(
+            app.clone()
+                .oneshot(get(&format!("/api/v1/days/{today}?tz=UTC"), &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(day["entries"].as_array().unwrap().is_empty(), "{day}");
+
+        let res = app
+            .oneshot(get("/api/v1/days/yesterday", &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let err = crate::web::test_support::json_of(res).await;
+        assert_eq!(err["error"], "not found", "one error vocabulary");
+    }
+
     /// A sitting names what it opened, and nothing else: the row is a comma
     /// list of links. A passage there was listed under the heading of the
     /// section it was cut from, and a note under the word "untitled".
@@ -742,6 +913,7 @@ mod tests {
             .unwrap()
             .timestamp();
         core.clock = Clock::Fixed(day + 10 * 3_600);
+        let day_at = |hour: i64| day + hour * 3_600;
         let out = core
             .ingest_capture(Capture::new("Zahnarzt 12.9.", "ui"))
             .await
@@ -805,6 +977,7 @@ mod tests {
             .unwrap();
         let (app, cookie) = app_with_cookie(core).await;
         let res = app
+            .clone()
             .oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie))
             .await
             .unwrap();
@@ -821,6 +994,32 @@ mod tests {
         ] {
             assert!(html.contains(s), "{s}");
         }
+
+        // The other door onto the same day, over the same fixture: two doors
+        // onto one fact that disagree are worse than one door.
+        let res = app
+            .oneshot(get("/api/v1/days/2026-08-30?tz=Europe/Berlin", &cookie))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().contains_key("etag"), "a read revalidates");
+        let day = crate::web::test_support::json_of(res).await;
+        assert_eq!(day["date"], "2026-08-30");
+        assert_eq!(day["tz"], "Europe/Berlin");
+        assert_eq!(day["from"], from);
+        assert_eq!(day["captured"][0]["id"], out.id.as_str());
+        assert_eq!(day["captured"][0]["at"], from + 3_600);
+        assert!(day["entries"].as_array().unwrap().is_empty());
+        assert_eq!(day["was_due"][0]["kind"], "due");
+        assert_eq!(day["was_due"][0]["done"], false);
+        assert_eq!(day["was_due"][0]["artifact_id"], aid.as_str());
+        assert_eq!(day["was_due"][0]["at"], day_at(9));
+        assert_eq!(day["refers"][0]["span"], "12.9.");
+        assert_eq!(day["sittings"][0]["query"], "qdrant payload filter");
+        assert_eq!(day["sittings"][0]["opened"][0]["id"], aid.as_str());
+        // Facts, and nothing a rendering made of them.
+        let text = day.to_string();
+        assert!(!text.contains("/ui/"), "an href crossed the API: {text}");
     }
 
     /// The journal is the door most likely to be written in the writer's own

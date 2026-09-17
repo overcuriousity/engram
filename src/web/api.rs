@@ -1900,6 +1900,7 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/ask", post(ask))
         .route("/ask/stream", post(ask_stream))
         .route("/resurface", get(resurface))
+        .route("/days/{date}", get(crate::web::day::api_day))
         .route("/consolidation", get(consolidation))
         .route("/consolidation/stale", get(stale))
         .route(
