@@ -13,6 +13,7 @@ pub mod insights;
 pub mod lineage_view;
 pub mod markdown;
 pub mod ops;
+pub mod page;
 pub mod pair;
 pub mod push;
 pub mod settings;

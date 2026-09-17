@@ -154,6 +154,25 @@ pub struct Corpus {
     pub metadata: serde_json::Value,
 }
 
+/// A corpus as a list shows it: every fact of the row except its text.
+#[derive(Debug, Clone)]
+pub struct CorpusSummary {
+    pub id: String,
+    /// The first 400 characters of `raw_text`, to label a row with no title.
+    pub opening: String,
+    pub origin: String,
+    pub title_hint: Option<String>,
+    pub status: CorpusStatus,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub coverage: Option<f64>,
+    pub near_dupe_of: Option<String>,
+    pub near_dupe_score: Option<f64>,
+    pub source_url: Option<String>,
+    pub restored_at: Option<i64>,
+    pub metadata: serde_json::Value,
+}
+
 /// A stored corpus that a new capture looks like.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NearDuplicate {
@@ -735,6 +754,60 @@ impl Store {
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows.iter().map(row_to_corpus).collect())
+    }
+
+    /// One page of the list, newest first, without the text.
+    ///
+    /// `raw_text` is never selected: for a captured book it is the book, and a
+    /// list of two hundred rows was two hundred books to say their names.
+    /// `opening` is enough of it to label a row that has no title.
+    ///
+    /// `before` is the last row of the previous page. A keyset rather than an
+    /// offset because this list grows at its head — see `web::page::Cursor`.
+    pub async fn list_corpus_summaries(
+        &self,
+        before: Option<&(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<CorpusSummary>> {
+        let (ts, id) = match before {
+            Some((ts, id)) => (*ts, id.as_str()),
+            None => (i64::MAX, ""),
+        };
+        let rows = sqlx::query(
+            "SELECT id, substr(raw_text, 1, 400) AS opening, origin, title_hint, status,
+                    created_at, updated_at, coverage, near_dupe_of, near_dupe_score,
+                    source_url, restored_at, metadata
+               FROM corpora
+              WHERE created_at < ? OR (created_at = ? AND id < ?)
+              ORDER BY created_at DESC, id DESC LIMIT ?",
+        )
+        .bind(ts)
+        .bind(ts)
+        .bind(id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| CorpusSummary {
+                id: r.get("id"),
+                opening: r.get("opening"),
+                origin: r.get("origin"),
+                title_hint: r.get("title_hint"),
+                status: CorpusStatus::parse(r.get::<String, _>("status").as_str()),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                coverage: r.get("coverage"),
+                near_dupe_of: r.get("near_dupe_of"),
+                near_dupe_score: r.get("near_dupe_score"),
+                source_url: r.get("source_url"),
+                restored_at: r.get("restored_at"),
+                metadata: r
+                    .get::<Option<String>, _>("metadata")
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_else(|| serde_json::json!({})),
+            })
+            .collect())
     }
 
     /// Everything captured in a span of time, oldest first — a day, read in

@@ -3,6 +3,7 @@ use crate::core::search::SearchQuery;
 use crate::error::{Error, Result};
 use crate::store::jobs::{FailedJob, Stage};
 use crate::tenants::Tenant;
+use crate::web::page::{Cursor, Page};
 use crate::web::state::AppState;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -1000,24 +1001,78 @@ async fn get_image(
 pub struct ListParams {
     #[serde(default = "default_limit")]
     pub limit: i64,
-    #[serde(default)]
-    pub offset: i64,
+    /// The `next` of the page before. See `web::page`.
+    pub after: Option<String>,
 }
 fn default_limit() -> i64 {
     50
 }
 
+/// One row of the corpus list: the row's facts and a label, and not its text.
+///
+/// Lists carry summaries and details carry bodies. `GET /corpora/{id}` is
+/// where `raw_text` is read.
+#[derive(serde::Serialize)]
+pub struct CorpusRow {
+    pub id: String,
+    pub origin: String,
+    /// What to call the row, and whether that is a name somebody gave it or
+    /// the opening of its text standing in for one — see `ui::RowLabel`.
+    pub label: String,
+    pub named: bool,
+    pub status: crate::store::corpora::CorpusStatus,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub coverage: Option<f64>,
+    pub near_dupe_of: Option<String>,
+    pub near_dupe_score: Option<f64>,
+    pub source_url: Option<String>,
+    pub restored_at: Option<i64>,
+    pub metadata: serde_json::Value,
+}
+
+impl From<crate::store::corpora::CorpusSummary> for CorpusRow {
+    fn from(c: crate::store::corpora::CorpusSummary) -> Self {
+        CorpusRow {
+            named: c.title_hint.is_some(),
+            label: crate::web::ui::corpus_label(c.title_hint, &c.opening, &c.origin),
+            id: c.id,
+            origin: c.origin,
+            status: c.status,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+            coverage: c.coverage,
+            near_dupe_of: c.near_dupe_of,
+            near_dupe_score: c.near_dupe_score,
+            source_url: c.source_url,
+            restored_at: c.restored_at,
+            metadata: c.metadata,
+        }
+    }
+}
+
 async fn list_corpora(
     tenant: Tenant,
     Query(p): Query<ListParams>,
-) -> Result<Json<Vec<crate::store::corpora::Corpus>>> {
-    Ok(Json(
-        tenant
-            .core
-            .store
-            .list_corpora(p.limit.clamp(1, 200), p.offset.max(0))
-            .await?,
-    ))
+) -> Result<Json<Page<CorpusRow>>> {
+    let limit = p.limit.clamp(1, 200);
+    let before = match p.after.as_deref() {
+        Some(a) => {
+            let c = Cursor::decode(a)?;
+            Some((c.at, c.id))
+        }
+        None => None,
+    };
+    let rows = tenant
+        .core
+        .store
+        .list_corpus_summaries(before.as_ref(), limit + 1)
+        .await?;
+    let rows: Vec<CorpusRow> = rows.into_iter().map(CorpusRow::from).collect();
+    Ok(Json(Page::of(rows, limit as usize, |r| Cursor {
+        at: r.created_at,
+        id: r.id.clone(),
+    })))
 }
 
 #[derive(serde::Serialize)]
@@ -4948,6 +5003,97 @@ mod patch_tests {
                 &token,
                 serde_json::json!({ "text": "   " }),
             ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_corpus_list_is_an_envelope_of_rows_without_their_text() {
+        let (app, token, core) = app_token_and_core().await;
+        core.store
+            .insert_corpus("the whole of a very long book", "web", Some("A book"))
+            .await
+            .unwrap();
+        core.store
+            .insert_corpus("no title, only an opening", "web", None)
+            .await
+            .unwrap();
+
+        let body = json_of(
+            app.oneshot(bearer_get("/api/v1/corpora", &token))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let items = body["items"].as_array().expect("items is a list");
+        assert_eq!(items.len(), 2);
+        assert!(body["next"].is_null(), "two rows are one page: {body}");
+        for row in items {
+            assert!(row.get("raw_text").is_none(), "a list row carried its text");
+        }
+        let named = items.iter().find(|r| r["label"] == "A book").unwrap();
+        assert_eq!(named["named"], true);
+        let unnamed = items.iter().find(|r| r["named"] == false).unwrap();
+        assert_eq!(unnamed["label"], "no title, only an opening");
+    }
+
+    /// The reason the cursor is a keyset: a capture landing between two page
+    /// reads is the ordinary case on a phone, and it must not repeat a row.
+    #[tokio::test]
+    async fn a_capture_between_two_pages_neither_repeats_nor_skips_a_row() {
+        let (app, token, core) = app_token_and_core().await;
+        let mut ids = vec![];
+        for n in 0..3 {
+            ids.push(
+                core.store
+                    .insert_corpus(&format!("text {n}"), "web", None)
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        let first = json_of(
+            app.clone()
+                .oneshot(bearer_get("/api/v1/corpora?limit=2", &token))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let next = first["next"].as_str().expect("a second page").to_string();
+
+        core.store
+            .insert_corpus("landed between", "web", None)
+            .await
+            .unwrap();
+
+        let second = json_of(
+            app.oneshot(bearer_get(
+                &format!("/api/v1/corpora?limit=2&after={next}"),
+                &token,
+            ))
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert!(second["next"].is_null());
+        let mut seen: Vec<String> = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["items"].as_array().unwrap())
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
+        seen.sort();
+        ids.sort();
+        assert_eq!(seen, ids, "every original row once, and only those");
+    }
+
+    #[tokio::test]
+    async fn a_cursor_this_server_did_not_issue_is_a_400() {
+        let (app, token, _core) = app_token_and_core().await;
+        let res = app
+            .oneshot(bearer_get("/api/v1/corpora?after=not-a-cursor", &token))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
