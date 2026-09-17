@@ -18,7 +18,8 @@ never changes the shape. A cursor this server did not issue is a `400`.
 **2. Lists carry summaries; details carry bodies.** A row of `GET /corpora`
 has no `raw_text`; `GET /corpora/{id}` has it. Search rows keep `text`, because
 the passage is the result. A day keeps its entries' text, because an entry is
-read on the day.
+read on the day — and only its entries': a captured row on a day is a link,
+and the document behind it may be a book.
 
 **3. Time is Unix seconds, identity is an id, and a label says whether it is a
 name.** No `href`, no preformatted clock time: a client builds its own links
@@ -71,7 +72,7 @@ the undo is on this list too.
 
 | Route | Answers |
 |---|---|
-| `GET /pairs` | Open duplicate pairs, clustered: `{ members, pairs: [...] }`. One artifact against two others is one question, not two cards. |
+| `GET /pairs` | Open duplicate pairs, clustered: `{ members, pairs: [...] }`. One artifact against two others is one question, not two cards. Bounded, so `next` is null; `more` beside `items` is how many are waiting beyond the ones listed. |
 | `POST /pairs/{id}/supersede` | Body `{"keep": "<artifact id>"}`, or none for the side the judge proposed. Keeps that one and hides the other behind it. `204`. |
 | `POST /pairs/{id}/synthesize` | Ask for one artifact written from both. Queued, not written here: the writing is a model call. `204`. |
 | `POST /pairs/{id}/discard` | Retire both. `204`. |
@@ -103,6 +104,12 @@ the whole of what says which answers the row admits — each of them is a route
 above. `subject_id` is what those routes name: a corpus for `parked`, the
 artifact for the rest. A `kind` a client has never heard of should draw no
 buttons rather than guess; that is what lets this list grow a seventh.
+
+One subject can appear under two kinds, because two of the seven questions can
+be true of it at once: an artifact a model wrote that is also overdue for
+verification is a `generated` row and an `unverified` one, and the two ask for
+different answers. A row's identity is `kind` and `subject_id` together, never
+`subject_id` alone. Under one `kind` a subject appears once.
 
 **`GET /insights` has no tuning in it at all.** Applying a tuning
 recommendation writes `config.toml`, and that press stays on the web where the

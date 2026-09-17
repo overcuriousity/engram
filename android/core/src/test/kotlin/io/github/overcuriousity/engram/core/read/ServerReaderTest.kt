@@ -135,6 +135,59 @@ class ServerReaderTest {
         assertEquals("unreadable answer", last.error)
     }
 
+    /**
+     * An app update can tighten a model against a body the previous build
+     * cached — a field becomes required, a string becomes an enum. Sending the
+     * tag anyway got a `304` back, and the row said "fresh" with nothing in
+     * it and no error: a blank screen every retry reproduced, until the
+     * thirty-day prune.
+     */
+    @Test fun aHeldBodyThisBuildCannotReadIsDroppedAndAskedForAgainWholly() = runTest {
+        server.enqueue(ok("one", "\"t1\""))
+        reader.read(req) { it }.toList()
+        server.takeRequest()
+        server.enqueue(ok("two", "\"t2\""))
+
+        // The decode this build would do: it refuses what was held.
+        val last = reader.read(req) { if (it == "one") error("no longer readable") else it }.toList().last()
+
+        assertNull("the tag went back out, so the server said 304", server.takeRequest().headers["If-None-Match"])
+        assertEquals("two", last.value)
+        assertNull(last.error)
+    }
+
+    /**
+     * `body` is the whole answer and nothing caps it: `GET /corpora/{id}`
+     * carries `raw_text`, which for a captured book is the book, and reading a
+     * column past SQLite's CursorWindow throws out of Room. Unguarded that
+     * threw out of `read` and out of the composable collecting it, on the held
+     * answer and before the server was asked — so retrying died the same way.
+     */
+    @Test fun aCacheThatThrowsCostsTheRoundTripAndNotTheScreen() = runTest {
+        val broken = object : io.github.overcuriousity.engram.core.db.CacheDao {
+            override suspend fun get(key: String, origin: String) = error("CursorWindow: row too big")
+            override suspend fun put(row: io.github.overcuriousity.engram.core.db.CacheRow) = error("disk full")
+            override suspend fun touch(key: String, origin: String, now: Long) = error("no")
+            override suspend fun delete(key: String, origin: String) = error("no")
+            override suspend fun deleteBefore(before: Long) = error("no")
+            override suspend fun clear() = error("no")
+            override suspend fun count() = 0
+        }
+        val r = ServerReader(
+            transport = { Transport(Connection(origin, "engram_tok", null, "0.1.0", "dev"), "ua") },
+            dao = broken,
+            clock = { now },
+            onRefused = { refused++ },
+            onPinMismatch = {},
+        )
+        server.enqueue(ok("one", "\"t1\""))
+
+        val seen = r.read(req) { it }.toList()
+
+        assertEquals("one", seen.last().value)
+        assertNull(seen.last().error)
+    }
+
     @Test fun aQuestionPutToTheServerIsNeverKept() = runTest {
         server.enqueue(MockResponse(code = 200, body = """{"offer":null}"""))
         val r = reader.ask("/api/v1/context", "{}") { it }

@@ -1564,8 +1564,17 @@ impl Store {
         // artifact is still true, so a buried stub still reads `deprecated` —
         // and Insights listed it twice: once here as hidden and still at its
         // own link, once from the graveyard as out of the index.
+        //
+        // Not a superseded one either, for the same reason and against the
+        // same list: `deprecate` and a supersession are independent, so an
+        // artifact can carry both, and `superseded_artifacts` already lists
+        // those — with the winner named, which this query cannot say. Two
+        // rows came back about one artifact under one `kind`, and a client
+        // that reads `subject_id` as the row's identity answered one of them
+        // and lost the other.
         let rows = sqlx::query(
-            "SELECT * FROM artifacts WHERE status = ? AND reaped_at IS NULL
+            "SELECT * FROM artifacts
+              WHERE status = ? AND reaped_at IS NULL AND superseded_by IS NULL
               ORDER BY created_at DESC LIMIT ?",
         )
         .bind(status.as_str())
@@ -3479,6 +3488,39 @@ mod tests {
             EmbedState::Pending,
             "and the restore is what asks for a point again"
         );
+    }
+
+    /// The Insights undo list folds seven queries into one list of rows, and
+    /// two of them draw hidden artifacts. `deprecate` and a supersession are
+    /// independent, so an artifact can carry both — and both rows came back
+    /// under the one `kind` the list gives them, about one subject. A client
+    /// that reads `subject_id` as the row's identity answered one and lost the
+    /// other; the page showed the same artifact twice.
+    #[tokio::test]
+    async fn a_deprecated_artifact_that_is_also_superseded_is_listed_once() {
+        let s = Store::memory().await.unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let made = s
+            .insert_artifacts(&src.id, &[nc(0, "clinic hours"), nc(1, "clinic services")])
+            .await
+            .unwrap();
+        let (loser, winner) = (&made[0].id, &made[1].id);
+        s.set_artifact_status(loser, ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        s.set_superseded_by(loser, Some(winner)).await.unwrap();
+
+        let deprecated = s
+            .artifacts_by_status(ArtifactStatus::Deprecated, 10)
+            .await
+            .unwrap();
+        assert!(
+            deprecated.is_empty(),
+            "the superseded list already has it, and names the winner besides"
+        );
+        let superseded = s.superseded_artifacts(10).await.unwrap();
+        assert_eq!(superseded.len(), 1);
+        assert_eq!(&superseded[0].id, loser);
     }
 
     #[tokio::test]

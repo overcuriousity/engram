@@ -360,26 +360,23 @@ async fn deprecate_ui(
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
-async fn reactivate_ui(
-    tenant: Tenant,
-    headers: axum::http::HeaderMap,
-    Path(aid): Path<String>,
-    Query(p): Query<ArtifactViewParams>,
-    Form(back): Form<ReturnTo>,
-) -> UiResult<Response> {
-    tenant.core.reactivate(&aid).await?;
-    // Whichever of the three hid it stamps; the others stamp nothing, since
-    // `undo_action_on` matches only open rows of that kind on this subject.
-    //
-    // `Supersede` belongs here even though the button that undoes a plain
-    // supersession is `unsupersede_ui`'s. An artifact can be deprecated *and*
-    // superseded — `insights::page` lists the deprecated with no
-    // `superseded_by IS NULL` filter, so such a row appears under Restore —
-    // and `Core::reactivate` falls straight through to `unsupersede_locked`
-    // for it. Unstamped, the supersession's journal row stayed open: it is
-    // what `dedupe::taken_back_before` reads to hand a pair to a person
-    // instead of ruling on it again, so the sweep simply re-applied the
-    // supersession the operator had just undone.
+/// Put a hidden or buried artifact back in results, and mark undone whichever
+/// of the three actions hid it.
+///
+/// The two halves are one act, as in `unsupersede_artifact`: whichever of the
+/// three hid it stamps, and the others stamp nothing, since `undo_action_on`
+/// matches only open rows of that kind on this subject.
+///
+/// `Supersede` belongs here even though the button that undoes a plain
+/// supersession is `unsupersede_ui`'s. A *buried* artifact can also be
+/// superseded — `graveyard_list` filters on neither — and `Core::reactivate`
+/// falls straight through to `unsupersede_locked` for it. Unstamped, the
+/// supersession's journal row stayed open: it is what
+/// `dedupe::taken_back_before` reads to hand a pair to a person instead of
+/// ruling on it again, so the sweep simply re-applied the supersession the
+/// operator had just undone.
+pub(crate) async fn reactivate_artifact(tenant: &Tenant, aid: &str) -> crate::error::Result<()> {
+    tenant.core.reactivate(aid).await?;
     for kind in [
         crate::store::actions::Kind::Discard,
         crate::store::actions::Kind::Reap,
@@ -389,13 +386,24 @@ async fn reactivate_ui(
             .core
             .store
             .undo_action_on(
-                &aid,
+                aid,
                 kind,
                 crate::store::actions::UndoneBy::Operator,
                 "reactivated on Insights",
             )
             .await?;
     }
+    Ok(())
+}
+
+async fn reactivate_ui(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    Path(aid): Path<String>,
+    Query(p): Query<ArtifactViewParams>,
+    Form(back): Form<ReturnTo>,
+) -> UiResult<Response> {
+    reactivate_artifact(&tenant, &aid).await?;
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
@@ -1653,13 +1661,15 @@ mod tests {
     /// Restore has to stamp whichever row was hiding the artifact, and a
     /// supersession is one of them.
     ///
-    /// An artifact can be deprecated *and* superseded, and `insights::page`
-    /// lists the deprecated with no `superseded_by IS NULL` filter — so such a
-    /// row appears under Restore, and `Core::reactivate` falls straight
-    /// through to `unsupersede_locked` for it. Unstamped, the supersession's
-    /// journal row stayed open, which is what `dedupe::taken_back_before`
-    /// reads to hand a pair to a person rather than ruling on it again: the
-    /// sweep simply re-applied the supersession the operator had just undone.
+    /// A *buried* artifact can also be superseded — `graveyard_list` filters
+    /// on neither — so such a row appears under Restore, and
+    /// `Core::reactivate` falls straight through to `unsupersede_locked` for
+    /// it. (A deprecated one no longer reaches here: `artifacts_by_status`
+    /// leaves the superseded to `superseded_artifacts`, which is the row that
+    /// can name the winner.) Unstamped, the supersession's journal row stayed
+    /// open, which is what `dedupe::taken_back_before` reads to hand a pair to
+    /// a person rather than ruling on it again: the sweep simply re-applied
+    /// the supersession the operator had just undone.
     #[tokio::test]
     async fn restoring_a_superseded_artifact_stamps_the_supersession() {
         use crate::store::actions::{Job, Kind, NewAction};

@@ -119,17 +119,26 @@ fn facts_of(p: crate::web::ops::PairRow) -> PairFacts {
 /// The open pairs, clustered. Bounded by the same `PAIR_LIMIT` the page is
 /// bounded by, so `next` is always null: this is a queue to work through, not
 /// a corpus to page.
-async fn pairs(tenant: Tenant) -> Result<Json<Page<PairCluster>>> {
-    let (rows, _more) = crate::web::ops::pair_rows(&tenant).await?;
-    Ok(Json(Page::whole(
-        crate::web::ops::group_pairs(rows)
-            .into_iter()
-            .map(|c| PairCluster {
-                members: c.members,
-                pairs: c.pairs.into_iter().map(facts_of).collect(),
-            })
-            .collect(),
-    )))
+///
+/// `more` is how many are waiting beyond the ones listed, which is the number
+/// the page says out loud ("2 more waiting"). A cap that goes unreported
+/// reads as the whole queue, and there is no `next` to go and find the rest
+/// with — so the count sits beside `items`, as `capped` does on
+/// `/insights/set-aside`.
+async fn pairs(tenant: Tenant) -> Result<Json<serde_json::Value>> {
+    let (rows, more) = crate::web::ops::pair_rows(&tenant).await?;
+    let items: Vec<PairCluster> = crate::web::ops::group_pairs(rows)
+        .into_iter()
+        .map(|c| PairCluster {
+            members: c.members,
+            pairs: c.pairs.into_iter().map(facts_of).collect(),
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "items": items,
+        "next": serde_json::Value::Null,
+        "more": more,
+    })))
 }
 
 // ── Gaps ─────────────────────────────────────────────────────────────────────
@@ -395,7 +404,7 @@ async fn deprecate(tenant: Tenant, Path(aid): Path<String>) -> Result<StatusCode
 }
 
 async fn reactivate(tenant: Tenant, Path(aid): Path<String>) -> Result<StatusCode> {
-    tenant.core.reactivate(&aid).await?;
+    crate::web::ops::reactivate_artifact(&tenant, &aid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -462,6 +471,35 @@ mod tests {
             .header("cookie", cookie)
             .body(Body::empty())
             .unwrap()
+    }
+
+    /// The queue is capped at `PAIR_LIMIT` and there is no `next` to find the
+    /// rest with, so the number still waiting has to cross. Dropped, a phone
+    /// worked five pairs and was told nothing about the sixth; the page beside
+    /// it says "2 more waiting".
+    #[tokio::test]
+    async fn the_pair_queue_says_how_many_are_waiting_beyond_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(
+            &core,
+            &[
+                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n",
+            ],
+        )
+        .await;
+        for w in ids.chunks(2) {
+            core.store.record_pair(&w[0], &w[1], 0.9).await.unwrap();
+        }
+
+        let body = json_of(app.oneshot(get("/api/v1/pairs", &cookie)).await.unwrap()).await;
+
+        assert_eq!(
+            body["items"].as_array().unwrap().len(),
+            crate::web::ops::PAIR_LIMIT,
+            "seven pairs, five offered: {body}"
+        );
+        assert_eq!(body["more"], 2, "and the other two said out loud: {body}");
+        assert!(body["next"].is_null(), "a queue is not paged");
     }
 
     /// A pending pair was filed on a cosine score and nothing has read it. The
@@ -845,6 +883,67 @@ mod tests {
 
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         assert!(core.store.get_artifact(&ids[1]).await.unwrap().in_results());
+    }
+
+    /// `reactivate` is the only answer the app draws for a `hidden` row, and
+    /// a supersession is one of the two things that word covers
+    /// (`insights::set_aside_rows`). Taking it back has to close the journal
+    /// row as well as clear the payload: `dedupe::taken_back_before` reads
+    /// that row to hand the pair to a person rather than ruling on it again,
+    /// and unstamped, the next consolidation tick re-applied the supersession
+    /// the press had just undone. The `/ui/ops` twin is
+    /// `ops::tests::restoring_a_superseded_artifact_stamps_the_supersession`.
+    #[tokio::test]
+    async fn reactivating_a_superseded_artifact_stamps_the_supersession() {
+        use crate::store::actions::{Job, Kind, NewAction};
+        let (app, cookie, core) = app_session_and_core().await;
+        let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
+        // Hidden behind the other by the sweep, journaled as the sweep journals it.
+        core.supersede_with(
+            &ids[0],
+            &ids[1],
+            Some(NewAction {
+                job: Job::Dedupe,
+                kind: Kind::Supersede,
+                subject_id: ids[0].clone(),
+                survivor_id: Some(ids[1].clone()),
+                detail: None,
+                evidence: serde_json::json!({}),
+                pair_score: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let res = app
+            .oneshot(post(
+                &format!("/api/v1/artifacts/{}/reactivate", ids[0]),
+                &cookie,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(
+            core.store.get_artifact(&ids[0]).await.unwrap().in_results(),
+            "the restore itself did not happen"
+        );
+        assert!(
+            core.store
+                .open_action_on(&ids[0], Kind::Supersede)
+                .await
+                .unwrap()
+                .is_none(),
+            "the supersession row is still open, so the sweep will re-apply it"
+        );
+        assert!(
+            core.store
+                .action_was_undone(&ids[0], Kind::Supersede)
+                .await
+                .unwrap(),
+            "and nothing records that a person took it back"
+        );
     }
 
     #[tokio::test]

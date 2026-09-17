@@ -28,6 +28,20 @@ import io.github.overcuriousity.engram.core.read.Reach
 import java.time.ZoneId
 
 /**
+ * The pages read so far, as one list, with a row that is in two of them shown
+ * once.
+ *
+ * Each page is revalidated on its own and a cursor, once asked for, is fixed:
+ * page two keeps asking from the row that *was* page one's last. Delete a
+ * corpus on the server and page one comes back one row further down the list,
+ * so its new last row is page two's first — and `LazyColumn`, keyed by id,
+ * throws on the repeat ("Key was already used"). Keeping the earlier of the
+ * two is keeping the one whose page is the more recently revalidated.
+ */
+internal fun rowsOf(pages: List<List<CorpusRow>>): List<CorpusRow> =
+    pages.flatten().distinctBy { it.id }
+
+/**
  * Everything captured, newest first, a page at a time. `cursors` is the list
  * of pages asked for so far — `null` is the first — and each page is a read of
  * its own, so each is kept and revalidated on its own and a page opened before
@@ -62,7 +76,7 @@ fun LibraryScreen(engram: Engram, onCorpus: (String) -> Unit) {
         } }
     }
 
-    val rows = pages.flatten()
+    val rows = rowsOf(pages)
     Column(Modifier.fillMaxSize()) {
         if (unreachable) Unreachable(unreachableAt) { attempt++ }
         if (rows.isEmpty() && !unreachable) Text("Nothing captured yet", Modifier.padding(16.dp), color = muted())

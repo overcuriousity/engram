@@ -87,6 +87,7 @@ fun PairReviewScreen(engram: Engram, onArtifact: (String) -> Unit) {
             LaunchedEffect(cards.size) { JudgeCounts.pairs.value = cards.size }
             PairReview(
                 cards = cards,
+                more = page.more,
                 onAnswer = { p, a ->
                     when (a) {
                         PairAnswer.KeepA -> engram.outbox.enqueuePairSupersede(p.id, p.a.id)
@@ -113,6 +114,12 @@ fun PairReviewScreen(engram: Engram, onArtifact: (String) -> Unit) {
 @Composable
 fun PairReview(
     cards: List<PairCard>,
+    /**
+     * How many pairs are waiting beyond the ones handed over. The queue is
+     * capped and there is no page to go and find the rest on, so a cap that
+     * says nothing reads as the whole queue.
+     */
+    more: Int = 0,
     onAnswer: suspend (Pair, PairAnswer) -> String,
     onUndo: suspend (String) -> Boolean,
     onArtifact: (String) -> Unit,
@@ -154,8 +161,11 @@ fun PairReview(
             return@Column
         }
         Text(
-            "${answered.size + 1} of ${cards.size}" +
-                if (card.siblings > 1) " · ${card.siblings} about this artifact" else "",
+            listOfNotNull(
+                "${answered.size + 1} of ${cards.size}",
+                "$more more waiting".takeIf { more > 0 },
+                "${card.siblings} about this artifact".takeIf { card.siblings > 1 },
+            ).joinToString(" · "),
             Modifier.padding(16.dp, 4.dp),
             style = MaterialTheme.typography.labelMedium,
             color = muted(),
@@ -325,6 +335,19 @@ fun JournalScreen(engram: Engram, onArtifact: (String) -> Unit, onCorpus: (Strin
     }
 }
 
+/**
+ * What tells one set-aside row from another.
+ *
+ * Not `subject_id` alone: two of the seven questions the list folds together
+ * can be true of one artifact at once — one a model wrote that is also overdue
+ * for verification is a `generated` row and an `unverified` one — and they ask
+ * for different answers. Keyed by the subject alone, answering either made
+ * both disappear, the second having been enqueued for nothing, and one Undo
+ * put both back. Under one `kind` a subject appears once; the server keeps
+ * that true (`Store::artifacts_by_status`).
+ */
+internal fun keyOf(row: SetAsideRow): String = "${row.kind}\u0000${row.subjectId}"
+
 @Composable
 fun Journal(
     rows: List<SetAsideRow>,
@@ -351,7 +374,7 @@ fun Journal(
             Text("Nothing set aside", Modifier.padding(16.dp), color = muted())
             return@Column
         }
-        rows.filter { it.subjectId !in answered }.forEach { row ->
+        rows.filter { keyOf(it) !in answered }.forEach { row ->
             Column(Modifier.fillMaxWidth().padding(16.dp, 10.dp)) {
                 Label(row.label, row.named)
                 if (row.subtitle.isNotEmpty()) {
@@ -373,8 +396,8 @@ fun Journal(
                         TextButton(onClick = {
                             scope.launch {
                                 val id = onAction(row, a)
-                                answered += row.subjectId
-                                undo = Undoable(id, row.subjectId, setAsideWords(a))
+                                answered += keyOf(row)
+                                undo = Undoable(id, keyOf(row), setAsideWords(a))
                             }
                         }) { Text(setAsideWords(a)) }
                     }

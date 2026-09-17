@@ -117,6 +117,18 @@ class ModelsTest {
         assertNull("nobody proposed a side", p.keeps)
     }
 
+    /**
+     * The queue is capped and never paged, so the cap is the only thing that
+     * can say there is more of it. Dropped, five answered pairs read as the
+     * whole backlog.
+     */
+    @Test fun thePairQueueSaysHowManyAreWaitingBeyondIt() {
+        assertEquals(0, Decode.pairs(fixture("pairs.json")).more)
+        assertEquals(2, Decode.pairs("""{"items":[],"next":null,"more":2}""").more)
+        // A server too old to send it says nothing, rather than a guess.
+        assertEquals(0, Decode.pairs("""{"items":[]}""").more)
+    }
+
     @Test fun mergeableIsFalseUnlessTheServerSaysOtherwise() {
         // The default a missing field falls to decides whether a button is
         // drawn whose press can only come back a validation error.

@@ -183,8 +183,10 @@ pub(crate) struct DayCorpus {
     /// Whether `label` is a name somebody gave it — see `ui::RowLabel`.
     pub named: bool,
     pub at: i64,
-    /// The whole text. A day is the one list that carries bodies: an entry is
-    /// read on the day page, not behind it.
+    /// The whole text of an *entry*. A day is the one list that carries
+    /// bodies, and rule 2 scopes that to entries: an entry is read on the day
+    /// page, not behind it. Empty on a captured row, which is a link to a
+    /// document that may be a book — `docs/api.md` rule 2.
     pub text: String,
 }
 
@@ -250,7 +252,14 @@ pub(crate) async fn facts(tenant: &Tenant, date: &str, tz: Tz) -> Result<Day, Er
             named: c.title_hint.is_some(),
             label: crate::web::ui::corpus_label(c.title_hint.clone(), &c.raw_text, &c.origin),
             at: c.created_at,
-            text: c.raw_text,
+            // Only an entry's. A captured row is a link on both doors — the
+            // page draws no body under it and the app draws a `LinkRow` — and
+            // a day on which a book was captured sent the whole book down the
+            // wire and into the phone's cache.
+            text: match journal {
+                true => c.raw_text,
+                false => String::new(),
+            },
         };
         if journal {
             entries.push(row)
@@ -848,6 +857,65 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         let err = crate::web::test_support::json_of(res).await;
         assert_eq!(err["error"], "not found", "one error vocabulary");
+    }
+
+    /// Rule 2 of `docs/api.md` scopes the day's bodies to entries. One
+    /// `DayCorpus` serves both lists, so a captured row carried `raw_text` —
+    /// for a captured book, the book — down a link that draws it nowhere: the
+    /// page has no body under a captured row and the app draws a link. It
+    /// landed in the phone's cache all the same.
+    #[tokio::test]
+    async fn a_captured_row_on_a_day_carries_no_body_and_an_entry_still_does() {
+        let mut core = test_core().await;
+        let tz = chrono_tz::Tz::Europe__Berlin;
+        let day = tz
+            .with_ymd_and_hms(2026, 8, 30, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        core.clock = Clock::Fixed(day + 10 * 3_600);
+        let out = core
+            .ingest_capture(Capture::new(
+                "a whole book, as far as this is concerned",
+                "web",
+            ))
+            .await
+            .unwrap();
+        // The capture lands at the real now, not on the fixed day; the row is
+        // moved into the day's bounds by hand, as the fixture above does it.
+        let (from, _) = bounds(NaiveDate::from_ymd_opt(2026, 8, 30).unwrap(), tz).unwrap();
+        sqlx::query("UPDATE corpora SET created_at = ? WHERE id = ?")
+            .bind(from + 3_600)
+            .bind(&out.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let (app, cookie) = app_with_cookie(core).await;
+        app.clone()
+            .oneshot(form(
+                "/ui/day/2026-08-30/entry",
+                &cookie,
+                "text=Long+day.&tz=Europe/Berlin",
+            ))
+            .await
+            .unwrap();
+
+        let d = crate::web::test_support::json_of(
+            app.oneshot(get("/api/v1/days/2026-08-30?tz=Europe/Berlin", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(
+            d["entries"][0]["text"], "Long day.",
+            "an entry is read here"
+        );
+        let captured = &d["captured"][0];
+        assert_eq!(captured["text"], "", "a captured row is a link, not a body");
+        assert!(
+            captured["label"].as_str().is_some_and(|l| !l.is_empty()),
+            "and it still says what it is: {captured}"
+        );
     }
 
     /// A sitting names what it opened, and nothing else: the row is a comma

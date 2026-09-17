@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import io.github.overcuriousity.engram.core.read.Hit
 import io.github.overcuriousity.engram.core.read.Pair
 import io.github.overcuriousity.engram.core.read.PairSide
+import io.github.overcuriousity.engram.core.read.SetAsideAction
 import io.github.overcuriousity.engram.core.read.SetAsideRow
 import io.github.overcuriousity.engram.core.read.Reach
 import io.github.overcuriousity.engram.core.read.Read
@@ -172,6 +173,32 @@ class DrawnTest {
         compose.waitForIdle()
         assertEquals(1, undone)
         compose.onNodeWithText("1 of 2").assertExists()
+    }
+
+    /**
+     * Two of the seven questions the set-aside list folds together can be true
+     * of one artifact at once, and they ask for different answers. Keyed by
+     * the subject alone, answering either made both rows disappear — the
+     * second having been enqueued for nothing.
+     */
+    @Test fun oneArtifactUnderTwoKindsIsTwoQuestionsAndAnsweringOneLeavesTheOther() {
+        val rows = listOf(
+            SetAsideRow(kind = "unverified", subjectId = "a1", artifactId = "a1", label = "Clinic hours", named = true, why = "last confirmed in May, and rarely reached since"),
+            SetAsideRow(kind = "generated", subjectId = "a1", artifactId = "a1", label = "Clinic hours", named = true, why = "written after a run of searches the base could not answer"),
+        )
+        val enqueued = mutableListOf<SetAsideAction>()
+        compose.setContent {
+            EngramTheme {
+                Journal(rows, capped = false, onAction = { _, a -> enqueued += a; "row-1" }, onUndo = { true }, onOpen = {})
+            }
+        }
+
+        compose.onNodeWithText("Still accurate").performClick()
+        compose.waitForIdle()
+
+        assertEquals(listOf(SetAsideAction.Verify), enqueued)
+        compose.onNodeWithText("written after a run of searches the base could not answer").assertExists()
+        compose.onAllNodesWithText("last confirmed in May, and rarely reached since").assertCountEquals(0)
     }
 
     @Test fun aSetAsideKindThisBuildHasNeverHeardOfDrawsNoButtons() {

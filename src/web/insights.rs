@@ -308,10 +308,16 @@ pub(crate) struct MergedRow {
 pub(crate) struct SetAsideRow {
     href: String,
     /// What the row's actions name. Which thing that is depends on `kind` —
-    /// a corpus for `parked`, the merge's journal action for `merged`, the
-    /// artifact for the rest — and a client reads it against `kind` rather
-    /// than taking it apart. Carried beside `href` rather than parsed out of
-    /// it: a link is a route, not an identity.
+    /// a corpus for `parked`, the artifact for every other kind, `merged`
+    /// included, whose undo route takes the artifact the merge wrote and not
+    /// the journal action that wrote it — and a client reads it against
+    /// `kind` rather than taking it apart. Carried beside `href` rather than
+    /// parsed out of it: a link is a route, not an identity.
+    ///
+    /// Not an identity on its own either: two of the seven questions can be
+    /// true of one artifact at once, so a row is identified by `kind` and
+    /// `subject_id` together. Under one `kind` a subject appears once — see
+    /// `Store::artifacts_by_status`, which is where that is kept true.
     pub(crate) subject_id: String,
     /// The artifact to open where the row is about one. `None` for a parked
     /// capture, which is a corpus.

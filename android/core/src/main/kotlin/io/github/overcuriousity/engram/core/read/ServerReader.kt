@@ -39,8 +39,28 @@ internal class ServerReader(
         // Keyed by origin as well: after a re-pair elsewhere, the previous
         // server's notes must not appear under the new one's name.
         val origin = t.connection.origin
-        val held = dao.get(request.key, origin)
-        val heldValue = held?.let { runCatching { decode(it.body) }.getOrNull() }
+        // Every cache call is guarded, not only the decode. `body` is the
+        // whole answer and nothing caps it — `GET /corpora/{id}` carries
+        // `raw_text`, which for a captured book is the book — and reading a
+        // column past SQLite's CursorWindow throws out of Room. Unguarded,
+        // that threw out of `read` and out of the composable collecting it:
+        // the screen died on the held answer, before the server was asked,
+        // and retrying could only die the same way.
+        val cached = runCatching { dao.get(request.key, origin) }.getOrNull()
+        val heldValue = cached?.let { runCatching { decode(it.body) }.getOrNull() }
+        // A held body this build can no longer read goes, and its tag with it.
+        // Kept, the tag was still sent, the server answered `304`, and the
+        // branch below had a fresh row with nothing in it and no error to
+        // show — a blank screen that every retry reproduced until the prune.
+        // An app update that tightens a model against a body the previous
+        // build cached is how it happens.
+        val held = when {
+            cached != null && heldValue == null -> {
+                runCatching { dao.delete(request.key, origin) }
+                null
+            }
+            else -> cached
+        }
         emit(Read(heldValue, held?.fetchedAt, Reach.Fresh, loading = true))
 
         val got = try {
@@ -61,7 +81,7 @@ internal class ServerReader(
         val now = clock()
         when (got.status) {
             304 -> {
-                dao.touch(request.key, origin, now)
+                runCatching { dao.touch(request.key, origin, now) }
                 emit(Read(heldValue, now, Reach.Fresh, loading = false))
             }
             200 -> {
@@ -70,14 +90,17 @@ internal class ServerReader(
                     // Not kept: a body this app cannot read is not worth showing again.
                     emit(Read(heldValue, held?.fetchedAt, Reach.Fresh, loading = false, error = "unreadable answer"))
                 } else {
-                    dao.put(CacheRow(request.key, origin, got.etag, got.body, now))
+                    // A write that fails costs the next read its round trip
+                    // and nothing else. It never costs this one the answer it
+                    // already has in hand.
+                    runCatching { dao.put(CacheRow(request.key, origin, got.etag, got.body, now)) }
                     emit(Read(value, now, Reach.Fresh, loading = false))
                 }
             }
             404 -> {
                 // Gone on the server is gone here: keeping it would show a
                 // deleted note for as long as the phone stayed offline.
-                dao.delete(request.key, origin)
+                runCatching { dao.delete(request.key, origin) }
                 emit(Read(null, null, Reach.Fresh, loading = false, error = said(got.body, 404)))
             }
             else -> emit(Read(heldValue, held?.fetchedAt, Reach.Fresh, loading = false, error = said(got.body, got.status)))

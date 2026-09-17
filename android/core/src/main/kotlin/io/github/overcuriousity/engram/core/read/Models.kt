@@ -278,6 +278,23 @@ data class Pair(
 @Serializable
 data class PairCluster(val members: Int = 1, val pairs: List<Pair> = emptyList())
 
+/**
+ * The pair queue, and how many are waiting beyond it.
+ *
+ * Its own type rather than [Page], for the reason [SetAside] has one: the
+ * queue is bounded rather than paged — `next` is always null — so the cap is
+ * the only thing that can say there is more, and a cap that goes unreported
+ * reads as the whole queue. [more] is the number, which is what the web page
+ * says out loud; zero where nothing is waiting, and where a server too old to
+ * send it said nothing.
+ */
+@Serializable
+data class PairQueue(
+    val items: List<PairCluster> = emptyList(),
+    val next: String? = null,
+    val more: Int = 0,
+)
+
 /** One question nothing covered. [kind] and [id] are what dismissing it names. */
 @Serializable
 data class GapMember(val kind: String = "", val id: String = "", val text: String = "")
@@ -395,7 +412,7 @@ object Decode {
     val day: (String) -> Day = { ApiJson.decodeFromString(Day.serializer(), it) }
     val offer: (String) -> OfferAnswer = { ApiJson.decodeFromString(OfferAnswer.serializer(), it) }
     val artifact: (String) -> ArtifactDetail = ::decodeArtifact
-    val pairs = page(PairCluster.serializer())
+    val pairs: (String) -> PairQueue = { ApiJson.decodeFromString(PairQueue.serializer(), it) }
     val gaps = page(GapCluster.serializer())
     val insights: (String) -> Insights = { ApiJson.decodeFromString(Insights.serializer(), it) }
     val setAside: (String) -> SetAside = { ApiJson.decodeFromString(SetAside.serializer(), it) }

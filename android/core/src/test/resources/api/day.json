@@ -5,76 +5,76 @@
   "to": 1789689600,
   "entries": [
     {
-      "id": "01a0b0be-82de-76b5-8071-0a46b199fadd",
+      "id": "01a0b13a-ba86-7172-80ae-2faa824358cd",
       "label": "Long day.",
       "named": false,
-      "at": 1789671670,
+      "at": 1789679811,
       "text": "Long day."
     }
   ],
   "captured": [
     {
-      "id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+      "id": "01a0b13a-ba85-7710-9c94-71041de9ad16",
       "label": "Qdrant notes",
       "named": true,
-      "at": 1789671670,
-      "text": "Filters narrow a search.\nPayload indexes make them fast.\nThird line."
+      "at": 1789679811,
+      "text": ""
     },
     {
-      "id": "01a0b0be-82de-76b5-8071-0a452888d652",
+      "id": "01a0b13a-ba85-7710-9c94-7105cfa7b21a",
       "label": "no title, only an opening",
       "named": false,
-      "at": 1789671670,
-      "text": "no title, only an opening"
+      "at": 1789679811,
+      "text": ""
     },
     {
-      "id": "01a0b0be-82e2-7666-a729-a903740bc909",
+      "id": "01a0b13a-ba8a-73e6-8116-b0e56177a269",
       "label": "Timeouts",
       "named": true,
-      "at": 1789671670,
-      "text": "timeouts"
+      "at": 1789679811,
+      "text": ""
     },
     {
-      "id": "01a0b0be-82e3-761c-865e-363bf9dd1e3a",
+      "id": "01a0b13a-ba8b-7520-92b5-f6e6fcf04c8e",
       "label": "Older",
       "named": true,
-      "at": 1789671670,
-      "text": "an older way"
+      "at": 1789679811,
+      "text": ""
     }
   ],
   "was_due": [
     {
-      "id": "01a0b0be-82e1-708a-8d64-d31154b84988",
-      "artifact_id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
+      "id": "01a0b13a-ba88-7423-b9be-463145ba6fd0",
+      "artifact_id": "01a0b13a-ba87-77f8-a911-9448be9adfb3",
       "label": "Merged, shorter.",
       "named": false,
       "kind": "due",
-      "at": 1789671670,
+      "at": 1789679811,
       "done": false,
       "span": null
     }
   ],
   "refers": [
     {
-      "id": "01a0b0be-82e1-708a-8d64-d3123a5eee8a",
-      "artifact_id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
+      "id": "01a0b13a-ba89-7621-9f32-4970ff91381d",
+      "artifact_id": "01a0b13a-ba87-77f8-a911-9448be9adfb3",
       "label": "Merged, shorter.",
       "named": false,
       "kind": "event",
-      "at": 1789671670,
+      "at": 1789679811,
       "done": false,
       "span": "today"
     }
   ],
   "sittings": [
     {
-      "opened_at": 1789671670,
-      "closed_at": 1789671670,
+      "opened_at": 1789679811,
+      "closed_at": 1789679811,
       "query": "payload filter",
       "searches": 1,
       "opened": [
         {
-          "id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
+          "id": "01a0b13a-ba87-77f8-a911-9448be9adfb3",
           "label": "Merged, shorter.",
           "named": true
         }
