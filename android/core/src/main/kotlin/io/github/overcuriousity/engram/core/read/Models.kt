@@ -230,6 +230,157 @@ data class AskAnswer(
     @SerialName("retired_only") val retiredOnly: Boolean = false,
 )
 
+// ── Judging ──────────────────────────────────────────────────────────────────
+
+/** One side of a duplicate pair, with enough of it to decide by. */
+@Serializable
+data class PairSide(
+    val id: String,
+    val label: String = "",
+    val named: Boolean = false,
+    val excerpt: String = "",
+)
+
+/**
+ * One open pair, carrying only what somebody actually established about it.
+ *
+ * Three of these fields are there to stop a card claiming more than was found.
+ * [unjudged] means the sweep filed this on a cosine score and nothing has read
+ * it since, so "these two cover the same ground" is a finding nobody made —
+ * the measurement is what there is to draw. [viaLink] means no cosine was ever
+ * computed, so [percent] is not a similarity and must not be shown as one.
+ * [mergeable] is whether the merge path would take a synthesis at all.
+ *
+ * Its default is false, and deliberately: a server that does not send the
+ * field leaves the button out, rather than offering a press that can only come
+ * back a validation error.
+ */
+@Serializable
+data class Pair(
+    val id: Long,
+    val percent: Long = 0,
+    @SerialName("via_link") val viaLink: Boolean = false,
+    val a: PairSide,
+    val b: PairSide,
+    /** The judge's line, where one was written. */
+    val finding: String? = null,
+    val contradiction: Boolean = false,
+    val vacuous: Boolean = false,
+    val unjudged: Boolean = false,
+    val unmergeable: Boolean = false,
+    val mergeable: Boolean = false,
+    @SerialName("synthesis_asked") val synthesisAsked: Boolean = false,
+    /** The artifact the judge's proposal amounts to keeping, where it made one. */
+    val keeps: String? = null,
+)
+
+/** One decision, however many pairs it takes to state it. */
+@Serializable
+data class PairCluster(val members: Int = 1, val pairs: List<Pair> = emptyList())
+
+/** One question nothing covered. [kind] and [id] are what dismissing it names. */
+@Serializable
+data class GapMember(val kind: String = "", val id: String = "", val text: String = "")
+
+/**
+ * Questions the sweep found to be about one subject. [labelledBy] is `model`
+ * or `terms` — whether a model named this group or its shared wording did,
+ * which is the difference between a reading and a description.
+ */
+@Serializable
+data class GapCluster(
+    val label: String = "",
+    @SerialName("labelled_by") val labelledBy: String = "",
+    val members: List<GapMember> = emptyList(),
+)
+
+@Serializable
+data class Held(val corpora: Long = 0, val artifacts: Long = 0, val segments: Long = 0, val synthesized: Long = 0)
+
+@Serializable
+data class UsedBand(val label: String = "", val count: Long = 0)
+
+/** Null throughout where nothing was judged — never 0.00, which reads as a score. */
+@Serializable
+data class Retrieval(
+    val judged: Long = 0,
+    @SerialName("recall_at_10") val recallAt10: Double? = null,
+    val mrr: Double? = null,
+)
+
+/** What the base is like. Read-only: nothing about tuning crosses. */
+@Serializable
+data class Insights(
+    val held: Held = Held(),
+    val used: List<UsedBand> = emptyList(),
+    /** Absent where no searches are recorded. */
+    val retrieval: Retrieval? = null,
+)
+
+/** What the base put beside a set-aside row: a merge's sources, a near-duplicate's winner. */
+@Serializable
+data class Beside(
+    val id: String = "",
+    @SerialName("corpus_id") val corpusId: String = "",
+    val label: String = "",
+    val named: Boolean = false,
+)
+
+/**
+ * One thing the base did on its own, or is waiting to be told about.
+ *
+ * [kind] is the whole of what says which answers the row admits — see
+ * [actionsFor]. [subjectId] is what those answers name, and which thing that
+ * is depends on the kind: a corpus for `parked`, the artifact for the rest.
+ */
+@Serializable
+data class SetAsideRow(
+    val kind: String = "",
+    @SerialName("subject_id") val subjectId: String = "",
+    /** The artifact to open. Null for a parked capture, which is a corpus. */
+    @SerialName("artifact_id") val artifactId: String? = null,
+    val label: String = "",
+    val named: Boolean = false,
+    /** What tells two rows with one label apart. Empty where nothing does. */
+    val subtitle: String = "",
+    val why: String = "",
+    val beside: List<Beside> = emptyList(),
+    /** The one thing about this row that is not simply reversible. */
+    val caveat: String? = null,
+)
+
+/** The undo list, and whether any cap bit. */
+@Serializable
+data class SetAside(
+    val items: List<SetAsideRow> = emptyList(),
+    val next: String? = null,
+    val capped: Boolean = false,
+)
+
+/** An answer a set-aside row admits. Each is a route; none of them is a rendering. */
+enum class SetAsideAction { Verify, Deprecate, Reactivate, UndoMerge, ResolveReplace, ResolveKeepBoth, ResolveDiscard }
+
+/**
+ * Which answers a row admits, from its `kind` and nothing else — no reading of
+ * its wording, no guess from what is beside it. A kind this build has never
+ * heard of admits none, which is what lets the server grow a seventh without
+ * breaking an older app.
+ *
+ * `hidden` arrives from two places — an artifact superseded by a near-duplicate
+ * and one deprecated by hand — and the kind does not say which. It does not
+ * have to: `reactivate` answers either, routing a supersession through the
+ * server's own unsupersede, so the one button here can never be a press that
+ * comes back refused.
+ */
+fun actionsFor(kind: String): List<SetAsideAction> = when (kind) {
+    "unverified" -> listOf(SetAsideAction.Verify, SetAsideAction.Deprecate)
+    "merged" -> listOf(SetAsideAction.UndoMerge)
+    "generated" -> listOf(SetAsideAction.Deprecate)
+    "hidden", "buried" -> listOf(SetAsideAction.Reactivate)
+    "parked" -> listOf(SetAsideAction.ResolveReplace, SetAsideAction.ResolveKeepBoth, SetAsideAction.ResolveDiscard)
+    else -> emptyList()
+}
+
 /** How each body is read. */
 object Decode {
     private fun <T> page(item: kotlinx.serialization.KSerializer<T>): (String) -> Page<T> =
@@ -244,6 +395,10 @@ object Decode {
     val day: (String) -> Day = { ApiJson.decodeFromString(Day.serializer(), it) }
     val offer: (String) -> OfferAnswer = { ApiJson.decodeFromString(OfferAnswer.serializer(), it) }
     val artifact: (String) -> ArtifactDetail = ::decodeArtifact
+    val pairs = page(PairCluster.serializer())
+    val gaps = page(GapCluster.serializer())
+    val insights: (String) -> Insights = { ApiJson.decodeFromString(Insights.serializer(), it) }
+    val setAside: (String) -> SetAside = { ApiJson.decodeFromString(SetAside.serializer(), it) }
 }
 
 /** The reads, by name. One place knows a path; a screen knows what it wants. */
@@ -257,6 +412,10 @@ object Api {
     fun lineage(id: String) = Request("/api/v1/artifacts/$id/lineage")
     fun versions(id: String) = Request("/api/v1/artifacts/$id/versions")
     fun day(date: String, tz: String) = Request("/api/v1/days/$date", mapOf("tz" to tz))
+    fun pairs() = Request("/api/v1/pairs")
+    fun gaps() = Request("/api/v1/gaps")
+    fun insights() = Request("/api/v1/insights")
+    fun setAside() = Request("/api/v1/insights/set-aside")
 
     const val CONTEXT = "/api/v1/context"
     const val SEEN = "/api/v1/context/seen"

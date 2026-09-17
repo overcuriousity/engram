@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import io.github.overcuriousity.engram.core.db.Db
 import io.github.overcuriousity.engram.core.db.Kind
 import io.github.overcuriousity.engram.core.db.State
+import io.github.overcuriousity.engram.core.read.GapMember
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
@@ -109,5 +110,43 @@ class OutboxTest {
         val rows = box.rows.first().sortedBy { it.kind.name }
         assertEquals(Kind.done, rows[0].kind); assertTrue(rows[0].payload.contains("\"moment\":\"m1\""))
         assertEquals(Kind.snooze, rows[1].kind); assertTrue(rows[1].payload.contains("\"until\":1800000000"))
+    }
+
+    @Test fun everyJudgingDecisionIsARowAndNotACall() = runTest {
+        box.enqueuePairSupersede(7, "art-a")
+        box.enqueuePairSynthesize(8)
+        box.enqueuePairDiscard(9)
+        box.enqueuePairDismiss(10)
+        box.enqueueGapDismiss("ask", "g1")
+        box.enqueueGapForget(listOf(GapMember("ask", "g1", "why"), GapMember("ask", "g2", "how")))
+        box.enqueueArtifactOp("art-b", ArtifactOp.verify)
+        box.enqueueMergeUndo("merge-1")
+        box.enqueueCorpusResolve("cor-1", Resolution.keep_both)
+        val byKind = box.rows.first().associateBy { it.kind }
+        assertEquals(9, byKind.size)
+        assertTrue(byKind[Kind.pair_supersede]!!.payload.contains("\"pair\":7"))
+        assertTrue(byKind[Kind.pair_supersede]!!.payload.contains("\"keep\":\"art-a\""))
+        assertTrue(byKind[Kind.gap_dismiss]!!.payload.contains("\"kind\":\"ask\""))
+        assertTrue(byKind[Kind.gap_forget]!!.payload.contains("g2"))
+        assertTrue(byKind[Kind.artifact_op]!!.payload.contains("\"op\":\"verify\""))
+        assertTrue(byKind[Kind.corpus_resolve]!!.payload.contains("\"action\":\"keep_both\""))
+        assertTrue(box.rows.first().all { it.state == State.queued })
+    }
+
+    @Test fun aSupersedeWithNoSideNamedIsTheProposalTheJudgeMade() = runTest {
+        box.enqueuePairSupersede(7, null)
+        // No key at all rather than a null: the server reads an absent `keep`
+        // as "the side the judge proposed", and a null is not that.
+        assertFalse(box.rows.first().single().payload.contains("keep"))
+    }
+
+    @Test fun anAnswerIsTakenBackWhileItIsStillQueuedAndNotAfter() = runTest {
+        val id = box.enqueuePairDismiss(3)
+        assertTrue(box.undo(id))
+        assertTrue(box.rows.first().isEmpty())
+        val sent = box.enqueuePairDismiss(4)
+        box.sent(sent, 204, "")
+        assertFalse("what the server already has is not ours to take back", box.undo(sent))
+        assertEquals(1, box.rows.first().size)
     }
 }

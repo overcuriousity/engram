@@ -5,19 +5,28 @@ import io.github.overcuriousity.engram.core.db.Kind
 import io.github.overcuriousity.engram.core.db.OutboxFile
 import io.github.overcuriousity.engram.core.db.OutboxRow
 import io.github.overcuriousity.engram.core.db.State
+import io.github.overcuriousity.engram.core.read.GapMember
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.util.UUID
 
 class Incoming(val name: String, val mime: String, val open: () -> InputStream)
+
+/** The four answers a set-aside artifact admits. Each is a route of its own. */
+enum class ArtifactOp { verify, deprecate, reactivate, unsupersede }
+
+/** The three-way answer to a parked capture, in the server's own words. */
+enum class Resolution { replace, keep_both, discard }
 
 /**
  * The load-bearing idea. A share is copied out of the sender's URI into our
@@ -53,6 +62,61 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
             copied,
         )
         return id
+    }
+
+    // ── Judging ──────────────────────────────────────────────────────────────
+    // Every decision a person makes about the base is a row here rather than a
+    // call from the screen. A decision made on a train is a decision; the queue
+    // is the one place that knows what is owed, and the one place an answer can
+    // be taken back out of before it goes.
+
+    /** `keep` is left out entirely where nobody named a side: absent means the judge's proposal. */
+    suspend fun enqueuePairSupersede(pairId: Long, keep: String?) =
+        insert(Kind.pair_supersede, buildJsonObject { put("pair", pairId); if (keep != null) put("keep", keep) })
+
+    suspend fun enqueuePairSynthesize(pairId: Long) =
+        insert(Kind.pair_synthesize, buildJsonObject { put("pair", pairId) })
+
+    suspend fun enqueuePairDiscard(pairId: Long) =
+        insert(Kind.pair_discard, buildJsonObject { put("pair", pairId) })
+
+    suspend fun enqueuePairDismiss(pairId: Long) =
+        insert(Kind.pair_dismiss, buildJsonObject { put("pair", pairId) })
+
+    suspend fun enqueueGapDismiss(kind: String, id: String) =
+        insert(Kind.gap_dismiss, buildJsonObject { put("kind", kind); put("id", id) })
+
+    /** A whole cluster, carrying the members the person was shown. */
+    suspend fun enqueueGapForget(members: List<GapMember>) =
+        insert(
+            Kind.gap_forget,
+            buildJsonObject {
+                putJsonArray("members") {
+                    members.forEach { m -> addJsonObject { put("kind", m.kind); put("id", m.id) } }
+                }
+            },
+        )
+
+    suspend fun enqueueArtifactOp(artifactId: String, op: ArtifactOp) =
+        insert(Kind.artifact_op, buildJsonObject { put("artifact", artifactId); put("op", op.name) })
+
+    suspend fun enqueueMergeUndo(mergeId: String) =
+        insert(Kind.merge_undo, buildJsonObject { put("merge", mergeId) })
+
+    suspend fun enqueueCorpusResolve(corpusId: String, action: Resolution) =
+        insert(Kind.corpus_resolve, buildJsonObject { put("corpus", corpusId); put("action", action.name) })
+
+    /**
+     * Take an answer back. Only while it is still queued: what the server
+     * already has is not ours to undo from here, and a row the drainer is
+     * settling is the server's business. The screen's Undo is this and nothing
+     * cleverer — which is why the window it offers is honest.
+     */
+    suspend fun undo(id: String): Boolean {
+        val row = dao.get(id) ?: return false
+        if (row.state != State.queued) return false
+        delete(id)
+        return true
     }
 
     suspend fun enqueueDone(momentId: String) = insert(Kind.done, buildJsonObject { put("moment", momentId) })
