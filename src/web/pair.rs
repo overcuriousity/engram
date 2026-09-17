@@ -193,7 +193,7 @@ async fn pair_submit(
 
 /// Percent-encode everything outside the unreserved set. Small and local
 /// rather than a dependency: three values, all of them ASCII.
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

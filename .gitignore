@@ -35,3 +35,14 @@ assets/app.css
 
 # Brainstorming companion scratch
 .superpowers/
+
+# The Android app's own build output and machine-local SDK path.
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.kotlin/
+
+# The app signing key. It belongs outside this tree entirely — see
+# android/README.md — and this is the backstop for the day it is not.
+*.jks
+*.keystore

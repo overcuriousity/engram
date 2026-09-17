@@ -58,6 +58,13 @@ bind = "127.0.0.1:8080"
 # things slow at once. Raise it when synthesis and embedding live on
 # different machines.
 workers = 1
+# The SHA-256 of the certificate's SubjectPublicKeyInfo, base64, for the
+# certificate a phone is shown when it reaches this deployment. Leave it
+# unset and the app pins whatever it sees while pairing, which is right when
+# you are standing at the screen. Set it and the pairing code carries it, so
+# the app pins the named key from the first byte.
+#   openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
+# tls_fingerprint = ""
 
 [store]
 # The control database: who the users are, their sessions and API tokens, and

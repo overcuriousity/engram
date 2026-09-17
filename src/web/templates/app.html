@@ -1,0 +1,25 @@
+{% extends "layout.html" %}
+{% block title %}Pair the app — engram{% endblock %}
+{% block content %}
+<h1>Pair the app</h1>
+{# The origin is stated because it is the one thing the operator can check:
+   the phone will be pointed at exactly this address. #}
+<p>This pairs the engram app on a phone with <strong>{{ origin }}</strong>.
+Open the app, choose <em>Scan to pair</em>, and point it at the code.</p>
+{% match code %}
+{% when Some with ((uri, svg)) %}
+<div class="qr" style="max-width:256px">{{ svg|safe }}</div>
+<p class="mono muted" style="word-break:break-all">{{ uri }}</p>
+<p class="muted">Good for two minutes, and for one phone. Press again for
+another.</p>
+{% when None %}
+{% endmatch %}
+<form method="post" action="/ui/app/grant">
+  <button class="btn btn-accent" type="submit">
+    {% if code.is_some() %}Show a new code{% else %}Show a code for this phone{% endif %}
+  </button>
+</form>
+<p class="muted">The picture carries a code, not a credential: the phone
+trades it for its own token, which then appears under Settings → API tokens
+named for the device, and is revoked there.</p>
+{% endblock %}

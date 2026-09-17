@@ -41,6 +41,14 @@ struct SettingsTemplate {
     gotify_url: String,
     gotify_token_set: bool,
     up_endpoint: String,
+    /// What registered the endpoint over the API, where something did. A row
+    /// typed into the field has none.
+    up_device: Option<String>,
+    /// An endpoint with no keys: a registration from before Web Push, still
+    /// pushed to in plaintext. Said on the page, because the difference is
+    /// invisible in the field and it is the difference between a push the
+    /// push service can read and one it cannot.
+    up_legacy: bool,
     tokens: Vec<TokenRow>,
     /// `None` when capture is switched off, which renders nothing at all: a
     /// section about a log nobody is keeping is noise.
@@ -162,6 +170,18 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Re
             .as_str()
             .unwrap_or_default()
             .to_string(),
+        up_device: notify["unifiedpush"]["device"]
+            .as_str()
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
+        up_legacy: crate::jobs::remind::notify_targets(&notify)
+            .iter()
+            .any(|t| {
+                matches!(
+                    t,
+                    crate::jobs::remind::Target::UnifiedPush { keys: None, .. }
+                )
+            }),
         tokens: token_rows(&tenant).await?,
         feedback: match tenant.core.learn.enabled {
             true => Some(
@@ -243,7 +263,7 @@ struct NotifyForm {
 /// words. That mattered more here, not less: nothing fetches a captured URL on
 /// a schedule, and `jobs::remind::run` POSTs to whatever is saved here on a
 /// timer, from the server, for as long as it stands.
-fn push_url(field: &str, raw: &str) -> Result<()> {
+pub(crate) fn push_url(field: &str, raw: &str) -> Result<()> {
     let u = url::Url::parse(raw).map_err(|e| Error::Validation(format!("{field}: {e}")))?;
     if !matches!(u.scheme(), "http" | "https") {
         return Err(Error::Validation(format!(
@@ -353,7 +373,13 @@ async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> UiResult<Resp
     let endpoint = f.up_endpoint.trim();
     if !endpoint.is_empty() {
         push_url("up_endpoint", endpoint)?;
-        notify["unifiedpush"] = serde_json::json!({ "endpoint": endpoint });
+        // The field shows the endpoint the app registered, so saving the
+        // form with it untouched must not turn that registration into a
+        // keyless one. A different endpoint is a person's, and has no keys.
+        notify["unifiedpush"] = match stored["unifiedpush"]["endpoint"].as_str() == Some(endpoint) {
+            true => stored["unifiedpush"].clone(),
+            false => serde_json::json!({ "endpoint": endpoint }),
+        };
     }
     control.set_notify(&tenant.user.subject, &notify).await?;
     tenant.core.store.rearm_remind().await?;
@@ -393,7 +419,13 @@ async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| Error::Internal(e.to_string()))?;
-    Ok(match crate::jobs::remind::push(&http, &target, "engram", "A test from Settings.").await {
+    let msg = crate::jobs::remind::Message::notice(
+        "engram",
+        "A test from Settings.",
+        tenant.core.clock.now(),
+    );
+    let sender = crate::jobs::remind::Sender::load(&tenant.core).await?;
+    Ok(match crate::jobs::remind::push(&http, &target, &msg, &sender).await {
         Ok(()) => axum::response::Html("<p class=\"muted\">Sent.</p>".to_string()),
         // The transport detail goes to the server log, never the page: this
         // is a server-side POST to whatever URL the user saved, and in a
@@ -472,6 +504,8 @@ mod tests {
             gotify_url: String::new(),
             gotify_token_set: false,
             up_endpoint: String::new(),
+            up_device: None,
+            up_legacy: false,
             tokens,
             feedback: None,
             asks: None,
@@ -690,6 +724,97 @@ mod tests {
             "a blank url switches the channel off"
         );
         assert_eq!(notify["unifiedpush"]["endpoint"], "https://u/x");
+    }
+
+    #[tokio::test]
+    async fn the_page_names_the_device_that_registered_and_marks_a_keyless_row() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {
+                    "endpoint": "https://push.example/up/1",
+                    "p256dh": "p", "auth": "a",
+                    "device": "engram-android/0.1 (Pixel 8)",
+                    "registered_at": 1,
+                }}),
+            )
+            .await
+            .unwrap();
+        let html = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(html.contains("engram-android/0.1 (Pixel 8)"), "{html}");
+        assert!(html.contains("encrypted"), "{html}");
+        assert!(!html.contains("plaintext"), "{html}");
+
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {"endpoint": "https://push.example/up/1"}}),
+            )
+            .await
+            .unwrap();
+        let html = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(html.contains("plaintext"), "{html}");
+        assert!(!html.contains("encrypted"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn saving_the_form_with_the_registered_endpoint_untouched_keeps_its_keys() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        core.store
+            .control
+            .set_notify(
+                &core.store.subject,
+                &serde_json::json!({"unifiedpush": {
+                    "endpoint": "https://push.example/up/1",
+                    "p256dh": "p", "auth": "a", "device": "d", "registered_at": 1,
+                }}),
+            )
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(form(
+                "/ui/settings/notify",
+                &cookie,
+                "gotify_url=&gotify_token=&up_endpoint=https%3A%2F%2Fpush.example%2Fup%2F1",
+            ))
+            .await
+            .unwrap();
+        let notify = core
+            .store
+            .control
+            .notify(&core.store.subject)
+            .await
+            .unwrap();
+        assert_eq!(notify["unifiedpush"]["p256dh"], "p");
+        assert_eq!(notify["unifiedpush"]["device"], "d");
+
+        app.clone()
+            .oneshot(form(
+                "/ui/settings/notify",
+                &cookie,
+                "gotify_url=&gotify_token=&up_endpoint=https%3A%2F%2Fpush.example%2Fup%2F2",
+            ))
+            .await
+            .unwrap();
+        let notify = core
+            .store
+            .control
+            .notify(&core.store.subject)
+            .await
+            .unwrap();
+        assert_eq!(
+            notify["unifiedpush"]["endpoint"],
+            "https://push.example/up/2"
+        );
+        assert!(
+            notify["unifiedpush"].get("p256dh").is_none(),
+            "a typed endpoint is a person's, and the keys were for the other one"
+        );
     }
 
     #[tokio::test]

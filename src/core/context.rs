@@ -296,6 +296,70 @@ pub struct Bundle {
     /// `wifi` | `cellular` | `wired` | anything else.
     pub network: Option<String>,
     pub audio_outputs: Option<u32>,
+
+    // ── Stored, not encoded. ───────────────────────────────────────────────
+    // Every field below is written to `context_events.bundle` whole and read
+    // by no block yet. A block that wants one is a layout change: it bumps
+    // `LAYOUT_VERSION`, and the sweep rebuilds every profile from these raw
+    // rows. Collecting first and encoding later is what whole-bundle storage
+    // was built for. `device_key` reads none of them — they all describe the
+    // moment, and none describe the machine.
+    /// Geohash, 6 characters (about 1 km). Only with the place switch on.
+    pub place: Option<String>,
+    /// `slow-2g` … `4g`, from `connection.effectiveType`.
+    pub net_effective: Option<String>,
+    /// Mbit/s estimate.
+    pub net_downlink: Option<f32>,
+    /// Round-trip estimate, ms.
+    pub rtt: Option<f32>,
+    pub save_data: Option<bool>,
+    pub reduced_motion: Option<bool>,
+    pub high_contrast: Option<bool>,
+    /// `coarse` | `fine`.
+    pub pointer: Option<String>,
+    pub hover: Option<bool>,
+    /// `standalone` | `browser` from the web; `app` from the phone.
+    pub display_mode: Option<String>,
+    /// `navigate` | `reload` | `back_forward`.
+    pub nav_type: Option<String>,
+    /// `maximised` | `windowed`.
+    pub window_state: Option<String>,
+    pub focused: Option<bool>,
+    /// Seconds since this sender last built a bundle.
+    pub since_last_view_s: Option<f32>,
+    /// Bundles this sender built since its local midnight.
+    pub views_today: Option<u32>,
+    pub screen_x: Option<f32>,
+    pub screen_y: Option<f32>,
+    pub screens: Option<u32>,
+    pub avail_w: Option<f32>,
+    pub avail_h: Option<f32>,
+    pub video_inputs: Option<u32>,
+    pub audio_inputs: Option<u32>,
+    /// `visualViewport.scale`.
+    pub zoom: Option<f32>,
+    pub fullscreen: Option<bool>,
+    /// `none` | `same_origin` | `external`.
+    pub referrer_kind: Option<String>,
+    pub online: Option<bool>,
+    /// The Chromium keyboard map's layout, where a browser offers one.
+    pub keyboard_layout: Option<String>,
+    /// `h12` | `h23`.
+    pub hour_cycle: Option<String>,
+    // Phone only: a browser writes `null` for these, so that the app.js test
+    // below still sees every name.
+    /// `speaker` | `wired` | `bluetooth` | `car`.
+    pub audio_route: Option<String>,
+    pub dnd: Option<bool>,
+    /// `normal` | `vibrate` | `silent`.
+    pub ringer: Option<String>,
+    pub power_save: Option<bool>,
+    /// 0.0..1.0.
+    pub brightness: Option<f32>,
+    /// Ambient light, last sensor reading.
+    pub lux: Option<f32>,
+    pub docked: Option<bool>,
+    pub headset: Option<bool>,
 }
 
 /// A bundle from whatever the browser posted.
@@ -784,6 +848,103 @@ mod tests {
         let mut other = phone();
         other.platform = Some("macOS".into());
         assert_ne!(device_key(&phone()), device_key(&other));
+    }
+
+    /// Every name the struct reads, off the source. Shared by the two tests
+    /// below and by the app.js test above, which reads it the same way.
+    fn bundle_field_names() -> std::collections::BTreeSet<&'static str> {
+        let src = include_str!("context.rs");
+        let body = src
+            .split_once("pub struct Bundle {")
+            .expect("Bundle struct")
+            .1
+            .split_once("\n}")
+            .expect("end of Bundle")
+            .0;
+        body.lines()
+            .filter_map(|l| l.trim().strip_prefix("pub "))
+            .filter_map(|l| l.split_once(':'))
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    #[test]
+    fn the_phone_reads_the_same_vocabulary_as_the_struct() {
+        // The third sender has a compiler of its own and no way to read this
+        // file: the Kotlin tests read a fixture instead, and this is what keeps
+        // the fixture honest. One name per line, sorted, nothing else.
+        let fixture = include_str!("../../android/core/src/test/resources/bundle-fields.txt");
+        let listed: std::collections::BTreeSet<&str> = fixture
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            listed,
+            bundle_field_names(),
+            "bundle-fields.txt and Bundle disagree about what a situation is"
+        );
+    }
+
+    #[test]
+    fn the_device_key_ignores_every_field_that_describes_the_moment() {
+        // The key hashes six stable fields and must stay deaf to the rest —
+        // a phone that walked into another room, plugged in a headset and
+        // turned on do-not-disturb is the same phone.
+        let a = phone();
+        let b = Bundle {
+            place: Some("u33dc0".into()),
+            net_effective: Some("4g".into()),
+            net_downlink: Some(12.5),
+            rtt: Some(40.0),
+            save_data: Some(true),
+            reduced_motion: Some(true),
+            high_contrast: Some(true),
+            pointer: Some("fine".into()),
+            hover: Some(true),
+            display_mode: Some("standalone".into()),
+            nav_type: Some("reload".into()),
+            window_state: Some("maximised".into()),
+            focused: Some(false),
+            since_last_view_s: Some(3600.0),
+            views_today: Some(9),
+            screen_x: Some(1920.0),
+            screen_y: Some(0.0),
+            screens: Some(2),
+            avail_w: Some(1900.0),
+            avail_h: Some(1000.0),
+            video_inputs: Some(1),
+            audio_inputs: Some(2),
+            zoom: Some(1.5),
+            fullscreen: Some(true),
+            referrer_kind: Some("external".into()),
+            online: Some(false),
+            keyboard_layout: Some("de".into()),
+            hour_cycle: Some("h23".into()),
+            audio_route: Some("car".into()),
+            dnd: Some(true),
+            ringer: Some("silent".into()),
+            power_save: Some(true),
+            brightness: Some(0.2),
+            lux: Some(3.0),
+            docked: Some(true),
+            headset: Some(true),
+            ..phone()
+        };
+        assert_eq!(device_key(&a), device_key(&b));
+    }
+
+    #[test]
+    fn a_bundle_with_the_wider_vocabulary_parses_every_field() {
+        let raw = r#"{"tz":"Europe/Berlin","place":"u33dc0","audio_route":"car",
+            "views_today":3,"lux":12.5,"online":true,"hour_cycle":"h23"}"#;
+        let b = parse_bundle(raw);
+        assert_eq!(b.place.as_deref(), Some("u33dc0"));
+        assert_eq!(b.audio_route.as_deref(), Some("car"));
+        assert_eq!(b.views_today, Some(3));
+        assert_eq!(b.lux, Some(12.5));
+        assert_eq!(b.online, Some(true));
+        assert_eq!(b.hour_cycle.as_deref(), Some("h23"));
     }
 
     #[test]

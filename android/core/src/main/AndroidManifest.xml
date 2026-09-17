@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Situation reads the active network on every bundle. The app only ever
+         had this because WorkManager's manifest merged it in; the module that
+         makes the call is the one that should ask for it. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+</manifest>

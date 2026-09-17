@@ -1020,7 +1020,11 @@
   // person, so they are constant and say nothing about which situation this is
   // — and a hardened browser randomises them per session, so every day would
   // look like a new device.
-  var slow = { battery_level: null, charging: null, audio_outputs: null };
+  var slow = {
+    battery_level: null, charging: null,
+    audio_outputs: null, audio_inputs: null, video_inputs: null,
+    keyboard_layout: null, screens: null, place: null
+  };
 
   function primeSlow() {
     if (navigator.getBattery) {
@@ -1031,11 +1035,132 @@
     }
     if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
       navigator.mediaDevices.enumerateDevices().then(function (list) {
-        slow.audio_outputs = list.filter(function (d) {
-          return d.kind === 'audiooutput';
-        }).length;
+        var n = { audiooutput: 0, audioinput: 0, videoinput: 0 };
+        list.forEach(function (d) { if (d.kind in n) n[d.kind] += 1; });
+        slow.audio_outputs = n.audiooutput;
+        slow.audio_inputs = n.audioinput;
+        slow.video_inputs = n.videoinput;
       }).catch(function () {});
     }
+    // Chromium only. The map's own keys are layout-specific; the letters under
+    // the physical Q, Y and A are enough to tell QWERTY from QWERTZ from AZERTY.
+    if (navigator.keyboard && navigator.keyboard.getLayoutMap) {
+      navigator.keyboard.getLayoutMap().then(function (m) {
+        slow.keyboard_layout = (m.get('KeyQ') || '') + (m.get('KeyY') || '') + (m.get('KeyA') || '');
+      }).catch(function () {});
+    }
+    // `screen.isExtended` says whether there is more than one screen without
+    // the window-management prompt `getScreenDetails` would raise. Two or
+    // more, or one.
+    slow.screens = screen.isExtended ? 2 : 1;
+    primePlace();
+  }
+
+  // How long a kept geohash still describes where this browser is. A fix from
+  // last week is not a place, it is a memory of one.
+  var PLACE_GOOD_FOR = 86400000;
+
+  // Place is the one field behind a permission, and the switch is the only way
+  // it is ever asked for. Low accuracy, ten minutes of cache, and the position
+  // is reduced to a geohash here — the coordinates never leave.
+  //
+  // The fix arrives in a callback, and the bundle is built on load, in this
+  // same turn: whatever this asks for now can only reach the bundle after it
+  // has gone. So the geohash is kept and read back on the next load, which is
+  // the app's own shape — `AndroidSituationSource.place` reads a last known
+  // position too, and never waits for a fresh one.
+  function primePlace() {
+    if (!placeOn()) return;
+    try {
+      var kept = (localStorage.getItem('engram:place_hash') || '').split(':');
+      if (kept[0] && Date.now() - (parseInt(kept[1], 10) || 0) < PLACE_GOOD_FOR) slow.place = kept[0];
+    } catch (e) {}
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      slow.place = geohash(pos.coords.latitude, pos.coords.longitude, 6);
+      try { localStorage.setItem('engram:place_hash', slow.place + ':' + Date.now()); } catch (e) {}
+    }, function () {}, { enableHighAccuracy: false, maximumAge: 600000, timeout: 8000 });
+  }
+
+  function placeOn() {
+    try { return localStorage.getItem('engram:place') === 'on'; } catch (e) { return false; }
+  }
+
+  // The switch off is a withdrawal, not a pause: what was kept goes with it.
+  function forgetPlace() {
+    slow.place = null;
+    try { localStorage.removeItem('engram:place_hash'); } catch (e) {}
+  }
+
+  function placeSwitch() {
+    var el = document.getElementById('place-switch');
+    if (!el) return;
+    try { el.checked = localStorage.getItem('engram:place') === 'on'; } catch (e) {}
+    el.addEventListener('change', function () {
+      try { localStorage.setItem('engram:place', el.checked ? 'on' : 'off'); } catch (e) {}
+      // Asking now, while the person is looking at the switch they pressed,
+      // is the one moment a permission prompt makes sense.
+      if (el.checked) primePlace(); else forgetPlace();
+    });
+  }
+
+  // Standard geohash, base32 alphabet, `precision` characters. The same
+  // function as `Geohash.encode` in the app.
+  function geohash(lat, lon, precision) {
+    var chars = '0123456789bcdefghjkmnpqrstuvwxyz';
+    var latR = [-90, 90], lonR = [-180, 180];
+    var out = '', bit = 0, ch = 0, even = true;
+    while (out.length < precision) {
+      if (even) {
+        var midLon = (lonR[0] + lonR[1]) / 2;
+        if (lon >= midLon) { ch = (ch << 1) | 1; lonR[0] = midLon; }
+        else { ch = ch << 1; lonR[1] = midLon; }
+      } else {
+        var midLat = (latR[0] + latR[1]) / 2;
+        if (lat >= midLat) { ch = (ch << 1) | 1; latR[0] = midLat; }
+        else { ch = ch << 1; latR[1] = midLat; }
+      }
+      even = !even;
+      if (++bit === 5) { out += chars.charAt(ch); bit = 0; ch = 0; }
+    }
+    return out;
+  }
+
+  function media(q) {
+    try { return matchMedia(q).matches; } catch (e) { return null; }
+  }
+
+  function navType() {
+    var e = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+    return e && e.type ? e.type : null;
+  }
+
+  function referrerKind() {
+    if (!document.referrer) return 'none';
+    try {
+      return new URL(document.referrer).origin === location.origin ? 'same_origin' : 'external';
+    } catch (e) { return 'external'; }
+  }
+
+  // Two counters this browser keeps about itself: how long since it last
+  // built a bundle, and how many it has built since its local midnight. A
+  // visit after a week away and the ninth visit of a morning are different
+  // situations, and nothing else in the bundle says so.
+  function viewCounters() {
+    var now = Date.now();
+    var out = { since_last_view_s: null, views_today: null };
+    try {
+      var last = parseInt(localStorage.getItem('engram:last_view') || '0', 10) || 0;
+      if (last) out.since_last_view_s = Math.round((now - last) / 1000);
+      var day = localDay(now);
+      var raw = (localStorage.getItem('engram:views') || '').split(':');
+      var n = raw[0] === day ? (parseInt(raw[1], 10) || 0) : 0;
+      n += 1;
+      out.views_today = n;
+      localStorage.setItem('engram:last_view', String(now));
+      localStorage.setItem('engram:views', day + ':' + n);
+    } catch (e) {}
+    return out;
   }
 
   function uaFamily() {
@@ -1084,6 +1209,48 @@
       b.battery_level = slow.battery_level;
       b.charging = slow.charging;
       b.audio_outputs = slow.audio_outputs;
+      // ── Stored, not encoded. See the Bundle struct in core/context.rs. ──
+      var conn = navigator.connection || navigator.mozConnection || {};
+      b.place = slow.place;
+      b.net_effective = conn.effectiveType || null;
+      b.net_downlink = typeof conn.downlink === 'number' ? conn.downlink : null;
+      b.rtt = typeof conn.rtt === 'number' ? conn.rtt : null;
+      b.save_data = typeof conn.saveData === 'boolean' ? conn.saveData : null;
+      b.reduced_motion = media('(prefers-reduced-motion: reduce)');
+      b.high_contrast = media('(prefers-contrast: more)');
+      b.pointer = media('(pointer: coarse)') ? 'coarse' : (media('(pointer: fine)') ? 'fine' : null);
+      b.hover = media('(hover: hover)');
+      b.display_mode = media('(display-mode: standalone)') ? 'standalone' : 'browser';
+      b.nav_type = navType();
+      b.window_state = (window.outerWidth >= screen.availWidth - 8 && window.outerHeight >= screen.availHeight - 8)
+        ? 'maximised' : 'windowed';
+      b.focused = document.hasFocus();
+      var counters = viewCounters();
+      b.since_last_view_s = counters.since_last_view_s;
+      b.views_today = counters.views_today;
+      b.screen_x = window.screenX;
+      b.screen_y = window.screenY;
+      b.screens = slow.screens;
+      b.avail_w = screen.availWidth;
+      b.avail_h = screen.availHeight;
+      b.video_inputs = slow.video_inputs;
+      b.audio_inputs = slow.audio_inputs;
+      b.zoom = window.visualViewport ? window.visualViewport.scale : null;
+      b.fullscreen = !!document.fullscreenElement;
+      b.referrer_kind = referrerKind();
+      b.online = navigator.onLine;
+      b.keyboard_layout = slow.keyboard_layout;
+      b.hour_cycle = Intl.DateTimeFormat().resolvedOptions().hourCycle || null;
+      // A browser cannot read these. The app fills them; they are listed here
+      // so that the test in context.rs sees the whole vocabulary on this side.
+      b.audio_route = null;
+      b.dnd = null;
+      b.ringer = null;
+      b.power_save = null;
+      b.brightness = null;
+      b.lux = null;
+      b.docked = null;
+      b.headset = null;
     } catch (e) {
       // A partial bundle is a working one: the blocks it could not fill are
       // zeroed server-side, and the weekday and the hour still stand.
@@ -2919,6 +3086,7 @@
     keyHint();
     installNudge();
     primeSlow();
+    placeSwitch();
     contextOffer();
     zoneDayLinks(document);
     restoreReading();

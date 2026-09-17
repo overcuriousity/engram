@@ -3327,6 +3327,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wide_bundle_is_stored_whole_and_read_by_no_block() {
+        // The new fields are stored, not encoded: the row carries them
+        // verbatim, and the encoder's output is the same with or without.
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = true;
+        core.learn.enabled = true;
+        let store = core.store.clone();
+        let background = core.background.clone();
+        let weights = core.recommend.weights.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+
+        let narrow = r#"{"tz":"Europe/Berlin","platform":"Android"}"#;
+        let wide = r#"{"tz":"Europe/Berlin","platform":"Android","place":"u33dc0","audio_route":"car","dnd":true}"#;
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/context",
+                &cookie,
+                &format!("bundle={}", crate::web::pair::urlencode(wide)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        background.wait_idle().await;
+
+        let rows = store.context_events_since(0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].bundle.contains("u33dc0"), "stored whole");
+        assert!(rows[0].bundle.contains("\"audio_route\":\"car\""));
+
+        let at = 1_700_000_000;
+        let a =
+            crate::core::context::encode(at, &crate::core::context::parse_bundle(narrow), &weights);
+        let b =
+            crate::core::context::encode(at, &crate::core::context::parse_bundle(wide), &weights);
+        assert_eq!(a, b, "no block reads the new fields");
+    }
+
+    #[tokio::test]
     async fn a_bundle_the_browser_could_not_build_does_not_break_the_page() {
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
@@ -6672,6 +6711,58 @@ mod tests {
         assert!(
             fail[..fail.find("\n    }").unwrap()].contains("stop();"),
             "fail() no longer closes the stream, so the browser will reconnect: {fail}"
+        );
+    }
+
+    /// The bundle is built on load, in the same turn `primePlace` runs, so a
+    /// place can only ever reach it from a fix an earlier load already had.
+    ///
+    /// This is the half of that a Rust test can see: the geohash is read back
+    /// from storage synchronously, before the asynchronous request whose answer
+    /// no bundle in this turn will live to see, and the request keeps what it
+    /// gets. Without the read the switch prompts for a permission and every
+    /// `b.place` is null forever — which is what it did.
+    #[test]
+    fn the_place_switch_reads_a_kept_geohash_before_it_asks_for_a_new_one() {
+        let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
+        let js = String::from_utf8(js.data.into_owned()).unwrap();
+
+        let prime = js
+            .split_once("function primePlace() {")
+            .expect("app.js has no primePlace()")
+            .1;
+        let prime = &prime[..prime.find("\n  }").expect("primePlace() does not end")];
+        let read = prime
+            .find("getItem('engram:place_hash')")
+            .expect("primePlace() never reads the kept geohash, so no bundle can carry one");
+        let ask = prime
+            .find("getCurrentPosition")
+            .expect("primePlace() no longer asks for a position");
+        assert!(
+            read < ask,
+            "the kept geohash must be read before the request, not in its callback: {prime}"
+        );
+        assert!(
+            prime.contains("setItem('engram:place_hash'"),
+            "a fix that arrives is not kept, so the next load has nothing to read: {prime}"
+        );
+
+        // Consent withdrawn is a place forgotten, not a place held back.
+        let switch = js
+            .split_once("function placeSwitch() {")
+            .expect("app.js has no placeSwitch()")
+            .1;
+        assert!(
+            switch[..switch.find("\n  }").unwrap()].contains("forgetPlace()"),
+            "turning the switch off leaves the kept geohash on disk: {switch}"
+        );
+        let forget = js
+            .split_once("function forgetPlace() {")
+            .expect("app.js has no forgetPlace()")
+            .1;
+        assert!(
+            forget[..forget.find("\n  }").unwrap()].contains("removeItem('engram:place_hash')"),
+            "forgetPlace() does not remove the kept geohash: {forget}"
         );
     }
 

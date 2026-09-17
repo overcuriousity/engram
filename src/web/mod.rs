@@ -1,4 +1,5 @@
 pub mod api;
+pub mod app;
 pub mod artifact;
 pub mod assets;
 pub mod auth_routes;
@@ -12,6 +13,7 @@ pub mod lineage_view;
 pub mod markdown;
 pub mod ops;
 pub mod pair;
+pub mod push;
 pub mod settings;
 pub mod share;
 pub mod state;
@@ -147,6 +149,7 @@ pub fn router(state: AppState) -> Router {
         .merge(ops::routes())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
+        .merge(app::app_router())
         .merge(share::share_router(
             state.config.capture.image_max_bytes,
             state.config.capture.pdf_max_bytes,

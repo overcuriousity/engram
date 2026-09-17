@@ -1,0 +1,5 @@
+<!-- The device tests talk to a MockWebServer over plain HTTP on loopback, which the platform's
+     cleartext policy refuses by default. This manifest is merged into the test APK only. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:usesCleartextTraffic="true" />
+</manifest>

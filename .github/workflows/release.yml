@@ -171,9 +171,76 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  android:
+    name: android
+    needs: version
+    if: needs.version.outputs.release == 'yes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+
+      # The same dance as the android workflow: the runner's SDK is used
+      # directly because the setup-android action runs `sdkmanager tools`,
+      # a package that no longer exists.
+      - name: accept SDK licences
+        run: yes | "$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager" --licenses > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # An unsigned APK is one no phone will install, and an APK signed by a
+      # key that is not the usual one is worse: it installs nowhere an older
+      # build already sits, and the person has to uninstall — losing the
+      # pairing — to take an update. Neither is worth publishing, so a missing
+      # key stops the release rather than shipping something inert.
+      - name: Unpack the signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::ANDROID_KEYSTORE_B64 is not set; the APK would be unsigned" >&2
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/engram.jks"
+
+      - name: Build
+        env:
+          ENGRAM_KEYSTORE: ${{ runner.temp }}/engram.jks
+          ENGRAM_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ENGRAM_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ENGRAM_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd android
+          ./gradlew :app:assembleRelease --no-daemon \
+            -PengramVersion="${{ needs.version.outputs.version }}"
+
+      - name: Name it after the version, and prove it is signed
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          # AGP writes `app-release-unsigned.apk` when no signing config took
+          # effect. Its absence is the check: a build that produced one has a
+          # key that did not load, whatever the secrets said.
+          test -f "$apk" || { echo "::error::the APK came out unsigned" >&2; exit 1; }
+          "$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)apksigner" verify --print-certs "$apk"
+          mkdir -p dist && cp "$apk" "dist/engram-${v}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engram-android
+          path: dist/*.apk
+          if-no-files-found: error
+
   publish:
     name: publish
-    needs: [version, build]
+    needs: [version, build, android]
     runs-on: ubuntu-latest
     permissions:
       # Scoped to this job alone: nothing above it may write to the repository.
@@ -196,7 +263,10 @@ jobs:
           # Every archive, or the release is not published. A missing target is
           # a broken release rather than a smaller one.
           test "$(ls -1 ./*.tar.gz | wc -l)" -eq 2
-          sha256sum ./*.tar.gz > SHA256SUMS
+          # And the APK, which Obtainium reads straight off the newest release:
+          # a release published without it is an update the phones cannot see.
+          test "$(ls -1 ./*.apk | wc -l)" -eq 1
+          sha256sum ./*.tar.gz ./*.apk > SHA256SUMS
           cat SHA256SUMS
 
       - name: Release
@@ -211,4 +281,4 @@ jobs:
             --title "${{ needs.version.outputs.tag }}" \
             --prerelease \
             --generate-notes \
-            dist/*.tar.gz dist/SHA256SUMS
+            dist/*.tar.gz dist/*.apk dist/SHA256SUMS

@@ -46,6 +46,14 @@ impl User {
     }
 }
 
+/// The instance's sender identity for Web Push, both halves base64url
+/// without padding: the private scalar and the uncompressed public point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VapidKeys {
+    pub private: String,
+    pub public: String,
+}
+
 #[derive(Clone)]
 pub struct Control {
     pub pool: sqlx::SqlitePool,
@@ -65,6 +73,7 @@ impl Control {
             .await?;
         let control = Control { pool };
         control.migrate().await?;
+        control.ensure_instance().await?;
         Ok(control)
     }
 
@@ -82,7 +91,44 @@ impl Control {
             .await?;
         let control = Control { pool };
         control.migrate().await?;
+        control.ensure_instance().await?;
         Ok(control)
+    }
+
+    /// The one `instance` row, written on first boot and left alone after.
+    ///
+    /// A keypair is generated before the insert on every boot and thrown away
+    /// when the row already stands — `ON CONFLICT DO NOTHING` is what makes
+    /// two processes opening the same file agree on one sender. Generating a
+    /// P-256 key costs microseconds; a read-then-write would cost a race.
+    pub async fn ensure_instance(&self) -> Result<()> {
+        use base64::Engine;
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        let secret = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let private = b64.encode(secret.to_bytes());
+        let public = b64.encode(secret.public_key().to_encoded_point(false).as_bytes());
+        sqlx::query(
+            "INSERT INTO instance (id, vapid_private, vapid_public, created_at) \
+             VALUES (1, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(private)
+        .bind(public)
+        .bind(super::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The instance's VAPID keypair, as stored.
+    pub async fn vapid(&self) -> Result<VapidKeys> {
+        let row = sqlx::query("SELECT vapid_private, vapid_public FROM instance WHERE id = 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(VapidKeys {
+            private: row.get("vapid_private"),
+            public: row.get("vapid_public"),
+        })
     }
 
     /// The schema, and the same refusal `Store::migrate` makes.
@@ -672,6 +718,27 @@ mod tests {
     /// longer does has to go, or the `INSERT` in `provision` that stopped naming
     /// it fails against a leftover `NOT NULL` with no default — which presents
     /// as a 500 at the door for the next person to sign in after an upgrade.
+    #[tokio::test]
+    async fn an_instance_has_one_vapid_keypair_that_survives_a_reread() {
+        use base64::Engine;
+        let c = Control::memory().await.unwrap();
+        let a = c.vapid().await.unwrap();
+        assert_eq!(c.vapid().await.unwrap(), a);
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let public = b64.decode(&a.public).unwrap();
+        assert_eq!(public.len(), 65, "an uncompressed P-256 point");
+        assert_eq!(public[0], 4);
+        assert_eq!(b64.decode(&a.private).unwrap().len(), 32);
+    }
+
+    #[tokio::test]
+    async fn ensuring_the_instance_again_keeps_the_first_key() {
+        let c = Control::memory().await.unwrap();
+        let first = c.vapid().await.unwrap();
+        c.ensure_instance().await.unwrap();
+        assert_eq!(c.vapid().await.unwrap(), first);
+    }
+
     #[tokio::test]
     async fn notify_is_empty_until_set_and_survives_a_reread() {
         let c = Control::memory().await.unwrap();

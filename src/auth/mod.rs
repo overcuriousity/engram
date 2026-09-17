@@ -1,3 +1,4 @@
+pub mod grants;
 pub mod local;
 pub mod oidc;
 pub mod tokens;
