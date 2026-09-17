@@ -1064,8 +1064,12 @@ fn default_limit() -> i64 {
 pub struct CorpusRow {
     pub id: String,
     pub origin: String,
-    /// What to call the row, and whether that is a name somebody gave it or
-    /// the opening of its text standing in for one — see `ui::RowLabel`.
+    /// What to call the row, and whether that is a name the base holds for it
+    /// — given at capture, derived from the text, or written by a model; all
+    /// three land in `title_hint` — or the opening of its text standing in for
+    /// one because no name has been stored yet. Seen over real HTTP: a fresh
+    /// text capture is `named` within moments, because the passages job
+    /// derives a title as soon as it has read it.
     pub label: String,
     pub named: bool,
     pub status: crate::store::corpora::CorpusStatus,
