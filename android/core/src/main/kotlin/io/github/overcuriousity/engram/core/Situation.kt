@@ -18,7 +18,9 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.graphics.Point
 import android.os.BatteryManager
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.text.format.DateFormat
@@ -50,9 +52,16 @@ data class Stable(
     companion object {
         fun of(context: Context): Stable {
             val wm = context.getSystemService(WindowManager::class.java)
-            val b = wm.maximumWindowMetrics.bounds
-            val w = minOf(b.width(), b.height())
-            val h = maxOf(b.width(), b.height())
+            // `maximumWindowMetrics` is API 30. Android 10 reads the same
+            // pixels from the call it replaced.
+            val (bw, bh) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                wm.maximumWindowMetrics.bounds.let { it.width() to it.height() }
+            } else {
+                @Suppress("DEPRECATION")
+                Point().also { wm.defaultDisplay.getRealSize(it) }.let { it.x to it.y }
+            }
+            val w = minOf(bw, bh)
+            val h = maxOf(bw, bh)
             val mi = ActivityManager.MemoryInfo().also { context.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
             val gb = (mi.totalMem / 1_073_741_824.0 * 2).roundToInt() / 2.0
             return Stable(

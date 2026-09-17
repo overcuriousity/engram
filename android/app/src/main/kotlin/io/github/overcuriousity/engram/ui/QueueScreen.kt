@@ -71,5 +71,26 @@ private fun firstLine(kind: Kind, payload: String): String {
         Kind.capture_files -> p["title"]?.jsonPrimitive?.contentOrNull ?: "Files"
         Kind.done -> "Done · ${p["moment"]?.jsonPrimitive?.contentOrNull}"
         Kind.snooze -> "Snoozed · ${p["moment"]?.jsonPrimitive?.contentOrNull}"
+        // A judging answer names the decision, not the row it was made on: a
+        // pair's number means nothing to the person who answered it.
+        Kind.pair_supersede -> "Duplicate pair · keep one"
+        Kind.pair_synthesize -> "Duplicate pair · write one"
+        Kind.pair_discard -> "Duplicate pair · discard both"
+        Kind.pair_dismiss -> "Duplicate pair · dismissed"
+        Kind.gap_dismiss -> "Gap · dismissed"
+        Kind.gap_forget -> "Gaps · forgotten"
+        Kind.artifact_op -> when (p["op"]?.jsonPrimitive?.contentOrNull) {
+            "verify" -> "Artifact · still accurate"
+            "deprecate" -> "Artifact · hidden"
+            "reactivate", "unsupersede" -> "Artifact · back in results"
+            else -> "Artifact"
+        }
+        Kind.merge_undo -> "Merge · undone"
+        Kind.corpus_resolve -> when (p["action"]?.jsonPrimitive?.contentOrNull) {
+            "replace" -> "Parked capture · replaced the old one"
+            "keep_both" -> "Parked capture · kept both"
+            "discard" -> "Parked capture · discarded"
+            else -> "Parked capture"
+        }
     }
 }

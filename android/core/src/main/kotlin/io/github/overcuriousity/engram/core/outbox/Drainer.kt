@@ -8,6 +8,7 @@ import io.github.overcuriousity.engram.core.Transport
 import io.github.overcuriousity.engram.core.db.Kind
 import io.github.overcuriousity.engram.core.db.OutboxRow
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -68,6 +69,7 @@ internal class Drainer(
             .getOrElse { throw Malformed("the row's payload is not an object") }
         fun s(k: String) = p[k]?.takeIf { it !is JsonNull }?.jsonPrimitive?.content
         fun need(k: String) = s(k) ?: throw Malformed("the row carries no $k")
+        fun pair() = p["pair"]?.jsonPrimitive?.longOrNull ?: throw Malformed("the row carries no pair")
         when (row.kind) {
             Kind.capture_text -> settle(row, transport.captureText(s("text") ?: "", s("title"), s("note"), tz()))
             Kind.capture_files -> {
@@ -81,6 +83,28 @@ internal class Drainer(
             Kind.snooze -> settle(
                 row,
                 transport.momentSnooze(need("moment"), p["until"]?.jsonPrimitive?.longOrNull ?: 0L),
+                goneIsSettled = true,
+            )
+            // A judging answer whose subject the server no longer has is
+            // settled for the reason a vanished moment is: two doors open onto
+            // one base, and a pair answered on the web while this phone was
+            // offline is not work still owed. Holding it would show a person a
+            // failure for a decision that has already been made.
+            Kind.pair_supersede -> settle(row, transport.pairSupersede(pair(), s("keep")), goneIsSettled = true)
+            Kind.pair_synthesize -> settle(row, transport.pairSynthesize(pair()), goneIsSettled = true)
+            Kind.pair_discard -> settle(row, transport.pairDiscard(pair()), goneIsSettled = true)
+            Kind.pair_dismiss -> settle(row, transport.pairDismiss(pair()), goneIsSettled = true)
+            Kind.gap_dismiss -> settle(row, transport.gapDismiss(need("kind"), need("id")), goneIsSettled = true)
+            Kind.gap_forget -> settle(row, transport.gapForget(members(p)), goneIsSettled = true)
+            Kind.artifact_op -> settle(
+                row,
+                transport.artifactOp(need("artifact"), need("op")),
+                goneIsSettled = true,
+            )
+            Kind.merge_undo -> settle(row, transport.mergeUndo(need("merge")), goneIsSettled = true)
+            Kind.corpus_resolve -> settle(
+                row,
+                transport.corpusResolve(need("corpus"), need("action")),
                 goneIsSettled = true,
             )
         }
@@ -101,6 +125,16 @@ internal class Drainer(
             else -> throw IOException("server answered ${a.status}")
         }
     }
+
+    /** The members a forget was shown, as the route names them. */
+    private fun members(p: kotlinx.serialization.json.JsonObject): List<Pair<String, String>> =
+        (p["members"] as? JsonArray ?: throw Malformed("the row carries no members")).map {
+            val m = it.jsonObject
+            val kind = m["kind"]?.jsonPrimitive?.content
+            val id = m["id"]?.jsonPrimitive?.content
+            if (kind == null || id == null) throw Malformed("a member carries no kind and id")
+            kind to id
+        }
 
     /** The server's `{"error": "..."}` if that is what came back, else the body. */
     private fun message(body: String): String =

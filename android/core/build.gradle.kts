@@ -9,7 +9,7 @@ android {
     namespace = "io.github.overcuriousity.engram.core"
     compileSdk = 37
     defaultConfig {
-        minSdk = 34
+        minSdk = 29
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     // Every launch-time crash this app had was an API newer than minSdk, which
@@ -24,6 +24,13 @@ android {
     }
     testOptions.unitTests.isReturnDefaultValues = true
     testOptions.unitTests.isIncludeAndroidResources = true
+    // `-Pengram.live.origin=… -Pengram.live.token=…` points LiveServerTest at a
+    // running engram. Absent, that test skips itself.
+    testOptions.unitTests.all { t ->
+        listOf("engram.live.origin", "engram.live.token").forEach { k ->
+            providers.gradleProperty(k).orNull?.let { t.systemProperty(k, it) }
+        }
+    }
 }
 
 

@@ -1,0 +1,80 @@
+{
+  "items": [
+    {
+      "id": "01a0b0be-82e3-761c-865e-363bf9dd1e3a",
+      "origin": "web",
+      "label": "Older",
+      "named": true,
+      "status": "raw",
+      "created_at": 1789671670,
+      "updated_at": 1789671670,
+      "coverage": null,
+      "near_dupe_of": null,
+      "near_dupe_score": null,
+      "source_url": null,
+      "restored_at": null,
+      "metadata": {}
+    },
+    {
+      "id": "01a0b0be-82e2-7666-a729-a903740bc909",
+      "origin": "web",
+      "label": "Timeouts",
+      "named": true,
+      "status": "raw",
+      "created_at": 1789671670,
+      "updated_at": 1789671670,
+      "coverage": null,
+      "near_dupe_of": null,
+      "near_dupe_score": null,
+      "source_url": null,
+      "restored_at": null,
+      "metadata": {}
+    },
+    {
+      "id": "01a0b0be-82de-76b5-8071-0a46b199fadd",
+      "origin": "journal",
+      "label": "Long day.",
+      "named": false,
+      "status": "raw",
+      "created_at": 1789671670,
+      "updated_at": 1789671670,
+      "coverage": null,
+      "near_dupe_of": null,
+      "near_dupe_score": null,
+      "source_url": null,
+      "restored_at": null,
+      "metadata": {}
+    },
+    {
+      "id": "01a0b0be-82de-76b5-8071-0a452888d652",
+      "origin": "paste",
+      "label": "no title, only an opening",
+      "named": false,
+      "status": "raw",
+      "created_at": 1789671670,
+      "updated_at": 1789671670,
+      "coverage": null,
+      "near_dupe_of": null,
+      "near_dupe_score": null,
+      "source_url": null,
+      "restored_at": null,
+      "metadata": {}
+    },
+    {
+      "id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+      "origin": "web",
+      "label": "Qdrant notes",
+      "named": true,
+      "status": "raw",
+      "created_at": 1789671670,
+      "updated_at": 1789671670,
+      "coverage": null,
+      "near_dupe_of": null,
+      "near_dupe_score": null,
+      "source_url": null,
+      "restored_at": null,
+      "metadata": {}
+    }
+  ],
+  "next": null
+}

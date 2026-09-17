@@ -12,6 +12,7 @@ is all you have. We keep the original and we keep it in front of you.
 
 Three doors, one backend: the web UI, a REST API at `/api/v1`, and an MCP server
 at `/mcp` so an agent can read and write mid-session. Three doors is enough.
+What a client of the API may rely on is in [docs/api.md](docs/api.md).
 
 **Small pastes are structured on the spot; big ones earn it.** A capture that
 fits one synthesis call is rewritten immediately into artifacts built for

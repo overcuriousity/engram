@@ -5,7 +5,95 @@ Needs an Android SDK (`local.properties` → `sdk.dir`) and a JDK 17 or newer.
 JVM tests: `./gradlew :core:test`. Device tests: `./gradlew :core:connectedDebugAndroidTest`
 with a phone attached or an emulator running.
 
-The spec is `docs/superpowers/specs/2026-09-16-android-app-foundation-design.md`.
+The specs are `docs/superpowers/specs/2026-09-16-android-app-foundation-design.md`
+(the foundation: capture, the outbox, notifications) and Parts E and F of
+`docs/superpowers/specs/2026-09-08-android-companion-design.md` (reading, and
+the decisions a person makes about the base).
+
+## The screens
+
+Search is home: a box, and beneath an empty one what the base has to say
+unasked — the card offered for the situation the phone is in, what is due,
+what is worth seeing again. A search runs when it is asked for rather than on
+every keystroke; from a phone each keystroke would be an embedding call across
+a VPN. Ask sits beside the box and streams, drawing the answer as it grows and
+then drawing the server's whole answer in its place, with the commands and
+paths no excerpt carries marked.
+
+The bar holds Search, Capture, Today and Library. Queue and Settings are above,
+and the queue shows a count only while something is still owed. Today is one
+day of the base and pages by date; Library is everything captured, a page at a
+time; an artifact shows its text, where it came from, how it came to exist, and
+the wordings it has had.
+
+The result list keeps what the web's keeps: the rule that says *relevance falls
+off here*, and the rows beneath it that hold their rank and stop claiming to be
+answers. A loose hit is badged rather than ranked. That is not decoration —
+retrieval always returns its best candidates however bad they are, and a list
+without the rule shows a typo exactly as it shows an answer.
+
+## Judging, and why it is quiet
+
+The decisions rather than the reads — which of two near-identical artifacts
+stays, which questions the base could not answer are worth answering, what the
+base did on its own while nobody was looking — live behind Settings. Not a tab,
+not a section on home, and with no count anywhere until somebody has opened the
+screen that fetched one.
+
+That is on purpose and it is the whole design. This is the part of the system
+meant to shrink: the human in the loop here is one to work towards removing,
+not one to build a habit around. A queue of chores on the screen the app opens
+on is an interface asking to be served, and an app that badges it teaches a
+person to serve it.
+
+A pair card offers all five answers the web offers — keep either side, write
+one from both, discard both, dismiss — and says only what somebody actually
+established about the pair. Where the sweep filed a pair on a score and nothing
+has read it since, the card prints the measurement and no finding, because
+*these two cover the same ground* is a finding nobody made. Where a pair came
+from repeated co-retrieval no similarity was ever computed, so no percentage is
+shown. Where a merge would be refused, there is no button to press.
+
+What a set-aside row admits is decided by its `kind` and nothing else — never
+by reading its wording — so a `kind` this build has never heard of draws no
+buttons and is still shown. What the base did is worth knowing even where this
+app cannot answer it.
+
+Every answer is an outbox row, like every other write the device owes: a
+decision made on a train is a decision. It is also where undo comes from. Until
+the row is delivered, taking an answer back is deleting a row — not a second
+write undoing the first, which would be a different and less honest thing.
+
+## When the server cannot be reached
+
+Nothing is fetched that nobody asked for, so what a screen can show without the
+server is what was opened on this phone before. When a read fails the screen
+says `Server unreachable`, with when the content was fetched and a retry, above
+whatever was held — or above nothing. Writes are different: a capture, a Done,
+a snooze go to the outbox and are delivered when the server can be reached
+again.
+
+Every screen asks `Reader` in `core` and never learns where the answer came
+from. That is deliberate: a later version of this app is meant to be
+self-contained, an engram on the device replacing the server by default, and it
+is a second implementation of that one interface rather than a rewrite of the
+screens.
+
+## Tests
+
+`./gradlew lintDebug testDebugUnitTest :app:assembleDebug` is the whole of what
+runs without a device. Beyond the plain unit tests:
+
+- `-Pengram.pictures=1` makes `PicturesTest` write PNGs of the screens' parts to
+  `app/build/pictures/`, for looking at while no phone is in the loop.
+- `-Pengram.live.origin=… -Pengram.live.token=…` points `LiveServerTest` at a
+  running engram and drives the reader and Ask against it over real HTTP. It
+  skips itself when they are absent. The token is a device token: pair the way
+  a phone does, or mint one under Settings → API tokens.
+- `core/src/test/resources/api/*.json` are not written by hand. The Rust test
+  `src/web/android_fixtures.rs` produces them from the real routes and checks
+  on every server test run that they still have the shape the server answers
+  with, so a field renamed on the server fails a test that names the file.
 
 ## Installing
 

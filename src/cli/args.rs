@@ -73,6 +73,10 @@ pub struct CliArgs {
     ///
     /// `-r` and `-j` refuse it too: both print their own one-line receipt and
     /// have no JSON form, so the flag was accepted and silently dropped.
+    ///
+    /// A search prints the server's rows as a bare array, which is what it has
+    /// always printed: the `{items, next}` envelope every API list answers
+    /// with is dropped here rather than handed to a pipe that predates it.
     #[arg(long, conflicts_with_all = ["ask", "show", "remind", "journal"])]
     pub json: bool,
     /// Never colour, never animate, never leave ASCII.

@@ -406,8 +406,9 @@ async function runSearch() {
     // `door=extension` is how the judging page tells a query typed while
     // reading from one typed in the web UI. Only this value is honoured
     // server-side; a client cannot claim to be `ask` or `judge`.
-    const hits = await engramApi.call(
-      '/api/v1/search?door=extension&q=' + encodeURIComponent(q));
+    // `.items`: every list the API answers is `{ items, next }`.
+    const hits = (await engramApi.call(
+      '/api/v1/search?door=extension&q=' + encodeURIComponent(q))).items;
     if (mine !== turn) return;
     say('');
     clearResults();
@@ -435,8 +436,8 @@ async function refineSearch(q, owner, fast) {
   if (owner !== turn) return;
   let hits;
   try {
-    hits = await engramApi.call(
-      '/api/v1/search?door=extension&rerank=true&q=' + encodeURIComponent(q));
+    hits = (await engramApi.call(
+      '/api/v1/search?door=extension&rerank=true&q=' + encodeURIComponent(q))).items;
   } catch (e) {
     return;
   }
@@ -646,7 +647,9 @@ async function refreshRecent() {
   if (!(await engramApi.config())) return;
   const list = $('recent-list');
   try {
-    const rows = await engramApi.call('/api/v1/corpora?limit=' + RECENT);
+    // Every list the API answers is `{ items, next }`. One page is all this
+    // shows, so `next` is not followed.
+    const rows = (await engramApi.call('/api/v1/corpora?limit=' + RECENT)).items;
     list.textContent = '';
     if (!rows.length) {
       list.textContent = 'Nothing captured yet.';
@@ -660,11 +663,11 @@ async function refreshRecent() {
       link.href = deployment + '/ui/corpora/' + c.id;
       link.target = '_blank';
       link.rel = 'noreferrer noopener';
-      // Same floor the hit rows carry: `label` bottoms out at '' for a
-      // corpus with no `title_hint` and no usable first line — an image
-      // capture, a PDF whose `raw_text` this payload does not carry — and an
-      // empty anchor is an invisible, unclickable row.
-      link.textContent = label(c) || c.id;
+      // The server's label: a list row no longer carries `raw_text` to build
+      // one from, and the server's is the one every other door shows. Same
+      // floor the hit rows carry — an empty anchor is an invisible,
+      // unclickable row.
+      link.textContent = c.label || c.id;
 
       const state = document.createElement('span');
       state.className = 'state ' + c.status;

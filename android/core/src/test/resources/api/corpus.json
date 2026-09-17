@@ -1,0 +1,80 @@
+{
+  "id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+  "raw_text": "Filters narrow a search.\nPayload indexes make them fast.\nThird line.",
+  "origin": "web",
+  "title_hint": "Qdrant notes",
+  "content_hash": "baae3863616f0685be311008c75eeed41b5cfacd3a324cc3ac58b9b38ef5673d",
+  "status": "raw",
+  "created_at": 1789671670,
+  "updated_at": 1789671670,
+  "coverage": null,
+  "near_dupe_of": null,
+  "near_dupe_score": null,
+  "source_url": null,
+  "restored_at": null,
+  "metadata": {},
+  "chunks": [
+    {
+      "id": "01a0b0be-82de-76b5-8071-0a476676a20c",
+      "corpus_id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+      "provenance": "captured",
+      "source_count": 0,
+      "ordinal": 0,
+      "text": "artifact 0 about payload filters",
+      "corpus_span": {
+        "start_line": 1,
+        "end_line": 2,
+        "source": "located"
+      },
+      "title": "Payload filters 0",
+      "category": null,
+      "tags": [
+        "qdrant"
+      ],
+      "embed_state": "pending",
+      "embed_model": null,
+      "created_at": 1789671670,
+      "segment_idx": null,
+      "flags": [],
+      "flag_detail": null,
+      "superseded_by": null,
+      "caveats": [],
+      "status": "active",
+      "last_verified_at": 1789671670,
+      "cues": [],
+      "retired_at": null,
+      "reaped_at": null
+    },
+    {
+      "id": "01a0b0be-82df-71d0-afbe-22777c4dfaa1",
+      "corpus_id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+      "provenance": "captured",
+      "source_count": 0,
+      "ordinal": 1,
+      "text": "artifact 1 about payload filters",
+      "corpus_span": {
+        "start_line": 1,
+        "end_line": 2,
+        "source": "located"
+      },
+      "title": "Payload filters 1",
+      "category": null,
+      "tags": [
+        "qdrant"
+      ],
+      "embed_state": "pending",
+      "embed_model": null,
+      "created_at": 1789671670,
+      "segment_idx": null,
+      "flags": [],
+      "flag_detail": null,
+      "superseded_by": null,
+      "caveats": [],
+      "status": "active",
+      "last_verified_at": 1789671670,
+      "cues": [],
+      "retired_at": null,
+      "reaped_at": null
+    }
+  ]
+}

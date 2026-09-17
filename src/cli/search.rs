@@ -71,9 +71,16 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
     }
 
     match body {
-        // The server's own JSON, unchanged. A client that re-serialised it
-        // would be a second definition of the response shape.
-        Some(body) if cli.json => println!("{body}"),
+        // The server's rows, as it serialised them, and as a bare array.
+        //
+        // The one place a door here takes the API's shape apart, and
+        // deliberately: `--json` is a shape scripts already pipe into `jq`,
+        // and it was a bare array before every list gained the
+        // `{items, next}` envelope. The envelope has nothing for this reader
+        // — `next` is always null on a search, and the CLI never asks to
+        // explain, so no key ever sits beside `items` — so passing it on
+        // would break every caller to say nothing.
+        Some(items) if cli.json => println!("{items}"),
         _ => print!("{}", face.render(&hits, elapsed)),
     }
     // `1` for nothing found, so `engram -s "x" || …` is a usable branch.
@@ -212,9 +219,32 @@ async fn plain(
                 .into(),
         ));
     }
-    let hits: Vec<SearchResult> =
+    // The list envelope every API list answers with. `next` is always null
+    // here — a search is bounded by `limit`, not paged — so it is not read.
+    let mut body: serde_json::Value =
         serde_json::from_str(&body).map_err(|err| Error::Internal(format!("results: {err}")))?;
-    Ok((hits, began.elapsed().as_millis(), body))
+    let items = items_of(&mut body);
+    let hits: Vec<SearchResult> = serde_json::from_value(items.clone())
+        .map_err(|err| Error::Internal(format!("results: {err}")))?;
+    // The rows as the server serialised them, and nothing this client built:
+    // `--json` is the server's own answer, and a client that re-shaped its
+    // rows would be a second definition of them. The envelope around them is
+    // dropped, which is the one thing this door does take apart — see the
+    // print site in `run`.
+    Ok((hits, began.elapsed().as_millis(), items.to_string()))
+}
+
+/// The rows out of the list envelope.
+///
+/// `get_mut`, not `body["items"]`: indexing a `Value` by name panics outright
+/// on anything that is not an object or null — and the one body that is not is
+/// an older server's bare array, which is the very skew this door has to
+/// survive. Absent reads as null and fails at the deserialize with the message
+/// the caller is written around, as `status.rs` does for the same skew.
+fn items_of(body: &mut serde_json::Value) -> serde_json::Value {
+    body.get_mut("items")
+        .map(serde_json::Value::take)
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// The form a pipe, a test and a script see.
@@ -369,6 +399,17 @@ pub(crate) mod fixture {
 mod tests {
     use super::*;
     use fixture::hit;
+
+    /// A CLI from this branch against a server that predates the envelope.
+    /// `body["items"]` panicked there — `cannot access key "items" in JSON …`
+    /// — instead of failing as a shape this door does not understand.
+    #[test]
+    fn an_older_servers_bare_array_is_not_a_panic() {
+        let mut bare = serde_json::json!([{ "id": "a" }]);
+        assert!(items_of(&mut bare).is_null());
+        let mut enveloped = serde_json::json!({ "items": [{ "id": "a" }], "next": null });
+        assert_eq!(items_of(&mut enveloped), serde_json::json!([{ "id": "a" }]));
+    }
 
     /// Same budget, same rule, in the form a pipe sees.
     #[test]

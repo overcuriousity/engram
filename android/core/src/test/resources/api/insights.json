@@ -1,0 +1,31 @@
+{
+  "held": {
+    "corpora": 5,
+    "artifacts": 5,
+    "segments": 0,
+    "synthesized": 1
+  },
+  "used": [
+    {
+      "label": "reached often",
+      "count": 0
+    },
+    {
+      "label": "reached",
+      "count": 1
+    },
+    {
+      "label": "touched once",
+      "count": 0
+    },
+    {
+      "label": "never reached",
+      "count": 4
+    }
+  ],
+  "retrieval": {
+    "judged": 0,
+    "recall_at_10": null,
+    "mrr": null
+  }
+}

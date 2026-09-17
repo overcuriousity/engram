@@ -32,9 +32,30 @@ use std::collections::{HashMap, HashSet};
 const MAX_DEPTH: usize = 6;
 const MAX_NODES: usize = 200;
 
+/// The document a captured artifact was drawn from, as facts: what the
+/// `source_href` beside it is built out of. What crosses the API, where a
+/// client builds its own way there.
+#[derive(Clone, serde::Serialize)]
+pub struct NodeSource {
+    pub corpus_id: String,
+    /// The document's title, its URL where it has no title, or the sentence
+    /// that says it is no longer stored.
+    pub label: String,
+    /// The lines it was written from. Absent for an artifact written before
+    /// spans were recorded, or restored from the vector store.
+    pub start_line: Option<i64>,
+    pub end_line: Option<i64>,
+}
+
 /// One artifact in the tree, and what it was written from.
+///
+/// Serialised for `GET /api/v1/artifacts/{id}/lineage` as its facts. The three
+/// fields that are a rendering of those facts — `when`, `source_href`,
+/// `source_label` — are the HTML door's and do not cross.
+#[derive(serde::Serialize)]
 pub struct LineageNode {
     pub id: String,
+    #[serde(rename = "label")]
     pub title: String,
     /// Whether `title` is a name somebody wrote or the opening of the text
     /// standing in for one — see `ui::RowLabel`. A node is a link and nothing
@@ -42,14 +63,19 @@ pub struct LineageNode {
     pub named: bool,
     /// `merge` or `captured` — what kind of artifact this is, in one word.
     pub kind: &'static str,
+    #[serde(skip)]
     pub when: String,
     /// Not rendered. What the levels are ordered by: a tree read top to bottom
     /// is a history, and one ordered by id is a history in no order at all.
     pub created_at: i64,
     /// The document this was drawn from, deep-linked to its exact lines.
     /// Empty for a merge, which belongs to no document.
+    #[serde(skip)]
     pub source_href: String,
+    #[serde(skip)]
     pub source_label: String,
+    /// The same document as facts. `None` for a merge.
+    pub source: Option<NodeSource>,
     /// This artifact was superseded by the one at the root of the tree — the
     /// ordinary outcome of a merge, and worth saying on the node rather than
     /// leaving the reader to infer it from the arrangement.
@@ -66,7 +92,7 @@ pub struct LineageNode {
 /// `Default` is the empty one: a captured artifact that has replaced nothing,
 /// and the fallback when the walk itself fails — a pane must render without
 /// its lineage, the same way it renders without its neighbours.
-#[derive(Default)]
+#[derive(Default, serde::Serialize)]
 pub struct Lineage {
     /// What it was written from, nested by generation. Empty for a captured
     /// artifact, which was written from a document rather than from artifacts.
@@ -294,12 +320,13 @@ impl Walk<'_> {
                 created_at: 0,
                 source_href: String::new(),
                 source_label: String::new(),
+                source: None,
                 replaced,
                 missing: true,
                 children: Vec::new(),
             };
         };
-        let (source_href, source_label) = self.source_of(&c).await;
+        let (source_href, source_label, source) = self.source_of(&c).await;
         let label = crate::web::ui::row_label(&c);
         LineageNode {
             title: label.text,
@@ -315,6 +342,7 @@ impl Walk<'_> {
             created_at: c.created_at,
             source_href,
             source_label,
+            source,
             replaced,
             missing: false,
             id: c.id,
@@ -325,9 +353,9 @@ impl Walk<'_> {
     /// Where a captured artifact was drawn from, as a link and its label. The
     /// same deep link the pane's own Source label uses, so a leaf of the tree
     /// opens the document at the lines it was written from.
-    async fn source_of(&mut self, c: &Chunk) -> (String, String) {
+    async fn source_of(&mut self, c: &Chunk) -> (String, String, Option<NodeSource>) {
         let Some(cid) = c.corpus_id.clone() else {
-            return (String::new(), String::new());
+            return (String::new(), String::new(), None);
         };
         let title = match self.corpora.get(&cid) {
             Some(t) => t.clone(),
@@ -345,6 +373,12 @@ impl Walk<'_> {
                 t
             }
         };
+        let source = Some(NodeSource {
+            corpus_id: cid.clone(),
+            label: title.clone(),
+            start_line: c.corpus_span.as_ref().map(|sp| sp.start_line),
+            end_line: c.corpus_span.as_ref().map(|sp| sp.end_line),
+        });
         match &c.corpus_span {
             Some(sp) => (
                 format!(
@@ -356,10 +390,15 @@ impl Walk<'_> {
                 } else {
                     format!("lines {}–{} of {title}", sp.start_line, sp.end_line)
                 },
+                source,
             ),
             // No span: written before spans were recorded, or restored from the
             // vector store. The document is still the honest answer.
-            None => (format!("/ui/corpora/{cid}"), format!("from {title}")),
+            None => (
+                format!("/ui/corpora/{cid}"),
+                format!("from {title}"),
+                source,
+            ),
         }
     }
 }
@@ -689,5 +728,141 @@ mod tests {
         );
         assert!(l.roots.iter().any(|n| n.id == ids[1]));
         assert!(!l.roots.iter().any(|n| n.id == ids[0] && !n.missing));
+    }
+
+    // ── The JSON door, held to what the tree is held to ────────────────────
+
+    async fn json_lineage(core: crate::core::Core, id: &str) -> (u16, serde_json::Value) {
+        use tower::ServiceExt;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/artifacts/{id}/lineage"))
+                    .header("cookie", cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        (status, crate::web::test_support::json_of(res).await)
+    }
+
+    #[tokio::test]
+    async fn the_json_tree_nests_a_generation_and_carries_facts_not_links() {
+        let core = crate::core::test_support::test_core().await;
+        let s = &core.store;
+        let ids = captured(s, 3).await;
+        let m1 = s
+            .insert_merged_artifact(&merged("first pass"), &ids[0..2])
+            .await
+            .unwrap();
+        let m2 = s
+            .insert_merged_artifact(&merged("second pass"), &[m1.id.clone(), ids[2].clone()])
+            .await
+            .unwrap();
+
+        let (status, tree) = json_lineage(core.clone(), &m2.id).await;
+
+        assert_eq!(status, 200);
+        assert_eq!(tree["truncated"], false);
+        let roots = tree["roots"].as_array().unwrap();
+        let gen1 = roots
+            .iter()
+            .find(|n| n["id"] == m1.id.as_str())
+            .expect("the merge it came through is a node");
+        assert_eq!(gen1["kind"], "merge");
+        assert_eq!(gen1["label"], "first pass");
+        assert!(gen1["source"].is_null(), "a merge belongs to no document");
+        assert_eq!(gen1["children"].as_array().unwrap().len(), 2);
+        let leaf = &gen1["children"][0];
+        assert_eq!(leaf["kind"], "captured");
+        assert_eq!(leaf["source"]["start_line"], 1);
+        assert_eq!(leaf["source"]["end_line"], 2);
+        assert!(leaf["created_at"].is_number());
+        let text = tree.to_string();
+        assert!(!text.contains("/ui/"), "an href crossed the API: {text}");
+        assert!(
+            !text.contains("\"when\""),
+            "a formatted time crossed: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_json_tree_keeps_what_was_replaced_apart_and_names_what_is_gone() {
+        let core = crate::core::test_support::test_core().await;
+        let s = &core.store;
+        let ids = captured(s, 3).await;
+        let m = s
+            .insert_merged_artifact(&merged("the merge"), &ids[0..2])
+            .await
+            .unwrap();
+        s.set_superseded_by(&ids[2], Some(&m.id)).await.unwrap();
+        s.delete_artifact(&ids[0]).await.unwrap();
+
+        let (_, tree) = json_lineage(core.clone(), &m.id).await;
+
+        assert_eq!(tree["also_replaced"][0]["id"], ids[2].as_str());
+        for n in tree["roots"].as_array().unwrap() {
+            if n["id"] == ids[0].as_str() {
+                assert_eq!(n["missing"], true, "a deleted source is stated: {n}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_artifact_with_no_history_is_an_empty_tree_and_an_unknown_one_a_404() {
+        let core = crate::core::test_support::test_core().await;
+        let ids = captured(&core.store, 1).await;
+
+        let (status, tree) = json_lineage(core.clone(), &ids[0]).await;
+        assert_eq!(status, 200);
+        assert!(tree["roots"].as_array().unwrap().is_empty());
+
+        let (status, err) = json_lineage(core, "nope").await;
+        assert_eq!(status, 404);
+        assert_eq!(err["error"], "not found");
+    }
+
+    #[tokio::test]
+    async fn versions_are_listed_oldest_first_in_the_envelope() {
+        use tower::ServiceExt;
+        let core = crate::core::test_support::test_core().await;
+        let ids = captured(&core.store, 1).await;
+        for text in ["shorter", "shortest"] {
+            core.store
+                .condense_artifact(&ids[0], None, text, None, &[], serde_json::json!({}))
+                .await
+                .unwrap()
+                .expect("written");
+        }
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let get = |uri: String| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .header("cookie", &cookie)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let res = app
+            .clone()
+            .oneshot(get(format!("/api/v1/artifacts/{}/versions", ids[0])))
+            .await
+            .unwrap();
+        assert!(res.headers().contains_key("etag"));
+        let body = crate::web::test_support::json_of(res).await;
+        assert!(body["next"].is_null());
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["n"], 1);
+        assert_eq!(items[0]["text"], "artifact 0", "version 1 is the original");
+        assert_eq!(items[1]["text"], "shorter");
+
+        let res = app
+            .oneshot(get("/api/v1/artifacts/nope/versions".into()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404);
     }
 }

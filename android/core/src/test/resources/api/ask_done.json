@@ -1,0 +1,36 @@
+{
+  "answer": "Run `qdrant-cli index create` on the payload field.",
+  "citations": [
+    {
+      "artifact_id": "art-sure",
+      "corpus_id": "corpus-1",
+      "title": "sure",
+      "text": "the body of sure",
+      "category": null,
+      "tags": [],
+      "score": 0.8999999761581421,
+      "status": "active",
+      "retired": false
+    },
+    {
+      "artifact_id": "art-loose",
+      "corpus_id": "corpus-1",
+      "title": "loose",
+      "text": "the body of loose",
+      "category": null,
+      "tags": [],
+      "score": 0.20000000298023224,
+      "status": "active",
+      "weak": true,
+      "past_cliff": true,
+      "retired": false
+    }
+  ],
+  "dropped": 2,
+  "truncated": false,
+  "abstained": false,
+  "unsupported": [
+    "qdrant-cli index create"
+  ],
+  "retired_only": false
+}

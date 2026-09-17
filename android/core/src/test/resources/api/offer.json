@@ -1,0 +1,17 @@
+{
+  "offer": {
+    "artifact_id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
+    "label": "Payload filters",
+    "named": true,
+    "snippet": "Both, merged.",
+    "rung": "pattern",
+    "slot": 3,
+    "events": 4,
+    "blocks": [
+      "weekday",
+      "hour"
+    ],
+    "at": 1789671670,
+    "at_tz": "Europe/Berlin"
+  }
+}

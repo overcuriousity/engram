@@ -4,3 +4,9 @@ local.properties
 *.iml
 .idea/
 .kotlin/
+
+# Room's exported schemas. The repository's `*.db.*` rule — there to keep a
+# copied knowledge base out — matches this directory by accident, because the
+# database class is `…core.db.Db`. The exports are source: a migration is
+# checked against them.
+!core/schemas/*.db.*/

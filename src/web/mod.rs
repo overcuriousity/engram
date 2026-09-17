@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod android_fixtures;
 pub mod api;
 pub mod app;
 pub mod artifact;
@@ -7,11 +9,14 @@ pub mod corpus;
 pub mod corpus_view;
 pub mod day;
 pub mod due;
+pub mod etag;
 pub mod extension;
 pub mod insights;
+pub mod judge;
 pub mod lineage_view;
 pub mod markdown;
 pub mod ops;
+pub mod page;
 pub mod pair;
 pub mod push;
 pub mod settings;

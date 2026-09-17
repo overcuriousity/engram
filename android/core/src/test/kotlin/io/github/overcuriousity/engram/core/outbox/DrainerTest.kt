@@ -5,6 +5,7 @@ import io.github.overcuriousity.engram.core.Connection
 import io.github.overcuriousity.engram.core.Transport
 import io.github.overcuriousity.engram.core.db.Db
 import io.github.overcuriousity.engram.core.db.State
+import io.github.overcuriousity.engram.core.read.GapMember
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
@@ -124,5 +125,72 @@ class DrainerTest {
         val out = drainer.drainOnce()
         assertTrue(out is Drainer.Outcome.Later)
         assertEquals(0, server.requestCount)
+    }
+
+    @Test fun eachJudgingAnswerGoesToItsOwnRoute() = runTest {
+        box.enqueuePairSupersede(7, "art-a"); now += 1
+        box.enqueuePairSupersede(8, null); now += 1
+        box.enqueuePairSynthesize(9); now += 1
+        box.enqueuePairDiscard(10); now += 1
+        box.enqueuePairDismiss(11); now += 1
+        box.enqueueGapDismiss("ask", "g1"); now += 1
+        box.enqueueGapForget(listOf(GapMember("ask", "g1", "why"), GapMember("ask", "g2", "how"))); now += 1
+        box.enqueueArtifactOp("art-b", ArtifactOp.deprecate); now += 1
+        box.enqueueMergeUndo("merge-1"); now += 1
+        box.enqueueCorpusResolve("cor-1", Resolution.discard)
+        repeat(10) { server.enqueue(MockResponse(code = 204)) }
+
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        val sent = (1..10).map { server.takeRequest() }
+        assertEquals(
+            listOf(
+                "/api/v1/pairs/7/supersede",
+                "/api/v1/pairs/8/supersede",
+                "/api/v1/pairs/9/synthesize",
+                "/api/v1/pairs/10/discard",
+                "/api/v1/pairs/11/dismiss",
+                "/api/v1/gaps/ask/g1/dismiss",
+                "/api/v1/gaps/forget",
+                "/api/v1/artifacts/art-b/deprecate",
+                "/api/v1/merges/merge-1/undo",
+                "/api/v1/corpora/cor-1/resolve",
+            ),
+            sent.map { it.target },
+        )
+        assertEquals("""{"keep":"art-a"}""", sent[0].body?.utf8())
+        // Absent, not null: an absent `keep` is the side the judge proposed.
+        assertEquals("{}", sent[1].body?.utf8())
+        assertTrue(sent[6].body!!.utf8().contains(""""members":[{"kind":"ask","id":"g1"},{"kind":"ask","id":"g2"}]"""))
+        assertEquals("""{"action":"discard"}""", sent[9].body?.utf8())
+        assertTrue(box.rows.first().all { it.state == State.sent })
+    }
+
+    @Test fun anAnswerTheServerWillNotTakeIsHeldRatherThanRepeated() = runTest {
+        box.enqueuePairSupersede(7, "not-in-this-pair")
+        server.enqueue(MockResponse(code = 400, body = """{"error":"keep must name one side of the pair"}"""))
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        val r = box.rows.first().single()
+        assertEquals(State.held, r.state)
+        assertEquals("keep must name one side of the pair", r.error)
+    }
+
+    @Test fun aPairSomebodyElseAlreadyAnsweredIsSettled() = runTest {
+        // Two doors onto one base: the pair answered on the web while the
+        // phone was offline is not work still owed, and not a failure to show.
+        box.enqueuePairDismiss(7)
+        server.enqueue(MockResponse(code = 404, body = """{"error":"no such pair"}"""))
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        assertEquals(State.sent, box.rows.first().single().state)
+    }
+
+    @Test fun aJudgingRowWithNoSubjectIsHeldAndTheRestGo() = runTest {
+        box.enqueueArtifactOp("art-b", ArtifactOp.verify); now += 1; box.enqueueText("good", null, null)
+        val bad = box.rows.first().minBy { it.createdAt }.id
+        db.outboxDao().let { dao -> dao.update(dao.get(bad)!!.copy(payload = """{"op":"verify"}""")) }
+        server.enqueue(MockResponse(code = 201, body = "{}"))
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        val rows = box.rows.first().sortedBy { it.createdAt }
+        assertEquals(State.held, rows[0].state); assertEquals("the row carries no artifact", rows[0].error)
+        assertEquals(State.sent, rows[1].state)
     }
 }

@@ -1,0 +1,29 @@
+{
+  "items": [
+    {
+      "moment": {
+        "id": "01a0b0be-82e1-708a-8d64-d31154b84988",
+        "artifact_id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
+        "kind": "due",
+        "at": 1789671670,
+        "until": null,
+        "tz": "UTC",
+        "rule": null,
+        "source": "set",
+        "span": null,
+        "done_at": null,
+        "snoozed_until": null,
+        "notified_at": null,
+        "moved_from": null,
+        "moved_at": null,
+        "series_id": null,
+        "origin_corpus_id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+        "created_at": 1789671670
+      },
+      "title": "Merged, shorter.",
+      "named": false,
+      "opening": "Merged, shorter."
+    }
+  ],
+  "next": null
+}

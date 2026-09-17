@@ -1,0 +1,36 @@
+{
+  "items": [
+    {
+      "members": 2,
+      "pairs": [
+        {
+          "id": 1,
+          "percent": 91,
+          "via_link": false,
+          "a": {
+            "id": "01a0b13a-ba8a-73e6-8116-b0e61118e243",
+            "label": "Timeout 0",
+            "named": true,
+            "excerpt": "the timeout is 30 seconds"
+          },
+          "b": {
+            "id": "01a0b13a-ba8a-73e6-8116-b0e75a25cc8d",
+            "label": "Timeout 1",
+            "named": true,
+            "excerpt": "the timeout is 90 seconds"
+          },
+          "finding": null,
+          "contradiction": false,
+          "vacuous": false,
+          "unjudged": true,
+          "unmergeable": false,
+          "mergeable": true,
+          "synthesis_asked": false,
+          "keeps": null
+        }
+      ]
+    }
+  ],
+  "next": null,
+  "more": 0
+}
