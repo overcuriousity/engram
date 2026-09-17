@@ -106,6 +106,15 @@ pub const MAX_PLAINTEXT: usize = MAX_RECORD - (16 + 4 + 1 + 65) - (1 + 16);
 /// A day: a reminder a day late is still a row on the band.
 const TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3_600);
 
+/// How long the VAPID token is good for, which is not the same question as
+/// how long the message is held, though one constant used to answer both.
+///
+/// RFC 8292 §2 caps `exp` at 24 hours from the request, and the services that
+/// matter reject *at* the boundary. Reusing `TTL` put every token exactly on
+/// it, so a server clock a few seconds ahead of the push service turned every
+/// push into a 401. Half the cap leaves no cliff to fall off.
+const VAPID_EXP: std::time::Duration = std::time::Duration::from_secs(12 * 3_600);
+
 /// The push, built and not sent. Refuses a body that would need a second
 /// record rather than splitting it: a phone reads one record, and a truncated
 /// JSON payload is a notification that fails to parse.
@@ -127,7 +136,7 @@ pub fn request(
         .parse()
         .map_err(|e| Error::Validation(format!("endpoint: {e}")))?;
     let (public, auth) = parse_keys(&keys.p256dh, &keys.auth)?;
-    let exp = crate::store::now() + TTL.as_secs() as i64;
+    let exp = crate::store::now() + VAPID_EXP.as_secs() as i64;
     let mut req = web_push_native::WebPushBuilder::new(uri, public, auth)
         .with_valid_duration(TTL)
         .build(body.to_vec())
@@ -307,6 +316,39 @@ mod tests {
         assert!(
             claims.get("sub").is_none(),
             "no contact, no claim: {claims}"
+        );
+    }
+
+    /// RFC 8292 §2 caps `exp` at 24 hours from the request, and FCM and
+    /// Mozilla reject at the boundary. `exp` was `now + TTL`, which is exactly
+    /// 24 hours: a server clock seconds ahead of the push service turned every
+    /// push into a 401.
+    #[tokio::test]
+    async fn the_vapid_token_expires_well_inside_the_cap_that_rfc_8292_sets() {
+        let (_, _, keys) = a_receiver();
+        let vapid = a_vapid().await;
+        let before = crate::store::now();
+        let req = request("https://push.example/abc", &keys, &vapid, None, b"x").unwrap();
+        let claims: serde_json::Value =
+            serde_json::from_slice(&b64(req.headers()["authorization"]
+                .to_str()
+                .unwrap()
+                .strip_prefix("vapid t=")
+                .unwrap()
+                .split('.')
+                .nth(1)
+                .unwrap()))
+            .unwrap();
+        let ahead = claims["exp"].as_i64().unwrap() - before;
+        assert!(ahead > 0, "in the future: {ahead}s");
+        assert!(
+            ahead <= 24 * 3_600 - 3_600,
+            "an hour of clock skew must not reach the cap: {ahead}s"
+        );
+        assert_eq!(
+            req.headers()["ttl"],
+            "86400",
+            "retention is its own question"
         );
     }
 

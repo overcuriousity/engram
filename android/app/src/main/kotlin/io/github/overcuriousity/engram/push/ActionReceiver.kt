@@ -21,7 +21,11 @@ class ActionReceiver : BroadcastReceiver() {
                     Reminders.ACTION_SNOOZE -> app.engram.outbox.enqueueSnooze(moment, System.currentTimeMillis() / 1000 + 3600)
                 }
                 Sync.kick(context)
-                context.getSystemService(NotificationManager::class.java).cancelAll()
+                // Only the notification this action came from. cancelAll swept
+                // away every other rung on the shade, each about a moment
+                // nobody had settled.
+                val id = intent.getIntExtra(Reminders.EXTRA_NOTIFICATION, -1)
+                if (id != -1) context.getSystemService(NotificationManager::class.java).cancel(id)
             } finally {
                 pending.finish()
             }

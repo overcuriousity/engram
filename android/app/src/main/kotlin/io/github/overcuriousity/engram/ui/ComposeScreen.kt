@@ -1,7 +1,6 @@
 package io.github.overcuriousity.engram.ui
 
 import android.Manifest
-import android.graphics.Bitmap
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import io.github.overcuriousity.engram.core.Engram
 import io.github.overcuriousity.engram.doors.AudioNote
 import io.github.overcuriousity.engram.doors.Intake
@@ -48,11 +48,24 @@ fun ComposeScreen(engram: Engram, justQueued: String? = null) {
     var recording by remember { mutableStateOf(false) }
 
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { files = files + it }
-    val photo = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bmp ->
-        bmp ?: return@rememberLauncherForActivityResult
+    // TakePicture writes the full-resolution image the camera actually took.
+    // TakePicturePreview, which this used, hands back the shutter thumbnail —
+    // a photo of a page or a whiteboard came through too small to read or OCR.
+    var pending by remember { mutableStateOf<File?>(null) }
+    val photo = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val f = pending
+        pending = null
+        if (ok && f != null && f.length() > 0) files = files + Uri.fromFile(f) else f?.delete()
+    }
+    fun shoot() {
         val f = File.createTempFile("photo", ".jpg", engram.app.cacheDir)
-        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-        files = files + Uri.fromFile(f)
+        pending = f
+        photo.launch(FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", f))
+    }
+    // An app that declares CAMERA must hold it before the camera app will
+    // answer ACTION_IMAGE_CAPTURE for it, the same as the microphone door.
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) shoot()
     }
     val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) { audio.start(); recording = true }
@@ -82,7 +95,7 @@ fun ComposeScreen(engram: Engram, justQueued: String? = null) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { pick.launch("*/*") }) { Text("Attach") }
-            TextButton(onClick = { photo.launch(null) }) { Text("Photo") }
+            TextButton(onClick = { camera.launch(Manifest.permission.CAMERA) }) { Text("Photo") }
             TextButton(onClick = {
                 if (recording) {
                     audio.stop()?.let { files = files + Uri.fromFile(it) }

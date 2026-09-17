@@ -14,6 +14,7 @@ object Reminders {
     const val CHANNEL = "reminders"
     const val ACTION_DONE = "io.github.overcuriousity.engram.DONE"
     const val ACTION_SNOOZE = "io.github.overcuriousity.engram.SNOOZE"
+    const val EXTRA_NOTIFICATION = "notification"
 
     fun ensureChannel(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -41,18 +42,26 @@ object Reminders {
             .setContentIntent(open)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+        val id = notificationId(p)
         if (p is Payload.Due && p.moments.isNotEmpty()) {
             val first = p.moments[0]
-            b.addAction(0, "Done", action(context, ACTION_DONE, first.id))
-            b.addAction(0, "Snooze 1 h", action(context, ACTION_SNOOZE, first.id))
+            b.addAction(0, "Done", action(context, ACTION_DONE, first.id, id))
+            b.addAction(0, "Snooze 1 h", action(context, ACTION_SNOOZE, first.id, id))
         }
-        context.getSystemService(NotificationManager::class.java).notify(notificationId(p), b.build())
+        context.getSystemService(NotificationManager::class.java).notify(id, b.build())
     }
 
-    private fun action(context: Context, action: String, moment: String): PendingIntent =
+    /**
+     * The action carries the notification it came from, so settling one
+     * moment dismisses that notification and no other. Several rungs can be
+     * on the shade at once, each about a different moment.
+     */
+    private fun action(context: Context, action: String, moment: String, notification: Int): PendingIntent =
         PendingIntent.getBroadcast(
             context, moment.hashCode(),
-            Intent(context, ActionReceiver::class.java).setAction(action).putExtra("moment", moment),
+            Intent(context, ActionReceiver::class.java).setAction(action)
+                .putExtra("moment", moment)
+                .putExtra(EXTRA_NOTIFICATION, notification),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 

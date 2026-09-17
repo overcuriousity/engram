@@ -102,11 +102,16 @@ fun EngramApp(engram: Engram, start: Screen? = null, pairText: String? = null, o
     ) { pad ->
         Column(Modifier.padding(pad)) {
             if (refused) RefusedBanner(onRescan = { nav.navigate(Screen.Pair.route) })
-            NavHost(nav, startDestination = (start ?: Screen.Compose).route) {
+            // A code scanned while already paired is how a phone moves to
+            // another server, and how it recovers from `refused`. It used to
+            // land here on Capture with the code dropped: the Pair screen was
+            // neither the start nor given the text.
+            val startAt = start ?: if (pairText != null) Screen.Pair else Screen.Compose
+            NavHost(nav, startDestination = startAt.route) {
                 composable(Screen.Compose.route) { ComposeScreen(engram) }
                 composable(Screen.Queue.route) { QueueScreen(engram) }
                 composable(Screen.Settings.route) { SettingsScreen(engram, onUnpair = onUnpair) }
-                composable(Screen.Pair.route) { PairScreen(engram, initialText = null, knownOrigin = connection?.origin) }
+                composable(Screen.Pair.route) { PairScreen(engram, initialText = pairText, knownOrigin = connection?.origin) }
             }
         }
     }

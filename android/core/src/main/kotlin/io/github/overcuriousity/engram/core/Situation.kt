@@ -1,5 +1,6 @@
 package io.github.overcuriousity.engram.core
 
+import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.app.NotificationManager
 import android.content.Context
@@ -233,6 +234,10 @@ class AndroidSituationSource(private val context: Context, private val counters:
     override val sinceLastViewS get() = counters.sinceLastViewS()
     override val viewsToday get() = counters.viewsToday()
 
+    // Only reached with the Place switch on, which cannot be turned on until
+    // ACCESS_COARSE_LOCATION is granted — and a revoked grant lands in the
+    // runCatching below rather than anywhere else.
+    @SuppressLint("MissingPermission")
     override fun place(): String? {
         val lm = context.getSystemService(LocationManager::class.java)
         val loc = runCatching { lm.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER) }.getOrNull() ?: return null

@@ -9,6 +9,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Transaction
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import androidx.room.Update
@@ -45,6 +46,18 @@ data class MomentRow(@PrimaryKey val id: String, val title: String, val at: Long
 interface OutboxDao {
     @Insert suspend fun insert(row: OutboxRow)
     @Insert suspend fun insertFiles(files: List<OutboxFile>)
+
+    /**
+     * A file capture arrives whole or not at all. Inserted separately, a
+     * drain pass kicked by an earlier capture could read the row in the gap,
+     * send it with no files, and park the 4xx in `held` — the share lost
+     * although its bytes were already on disk.
+     */
+    @Transaction
+    suspend fun insertWithFiles(row: OutboxRow, files: List<OutboxFile>) {
+        insert(row)
+        insertFiles(files)
+    }
     @Update suspend fun update(row: OutboxRow)
     @Query("SELECT * FROM outbox WHERE id = :id") suspend fun get(id: String): OutboxRow?
     @Query("SELECT * FROM outbox ORDER BY createdAt DESC") fun all(): Flow<List<OutboxRow>>

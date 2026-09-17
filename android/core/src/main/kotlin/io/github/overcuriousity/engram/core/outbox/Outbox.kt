@@ -47,8 +47,11 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
             throw e
         }
         val now = clock()
-        dao.insert(OutboxRow(id, Kind.capture_files, buildJsonObject { put("title", title); put("note", note) }.toString(), now, nextAt = now))
-        dao.insertFiles(copied)
+        // One transaction: a drain pass must never see the row without its files.
+        dao.insertWithFiles(
+            OutboxRow(id, Kind.capture_files, buildJsonObject { put("title", title); put("note", note) }.toString(), now, nextAt = now),
+            copied,
+        )
         return id
     }
 

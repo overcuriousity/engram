@@ -42,7 +42,8 @@ object Pairing {
             val obj = Json.parseToJsonElement(text).jsonObject
             val token = obj["token"]!!.jsonPrimitive.content
             val version = obj["version"]?.jsonPrimitive?.content ?: uri.serverVersion
-            val pin = uri.fingerprint ?: tofuPin(res.handshake?.peerCertificates?.firstOrNull() as? X509Certificate)
+            val pin = uri.fingerprint
+                ?: tofuPin(res.handshake?.peerCertificates.orEmpty().filterIsInstance<X509Certificate>())
             Connection(uri.origin, token, pin, version, deviceName)
         }
     }
@@ -52,22 +53,35 @@ object Pairing {
         Base64.getUrlEncoder().withoutPadding()
             .encodeToString(MessageDigest.getInstance("SHA-256").digest(cert.publicKey.encoded))
 
-    private fun tofuPin(leaf: X509Certificate?): String? {
-        leaf ?: return null
+    private fun tofuPin(chain: List<X509Certificate>): String? {
+        val leaf = chain.firstOrNull() ?: return null
         // A chain the system trusts needs no pin: the CA is the guarantee, and
-        // a pin would only break the day the operator renews. Only the leaf is
-        // checked here, so a chain that needs its intermediate is pinned — the
-        // safe direction to err in.
-        return if (publiclyTrusted(leaf)) null else spki(leaf)
+        // a pin would only break the day the operator renews.
+        return if (publiclyTrusted(chain)) null else spki(leaf)
     }
 
-    private fun publiclyTrusted(leaf: X509Certificate): Boolean = runCatching {
+    /**
+     * The whole chain the handshake served, under the authentication type the
+     * leaf's key actually implies.
+     *
+     * Checking the leaf alone was not the safe direction to err in: no real CA
+     * issues from its root directly, so path building failed for every
+     * publicly-trusted deployment and every one of them was pinned by mistake
+     * — and then broke on the operator's next renewal, with nothing on the
+     * mismatch screen but "Unpair". Hardcoding "RSA" failed the same way for
+     * an ECDSA leaf, which is what Let's Encrypt issues by default.
+     */
+    private fun publiclyTrusted(chain: List<X509Certificate>): Boolean = runCatching {
         val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
         tmf.init(null as KeyStore?)
         val tm = tmf.trustManagers.filterIsInstance<X509TrustManager>().first()
-        tm.checkServerTrusted(arrayOf(leaf), "RSA")
+        tm.checkServerTrusted(chain.toTypedArray(), authType(chain.first()))
         true
     }.getOrDefault(false)
+
+    /** What the key exchange would have been called. Every modern suite is ephemeral DH. */
+    private fun authType(leaf: X509Certificate) =
+        if (leaf.publicKey.algorithm == "EC") "ECDHE_ECDSA" else "ECDHE_RSA"
 
     private fun js(s: String) = Json.encodeToString(String.serializer(), s)
 }

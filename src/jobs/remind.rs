@@ -3,7 +3,7 @@
 
 use crate::core::Core;
 use crate::error::Result;
-use crate::jobs::webpush::{Kind, Payload, PayloadMoment, Vapid, WebPushKeys};
+use crate::jobs::webpush::{Kind, MAX_PLAINTEXT, Payload, PayloadMoment, Vapid, WebPushKeys};
 
 /// The one Remind row per tenant.
 pub const REMIND_TARGET: &str = "due";
@@ -178,27 +178,61 @@ impl Message {
     /// The ladder's: `compose` for the prose channels, and for the payload
     /// the first `BODY_LINES` rows by id with the rest as a count — the same
     /// cut the body makes, so what the two say agrees.
+    ///
+    /// The payload may cut further, because one record is all a push carries.
+    /// `BODY_LINES` titles of unbounded length ran past `MAX_PLAINTEXT`, and
+    /// the keyed channel then refused the message instead of trimming it: if
+    /// that channel was the only one, `deliver` errored, `mark_notified` never
+    /// ran, and every retry rebuilt the identical over-long payload. The
+    /// reminder never rang and the rows stayed owed for good. So moments go
+    /// until it fits — `more` is what the band still has — and if a single
+    /// title is itself past the record, that title is shortened. Something
+    /// rings either way.
     pub fn due(rows: &[crate::store::moments::DueRow], now: i64) -> Message {
         let (title, body) = compose(rows, now);
-        let moments = rows
-            .iter()
-            .take(BODY_LINES)
-            .map(|row| PayloadMoment {
-                id: row.moment.id.clone(),
-                title: row.title.clone(),
-                at: row.moment.snoozed_until.or(row.moment.at).unwrap_or(now),
-            })
-            .collect();
+        let mut take = rows.len().min(BODY_LINES);
+        let mut payload = due_payload(rows, now, take, usize::MAX);
+        while take > 1 && payload.to_bytes().len() > MAX_PLAINTEXT {
+            take -= 1;
+            payload = due_payload(rows, now, take, usize::MAX);
+        }
+        // JSON escaping makes the arithmetic inexact, so measure rather than
+        // compute; three quarters each pass reaches zero from any length.
+        let mut cap = rows.first().map_or(0, |row| row.title.chars().count());
+        while cap > 0 && payload.to_bytes().len() > MAX_PLAINTEXT {
+            cap = cap * 3 / 4;
+            payload = due_payload(rows, now, take, cap);
+        }
         Message {
             title,
             body,
-            payload: Payload::new(Kind::Due {
-                at: now,
-                moments,
-                more: rows.len().saturating_sub(BODY_LINES),
-            }),
+            payload,
         }
     }
+}
+
+/// The payload for the first `take` rows, each title cut to `cap` characters,
+/// with every row left out counted in `more`.
+fn due_payload(
+    rows: &[crate::store::moments::DueRow],
+    now: i64,
+    take: usize,
+    cap: usize,
+) -> Payload {
+    let moments = rows
+        .iter()
+        .take(take)
+        .map(|row| PayloadMoment {
+            id: row.moment.id.clone(),
+            title: row.title.chars().take(cap).collect(),
+            at: row.moment.snoozed_until.or(row.moment.at).unwrap_or(now),
+        })
+        .collect();
+    Payload::new(Kind::Due {
+        at: now,
+        moments,
+        more: rows.len().saturating_sub(take),
+    })
 }
 
 /// Who is speaking, for the keyed channel: the instance's VAPID identity and
@@ -531,6 +565,60 @@ mod tests {
         let (title, body) = compose(&[row(Some(now + 3_600), None)], now);
         assert_eq!(title, "Send the invoice");
         assert!(body.contains("Send the invoice"), "{body}");
+    }
+
+    /// A named artifact's title is not capped anywhere, and an opening is 120
+    /// characters, which in CJK is some 360 bytes. Eight of either runs past
+    /// the one record a push carries.
+    #[test]
+    fn a_due_payload_drops_moments_until_one_record_holds_it() {
+        let now = 1_787_320_320;
+        let long = "ü".repeat(600);
+        let rows: Vec<_> = (0..BODY_LINES)
+            .map(|i| crate::store::moments::DueRow {
+                title: long.clone(),
+                ..row(Some(now + i as i64), None)
+            })
+            .collect();
+        let msg = Message::due(&rows, now);
+        assert!(
+            msg.payload.to_bytes().len() <= MAX_PLAINTEXT,
+            "{} bytes",
+            msg.payload.to_bytes().len()
+        );
+        let crate::jobs::webpush::Kind::Due { moments, more, .. } = &msg.payload.kind else {
+            panic!("a due payload")
+        };
+        assert!(!moments.is_empty(), "something still rings");
+        assert!(moments.len() < rows.len(), "and something was dropped");
+        assert_eq!(
+            moments.len() + more,
+            rows.len(),
+            "what was dropped is counted, and the band has it"
+        );
+    }
+
+    /// One title alone past the record. Shortened rather than dropped: a
+    /// notification with no moment in it can be neither done nor snoozed.
+    #[test]
+    fn a_single_title_past_one_record_is_shortened_and_still_sent() {
+        let now = 1_787_320_320;
+        let rows = vec![crate::store::moments::DueRow {
+            title: "ü".repeat(MAX_PLAINTEXT),
+            ..row(Some(now), None)
+        }];
+        let msg = Message::due(&rows, now);
+        assert!(msg.payload.to_bytes().len() <= MAX_PLAINTEXT);
+        let crate::jobs::webpush::Kind::Due { moments, more, .. } = &msg.payload.kind else {
+            panic!("a due payload")
+        };
+        assert_eq!(moments.len(), 1);
+        assert_eq!(*more, 0);
+        assert!(!moments[0].title.is_empty(), "shortened, not emptied");
+        assert_eq!(
+            moments[0].id, rows[0].moment.id,
+            "still the moment it is about"
+        );
     }
 
     /// A `DueRow` built by hand, so `compose` can be read on its own.
@@ -984,14 +1072,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_wake_past_one_record_is_refused_on_the_keyed_channel_and_gotify_still_takes_it() {
-        // Titles long enough that eight of them overflow one record. The keyed
-        // channel refuses rather than truncates; the message is still
-        // delivered, because Gotify took it, and the rows are marked.
+    async fn a_wake_past_one_record_is_trimmed_and_every_channel_takes_it() {
+        // Titles long enough that two of them overflow one record. The keyed
+        // channel used to refuse the message outright, and with UnifiedPush as
+        // the only channel that meant `deliver` errored, `mark_notified` never
+        // ran, and every retry rebuilt the same over-long payload — a reminder
+        // that could never ring. It is cut to what one record holds and sent.
         let up = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(wiremock::ResponseTemplate::new(201))
-            .expect(0)
+            .expect(1)
             .mount(&up)
             .await;
         let gotify = wiremock::MockServer::start().await;
@@ -1013,7 +1103,14 @@ mod tests {
             })
             .collect();
         let msg = Message::due(&rows, now);
-        assert!(msg.payload.to_bytes().len() > crate::jobs::webpush::MAX_PLAINTEXT);
+        assert!(
+            msg.payload.to_bytes().len() <= MAX_PLAINTEXT,
+            "trimmed to one record, not refused"
+        );
+        assert!(
+            msg.body.contains(&long),
+            "the prose channels have no such limit and still say everything"
+        );
         core.store
             .control
             .set_notify(

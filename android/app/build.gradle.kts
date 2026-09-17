@@ -9,7 +9,7 @@ android {
     compileSdk = 37
     defaultConfig {
         applicationId = "io.github.overcuriousity.engram"
-        minSdk = 29
+        minSdk = 34
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
@@ -20,6 +20,12 @@ android {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+    }
+    // Every launch-time crash this app had was an API newer than minSdk, which
+    // the compiler cannot see and only lint does. Fatal, and run in CI.
+    lint {
+        abortOnError = true
+        error += "NewApi"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

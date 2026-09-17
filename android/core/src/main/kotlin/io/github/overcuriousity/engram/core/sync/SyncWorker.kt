@@ -31,10 +31,20 @@ object Sync {
     private const val NAME = "engram-sync"
     private val online = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
-    /** Something new is owed: run as soon as there is a network. */
+    /**
+     * Something new is owed: run as soon as there is a network.
+     *
+     * REPLACE, not KEEP. `scheduleAt` parks a run under this same unique name
+     * with a backoff delay that reaches hours, and KEEP would let that parked
+     * run swallow every kick after it: a share, a Done from a notification, a
+     * re-pair, "Deliver now" — all silently dropped while the capture sat in
+     * the outbox with a working network. A kick means now, so it displaces
+     * whatever was waiting; `drainOnce` is restartable, so replacing a pass
+     * already running costs nothing but the pass.
+     */
     fun kick(context: Context) {
         WorkManager.getInstance(context).enqueueUniqueWork(
-            NAME, ExistingWorkPolicy.KEEP,
+            NAME, ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<SyncWorker>().setConstraints(online).build(),
         )
     }

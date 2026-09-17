@@ -17,9 +17,20 @@ class Push internal constructor(
     private val db: Db,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
+    /**
+     * Write the registration down and nothing else. The distributor hands the
+     * endpoint over on the main thread, where a PUT cannot go; recording it
+     * is a few hundred bytes to a local file, and the worker owes the server
+     * the rest. Stored before any send, so a failed PUT is retried without
+     * the distributor's help.
+     */
+    fun rememberKeys(endpoint: String, p256dh: String, auth: String, distributor: String) {
+        store.pushKeys = PushKeys(endpoint, p256dh, auth, distributor)
+    }
+
     /** The keys are kept before the PUT, so a failed PUT can be retried without the distributor's help. */
     suspend fun onEndpoint(endpoint: String, p256dh: String, auth: String, distributor: String) {
-        store.pushKeys = PushKeys(endpoint, p256dh, auth, distributor)
+        rememberKeys(endpoint, p256dh, auth, distributor)
         transportFor()?.registerPush(endpoint, p256dh, auth)
     }
 
@@ -29,18 +40,37 @@ class Push internal constructor(
         transportFor()?.registerPush(k.endpoint, k.p256dh, k.auth)
     }
 
-    suspend fun onUnregistered() {
-        runCatching { transportFor()?.unregisterPush() }
+    /** Drop the registration locally. The server is told separately, and best-effort. */
+    fun forgetKeys() {
         store.pushKeys = null
     }
 
-    suspend fun received(bytes: ByteArray, decrypted: Boolean): Payload {
-        if (!decrypted) return Payload.Unknown(null)
-        val p = Payload.parse(bytes)
+    /** Tell the server the registration is gone. Best-effort; the local drop stands either way. */
+    suspend fun tellUnregistered() {
+        runCatching { transportFor()?.unregisterPush() }
+    }
+
+    suspend fun onUnregistered() {
+        tellUnregistered()
+        forgetKeys()
+    }
+
+    /**
+     * What arrived, without touching the database. Pure, so the notification
+     * can be drawn on the thread the message was delivered on and the moments
+     * written afterwards.
+     */
+    fun decode(bytes: ByteArray, decrypted: Boolean): Payload =
+        if (!decrypted) Payload.Unknown(null) else Payload.parse(bytes)
+
+    /** The band's copy of what the push said. Nothing to write for any other kind. */
+    suspend fun rememberMoments(p: Payload) {
         if (p is Payload.Due && p.moments.isNotEmpty()) {
             val now = clock()
             db.momentsDao().upsert(p.moments.map { MomentRow(it.id, it.title, it.at, now) })
         }
-        return p
     }
+
+    suspend fun received(bytes: ByteArray, decrypted: Boolean): Payload =
+        decode(bytes, decrypted).also { rememberMoments(it) }
 }

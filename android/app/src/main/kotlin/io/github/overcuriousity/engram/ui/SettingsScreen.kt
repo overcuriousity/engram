@@ -45,10 +45,10 @@ fun SettingsScreen(engram: Engram, onUnpair: () -> Unit) {
     val c by engram.store.current.collectAsStateWithLifecycle()
     val latest by engram.latestMoment.collectAsStateWithLifecycle(null)
     val pushFailure by engram.pushFailure.collectAsStateWithLifecycle()
+    val keys by engram.store.pushKeysFlow.collectAsStateWithLifecycle()
     var noDistributor by remember { mutableStateOf(false) }
     var placeOn by remember { mutableStateOf(engram.placeOn) }
     var confirmUnpair by remember { mutableStateOf(false) }
-    var keysTick by remember { mutableStateOf(0) }
     val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         placeOn = ok
         engram.placeOn = ok
@@ -68,10 +68,9 @@ fun SettingsScreen(engram: Engram, onUnpair: () -> Unit) {
             Line(if (c?.pin != null) "pinned · ${c!!.pin!!.take(12)}…" else "public certificate · no pin", muted = true)
         }
         Section("Reminders") {
-            @Suppress("UNUSED_EXPRESSION") keysTick
-            val keys = engram.store.pushKeys
+            val k = keys
             when {
-                keys != null -> Line("registered · ${keys.distributor}", muted = true)
+                k != null -> Line("registered · ${k.distributor}", muted = true)
                 noDistributor -> {
                     Line("No UnifiedPush distributor", muted = true)
                     Line("Reminders need one · ntfy or NextPush, from F-Droid", muted = true)
@@ -79,7 +78,7 @@ fun SettingsScreen(engram: Engram, onUnpair: () -> Unit) {
                         ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://unifiedpush.org/users/distributors/")))
                     }) { Text("Distributors") }
                 }
-                else -> Button(onClick = { PushRegistrar.ensure(ctx, engram) { noDistributor = true }; keysTick++ }) {
+                else -> Button(onClick = { PushRegistrar.ensure(ctx, engram) { noDistributor = true } }) {
                     Text("Register for reminders")
                 }
             }

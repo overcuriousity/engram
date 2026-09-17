@@ -84,14 +84,23 @@ class ConnectionStore(private val file: File, private val box: SecretBox) {
     private var stored: Stored = load()
     private val _current = MutableStateFlow(stored.connection)
     val current: StateFlow<Connection?> get() = _current
+    private val _pushKeys = MutableStateFlow(stored.pushKeys)
+
+    /**
+     * Registration arrives from the distributor long after the button was
+     * pressed, so a screen showing it has to be told. Settings read the plain
+     * property and never recomposed: "Register for reminders" stayed on the
+     * page as though the tap had done nothing.
+     */
+    val pushKeysFlow: StateFlow<PushKeys?> get() = _pushKeys
 
     var pushKeys: PushKeys?
         get() = stored.pushKeys
-        set(v) { stored = stored.copy(pushKeys = v); save() }
+        set(v) { stored = stored.copy(pushKeys = v); save(); _pushKeys.value = v }
 
     fun set(c: Connection) { stored = stored.copy(connection = c); save(); _current.value = c }
 
-    fun clear() { stored = Stored(); save(); _current.value = null }
+    fun clear() { stored = Stored(); save(); _current.value = null; _pushKeys.value = null }
 
     private fun load(): Stored =
         if (!file.exists()) Stored()

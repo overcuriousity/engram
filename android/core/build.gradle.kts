@@ -9,8 +9,14 @@ android {
     namespace = "io.github.overcuriousity.engram.core"
     compileSdk = 37
     defaultConfig {
-        minSdk = 29
+        minSdk = 34
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    // Every launch-time crash this app had was an API newer than minSdk, which
+    // the compiler cannot see and only lint does. Fatal, and run in CI.
+    lint {
+        abortOnError = true
+        error += "NewApi"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
