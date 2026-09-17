@@ -12,6 +12,7 @@ pub mod due;
 pub mod etag;
 pub mod extension;
 pub mod insights;
+pub mod judge;
 pub mod lineage_view;
 pub mod markdown;
 pub mod ops;

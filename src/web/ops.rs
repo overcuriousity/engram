@@ -106,6 +106,25 @@ async fn artifact_changed(
     Ok(Redirect::to(back.path()).into_response())
 }
 
+/// Put a superseded artifact back in results, and mark the action undone.
+///
+/// The two halves are one act: `unsupersede` alone leaves the journal claiming
+/// a supersession that no longer holds, which is what the sweep reads.
+pub(crate) async fn unsupersede_artifact(tenant: &Tenant, aid: &str) -> crate::error::Result<()> {
+    tenant.core.unsupersede(aid).await?;
+    tenant
+        .core
+        .store
+        .undo_action_on(
+            aid,
+            crate::store::actions::Kind::Supersede,
+            crate::store::actions::UndoneBy::Operator,
+            "unsuperseded on Insights",
+        )
+        .await?;
+    Ok(())
+}
+
 async fn unsupersede_ui(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
@@ -113,25 +132,13 @@ async fn unsupersede_ui(
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> UiResult<Response> {
-    tenant.core.unsupersede(&aid).await?;
-    tenant
-        .core
-        .store
-        .undo_action_on(
-            &aid,
-            crate::store::actions::Kind::Supersede,
-            crate::store::actions::UndoneBy::Operator,
-            "unsuperseded on Insights",
-        )
-        .await?;
+    unsupersede_artifact(&tenant, &aid).await?;
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
-async fn dismiss_pair_ui(
-    tenant: Tenant,
-    Path(pid): Path<i64>,
-    Form(back): Form<ReturnTo>,
-) -> UiResult<Response> {
+/// Answer a pair by saying it is not a question worth answering. Nothing is
+/// hidden and nothing is written; the row leaves the queue.
+pub(crate) async fn dismiss_pair(tenant: &Tenant, pid: i64) -> crate::error::Result<()> {
     tenant
         .core
         .store
@@ -142,6 +149,15 @@ async fn dismiss_pair_ui(
             crate::store::pairs::DecidedBy::Operator,
         )
         .await?;
+    Ok(())
+}
+
+async fn dismiss_pair_ui(
+    tenant: Tenant,
+    Path(pid): Path<i64>,
+    Form(back): Form<ReturnTo>,
+) -> UiResult<Response> {
+    dismiss_pair(&tenant, pid).await?;
     Ok(Redirect::to(back.path()).into_response())
 }
 
@@ -159,11 +175,7 @@ async fn dismiss_pair_ui(
 /// before either is retired, side effects before the pair is settled — are the
 /// whole of what makes the action safe, and a second copy of them is a second
 /// place for one of them to be dropped.
-async fn discard_pair_ui(
-    tenant: Tenant,
-    Path(pid): Path<i64>,
-    Form(back): Form<ReturnTo>,
-) -> UiResult<Response> {
+pub(crate) async fn discard_pair(tenant: &Tenant, pid: i64) -> crate::error::Result<()> {
     let pair = tenant.core.store.get_pair(pid).await?;
     let detail = pair.detail.clone();
     crate::jobs::dedupe::discard_both(
@@ -172,7 +184,15 @@ async fn discard_pair_ui(
         detail.as_deref(),
         crate::store::pairs::DecidedBy::Operator,
     )
-    .await?;
+    .await
+}
+
+async fn discard_pair_ui(
+    tenant: Tenant,
+    Path(pid): Path<i64>,
+    Form(back): Form<ReturnTo>,
+) -> UiResult<Response> {
+    discard_pair(&tenant, pid).await?;
     Ok(Redirect::to(back.path()).into_response())
 }
 
@@ -206,11 +226,7 @@ struct KeepForm {
 /// categories both fit that shape, so the label is a coin flip on a decision
 /// that hides two artifacts behind a third. The reading is the model's; the
 /// call is the operator's.
-async fn ask_pair_synthesis_ui(
-    tenant: Tenant,
-    Path(pid): Path<i64>,
-    Form(back): Form<ReturnTo>,
-) -> UiResult<Response> {
+pub(crate) async fn synthesize_pair(tenant: &Tenant, pid: i64) -> crate::error::Result<()> {
     let pair = tenant.core.store.get_pair(pid).await?;
     // The same refusal the Keep buttons make. Every button on this card acts on
     // both sides, and a side already out of results is work nobody can do.
@@ -221,8 +237,7 @@ async fn ask_pair_synthesis_ui(
     if !a.in_results() || !b.in_results() {
         return Err(crate::error::Error::Validation(
             "one of these has already left results".into(),
-        )
-        .into());
+        ));
     }
     // The card only draws this button where the merge path will take it, but a
     // hidden button is not a check: a page drawn before something changed still
@@ -232,17 +247,16 @@ async fn ask_pair_synthesis_ui(
     if !pair_is_mergeable(&tenant, &pair.a_id, &pair.b_id).await? {
         return Err(crate::error::Error::Validation(
             "one of these is stored source text, which a merge may not rewrite".into(),
-        )
-        .into());
+        ));
     }
     // Only on a pair still waiting for an answer, asked in the write itself. A
     // card left open keeps its buttons after the pair behind it was answered,
     // and `dedupe::run` reads a press as the verdict: a "Write one" from a stale
     // page merged a pair the operator had already dismissed.
     if !tenant.core.store.ask_pair_synthesis(pid).await? {
-        return Err(
-            crate::error::Error::Validation("this pair has already been answered".into()).into(),
-        );
+        return Err(crate::error::Error::Validation(
+            "this pair has already been answered".into(),
+        ));
     }
     // Idle-only, like `consolidate` arms it: re-arming a queued unit winds its
     // attempts back to zero.
@@ -256,6 +270,15 @@ async fn ask_pair_synthesis_ui(
             0,
         )
         .await?;
+    Ok(())
+}
+
+async fn ask_pair_synthesis_ui(
+    tenant: Tenant,
+    Path(pid): Path<i64>,
+    Form(back): Form<ReturnTo>,
+) -> UiResult<Response> {
+    synthesize_pair(&tenant, pid).await?;
     Ok(Redirect::to(back.path()).into_response())
 }
 
@@ -272,24 +295,23 @@ async fn ask_pair_synthesis_ui(
 /// and leave both in results.
 ///
 /// Nothing before this press hides anything — see `jobs::consolidate::judge_pending`.
-async fn apply_pair_supersede_ui(
-    tenant: Tenant,
-    Path(pid): Path<i64>,
-    Form(f): Form<KeepForm>,
-) -> UiResult<Response> {
+pub(crate) async fn supersede_pair(
+    tenant: &Tenant,
+    pid: i64,
+    keep: Option<&str>,
+) -> crate::error::Result<()> {
     let pair = tenant.core.store.get_pair(pid).await?;
     // The winner has to be one of this pair's own artifacts. A form field is
     // user input, and superseding an arbitrary id because it arrived in a POST
     // would hide an artifact that has nothing to do with the row that was
     // pressed.
-    let obsolete_id = match f.keep {
+    let obsolete_id = match keep {
         Some(keep) if keep == pair.a_id => pair.b_id.clone(),
         Some(keep) if keep == pair.b_id => pair.a_id.clone(),
         Some(_) => {
             return Err(crate::error::Error::Validation(
                 "the artifact to keep is not part of this pair".into(),
-            )
-            .into());
+            ));
         }
         None => pair
             .obsolete_id
@@ -315,6 +337,15 @@ async fn apply_pair_supersede_ui(
             crate::store::pairs::DecidedBy::Operator,
         )
         .await?;
+    Ok(())
+}
+
+async fn apply_pair_supersede_ui(
+    tenant: Tenant,
+    Path(pid): Path<i64>,
+    Form(f): Form<KeepForm>,
+) -> UiResult<Response> {
+    supersede_pair(&tenant, pid, f.keep.as_deref()).await?;
     Ok(Redirect::to(f.back.path()).into_response())
 }
 
@@ -379,27 +410,31 @@ async fn verify_ui(
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
-async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Response> {
+pub(crate) async fn undo_merge(tenant: &Tenant, aid: &str) -> crate::error::Result<()> {
     use crate::store::actions::UndoneBy;
     // A press on a page that has gone stale: between the render and the press,
     // a later merge subsumed this one and took its supersession. Saying so is
     // the whole of what is available from here — the alternative is a redirect
     // to a queue the row has left, which reads as "done".
     if let crate::jobs::merge::Undone::HiddenBehind { later } =
-        crate::jobs::merge::undo(&tenant.core, &aid, crate::store::pairs::DecidedBy::Operator)
+        crate::jobs::merge::undo(&tenant.core, aid, crate::store::pairs::DecidedBy::Operator)
             .await?
     {
         return Err(crate::error::Error::Validation(format!(
             "this merge was itself merged into {later} since this page was drawn — \
              undo that one first, and this comes back with it"
-        ))
-        .into());
+        )));
     }
     tenant
         .core
         .store
-        .undo_actions_under(&aid, UndoneBy::Operator, "undone on Insights")
+        .undo_actions_under(aid, UndoneBy::Operator, "undone on Insights")
         .await?;
+    Ok(())
+}
+
+async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Response> {
+    undo_merge(&tenant, &aid).await?;
     Ok(Redirect::to("/ui/insights").into_response())
 }
 
@@ -412,6 +447,26 @@ async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Resp
 /// artifact's, so the action is read for its `subject_id` before it is undone
 /// — after which the row still names the same artifact, but reading it first
 /// keeps the failure ordinary: no such action is a `404` with nothing written.
+/// Answers with the artifact the condensation was on, which is what a caller
+/// redrawing a pane needs and what the path does not carry.
+pub(crate) async fn undo_condensation(
+    tenant: &Tenant,
+    action_id: &str,
+) -> crate::error::Result<String> {
+    let artifact_id = tenant
+        .core
+        .store
+        .action(action_id)
+        .await?
+        .ok_or(crate::error::Error::NotFound)?
+        .subject_id;
+    tenant
+        .core
+        .uncondense(action_id, crate::store::actions::UndoneBy::Operator)
+        .await?;
+    Ok(artifact_id)
+}
+
 async fn uncondense_ui(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
@@ -419,17 +474,7 @@ async fn uncondense_ui(
     Query(p): Query<ArtifactViewParams>,
     Form(back): Form<ReturnTo>,
 ) -> UiResult<Response> {
-    let artifact_id = tenant
-        .core
-        .store
-        .action(&aid)
-        .await?
-        .ok_or(crate::error::Error::NotFound)?
-        .subject_id;
-    tenant
-        .core
-        .uncondense(&aid, crate::store::actions::UndoneBy::Operator)
-        .await?;
+    let artifact_id = undo_condensation(&tenant, &aid).await?;
     artifact_changed(&tenant, &headers, &artifact_id, &p.terms, &back).await
 }
 
