@@ -10,7 +10,11 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
+import io.github.overcuriousity.engram.core.read.Beside
 import io.github.overcuriousity.engram.core.read.Hit
+import io.github.overcuriousity.engram.core.read.Pair
+import io.github.overcuriousity.engram.core.read.PairSide
+import io.github.overcuriousity.engram.core.read.SetAsideRow
 import io.github.overcuriousity.engram.core.read.Reach
 import io.github.overcuriousity.engram.core.read.Read
 import org.junit.Rule
@@ -64,5 +68,81 @@ class PicturesTest {
             EngramTheme { Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) { Rail(railOf(hits)) {} } }
         }
         save("results-all-loose")
+    }
+
+    @Test fun aPairCard() {
+        val cards = listOf(
+            PairCard(
+                Pair(
+                    id = 1,
+                    percent = 91,
+                    a = PairSide("art-a", "Qdrant payload filters", named = true, excerpt = "Filters narrow a search before the vectors are compared, and a payload index is what makes that fast."),
+                    b = PairSide("art-b", "the same thing, said in a note I made later", named = false, excerpt = "payload filtering happens first; without an index on the field it is a full scan."),
+                    finding = "both say filtering happens before the comparison; the second adds what it costs without an index",
+                    mergeable = true,
+                    keeps = "art-a",
+                ),
+                siblings = 3,
+            ),
+        )
+        compose.setContent {
+            EngramTheme {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
+                    PairReview(cards, onAnswer = { _, _ -> "row" }, onUndo = { true }, onArtifact = {}, modifier = Modifier)
+                }
+            }
+        }
+        save("pair-card")
+    }
+
+    @Test fun anUnjudgedPairCard() {
+        val cards = listOf(
+            PairCard(
+                Pair(
+                    id = 2,
+                    percent = 88,
+                    a = PairSide("art-a", "Timeout 0", named = true, excerpt = "the timeout is 30 seconds"),
+                    b = PairSide("art-b", "Timeout 1", named = true, excerpt = "the timeout is 90 seconds"),
+                    unjudged = true,
+                    mergeable = false,
+                ),
+                siblings = 1,
+            ),
+        )
+        compose.setContent {
+            EngramTheme {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
+                    PairReview(cards, onAnswer = { _, _ -> "row" }, onUndo = { true }, onArtifact = {}, modifier = Modifier)
+                }
+            }
+        }
+        save("pair-card-unjudged")
+    }
+
+    @Test fun theJournal() {
+        val rows = listOf(
+            SetAsideRow(
+                kind = "merged", subjectId = "m1", artifactId = "m1",
+                label = "Payload filtering, in one place", named = true,
+                subtitle = "17 Sep 19:01",
+                why = "written from 2 artifacts, which are still stored — undoing brings them back and retires this",
+                beside = listOf(Beside("s1", "c1", "Payload filters 0", true), Beside("s2", "c1", "Payload filters 1", true)),
+                caveat = "a source has since been deleted",
+            ),
+            SetAsideRow(
+                kind = "parked", subjectId = "c9",
+                label = "meeting-notes.pdf", named = true, subtitle = "184 kB",
+                why = "96% the same as the capture beside it, so nothing has been spent on reading it yet",
+                beside = listOf(Beside("", "c8", "meeting notes (2).pdf", true)),
+            ),
+        )
+        compose.setContent {
+            EngramTheme {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
+                    Journal(rows, capped = false, onAction = { _, _ -> "row" }, onUndo = { true }, onOpen = {}, modifier = Modifier)
+                }
+            }
+        }
+        save("journal")
     }
 }

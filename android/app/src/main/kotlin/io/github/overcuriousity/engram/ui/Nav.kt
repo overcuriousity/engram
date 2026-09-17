@@ -53,6 +53,13 @@ sealed class Screen(val route: String, val label: String) {
     object Library : Screen("library", "Library")
     object Queue : Screen("queue", "Queue")
     object Settings : Screen("settings", "Settings")
+
+    // Reached from Settings and from nowhere else. Never in `bar`, never in
+    // the top bar: judging is a mechanic to work towards removing, and a place
+    // for it on the screen the app opens on would build a habit around it.
+    object Pairs : Screen("judge/pairs", "Duplicate pairs")
+    object Gaps : Screen("judge/gaps", "Gaps")
+    object Journal : Screen("judge/journal", "While you were away")
 }
 
 /** Where a row leads. Ids and dates travel in the route; nothing else does. */
@@ -151,7 +158,12 @@ fun EngramApp(engram: Engram, start: Screen? = null, pairText: String? = null, o
                 }
                 composable(Screen.Library.route) { LibraryScreen(engram, onCorpus) }
                 composable(Screen.Queue.route) { QueueScreen(engram) }
-                composable(Screen.Settings.route) { SettingsScreen(engram, onUnpair = onUnpair) }
+                composable(Screen.Settings.route) {
+                    SettingsScreen(engram, onJudging = { go(it.route) }, onUnpair = onUnpair)
+                }
+                composable(Screen.Pairs.route) { PairReviewScreen(engram, onArtifact) }
+                composable(Screen.Gaps.route) { GapsScreen(engram) }
+                composable(Screen.Journal.route) { JournalScreen(engram, onArtifact, onCorpus) }
                 composable(Screen.Pair.route) { PairScreen(engram, initialText = pairText, knownOrigin = connection?.origin) }
                 composable(Routes.ASK) { AskScreen(engram, it.arguments?.getString("q").orEmpty(), onArtifact) }
                 composable(Routes.ARTIFACT) { ArtifactScreen(engram, it.arguments?.getString("id").orEmpty(), onCorpus, onArtifact) }

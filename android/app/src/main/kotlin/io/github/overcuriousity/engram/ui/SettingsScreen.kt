@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -40,7 +41,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 @Composable
-fun SettingsScreen(engram: Engram, onUnpair: () -> Unit) {
+fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onUnpair: () -> Unit) {
     val ctx = LocalContext.current
     val c by engram.store.current.collectAsStateWithLifecycle()
     val latest by engram.latestMoment.collectAsStateWithLifecycle(null)
@@ -101,6 +102,17 @@ fun SettingsScreen(engram: Engram, onUnpair: () -> Unit) {
                 })
             }
         }
+        // Where judging lives, and the only place it is offered from. Not a
+        // tab, not a section on home, and no count until somebody has opened
+        // the screen that fetched one.
+        Section("Judging") {
+            val pairs by JudgeCounts.pairs.collectAsStateWithLifecycle()
+            val gaps by JudgeCounts.gaps.collectAsStateWithLifecycle()
+            val aside by JudgeCounts.setAside.collectAsStateWithLifecycle()
+            JudgeLine("Duplicate pairs", pairs) { onJudging(Screen.Pairs) }
+            JudgeLine("Gaps", gaps) { onJudging(Screen.Gaps) }
+            JudgeLine("While you were away", aside) { onJudging(Screen.Journal) }
+        }
         Section("This phone") {
             Line(engram.situation.bundle(placeOn).toString(), muted = true, mono = true)
         }
@@ -118,6 +130,19 @@ fun SettingsScreen(engram: Engram, onUnpair: () -> Unit) {
         },
         dismissButton = { TextButton(onClick = { confirmUnpair = false }) { Text("Keep") } },
     )
+}
+
+@Composable
+private fun JudgeLine(label: String, count: Int?, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Line(label)
+        // What was actually fetched, once, and nothing when nothing has been.
+        count?.let { Line(it.toString(), muted = true) }
+    }
 }
 
 @Composable
