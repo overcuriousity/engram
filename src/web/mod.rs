@@ -7,6 +7,7 @@ pub mod corpus;
 pub mod corpus_view;
 pub mod day;
 pub mod due;
+pub mod etag;
 pub mod extension;
 pub mod insights;
 pub mod lineage_view;

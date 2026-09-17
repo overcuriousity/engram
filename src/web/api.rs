@@ -1792,6 +1792,9 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/artifacts/{id}/moments", post(set_moment))
         .merge(crate::web::push::routes())
         .merge(crate::web::app::routes())
+        // Over every route above and every one added later: a read that
+        // answers JSON revalidates, without its handler having to know.
+        .layer(axum::middleware::from_fn(crate::web::etag::layer))
 }
 
 // ── Moments ──────────────────────────────────────────────────────────────────
@@ -4948,6 +4951,83 @@ mod patch_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn bearer_get_if(uri: &str, token: &str, tag: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("if-none-match", tag)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// The read contract's fourth rule, through the real router: a read is
+    /// tagged, and its own tag sent back is answered with nothing.
+    #[tokio::test]
+    async fn a_read_answers_an_etag_and_a_304_to_its_own_tag() {
+        let (app, token, _core) = app_token_and_core().await;
+        let res = app
+            .clone()
+            .oneshot(bearer_get("/api/v1/corpora", &token))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["cache-control"], "private, no-cache");
+        let tag = res.headers()["etag"].to_str().unwrap().to_string();
+
+        let again = app
+            .oneshot(bearer_get_if("/api/v1/corpora", &token, &tag))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(again.headers()["etag"].to_str().unwrap(), tag);
+        assert!(crate::web::test_support::body_of(again).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_capture_changes_the_tag_of_the_list_it_lands_in() {
+        let (app, token, core) = app_token_and_core().await;
+        let before = app
+            .clone()
+            .oneshot(bearer_get("/api/v1/corpora", &token))
+            .await
+            .unwrap();
+        let tag = before.headers()["etag"].to_str().unwrap().to_string();
+        core.store.insert_corpus("x", "web", None).await.unwrap();
+
+        let after = app
+            .oneshot(bearer_get_if("/api/v1/corpora", &token, &tag))
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::OK, "a stale tag was honoured");
+        assert_ne!(after.headers()["etag"].to_str().unwrap(), tag);
+    }
+
+    /// An error is not a version of anything, and a write is not a read.
+    #[tokio::test]
+    async fn an_error_and_a_post_carry_no_etag() {
+        let (app, token, _core) = app_token_and_core().await;
+        let missing = app
+            .clone()
+            .oneshot(bearer_get("/api/v1/corpora/nope", &token))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert!(missing.headers().get("etag").is_none());
+
+        let post = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/moments/nope/done")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(post.headers().get("etag").is_none());
     }
 
     fn bearer_get(uri: &str, token: &str) -> Request<Body> {
