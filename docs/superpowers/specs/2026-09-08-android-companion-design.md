@@ -385,6 +385,16 @@ part — arrives with the answer rather than before it. The screen has to render
 partial text and then re-render it annotated, and that is a different shape
 from every other screen in the app.
 
+*2026-09-17: built (plan `docs/superpowers/plans/2026-09-17-android-reading.md`).
+Two things this document did not settle, decided with the user while building:
+nothing is fetched that was not asked for — an unreachable server is said
+plainly rather than papered over with a background sync, because the real
+answer to being offline is the self-contained app that comes later — and the
+`Reader` interface in `core` is the seam that app plugs into. Search is home;
+the divider is drawn from `past_cliff`, not `weak`, which is what this document
+says and what `_results.html` has always done. The widget and the vector
+background named above are not built.*
+
 ---
 
 ## Part F — The app: judging
