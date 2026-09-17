@@ -408,6 +408,15 @@ queue of one decision at a time with three buttons, which is a worse fit for a
 desk than for a phone in a queue at a shop. Insights stays read-only, per
 Part B.
 
+*2026-09-17: B's second slice landed — thirteen routes, written up in
+`docs/api.md`. Two things this document assumed and the user changed while it
+was being built. The card keeps all five answers the web offers rather than
+three: Keep either side, Write one, Discard both, Dismiss. And judging does not
+go where this document's enthusiasm would have put it — it lives behind
+Settings, off the home screen, with no count badge anywhere, because the human
+in the loop is a mechanic the base is meant to grow out of rather than a habit
+the app should build. Applying a tuning recommendation still does not cross.*
+
 ---
 
 ## Part G — The watch

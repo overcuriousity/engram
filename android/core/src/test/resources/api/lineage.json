@@ -1,13 +1,13 @@
 {
   "roots": [
     {
-      "id": "01a0af90-f652-7791-ada5-02e6daf4a757",
+      "id": "01a0b0be-82de-76b5-8071-0a476676a20c",
       "label": "Payload filters 0",
       "named": true,
       "kind": "captured",
-      "created_at": 1789651908,
+      "created_at": 1789671670,
       "source": {
-        "corpus_id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+        "corpus_id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
         "label": "Qdrant notes",
         "start_line": 1,
         "end_line": 2
@@ -17,13 +17,13 @@
       "children": []
     },
     {
-      "id": "01a0af90-f652-7791-ada5-02e731a38244",
+      "id": "01a0b0be-82df-71d0-afbe-22777c4dfaa1",
       "label": "Payload filters 1",
       "named": true,
       "kind": "captured",
-      "created_at": 1789651908,
+      "created_at": 1789671670,
       "source": {
-        "corpus_id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+        "corpus_id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
         "label": "Qdrant notes",
         "start_line": 1,
         "end_line": 2
@@ -33,6 +33,23 @@
       "children": []
     }
   ],
-  "also_replaced": [],
+  "also_replaced": [
+    {
+      "id": "01a0b0be-82e3-761c-865e-363c878cd500",
+      "label": "Superseded",
+      "named": true,
+      "kind": "captured",
+      "created_at": 1789671670,
+      "source": {
+        "corpus_id": "01a0b0be-82e3-761c-865e-363bf9dd1e3a",
+        "label": "Older",
+        "start_line": null,
+        "end_line": null
+      },
+      "replaced": true,
+      "missing": false,
+      "children": []
+    }
+  ],
   "truncated": false
 }

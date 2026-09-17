@@ -5,62 +5,76 @@
   "to": 1789689600,
   "entries": [
     {
-      "id": "01a0af90-f651-7044-9d5c-fe4faa3cf68a",
+      "id": "01a0b0be-82de-76b5-8071-0a46b199fadd",
       "label": "Long day.",
       "named": false,
-      "at": 1789651908,
+      "at": 1789671670,
       "text": "Long day."
     }
   ],
   "captured": [
     {
-      "id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+      "id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
       "label": "Qdrant notes",
       "named": true,
-      "at": 1789651908,
+      "at": 1789671670,
       "text": "Filters narrow a search.\nPayload indexes make them fast.\nThird line."
     },
     {
-      "id": "01a0af90-f651-7044-9d5c-fe4ec251d21c",
+      "id": "01a0b0be-82de-76b5-8071-0a452888d652",
       "label": "no title, only an opening",
       "named": false,
-      "at": 1789651908,
+      "at": 1789671670,
       "text": "no title, only an opening"
+    },
+    {
+      "id": "01a0b0be-82e2-7666-a729-a903740bc909",
+      "label": "Timeouts",
+      "named": true,
+      "at": 1789671670,
+      "text": "timeouts"
+    },
+    {
+      "id": "01a0b0be-82e3-761c-865e-363bf9dd1e3a",
+      "label": "Older",
+      "named": true,
+      "at": 1789671670,
+      "text": "an older way"
     }
   ],
   "was_due": [
     {
-      "id": "01a0af90-f656-744f-8a41-ae66d547bb72",
-      "artifact_id": "01a0af90-f653-746a-8273-545e206559d0",
+      "id": "01a0b0be-82e1-708a-8d64-d31154b84988",
+      "artifact_id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
       "label": "Merged, shorter.",
       "named": false,
       "kind": "due",
-      "at": 1789651908,
+      "at": 1789671670,
       "done": false,
       "span": null
     }
   ],
   "refers": [
     {
-      "id": "01a0af90-f656-744f-8a41-ae67eba1d9cf",
-      "artifact_id": "01a0af90-f653-746a-8273-545e206559d0",
+      "id": "01a0b0be-82e1-708a-8d64-d3123a5eee8a",
+      "artifact_id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
       "label": "Merged, shorter.",
       "named": false,
       "kind": "event",
-      "at": 1789651908,
+      "at": 1789671670,
       "done": false,
       "span": "today"
     }
   ],
   "sittings": [
     {
-      "opened_at": 1789651908,
-      "closed_at": 1789651908,
+      "opened_at": 1789671670,
+      "closed_at": 1789671670,
       "query": "payload filter",
       "searches": 1,
       "opened": [
         {
-          "id": "01a0af90-f653-746a-8273-545e206559d0",
+          "id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
           "label": "Merged, shorter.",
           "named": true
         }

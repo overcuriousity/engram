@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "label": "how do ticks work",
+      "labelled_by": "terms",
+      "members": [
+        {
+          "kind": "ask",
+          "id": "01a0b0be-82e4-71c9-a76a-e90081ce0478",
+          "text": "how do ticks work"
+        }
+      ]
+    }
+  ],
+  "next": null
+}

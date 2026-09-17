@@ -64,6 +64,52 @@ server broke. There are no error codes; the status is the vocabulary.
 | `POST /context/seen` | Body `{ artifact_id, rung, slot }`, sent when the card is actually on screen. Always `204`. |
 | `GET /status`, `GET /consolidation` | The state of the base and of the review queue. |
 
+## Judging
+
+Where a person decides rather than reads. Every one of these has an undo, and
+the undo is on this list too.
+
+| Route | Answers |
+|---|---|
+| `GET /pairs` | Open duplicate pairs, clustered: `{ members, pairs: [...] }`. One artifact against two others is one question, not two cards. |
+| `POST /pairs/{id}/supersede` | Body `{"keep": "<artifact id>"}`, or none for the side the judge proposed. Keeps that one and hides the other behind it. `204`. |
+| `POST /pairs/{id}/synthesize` | Ask for one artifact written from both. Queued, not written here: the writing is a model call. `204`. |
+| `POST /pairs/{id}/discard` | Retire both. `204`. |
+| `POST /pairs/{id}/dismiss` | Not a question worth answering. Nothing is hidden. `204`. |
+| `GET /gaps` | Questions nothing covered, clustered under the name the sweep gave them, with `labelled_by` of `model` or `terms`. |
+| `POST /gaps/{kind}/{id}/dismiss` | This one needs no answer. `204`. |
+| `POST /gaps/forget` | Body `{"members": [{"kind", "id"}]}` — a whole cluster. `204`. |
+| `GET /insights` | `{ held, used, retrieval }`. Read-only. |
+| `GET /insights/set-aside` | What the base did on its own and left an undo for, and what it is waiting to be told. |
+| `POST /artifacts/{id}/verify` · `/deprecate` · `/reactivate` · `/unsupersede` | The four answers a set-aside row admits. `204`. |
+| `POST /merges/{id}/undo` | Take a merge back: its sources return, the merge is retired. `204`. |
+| `POST /condensations/{id}/undo` | Put the version a condensation retired back. Answers `{ "artifact_id" }`, which the path does not carry. |
+| `POST /corpora/{id}/resolve` | The three-way answer to a parked capture. Already existed. |
+
+Three things these shapes say that are easy to miss:
+
+**A pair says who has looked at it.** `unjudged` means the sweep filed it on a
+cosine score and nothing has read it since, so *these two cover the same
+ground* is a finding nobody made — print the measurement instead.
+`via_link` means no cosine was ever computed (the pair came from repeated
+co-retrieval), so `percent` is not a similarity and must not be shown as one.
+`mergeable` says whether the merge path would take a synthesis at all; where it
+is false, leave the button out rather than offer a press that can only come
+back a validation error.
+
+**A set-aside row carries its `kind`, not its buttons.** `kind` is one of
+`merged`, `generated`, `hidden`, `buried`, `parked`, `unverified`, and it is
+the whole of what says which answers the row admits — each of them is a route
+above. `subject_id` is what those routes name: a corpus for `parked`, the
+artifact for the rest. A `kind` a client has never heard of should draw no
+buttons rather than guess; that is what lets this list grow a seventh.
+
+**`GET /insights` has no tuning in it at all.** Applying a tuning
+recommendation writes `config.toml`, and that press stays on the web where the
+person who may make it is at a keyboard. `retrieval` is `null` where no
+searches are recorded — never `0.00`, which would read as a score rather than
+as an absence.
+
 ## What does not cross
 
 API token management, the browser-extension offer, instance configuration and

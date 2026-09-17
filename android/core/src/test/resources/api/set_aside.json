@@ -1,0 +1,48 @@
+{
+  "items": [
+    {
+      "kind": "merged",
+      "subject_id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
+      "artifact_id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
+      "label": "Merged, shorter.",
+      "named": true,
+      "subtitle": "2026-09-17 19:01 · Merged, shorter.",
+      "why": "written from 2 artifacts, which are still stored — undoing brings them back and retires this",
+      "beside": [
+        {
+          "id": "01a0b0be-82de-76b5-8071-0a476676a20c",
+          "corpus_id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+          "label": "Payload filters 0",
+          "named": true
+        },
+        {
+          "id": "01a0b0be-82df-71d0-afbe-22777c4dfaa1",
+          "corpus_id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+          "label": "Payload filters 1",
+          "named": true
+        }
+      ],
+      "caveat": null
+    },
+    {
+      "kind": "hidden",
+      "subject_id": "01a0b0be-82e3-761c-865e-363c878cd500",
+      "artifact_id": "01a0b0be-82e3-761c-865e-363c878cd500",
+      "label": "Superseded",
+      "named": true,
+      "subtitle": "2026-09-17 19:01 · an older way of saying it",
+      "why": "near-identical to the one beside it, so it is kept out of results — still stored, still readable",
+      "beside": [
+        {
+          "id": "01a0b0be-82e0-76e8-a3d7-a2f9b69f6d93",
+          "corpus_id": "",
+          "label": "Merged, shorter.",
+          "named": true
+        }
+      ],
+      "caveat": null
+    }
+  ],
+  "next": null,
+  "capped": false
+}
