@@ -852,13 +852,37 @@ async fn gap_forget(tenant: Tenant, Form(f): Form<ForgetForm>) -> UiResult<Respo
     Ok(().into_response())
 }
 
+/// Every member of one cluster, forgotten together.
+///
+/// A member that is already gone is not a failure: the list was drawn before
+/// the press, and a question answered since is a question covered.
+pub(crate) async fn forget_gaps(
+    tenant: &Tenant,
+    members: &[(String, String)],
+) -> crate::error::Result<()> {
+    for (kind, id) in members {
+        match dismiss_gap(tenant, kind, id).await {
+            Ok(()) | Err(Error::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Cover a question by saying it does not need one. The kind is checked
+/// against the vocabulary rather than passed through: a word this base does
+/// not know would delete nothing and report success.
+pub(crate) async fn dismiss_gap(tenant: &Tenant, kind: &str, id: &str) -> crate::error::Result<()> {
+    let kind = crate::store::gaps::GapKind::parse(kind)
+        .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
+    tenant.core.store.dismiss_gap(kind, id).await
+}
+
 async fn gap_dismiss(
     tenant: Tenant,
     Path((kind, id)): Path<(String, String)>,
 ) -> UiResult<Response> {
-    let kind = crate::store::gaps::GapKind::parse(&kind)
-        .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
-    tenant.core.store.dismiss_gap(kind, &id).await?;
+    dismiss_gap(&tenant, &kind, &id).await?;
     Ok(axum::http::StatusCode::OK.into_response())
 }
 

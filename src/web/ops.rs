@@ -244,7 +244,7 @@ pub(crate) async fn synthesize_pair(tenant: &Tenant, pid: i64) -> crate::error::
     // carries it, and the press that arrives is as real as any other. Refused
     // here rather than three steps later, where the unit would clear the ask
     // and settle the pair for a person who would then wonder what they pressed.
-    if !pair_is_mergeable(&tenant, &pair.a_id, &pair.b_id).await? {
+    if !pair_is_mergeable(tenant, &pair.a_id, &pair.b_id).await? {
         return Err(crate::error::Error::Validation(
             "one of these is stored source text, which a merge may not rewrite".into(),
         ));

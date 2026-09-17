@@ -132,9 +132,214 @@ async fn pairs(tenant: Tenant) -> Result<Json<Page<PairCluster>>> {
     )))
 }
 
+// ── Gaps ─────────────────────────────────────────────────────────────────────
+
+/// One question the base could not answer.
+#[derive(serde::Serialize)]
+pub struct GapMember {
+    /// Which vocabulary the id belongs to; what dismissing one names.
+    pub kind: String,
+    pub id: String,
+    pub text: String,
+}
+
+/// Questions the sweep found to be about one subject, under the name it gave
+/// them. A lone question is a cluster of one and reads the same: which of the
+/// two it is matters to nobody deciding what to do about it.
+#[derive(serde::Serialize)]
+pub struct GapClusterFacts {
+    pub label: String,
+    /// `model` or `terms` — whether a model named this group or its shared
+    /// wording did. Said because a name a model gave is a reading, and a name
+    /// taken from the words is not.
+    pub labelled_by: String,
+    pub members: Vec<GapMember>,
+}
+
+async fn gaps(tenant: Tenant) -> Result<Json<Page<GapClusterFacts>>> {
+    if !tenant.core.learn.enabled {
+        // Not an error: gaps are recorded only where searches are, and an
+        // installation that records none has nothing here rather than a
+        // failure to report.
+        return Ok(Json(Page::whole(Vec::new())));
+    }
+    let (rows, loose) = tenant
+        .core
+        .store
+        .gap_rows(tenant.core.embedder.model(), tenant.core.weak_below())
+        .await?;
+    let member = |g: crate::store::gaps::Gap| GapMember {
+        kind: g.kind.as_str().to_string(),
+        id: g.id,
+        text: g.text,
+    };
+    let clustered = rows.into_iter().map(|r| GapClusterFacts {
+        label: r.label,
+        labelled_by: r.labelled_by,
+        members: r.members.into_iter().map(member).collect(),
+    });
+    let alone = loose.into_iter().map(|g| GapClusterFacts {
+        label: g.text.clone(),
+        labelled_by: "terms".into(),
+        members: vec![member(g)],
+    });
+    Ok(Json(Page::whole(clustered.chain(alone).collect())))
+}
+
+async fn dismiss_gap(
+    tenant: Tenant,
+    Path((kind, id)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    crate::web::ui::dismiss_gap(&tenant, &kind, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct Members {
+    #[serde(default)]
+    pub members: Vec<GapRef>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct GapRef {
+    pub kind: String,
+    pub id: String,
+}
+
+/// Forget a cluster: every question in it at once, which is how the page
+/// offers it. A caller sends the members it was shown.
+async fn forget_gaps(tenant: Tenant, Json(m): Json<Members>) -> Result<StatusCode> {
+    let members: Vec<(String, String)> = m.members.into_iter().map(|g| (g.kind, g.id)).collect();
+    crate::web::ui::forget_gaps(&tenant, &members).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── What the base has been doing ─────────────────────────────────────────────
+
+/// One thing the base did on its own, or is waiting to be told about.
+///
+/// `kind` is the whole of what says which answers this row admits — each of
+/// them is a route of its own, and a client knows the six. A `kind` this
+/// client has never heard of draws no buttons rather than guessing, which is
+/// what lets the server grow a seventh without breaking an older app.
+///
+/// `subject_id` is what those routes name, and which thing it is depends on
+/// the kind: a corpus for `parked`, the artifact for the rest.
+#[derive(serde::Serialize)]
+pub struct SetAsideFacts {
+    pub kind: &'static str,
+    pub subject_id: String,
+    /// The artifact to open. `None` for a parked capture, which is a corpus.
+    pub artifact_id: Option<String>,
+    pub label: String,
+    pub named: bool,
+    /// What tells two rows with one label apart. Empty where nothing does.
+    pub subtitle: String,
+    /// Why it is here, in a sentence. Never a mechanism the reader has to
+    /// already know.
+    pub why: String,
+    /// What the base put beside it — the sources a merge came from, the
+    /// artifact a near-duplicate lost to.
+    pub beside: Vec<Beside>,
+    /// The one thing about this row that is not simply reversible.
+    pub caveat: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct Beside {
+    pub id: String,
+    pub corpus_id: String,
+    pub label: String,
+    pub named: bool,
+}
+
+/// `GET /insights/set-aside` — the undo list, and whether any cap bit.
+async fn set_aside(tenant: Tenant) -> Result<Json<serde_json::Value>> {
+    let (rows, capped) = crate::web::insights::set_aside_rows(&tenant).await?;
+    let items: Vec<SetAsideFacts> = rows
+        .into_iter()
+        .map(|r| SetAsideFacts {
+            kind: r.kind,
+            subject_id: r.subject_id,
+            artifact_id: r.artifact_id,
+            label: r.title,
+            named: r.named,
+            subtitle: r.subtitle,
+            why: r.why,
+            beside: r
+                .beside
+                .into_iter()
+                .map(|b| Beside {
+                    id: b.id,
+                    corpus_id: b.corpus_id,
+                    label: b.title,
+                    named: b.named,
+                })
+                .collect(),
+            caveat: r.caveat,
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "items": items,
+        "next": serde_json::Value::Null,
+        "capped": capped,
+    })))
+}
+
+/// What the base is like, read-only.
+///
+/// Read-only by the programme: Insights says what the tuning sweep
+/// recommends, and the press that adopts it stays on the web, because it
+/// writes `config.toml` and the person who may do that is at a keyboard.
+/// Nothing about tuning is in this answer at all.
+async fn insights(tenant: Tenant) -> Result<Json<serde_json::Value>> {
+    let held = tenant.core.store.held().await?;
+    let used = tenant
+        .core
+        .store
+        .used(tenant.core.activation.half_life_days, crate::store::now())
+        .await?;
+    // Only where searches are recorded. On an installation that records none
+    // the honest answer is that there is nothing to say — not 0.00, which
+    // would read as a score.
+    let retrieval = match tenant.core.learn.enabled {
+        true => {
+            let f = tenant
+                .core
+                .store
+                .feedback_stats(tenant.core.weak_below())
+                .await?;
+            serde_json::json!({
+                "judged": f.judged,
+                "recall_at_10": (f.judged > 0).then_some(f.recall_at_10),
+                "mrr": (f.judged > 0).then_some(f.mrr),
+            })
+        }
+        false => serde_json::Value::Null,
+    };
+    Ok(Json(serde_json::json!({
+        "held": {
+            "corpora": held.corpora,
+            "artifacts": held.artifacts,
+            "segments": held.segments,
+            "synthesized": held.synthesized,
+        },
+        "used": used
+            .iter()
+            .map(|b| serde_json::json!({ "label": b.label, "count": b.count }))
+            .collect::<Vec<_>>(),
+        "retrieval": retrieval,
+    })))
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/pairs", get(pairs))
+        .route("/gaps", get(gaps))
+        .route("/gaps/forget", post(forget_gaps))
+        .route("/gaps/{kind}/{id}/dismiss", post(dismiss_gap))
+        .route("/insights", get(insights))
+        .route("/insights/set-aside", get(set_aside))
         .route("/pairs/{id}/dismiss", post(dismiss))
         .route("/pairs/{id}/discard", post(discard))
         .route("/pairs/{id}/supersede", post(supersede))
@@ -378,6 +583,153 @@ mod tests {
             ids[0].as_str(),
             "keeping a is superseding b: {p}"
         );
+    }
+
+    // ── Gaps ────────────────────────────────────────────────────────────────
+
+    /// An abstained ask, judged as having no answer here: the plainest gap
+    /// there is, and the one the capture page lists.
+    async fn a_gap(core: &crate::core::Core, q: &str) -> String {
+        let id = core
+            .store
+            .record_ask(crate::store::asks::NewAsk {
+                question: q.into(),
+                filters: "{}".into(),
+                query_vec: vec![1.0, 0.0],
+                embed_model: core.embedder.model().into(),
+                answer: "Not in the knowledge base.".into(),
+                abstained: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        core.store
+            .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn a_gap_is_listed_and_can_be_covered_by_saying_it_needs_no_answer() {
+        // Gaps are only recorded where searches are, so the core is built
+        // with that on before the router is wrapped around it.
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let handle = core.clone();
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let id = a_gap(&handle, "how do ticks work").await;
+
+        let body = json_of(
+            app.clone()
+                .oneshot(get("/api/v1/gaps", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{body}");
+        assert_eq!(items[0]["members"][0]["text"], "how do ticks work");
+        let kind = items[0]["members"][0]["kind"].as_str().unwrap().to_string();
+
+        let res = app
+            .clone()
+            .oneshot(post(
+                &format!("/api/v1/gaps/{kind}/{id}/dismiss"),
+                &cookie,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let after = json_of(app.oneshot(get("/api/v1/gaps", &cookie)).await.unwrap()).await;
+        assert!(after["items"].as_array().unwrap().is_empty(), "{after}");
+    }
+
+    /// A kind this base does not know deletes nothing, so it must not report
+    /// success.
+    #[tokio::test]
+    async fn a_gap_kind_this_base_does_not_know_is_refused() {
+        let (app, cookie, _core) = app_session_and_core().await;
+        let res = app
+            .oneshot(post("/api/v1/gaps/invented/x/dismiss", &cookie, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Gaps are recorded only where searches are. Nothing to say is an empty
+    /// list, not a failure.
+    #[tokio::test]
+    async fn a_base_that_records_nothing_has_no_gaps_rather_than_an_error() {
+        let (app, cookie, _core) = app_session_and_core().await;
+        let res = app.oneshot(get("/api/v1/gaps", &cookie)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(json_of(res).await["items"].as_array().unwrap().is_empty());
+    }
+
+    // ── What the base has been doing ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn insights_says_what_is_held_and_nothing_about_tuning() {
+        let (app, cookie, core) = app_session_and_core().await;
+        artifacts(&core, &["one", "two"]).await;
+
+        let res = app.oneshot(get("/api/v1/insights", &cookie)).await.unwrap();
+        assert!(res.headers().contains_key("etag"));
+        let body = json_of(res).await;
+
+        assert_eq!(body["held"]["artifacts"], 2);
+        assert_eq!(body["held"]["corpora"], 1);
+        assert!(body["used"].is_array());
+        // Recording is off in the fixture, so there is nothing to say about
+        // retrieval — and nothing to say is null, never 0.00, which would read
+        // as a score.
+        assert!(body["retrieval"].is_null(), "{body}");
+        assert!(
+            body.get("tune").is_none(),
+            "the one route that writes config.toml has no business here: {body}"
+        );
+    }
+
+    /// The undo list. A superseded artifact is the plainest row on it: the
+    /// base hid something, and the row is how it comes back.
+    #[tokio::test]
+    async fn the_set_aside_list_names_what_a_row_is_about_and_what_answers_it() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let (ids, pid) = a_pair(&core).await;
+        app.clone()
+            .oneshot(post(
+                &format!("/api/v1/pairs/{pid}/supersede"),
+                &cookie,
+                Some(&format!(r#"{{"keep":"{}"}}"#, ids[0])),
+            ))
+            .await
+            .unwrap();
+
+        let res = app
+            .oneshot(get("/api/v1/insights/set-aside", &cookie))
+            .await
+            .unwrap();
+        assert!(res.headers().contains_key("etag"));
+        let body = json_of(res).await;
+
+        let hidden = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["subject_id"] == ids[1].as_str())
+            .unwrap_or_else(|| panic!("the artifact that was hidden is not listed: {body}"));
+        assert_eq!(hidden["kind"], "hidden");
+        assert_eq!(hidden["artifact_id"], ids[1].as_str());
+        assert!(hidden["why"].as_str().is_some_and(|w| !w.is_empty()));
+        // What it lost to, so the row can say what took its place.
+        assert_eq!(hidden["beside"][0]["id"], ids[0].as_str());
+        // Facts, not a rendering: no hrefs and no button labels.
+        let text = body.to_string();
+        assert!(!text.contains("/ui/"), "a link crossed the API: {text}");
+        assert!(!text.contains("Restore"), "a button label crossed: {text}");
     }
 
     #[tokio::test]

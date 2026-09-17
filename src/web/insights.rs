@@ -307,22 +307,31 @@ pub(crate) struct MergedRow {
 /// differs per row.
 pub(crate) struct SetAsideRow {
     href: String,
-    title: String,
+    /// What the row's actions name. Which thing that is depends on `kind` —
+    /// a corpus for `parked`, the merge's journal action for `merged`, the
+    /// artifact for the rest — and a client reads it against `kind` rather
+    /// than taking it apart. Carried beside `href` rather than parsed out of
+    /// it: a link is a route, not an identity.
+    pub(crate) subject_id: String,
+    /// The artifact to open where the row is about one. `None` for a parked
+    /// capture, which is a corpus.
+    pub(crate) artifact_id: Option<String>,
+    pub(crate) title: String,
     /// See `ui::RowLabel::named`. A label that is the artifact's own opening
     /// is set as text, not in the place a name would go.
-    named: bool,
+    pub(crate) named: bool,
     /// What tells two rows with one title apart. Empty where nothing does.
-    subtitle: String,
+    pub(crate) subtitle: String,
     /// The one-word name for what put this row here, as a badge.
-    kind: &'static str,
+    pub(crate) kind: &'static str,
     /// The sentence. Never a mechanism the reader has to already know: "written
     /// from 3 others" rather than "the dedupe pass wrote this".
-    why: String,
+    pub(crate) why: String,
     /// What the base put beside it: the sources a merge came from, the artifact
     /// a near-duplicate lost to, the capture a park collided with.
-    beside: Vec<crate::web::ui::SourceRow>,
+    pub(crate) beside: Vec<crate::web::ui::SourceRow>,
     /// A note under the row for the one thing that is not simply reversible.
-    caveat: Option<String>,
+    pub(crate) caveat: Option<String>,
     actions: Vec<SetAsideAction>,
 }
 
@@ -350,64 +359,14 @@ impl SetAsideAction {
     }
 }
 
-async fn page(tenant: Tenant) -> UiResult<Response> {
-    use sqlx::Row;
-
-    let (pairs, more_pairs) = crate::web::ops::pair_rows(&tenant).await?;
-    let pairs = crate::web::ops::group_pairs(pairs);
-
-    // Read, never computed: the page shows what the sweep grouped and named,
-    // and whatever has been judged since sits under itself until the next
-    // pass. Nothing here embeds or calls a model.
-    let gaps = if tenant.core.learn.enabled {
-        let (rows, loose) = tenant
-            .core
-            .store
-            .gap_rows(tenant.core.embedder.model(), tenant.core.weak_below())
-            .await?;
-        // A group and a lone question are one row each and read the same:
-        // what the sweep called the group, or what somebody typed. Which of
-        // the two it is matters to nobody deciding what to do about it.
-        rows.into_iter()
-            .map(|r| crate::web::ui::GapGroup {
-                label: r.label,
-                members: r
-                    .members
-                    .into_iter()
-                    .map(crate::web::ui::gap_member)
-                    .collect(),
-            })
-            .chain(loose.into_iter().map(|g| crate::web::ui::GapGroup {
-                label: g.text.clone(),
-                members: vec![crate::web::ui::gap_member(g)],
-            }))
-            .collect()
-    } else {
-        vec![]
-    };
-
-    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
-        .fetch_one(&tenant.core.store.pool)
-        .await?
-        .get("n");
-
-    // Not a queue of chores: work that hit something and is waiting to try
-    // again on its own. Nothing here needs a person.
-    let retrying: Vec<RetryingRow> = tenant
-        .core
-        .store
-        .retrying_jobs(50)
-        .await?
-        .into_iter()
-        .map(|j| RetryingRow {
-            stage: j.stage,
-            target_id: j.target_id,
-            attempts: j.attempts,
-            due: fmt_duration(j.next_attempt_secs),
-            last_error: j.last_error.unwrap_or_else(|| "—".into()),
-        })
-        .collect();
-
+/// The seven things the base set aside, folded into one list, and whether any
+/// of their caps bit.
+///
+/// Extracted from the page so the JSON door answers the same rows: two
+/// accounts of what is waiting for a person would differ the first time one of
+/// the seven sources changed, and the row carries an undo, so the difference
+/// would be about what can still be taken back.
+pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>, bool)> {
     // A parked capture is the one corpus state no worker advances. It has to be
     // shown here or it sits unprocessed with nothing saying why.
     let mut parked = Vec::new();
@@ -516,77 +475,6 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             sources,
         });
     }
-    let pursuit_enabled = tenant.core.learn.enabled;
-    let recent = match pursuit_enabled {
-        true => tenant.core.store.recent_pursuits(50).await?,
-        false => Vec::new(),
-    };
-    let pursuit_recent = recent.len();
-    // The ones the sentence below can honestly point at. `unsatisfied` is how a
-    // run of searches *ended*, and a capture that answers one afterwards leaves
-    // that word alone deliberately — coverage never rewrites what happened — so
-    // counting the state sent the operator to a gap list that had already
-    // dropped half of them.
-    let on_the_gap_list = match pursuit_enabled {
-        true => tenant
-            .core
-            .store
-            .open_pursuit_gap_ids(tenant.core.embedder.model())
-            .await
-            .unwrap_or_default(),
-        false => Default::default(),
-    };
-    let pursuit_unsatisfied = recent
-        .iter()
-        .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
-        .count();
-    // What the memory did while nobody was looking. The last day as one
-    // sentence, and under it the runs themselves — which is the half a single
-    // overwritten summary could never give.
-    let day = tenant
-        .core
-        .store
-        .sweep_runs_since(crate::store::now() - 86_400, 500)
-        .await
-        .unwrap_or_default();
-    let last_day_failures = day.iter().filter(|r| r.outcome == "failed").count();
-    let mut totals: Vec<(String, i64)> = Vec::new();
-    for r in &day {
-        tally_sweep(&r.stage, &r.detail, &mut totals);
-    }
-    let last_day: Vec<SweepCount> = totals
-        .into_iter()
-        .map(|(what, n)| SweepCount { n, what })
-        .collect();
-    let sweep_history: Vec<SweepRunRow> = tenant
-        .core
-        .store
-        .sweep_history(TABLE_CAP)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| {
-            let mut counts = Vec::new();
-            tally_sweep(&r.stage, &r.detail, &mut counts);
-            SweepRunRow {
-                when: fmt_time(r.started_at),
-                error: match r.outcome == "failed" {
-                    true => serde_json::from_str::<serde_json::Value>(&r.detail)
-                        .ok()
-                        .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
-                        .unwrap_or_else(|| "it failed".into()),
-                    false => String::new(),
-                },
-                took: fmt_elapsed(r.ended_at - r.started_at),
-                stage: sweep_label(&r.stage).to_string(),
-                stage_id: r.stage,
-                counts: counts
-                    .into_iter()
-                    .map(|(what, n)| SweepCount { n, what })
-                    .collect(),
-            }
-        })
-        .collect();
 
     let more_superseded = superseded.len() > TABLE_CAP as usize;
     superseded.truncate(TABLE_CAP as usize);
@@ -671,6 +559,8 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for p_ in parked {
         set_aside.push(SetAsideRow {
             href: format!("/ui/corpora/{}", p_.id),
+            subject_id: p_.id.clone(),
+            artifact_id: None,
             // A corpus label is always a name: `corpus_label` falls back to
             // "document" or the opening rather than to nothing.
             named: true,
@@ -711,6 +601,8 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for s in stale {
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", s.id),
+            subject_id: s.id.clone(),
+            artifact_id: Some(s.id.clone()),
             named: s.named,
             title: s.title,
             subtitle: String::new(),
@@ -739,6 +631,8 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         let n = m.sources.len();
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", m.id),
+            subject_id: m.id.clone(),
+            artifact_id: Some(m.id.clone()),
             named: m.named,
             title: m.title,
             subtitle: m.subtitle,
@@ -763,6 +657,8 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for g in generated {
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", g.id),
+            subject_id: g.id.clone(),
+            artifact_id: Some(g.id.clone()),
             named: g.named,
             title: g.title,
             subtitle: g.subtitle,
@@ -790,6 +686,8 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for s in superseded {
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", s.id),
+            subject_id: s.id.clone(),
+            artifact_id: Some(s.id.clone()),
             named: s.named,
             title: s.title,
             subtitle: s.subtitle,
@@ -818,6 +716,8 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for d in deprecated {
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", d.id),
+            subject_id: d.id.clone(),
+            artifact_id: Some(d.id.clone()),
             named: d.named,
             title: d.title,
             subtitle: String::new(),
@@ -835,6 +735,8 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     for g in reaped {
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", g.id),
+            subject_id: g.id.clone(),
+            artifact_id: Some(g.id.clone()),
             named: g.named,
             title: g.title,
             subtitle: String::new(),
@@ -858,6 +760,140 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             )],
         });
     }
+    Ok((set_aside, set_aside_capped))
+}
+
+async fn page(tenant: Tenant) -> UiResult<Response> {
+    use sqlx::Row;
+
+    let (pairs, more_pairs) = crate::web::ops::pair_rows(&tenant).await?;
+    let pairs = crate::web::ops::group_pairs(pairs);
+
+    // Read, never computed: the page shows what the sweep grouped and named,
+    // and whatever has been judged since sits under itself until the next
+    // pass. Nothing here embeds or calls a model.
+    let gaps = if tenant.core.learn.enabled {
+        let (rows, loose) = tenant
+            .core
+            .store
+            .gap_rows(tenant.core.embedder.model(), tenant.core.weak_below())
+            .await?;
+        // A group and a lone question are one row each and read the same:
+        // what the sweep called the group, or what somebody typed. Which of
+        // the two it is matters to nobody deciding what to do about it.
+        rows.into_iter()
+            .map(|r| crate::web::ui::GapGroup {
+                label: r.label,
+                members: r
+                    .members
+                    .into_iter()
+                    .map(crate::web::ui::gap_member)
+                    .collect(),
+            })
+            .chain(loose.into_iter().map(|g| crate::web::ui::GapGroup {
+                label: g.text.clone(),
+                members: vec![crate::web::ui::gap_member(g)],
+            }))
+            .collect()
+    } else {
+        vec![]
+    };
+
+    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+        .fetch_one(&tenant.core.store.pool)
+        .await?
+        .get("n");
+
+    // Not a queue of chores: work that hit something and is waiting to try
+    // again on its own. Nothing here needs a person.
+    let retrying: Vec<RetryingRow> = tenant
+        .core
+        .store
+        .retrying_jobs(50)
+        .await?
+        .into_iter()
+        .map(|j| RetryingRow {
+            stage: j.stage,
+            target_id: j.target_id,
+            attempts: j.attempts,
+            due: fmt_duration(j.next_attempt_secs),
+            last_error: j.last_error.unwrap_or_else(|| "—".into()),
+        })
+        .collect();
+
+    let (set_aside, set_aside_capped) = set_aside_rows(&tenant).await?;
+
+    let pursuit_enabled = tenant.core.learn.enabled;
+    let recent = match pursuit_enabled {
+        true => tenant.core.store.recent_pursuits(50).await?,
+        false => Vec::new(),
+    };
+    let pursuit_recent = recent.len();
+    // The ones the sentence below can honestly point at. `unsatisfied` is how a
+    // run of searches *ended*, and a capture that answers one afterwards leaves
+    // that word alone deliberately — coverage never rewrites what happened — so
+    // counting the state sent the operator to a gap list that had already
+    // dropped half of them.
+    let on_the_gap_list = match pursuit_enabled {
+        true => tenant
+            .core
+            .store
+            .open_pursuit_gap_ids(tenant.core.embedder.model())
+            .await
+            .unwrap_or_default(),
+        false => Default::default(),
+    };
+    let pursuit_unsatisfied = recent
+        .iter()
+        .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
+        .count();
+    // What the memory did while nobody was looking. The last day as one
+    // sentence, and under it the runs themselves — which is the half a single
+    // overwritten summary could never give.
+    let day = tenant
+        .core
+        .store
+        .sweep_runs_since(crate::store::now() - 86_400, 500)
+        .await
+        .unwrap_or_default();
+    let last_day_failures = day.iter().filter(|r| r.outcome == "failed").count();
+    let mut totals: Vec<(String, i64)> = Vec::new();
+    for r in &day {
+        tally_sweep(&r.stage, &r.detail, &mut totals);
+    }
+    let last_day: Vec<SweepCount> = totals
+        .into_iter()
+        .map(|(what, n)| SweepCount { n, what })
+        .collect();
+    let sweep_history: Vec<SweepRunRow> = tenant
+        .core
+        .store
+        .sweep_history(TABLE_CAP)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let mut counts = Vec::new();
+            tally_sweep(&r.stage, &r.detail, &mut counts);
+            SweepRunRow {
+                when: fmt_time(r.started_at),
+                error: match r.outcome == "failed" {
+                    true => serde_json::from_str::<serde_json::Value>(&r.detail)
+                        .ok()
+                        .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
+                        .unwrap_or_else(|| "it failed".into()),
+                    false => String::new(),
+                },
+                took: fmt_elapsed(r.ended_at - r.started_at),
+                stage: sweep_label(&r.stage).to_string(),
+                stage_id: r.stage,
+                counts: counts
+                    .into_iter()
+                    .map(|(what, n)| SweepCount { n, what })
+                    .collect(),
+            }
+        })
+        .collect();
 
     // The column, read live rather than off the tenant snapshot, for the
     // reason `web::tenant::CanJudge` gives at length: an open tenant outlives
