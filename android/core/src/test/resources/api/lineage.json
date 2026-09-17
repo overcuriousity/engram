@@ -1,0 +1,38 @@
+{
+  "roots": [
+    {
+      "id": "01a0af90-f652-7791-ada5-02e6daf4a757",
+      "label": "Payload filters 0",
+      "named": true,
+      "kind": "captured",
+      "created_at": 1789651908,
+      "source": {
+        "corpus_id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+        "label": "Qdrant notes",
+        "start_line": 1,
+        "end_line": 2
+      },
+      "replaced": false,
+      "missing": false,
+      "children": []
+    },
+    {
+      "id": "01a0af90-f652-7791-ada5-02e731a38244",
+      "label": "Payload filters 1",
+      "named": true,
+      "kind": "captured",
+      "created_at": 1789651908,
+      "source": {
+        "corpus_id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+        "label": "Qdrant notes",
+        "start_line": 1,
+        "end_line": 2
+      },
+      "replaced": false,
+      "missing": false,
+      "children": []
+    }
+  ],
+  "also_replaced": [],
+  "truncated": false
+}

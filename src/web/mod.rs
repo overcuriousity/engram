@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod android_fixtures;
 pub mod api;
 pub mod app;
 pub mod artifact;

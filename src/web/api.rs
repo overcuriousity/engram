@@ -1365,7 +1365,7 @@ async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<se
 /// here. `weak` and `past_cliff` are the two facts a rail's honesty is drawn
 /// from — the loose-match badge and the *relevance falls off here* rule — and
 /// a door that rebuilt its rows field by field is a door that can forget one.
-fn search_body(
+pub(crate) fn search_body(
     results: &[crate::core::search::SearchResult],
     explanation: Option<&crate::core::explain::SearchExplanation>,
 ) -> Result<serde_json::Value> {

@@ -1,0 +1,37 @@
+{
+  "id": "01a0af90-f652-7791-ada5-02e6daf4a757",
+  "corpus_id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+  "provenance": "captured",
+  "source_count": 0,
+  "ordinal": 0,
+  "text": "artifact 0 about payload filters",
+  "corpus_span": {
+    "start_line": 1,
+    "end_line": 2,
+    "source": "located"
+  },
+  "title": "Payload filters 0",
+  "category": null,
+  "tags": [
+    "qdrant"
+  ],
+  "embed_state": "pending",
+  "embed_model": null,
+  "created_at": 1789651908,
+  "segment_idx": null,
+  "flags": [],
+  "flag_detail": null,
+  "superseded_by": null,
+  "caveats": [],
+  "status": "active",
+  "last_verified_at": 1789651908,
+  "cues": [],
+  "retired_at": null,
+  "reaped_at": null,
+  "source": {
+    "id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+    "title": "Qdrant notes",
+    "origin": "web",
+    "source_url": null
+  }
+}

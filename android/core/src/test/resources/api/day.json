@@ -1,0 +1,70 @@
+{
+  "date": "2026-09-17",
+  "tz": "UTC",
+  "from": 1789603200,
+  "to": 1789689600,
+  "entries": [
+    {
+      "id": "01a0af90-f651-7044-9d5c-fe4faa3cf68a",
+      "label": "Long day.",
+      "named": false,
+      "at": 1789651908,
+      "text": "Long day."
+    }
+  ],
+  "captured": [
+    {
+      "id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+      "label": "Qdrant notes",
+      "named": true,
+      "at": 1789651908,
+      "text": "Filters narrow a search.\nPayload indexes make them fast.\nThird line."
+    },
+    {
+      "id": "01a0af90-f651-7044-9d5c-fe4ec251d21c",
+      "label": "no title, only an opening",
+      "named": false,
+      "at": 1789651908,
+      "text": "no title, only an opening"
+    }
+  ],
+  "was_due": [
+    {
+      "id": "01a0af90-f656-744f-8a41-ae66d547bb72",
+      "artifact_id": "01a0af90-f653-746a-8273-545e206559d0",
+      "label": "Merged, shorter.",
+      "named": false,
+      "kind": "due",
+      "at": 1789651908,
+      "done": false,
+      "span": null
+    }
+  ],
+  "refers": [
+    {
+      "id": "01a0af90-f656-744f-8a41-ae67eba1d9cf",
+      "artifact_id": "01a0af90-f653-746a-8273-545e206559d0",
+      "label": "Merged, shorter.",
+      "named": false,
+      "kind": "event",
+      "at": 1789651908,
+      "done": false,
+      "span": "today"
+    }
+  ],
+  "sittings": [
+    {
+      "opened_at": 1789651908,
+      "closed_at": 1789651908,
+      "query": "payload filter",
+      "searches": 1,
+      "opened": [
+        {
+          "id": "01a0af90-f653-746a-8273-545e206559d0",
+          "label": "Merged, shorter.",
+          "named": true
+        }
+      ]
+    }
+  ]
+}

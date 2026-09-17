@@ -1,0 +1,50 @@
+{
+  "items": [
+    {
+      "id": "01a0af90-f651-7044-9d5c-fe4faa3cf68a",
+      "origin": "journal",
+      "label": "Long day.",
+      "named": false,
+      "status": "raw",
+      "created_at": 1789651908,
+      "updated_at": 1789651908,
+      "coverage": null,
+      "near_dupe_of": null,
+      "near_dupe_score": null,
+      "source_url": null,
+      "restored_at": null,
+      "metadata": {}
+    },
+    {
+      "id": "01a0af90-f651-7044-9d5c-fe4ec251d21c",
+      "origin": "paste",
+      "label": "no title, only an opening",
+      "named": false,
+      "status": "raw",
+      "created_at": 1789651908,
+      "updated_at": 1789651908,
+      "coverage": null,
+      "near_dupe_of": null,
+      "near_dupe_score": null,
+      "source_url": null,
+      "restored_at": null,
+      "metadata": {}
+    },
+    {
+      "id": "01a0af90-f650-7105-ac29-2c3d4fb7e7ae",
+      "origin": "web",
+      "label": "Qdrant notes",
+      "named": true,
+      "status": "raw",
+      "created_at": 1789651908,
+      "updated_at": 1789651908,
+      "coverage": null,
+      "near_dupe_of": null,
+      "near_dupe_score": null,
+      "source_url": null,
+      "restored_at": null,
+      "metadata": {}
+    }
+  ],
+  "next": null
+}
