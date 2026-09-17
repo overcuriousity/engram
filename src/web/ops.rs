@@ -493,6 +493,13 @@ pub struct PairRow {
     /// times. Same rule as `disambiguate_labels`, same reason.
     pub a_opening: String,
     pub b_opening: String,
+    /// Whether each label is a name somebody gave or the opening of the text
+    /// standing in for one — see `ui::RowLabel`. Carried rather than inferred
+    /// from an empty `a_opening`: that field is cleared by
+    /// `disambiguate_pair_titles` for rows the page does not need it on, so it
+    /// answers a question about the layout and not about the artifact.
+    pub a_named: bool,
+    pub b_named: bool,
     /// Enough of each side to decide by. The titles are links, but following
     /// one leaves the queue and comes back to a card whose other half you now
     /// have to remember — which is not a comparison, it is two readings with a
@@ -564,13 +571,13 @@ pub struct PairCluster {
 /// its text opens (`row_label`). The opening then goes: it is the same words,
 /// and `disambiguate_pair_titles` only ever adds it to tell two rows carrying
 /// one name apart.
-fn pair_side(c: &crate::store::artifacts::Chunk) -> (String, String) {
+fn pair_side(c: &crate::store::artifacts::Chunk) -> (String, String, bool) {
     let label = crate::web::ui::row_label(c);
     let opening = match label.named {
         true => crate::web::markdown::stand_in_title(&c.text, 40),
         false => String::new(),
     };
-    (label.text, opening)
+    (label.text, opening, label.named)
 }
 
 /// Whether `insert_merged_artifact` would accept a merge over these two.
@@ -702,6 +709,8 @@ pub(crate) async fn pair_rows(tenant: &Tenant) -> Result<(Vec<PairRow>, i64)> {
                 // clears the ones the page does not need.
                 a_opening: side_a.1,
                 b_opening: side_b.1,
+                a_named: side_a.2,
+                b_named: side_b.2,
                 a_excerpt: crate::web::markdown::snippet(&a.text, 400),
                 b_excerpt: crate::web::markdown::snippet(&b.text, 400),
                 a_id: p.a_id,
@@ -909,9 +918,10 @@ mod tests {
             text: "Der Vorgang setzt voraus, dass das Journal noch steht.".into(),
             ..crate::web::test_support::chunk_fixture(None, "")
         };
-        let (title, opening) = pair_side(&passage);
+        let (title, opening, named) = pair_side(&passage);
         assert!(title.starts_with("Der Vorgang setzt voraus"), "{title:?}");
         assert!(!title.contains("Kapitel"), "{title:?}");
+        assert!(!named, "an opening standing in for a name is not one");
         assert!(
             opening.is_empty(),
             "the opening stood beside itself: {opening:?}"
@@ -925,8 +935,9 @@ mod tests {
             provenance: crate::store::artifacts::Provenance::Captured,
             ..named
         };
-        let (title, opening) = pair_side(&named);
+        let (title, opening, is_named) = pair_side(&named);
         assert_eq!(title, "Wie ein Journal steht");
+        assert!(is_named);
         assert!(
             !opening.is_empty(),
             "a named side still needs its opening to tell two of them apart"
@@ -943,6 +954,8 @@ mod tests {
             b_title: "SQLite-Datenbankeinstellungen und WAL".into(),
             a_opening: a_opening.into(),
             b_opening: "Einstellungen der SQLite-Datenbank".into(),
+            a_named: true,
+            b_named: true,
             a_excerpt: "Auto Vacuum werden freie Pages in der Free Page List verwaltet".into(),
             b_excerpt: "Einstellungen der SQLite-Datenbank koennen ueber Pragma".into(),
             detail: None,
