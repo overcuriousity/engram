@@ -75,6 +75,15 @@ fn local_hash(data_dir: &Path) -> Result<String> {
 /// words, instead of waiting out a timeout against a server that was never
 /// going to be there. A role that *has* a model never reads its endpoint —
 /// see `Core::with_local_models`.
+///
+/// Two tiers, because the two windows mean different things. The
+/// synthesizer's is a planning budget: its instructions alone are some three
+/// thousand tokens, and a window too small to plan in fails the capture
+/// *before* its passages are embedded — which is how this file first came to
+/// have the server's default here. Ask's is memory: it is the KV cache a model
+/// on this device allocates, so it is as small as an answer over retrieved
+/// passages allows. `plan = false` spares a phone the second completion per
+/// question.
 fn config_for(data_dir: &Path, local_hash: &str) -> String {
     let dir = data_dir.join("bases");
     let control = data_dir.join("control.db");
@@ -91,14 +100,20 @@ control_path = {control}
 url = "http://127.0.0.1:9"
 collection = "artifacts"
 
-[infer.tiers.device]
+[infer.tiers.device-synthesize]
 base_url = "http://127.0.0.1:9/v1"
 model = "device"
-context_tokens = 4096
+context_tokens = 32768
+max_output_tokens = 4096
+
+[infer.tiers.device-ask]
+base_url = "http://127.0.0.1:9/v1"
+model = "device"
+context_tokens = 8192
 max_output_tokens = 1024
 
 [infer.synthesize]
-tier = "device"
+tier = "device-synthesize"
 
 [infer.embed]
 base_url = "http://127.0.0.1:9/v1"
@@ -107,7 +122,8 @@ dim = 768
 max_input_tokens = 2048
 
 [infer.ask]
-tier = "device"
+tier = "device-ask"
+plan = false
 
 [auth]
 mode = "local"

@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "engram"
 path = "src/main.rs"
 
+[[example]]
+name = "contained"
+required-features = ["contained"]
+
 [dependencies]
 axum = { version = "0.8.9", features = ["macros", "multipart"] }
 tokio = { version = "1.53.1", features = ["full"] }
