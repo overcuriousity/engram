@@ -164,10 +164,15 @@ Three tiers:
 2. **Opportunistic.** Synthesis at ingest, consolidation and sleep, gaps,
    pairs, the tuning pass. One WorkManager job, constrained to charging, idle
    and battery not low, with a thermal check between jobs that ends the pass.
-   It runs only if an ask model is installed or an endpoint is set; with an
-   endpoint the constraint is an unmetered network instead, since the phone is
-   not the one computing.
+   It runs only where an endpoint is set, and then also wants an unmetered
+   network. The model on the phone answers questions and nothing else until
+   the device pass has measured whether it can read a capture; until then its
+   work waits in the queue, held and not failed.
 3. **Never.** MCP, the web interface, OIDC, tenants. Compiled out.
+
+The core does not stop when the app leaves the foreground. Its models leave
+memory when idle, and a job cut off with the process is reclaimed at the next
+start.
 
 The status endpoint reports which capabilities exist, as it does for speech.
 Screens that depend on tier 2 show what there is and an empty state when
