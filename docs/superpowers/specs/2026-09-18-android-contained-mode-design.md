@@ -59,25 +59,30 @@ write in one mode's outbox is never drained into the other source. Switching
 back finds everything where it was left.
 
 On the Rust side the core is a `cdylib` target of this crate for
-`aarch64-linux-android`, behind a Cargo feature `contained`. That feature set
-leaves out Qdrant, OIDC, MCP, the web templates and the CLI, and keeps the
-store, the core pipeline, the jobs and the JSON routes the app uses. The
-server build is unchanged.
+`aarch64-linux-android`, behind a Cargo feature `contained`. The feature is
+additive: it brings in what the phone needs and takes nothing out. Whether
+OIDC, MCP, the templates and the CLI are worth carving out of the library is
+decided in step 3, against the measured size of the `.so`. The server build
+is unchanged.
 
 ## 2. Inside the core
 
 ### Vectors
 
 `SqliteVectors` implements `VectorStore` beside `QdrantVectors` and
-`MemoryVectors`. Dense vectors live in a sqlite-vec `vec0` table inside
-`engram.db`, keyed by the existing point ids; payload filters are SQL against
-payload columns; sparse vectors and facets reuse the logic of `memory.rs` and
-`sparse.rs`. sqlite-vec is linked statically into the SQLite that sqlx
-bundles, so nothing is loaded from storage at runtime. It is pre-1.0 and does
-exact search only, which is right for a personal base of tens of thousands of
-passages; the version is pinned.
+`MemoryVectors`. Points, dense vectors, BM25 postings and context sets are
+`vec_*` tables inside `engram.db`; ranking is sqlite-vec's
+`vec_distance_cosine` over every row, exact, with payload filters as plain
+SQL. sqlite-vec is linked statically into the SQLite that sqlx bundles and
+registered as an auto-extension, so nothing is loaded from storage at
+runtime. It is pre-1.0; the version is pinned exactly.
 
-The existing `VectorStore` test suite runs against all three implementations.
+What Qdrant does on its side of the wire, this store does in Rust to the same
+arithmetic: IDF over the sparse half, reciprocal rank fusion of the two
+halves, recency decay and the pinned boost. A base ranks the same in either.
+
+One conformance suite, `src/vector/conformance.rs`, states what every store
+must do, and runs against `MemoryVectors` and `SqliteVectors`.
 
 ### Inference
 
