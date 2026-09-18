@@ -96,9 +96,12 @@ must do, and runs against `MemoryVectors` and `SqliteVectors`.
 
 `infer/local.rs` implements `Embedder`, `Reranker`, `Synthesizer`/`Completer`
 and `Transcriber` in process: llama.cpp through the `llama-cpp-2` binding,
-whisper.cpp for speech, CPU only. Both embed ggml, and two copies in one
-library collide, so ggml is built once and both are pointed at it. Their
-pinned versions are therefore a matched pair and move together.
+whisper.cpp for speech, CPU only. Both are built over ggml, and two copies in
+one library collide. There is only ever one: whisper.cpp's three source files
+are vendored and compiled against the ggml that `llama-cpp-sys-2` builds and
+exports for the purpose. The vendored release is the one written against the
+nearest ggml at or below llama.cpp's, so the two are a matched pair and move
+together.
 
 Configuration selects per role, as it does on the server: a role is `local`
 with a model file, or an OpenAI-compatible `base_url` handled by the existing
