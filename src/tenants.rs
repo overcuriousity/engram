@@ -50,6 +50,29 @@ impl VectorFactory for QdrantFactory {
     }
 }
 
+/// The contained build's: one file, one tenant.
+///
+/// The alias is not consulted. A phone holds one person's base, and the file
+/// is the same one the `Store` lives in — the vectors are `vec_*` tables
+/// beside the artifacts, so a base is one thing to keep rather than two.
+#[cfg(feature = "contained")]
+pub struct SqliteFactory {
+    pub path: std::path::PathBuf,
+    pub scoring: crate::vector::sqlite::Scoring,
+}
+
+#[cfg(feature = "contained")]
+#[async_trait::async_trait]
+impl VectorFactory for SqliteFactory {
+    async fn open(&self, _alias: &str, dim: usize) -> Result<Arc<dyn crate::vector::VectorStore>> {
+        let vectors: Arc<dyn crate::vector::VectorStore> = Arc::new(
+            crate::vector::sqlite::SqliteVectors::connect(&self.path, self.scoring).await?,
+        );
+        vectors.ensure_collection(dim).await?;
+        Ok(vectors)
+    }
+}
+
 pub struct Tenants {
     cfg: Arc<Config>,
     control: Control,

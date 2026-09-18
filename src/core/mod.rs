@@ -1313,3 +1313,58 @@ mod tests {
         assert!(err.contains("infer.synthesis"), "{err}");
     }
 }
+
+#[cfg(all(test, feature = "contained"))]
+mod contained_tests {
+    use crate::core::test_support::{TEST_DIM, test_core};
+    use crate::store::feedback::Door;
+    use crate::tenants::VectorFactory;
+
+    /// The whole of part 1 in one test: a capture goes in, the jobs run, and a
+    /// search finds it — with no Qdrant anywhere, and the base is still there
+    /// for a second store opened over the same file.
+    #[tokio::test]
+    async fn a_capture_is_found_again_with_only_a_file_for_a_vector_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = crate::tenants::SqliteFactory {
+            path: dir.path().join("engram.db"),
+            scoring: crate::vector::sqlite::Scoring::off(),
+        };
+        let mut core = test_core().await;
+        core.vectors = factory.open("ignored", TEST_DIM).await.unwrap();
+
+        let out = core
+            .ingest(
+                "Die Rechnung für den Steuerberater liegt im blauen Ordner.",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+
+        let q = crate::core::search::SearchQuery {
+            q: "Steuerberater".into(),
+            limit: 5,
+            tags: vec![],
+            category: None,
+            mark: true,
+            rerank: false,
+            explain: false,
+            include_deprecated: false,
+            include_superseded: false,
+        };
+        let hits = core.search(&q, Door::Cli).await.unwrap();
+        assert!(
+            hits.iter().any(|h| h.corpus_id == out.id),
+            "the capture was not found"
+        );
+
+        let again = factory.open("ignored", TEST_DIM).await.unwrap();
+        assert!(again.count().await.unwrap() > 0);
+        assert_eq!(
+            again.count().await.unwrap(),
+            core.vectors.count().await.unwrap()
+        );
+    }
+}
