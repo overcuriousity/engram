@@ -394,6 +394,8 @@ private fun Results(engram: Engram, q: String, category: String, doors: Status?,
             val rail = railOf(p.items)
             val loose = p.items.count { it.weak }
             val allLoose = rail.any { it == RailItem.NothingClose }
+            // Bound here rather than read twice: it crosses a module boundary, so it does not smart-cast.
+            val event = p.event
             // Counted off the list rather than passed in beside it, so the
             // number and the rows cannot disagree.
             Row(Modifier.padding(16.dp, 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -407,7 +409,7 @@ private fun Results(engram: Engram, q: String, category: String, doors: Status?,
             if (p.items.isEmpty()) Text("No matches.", Modifier.padding(16.dp, 4.dp), color = muted())
             // The deck's "gap" key, where the person is when they know:
             // beside an empty list, or the notice over a list that is all loose.
-            if ((p.items.isEmpty() || allLoose) && p.event != null && doors?.learn == true) GapButton(engram, p.event, q)
+            if ((p.items.isEmpty() || allLoose) && event != null && doors?.learn == true) GapButton(engram, event, q)
             Rail(rail, onOpen = { id -> onHit(id, p.event) })
         }
     }

@@ -195,10 +195,10 @@ data class Status(
 data class ArtifactDetail(val chunk: Chunk, val source: SourceRef?, val searchEvent: String? = null)
 
 @Serializable
-private data class Beside(val source: SourceRef? = null, @SerialName("search_event") val searchEvent: String? = null)
+private data class ArtifactBeside(val source: SourceRef? = null, @SerialName("search_event") val searchEvent: String? = null)
 
 fun decodeArtifact(body: String): ArtifactDetail {
-    val b = ApiJson.decodeFromString(Beside.serializer(), body)
+    val b = ApiJson.decodeFromString(ArtifactBeside.serializer(), body)
     return ArtifactDetail(ApiJson.decodeFromString(Chunk.serializer(), body), b.source, b.searchEvent)
 }
 

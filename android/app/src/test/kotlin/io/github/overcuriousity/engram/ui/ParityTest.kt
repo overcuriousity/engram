@@ -1,5 +1,8 @@
 package io.github.overcuriousity.engram.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -30,30 +33,34 @@ class ParityTest {
 
     @Test fun theSearchBarOffersThreeAnswersThenAnUndoAndNeverAnUndoOnASkip() {
         var said: String? = null
-        compose.setContent { EngramTheme { SearchVerdictBar(SearchVerdict()) { said = it } } }
+        // The content is set once and the state walked through it: a test may
+        // call setContent only the once, and the bar is a function of its verdict.
+        var v by mutableStateOf(SearchVerdict())
+        compose.setContent { EngramTheme { SearchVerdictBar(v) { said = it } } }
         compose.onNodeWithText("Was this what you were looking for?").assertIsDisplayed()
         compose.onNodeWithText("Not sure").performClick()
         assertEquals("skip", said)
 
-        compose.setContent { EngramTheme { SearchVerdictBar(SearchVerdict(state = "hit")) { said = it } } }
+        v = SearchVerdict(state = "hit")
         compose.onNodeWithText("yes, this was it").assertIsDisplayed()
         compose.onNodeWithText("Undo").performClick()
         assertEquals("none", said)
 
-        compose.setContent { EngramTheme { SearchVerdictBar(SearchVerdict(state = "skip")) {} } }
+        v = SearchVerdict(state = "skip")
         compose.onNodeWithText("left unanswered").assertIsDisplayed()
         compose.onNodeWithText("Undo").assertDoesNotExist()
 
-        compose.setContent { EngramTheme { SearchVerdictBar(SearchVerdict(already = true)) {} } }
+        v = SearchVerdict(already = true)
         compose.onNodeWithText("nothing to record — that search was already judged.").assertIsDisplayed()
     }
 
     @Test fun theAskBarSaysWhatWasJudgedInTheServersWords() {
         var said: String? = null
-        compose.setContent { EngramTheme { AskVerdictBar(AskVerdict()) { said = it } } }
+        var v by mutableStateOf(AskVerdict())
+        compose.setContent { EngramTheme { AskVerdictBar(v) { said = it } } }
         compose.onNodeWithText("Nothing here").performClick()
         assertEquals("nothing_here", said)
-        compose.setContent { EngramTheme { AskVerdictBar(AskVerdict(verdict = "nothing here")) { said = it } } }
+        v = AskVerdict(verdict = "nothing here")
         compose.onNodeWithText("judged nothing here").assertIsDisplayed()
         compose.onNodeWithText("Undo").performClick()
         assertEquals("none", said)
