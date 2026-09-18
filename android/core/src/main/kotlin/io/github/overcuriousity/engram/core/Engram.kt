@@ -6,6 +6,9 @@ import io.github.overcuriousity.engram.core.ask.Ask
 import io.github.overcuriousity.engram.core.contained.Contained
 import io.github.overcuriousity.engram.core.contained.Core
 import io.github.overcuriousity.engram.core.contained.CoreState
+import io.github.overcuriousity.engram.core.contained.Downloader
+import io.github.overcuriousity.engram.core.contained.Endpoint
+import io.github.overcuriousity.engram.core.contained.Model
 import io.github.overcuriousity.engram.core.contained.Setup
 import io.github.overcuriousity.engram.core.contained.Started
 import io.github.overcuriousity.engram.core.db.Db
@@ -22,8 +25,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import okhttp3.OkHttpClient
 import java.io.File
 import java.time.ZoneId
+import java.util.concurrent.TimeUnit
 
 /** Everything the app and its receivers are allowed to touch, built once. */
 class Engram internal constructor(
@@ -50,10 +55,31 @@ class Engram internal constructor(
     private val state = ModeState.of(mode, app.filesDir)
     private val contained: Contained? =
         if (mode == Mode.contained) Contained(
-            state.core!!, { Setup(state.models()) }, deviceName,
+            state.core!!, ::setup, deviceName,
             // The verifier wants its Context before the core's first HTTPS call.
             boot ?: { dir, setup -> Core.init(app); Core.start(dir, setup) },
         ) else null
+
+    /** What the core is started with: the models that are here, and ask as the person set it. */
+    private fun setup(): Setup {
+        val m = state.models()
+        return when (modes.ask) {
+            AskVia.device -> Setup(m)
+            AskVia.endpoint -> Setup(m.copy(ask = null), store.askEndpoint)
+            AskVia.off -> Setup(m.copy(ask = null))
+        }
+    }
+
+    /** Fetches models into contained mode's directory. Null in server mode, which has none. */
+    val downloader: Downloader? = state.models?.let { Downloader(it, OkHttpClient.Builder().readTimeout(60, TimeUnit.SECONDS).build()) }
+    fun installed(model: Model): Boolean = downloader?.installed(model) != null
+
+    var askEndpoint: Endpoint?
+        get() = store.askEndpoint
+        set(v) { store.askEndpoint = v }
+
+    /** A new core over what is on the phone now: after a model arrives or goes, or ask is set differently. */
+    suspend fun restartCore(): Boolean = contained?.restart() != null
 
     val db = Db.open(app, state.dbName)
     val outbox = Outbox(db, state.outbox)

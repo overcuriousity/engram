@@ -41,12 +41,25 @@ class ModeTest {
         assertEquals(File(files, "contained/core"), s.core)
     }
 
-    @Test fun onlyModelFilesThatExistAreNamed() {
+    @Test fun onlyAWholeModelIsNamed() {
         val s = ModeState.of(Mode.contained, files)
         assertEquals(io.github.overcuriousity.engram.core.contained.Models(), s.models())
         s.models!!.mkdirs()
-        File(s.models, "embed.gguf").writeText("x")
-        assertEquals(File(s.models, "embed.gguf").path, s.models().embed)
+        val embed = io.github.overcuriousity.engram.core.contained.ModelManifest.required.single()
+        val f = File(s.models, embed.file)
+        java.io.RandomAccessFile(f, "rw").use { it.setLength(embed.bytes - 1) }
+        assertNull(s.models().embed)
+        java.io.RandomAccessFile(f, "rw").use { it.setLength(embed.bytes) }
+        assertEquals(f.path, s.models().embed)
         assertNull(s.models().ask)
+        // A download in flight is not a model.
+        File(s.models, embed.file + ".part").writeText("x")
+        assertEquals(f.path, s.models().embed)
+    }
+
+    @Test fun askIsOnTheDeviceUntilSomebodySaysOtherwise() {
+        assertEquals(AskVia.device, ModeStore(prefs).ask)
+        ModeStore(prefs).ask = AskVia.off
+        assertEquals(AskVia.off, ModeStore(prefs).ask)
     }
 }

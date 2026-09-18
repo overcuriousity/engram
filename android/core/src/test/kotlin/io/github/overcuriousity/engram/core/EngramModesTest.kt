@@ -4,6 +4,10 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import io.github.overcuriousity.engram.core.contained.CoreFailed
 import io.github.overcuriousity.engram.core.contained.CoreState
+import io.github.overcuriousity.engram.core.contained.Endpoint
+import io.github.overcuriousity.engram.core.contained.ModelManifest
+import io.github.overcuriousity.engram.core.contained.Role
+import io.github.overcuriousity.engram.core.contained.Setup
 import io.github.overcuriousity.engram.core.contained.Started
 import io.github.overcuriousity.engram.core.db.State
 import io.github.overcuriousity.engram.core.outbox.Drainer
@@ -28,8 +32,9 @@ class EngramModesTest {
     private val theCore = MockWebServer().apply { start(InetAddress.getByName("127.0.0.1"), 0) }
     private val open = mutableListOf<Engram>()
 
+    private var given: Setup? = null
     private fun engram(boot: () -> Started = { Started(theCore.port, "launch") }) =
-        Engram(app, "0", PlainBox()) { _, _ -> boot() }.also { open += it }
+        Engram(app, "0", PlainBox()) { _, setup -> given = setup; boot() }.also { open += it }
     private fun choose(m: Mode?) { ModeStore(app.getSharedPreferences("engram", Context.MODE_PRIVATE)).chosen = m }
     private fun paired() = Connection(theServer.url("/").toString().trimEnd('/'), "tok", null, "1", "d")
 
@@ -113,5 +118,48 @@ class EngramModesTest {
         engram().also { it.outbox.enqueueText("y", null, null) }.close()
         assertTrue(app.getDatabasePath("engram.db").exists())
         assertTrue(app.getDatabasePath("contained.db").exists())
+    }
+
+    private fun install(role: Role) = ModelManifest.defaultFor(role)!!.let { m ->
+        File(app.filesDir, "contained/models").apply { mkdirs() }.resolve(m.file)
+            .also { f -> java.io.RandomAccessFile(f, "rw").use { it.setLength(m.bytes) } }
+    }
+
+    @Test fun aModelThatArrivesIsNamedAfterARestart() = runTest {
+        choose(Mode.contained)
+        val e = engram()
+        assertTrue(e.ready())
+        assertNull(given!!.embed)
+        val f = install(Role.embed)
+        assertTrue(e.installed(ModelManifest.required.single()))
+        assertTrue(e.restartCore())
+        assertEquals(f.path, given!!.embed)
+    }
+
+    @Test fun anEndpointReachesTheCoreOnlyWhenAskIsSetToIt() = runTest {
+        choose(Mode.contained)
+        val ask = install(Role.ask)
+        val e = engram()
+        e.askEndpoint = Endpoint("https://llm.example/v1", "a-model", "sk-1")
+        assertTrue(e.ready())
+        assertEquals(ask.path, given!!.ask); assertNull(given!!.askEndpoint)
+        e.modes.ask = AskVia.endpoint
+        assertTrue(e.restartCore())
+        assertNull(given!!.ask); assertEquals("https://llm.example/v1", given!!.askEndpoint!!.baseUrl)
+        e.modes.ask = AskVia.off
+        assertTrue(e.restartCore())
+        assertNull(given!!.ask); assertNull(given!!.askEndpoint)
+    }
+
+    @Test fun unpairingDoesNotForgetWhereToAsk() = runTest {
+        val e = engram().also { it.store.set(paired()) }
+        e.askEndpoint = Endpoint("https://llm.example/v1", "a-model")
+        e.store.clear()
+        assertEquals("a-model", e.askEndpoint!!.model)
+    }
+
+    @Test fun serverModeHasNothingToDownloadInto() = runTest {
+        assertNull(engram().downloader)
+        assertFalse(engram().installed(ModelManifest.required.single()))
     }
 }
