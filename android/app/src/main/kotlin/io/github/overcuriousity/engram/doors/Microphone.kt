@@ -27,7 +27,6 @@ import java.nio.ByteOrder
  * there is no conversion.
  */
 class Microphone(private val context: Context) {
-    private var record: AudioRecord? = null
     private var reader: Thread? = null
     private val pcm = ByteArrayOutputStream()
     @Volatile private var running = false
@@ -50,14 +49,21 @@ class Microphone(private val context: Context) {
         }
         if (r.state != AudioRecord.STATE_INITIALIZED) { r.release(); return false }
         pcm.reset()
-        record = r
         running = true
         r.startRecording()
+        // The reader owns the recorder and lets it go as it leaves. Nobody
+        // else may: a release from `stop` is a release of the native object
+        // this thread is sitting inside `read` on.
         reader = Thread({
             val buf = ByteArray(4096)
-            while (running) {
-                val n = r.read(buf, 0, buf.size)
-                if (n > 0) pcm.write(buf, 0, n) else if (n < 0) break
+            try {
+                while (running) {
+                    val n = r.read(buf, 0, buf.size)
+                    if (n > 0) pcm.write(buf, 0, n) else if (n < 0) break
+                }
+            } finally {
+                runCatching { r.stop() }
+                r.release()
             }
         }, "engram-mic").also { it.start() }
         return true
@@ -67,10 +73,12 @@ class Microphone(private val context: Context) {
     fun stop(): ByteArray {
         if (!running) return wav(ByteArray(0), RATE)
         running = false
+        // Bounded, because this is a press being released and the hand must
+        // not be held: what the join is for is the samples, not the recorder,
+        // and a join that times out costs the last buffer rather than a
+        // recorder pulled out from under the thread still reading it.
         reader?.join(1000)
         reader = null
-        record?.let { runCatching { it.stop() }; it.release() }
-        record = null
         return wav(pcm.toByteArray(), RATE)
     }
 

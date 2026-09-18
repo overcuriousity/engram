@@ -66,7 +66,13 @@ fun DueBand(engram: Engram, onArtifact: (String) -> Unit, head: Boolean = false)
     val due = rememberRead(engram, Api.due(), Decode.due)
     val now = System.currentTimeMillis()
     val zone = ZoneId.systemDefault()
-    val events = rememberRead(engram, Api.events(now / 1000, now / 1000 + COMING_UP_DAYS * 86_400), Decode.due)
+    // The window is anchored once, not read off the clock on every pass.
+    // `rememberRead` is keyed on the request, and a `from` that moved with
+    // the clock would hand it a new key each time a read answered: the read
+    // would re-arm itself, empty, for as long as the band was on screen, and
+    // *coming up* would never render. The words below still read `now`.
+    val from = remember { now / 1000 }
+    val events = rememberRead(engram, Api.events(from, from + COMING_UP_DAYS * 86_400), Decode.due)
     var all by remember { mutableStateOf(false) }
     // What this band has already settled, held above the rows — see [Settled].
     val settled = remember { Settled() }

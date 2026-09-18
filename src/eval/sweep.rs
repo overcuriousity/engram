@@ -354,10 +354,16 @@ pub(crate) fn served_at(rank: Option<i64>) -> Option<usize> {
     rank.map(|r| (r - 1).max(0) as usize).filter(|r| *r < LIMIT)
 }
 
-/// How many pairs of each kind one pass will draw on. A bound rather than a
-/// setting: the pass re-ranks every pair under every candidate, so the work
-/// is pairs times candidates, and a base that has been used for a year would
-/// otherwise make one pass unbounded.
+/// How many pairs one pass will draw on, of both kinds together. A bound
+/// rather than a setting: the pass re-ranks every pair under every candidate,
+/// so the work is pairs times candidates, and a base that has been used for a
+/// year would otherwise make one pass unbounded.
+///
+/// One bound over the whole sample and not one per kind, because the two costs
+/// it holds down are both counted in pairs. The grid is `tune::BUDGET` vector
+/// reads per pair, which a night absorbs either way; the flip is one reranker
+/// call per pair, on the card that is also serving embeddings and the chat
+/// model, and that is the one a doubled sample would be felt on.
 pub(crate) const OBSERVATION_LIMIT: usize = 500;
 
 /// Where one configuration put the answer to one pair. `None` past `LIMIT`.
@@ -544,7 +550,16 @@ pub(crate) async fn evidence_pairs(core: &Core, generation_id: &str) -> Result<(
         .map(|p| (p.event_id.clone(), p.expect.clone()))
         .collect();
     let (mut pairs, mut skipped) = pairs_from_verdicts(core, verdicts).await?;
-    let (observed, left_out) = observation_pairs_except(core, generation_id, &confirmed).await?;
+    // One budget over both kinds — see `OBSERVATION_LIMIT` — and the verdicts
+    // are served out of it first. Not an ordering of convenience: a verdict is
+    // a person having said so, and an observation is the system's reading of
+    // an open, so where the two compete for the last of the budget the one a
+    // person made is the one that is kept. A deleted artifact costs a verdict
+    // its place and hands the room back to the observations, which is right:
+    // what was skipped is not evidence either.
+    let room = OBSERVATION_LIMIT.saturating_sub(pairs.len());
+    let (observed, left_out) =
+        observation_pairs_except(core, generation_id, &confirmed, room).await?;
     pairs.extend(observed);
     skipped += left_out;
     Ok((pairs, skipped))
@@ -553,7 +568,8 @@ pub(crate) async fn evidence_pairs(core: &Core, generation_id: &str) -> Result<(
 /// The positive observations under one generation, as pairs the ranking can be
 /// scored on, and how many named an artifact that no longer exists.
 ///
-/// Bounded at `OBSERVATION_LIMIT`, and within the bound split in half.
+/// Bounded at what the verdicts left of `OBSERVATION_LIMIT`, and within that
+/// bound split in half.
 ///
 /// Prioritising by how wrong the system was — worst-placed first — is the
 /// half that reads well and cannot stand alone. Every candidate is scored by
@@ -578,16 +594,27 @@ pub(crate) async fn observation_pairs(
     core: &Core,
     generation_id: &str,
 ) -> Result<(Vec<Pair>, i64)> {
-    observation_pairs_except(core, generation_id, &Default::default()).await
+    observation_pairs_except(core, generation_id, &Default::default(), OBSERVATION_LIMIT).await
 }
 
 /// `observation_pairs`, leaving out every observation that repeats a verdict:
-/// one whose `(event_id, artifact_id)` is in `confirmed`. See `evidence_pairs`.
+/// one whose `(event_id, artifact_id)` is in `confirmed`, and drawing at most
+/// `budget` of what is left. See `evidence_pairs`.
+///
+/// `budget` is the room the verdicts did not take, so it is `OBSERVATION_LIMIT`
+/// where there are none and zero where they filled it. The halves below split
+/// what they are given rather than the constant: a shrunken budget still buys
+/// the worst-placed observations their share, which is the half that cannot
+/// stand alone and the half nothing else would look for.
 async fn observation_pairs_except(
     core: &Core,
     generation_id: &str,
     confirmed: &std::collections::HashSet<(String, String)>,
+    budget: usize,
 ) -> Result<(Vec<Pair>, i64)> {
+    if budget == 0 {
+        return Ok((Vec::new(), 0));
+    }
     let mut observations: Vec<_> = core
         .store
         .observations_for_generation(generation_id, OBSERVATION_LIMIT * 2)
@@ -606,16 +633,16 @@ async fn observation_pairs_except(
     let (deep, inside): (Vec<_>, Vec<_>) = observations
         .into_iter()
         .partition(|o| o.rank.is_none_or(|r| r as usize > LIMIT));
-    let half = OBSERVATION_LIMIT / 2;
+    let half = budget / 2;
     // Each half takes the other's unused room, so a base with nothing on one
     // side still fills the budget from the other.
     let from_deep = half
-        .max(OBSERVATION_LIMIT.saturating_sub(inside.len()))
+        .max(budget.saturating_sub(inside.len()))
         .min(deep.len());
     let observations: Vec<_> = deep
         .into_iter()
         .take(from_deep)
-        .chain(inside.into_iter().take(OBSERVATION_LIMIT - from_deep))
+        .chain(inside.into_iter().take(budget.saturating_sub(from_deep)))
         .collect();
 
     let mut pairs = Vec::with_capacity(observations.len());
@@ -1159,6 +1186,49 @@ mod tests {
         observe_on(&core, &generation, &order[4], Source::Opened, Some(&event)).await;
         observe(&core, &generation, &order[3], Source::Cited).await;
         assert_eq!(evidence_pairs(&core, &generation).await.unwrap().0.len(), 3);
+    }
+
+    /// One budget over both kinds, and the verdicts served out of it first.
+    ///
+    /// The bound exists because the pass's work is pairs times candidates and
+    /// the pair count grows with the age of the base — see `OBSERVATION_LIMIT`.
+    /// Drawn per kind it was two bounds wearing one name: a pass could rank
+    /// twice what the constant promised, and where a reranker serves search
+    /// that is twice the inference, which is the only inference the pass ever
+    /// spends.
+    #[tokio::test]
+    async fn the_two_kinds_of_evidence_share_one_budget_and_a_verdict_is_served_first() {
+        let (core, order) = seeded().await;
+        let generation = a_generation(&core).await;
+        // Between them far more than the budget. A verdict here carries no
+        // served place — the bar's search recorded no pool — and every
+        // observation carries one, so the two are told apart below by that.
+        for _ in 0..300 {
+            judge(&core, &order[3]).await;
+        }
+        for i in 0..400 {
+            observed_at(&core, &generation, &order[0], 1 + (i % 5) as i64).await;
+        }
+
+        let (pairs, _) = evidence_pairs(&core, &generation).await.unwrap();
+        assert_eq!(pairs.len(), OBSERVATION_LIMIT, "one budget, not one each");
+        assert_eq!(
+            pairs.iter().filter(|p| p.served_rank.is_none()).count(),
+            300,
+            "every verdict is kept; the observations take the room left"
+        );
+
+        // And where the verdicts alone fill it, the observations take none —
+        // the budget is spent on what people said, not topped up past it.
+        for _ in 0..300 {
+            judge(&core, &order[3]).await;
+        }
+        let (pairs, _) = evidence_pairs(&core, &generation).await.unwrap();
+        assert_eq!(pairs.len(), OBSERVATION_LIMIT);
+        assert!(
+            pairs.iter().all(|p| p.served_rank.is_none()),
+            "no observation is drawn once the verdicts have spent the budget"
+        );
     }
 
     #[tokio::test]
