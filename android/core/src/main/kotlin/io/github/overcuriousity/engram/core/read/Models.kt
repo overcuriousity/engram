@@ -180,6 +180,8 @@ data class Status(
     /** Searches and questions are recorded: the verdict bars and the gap button are drawn only then. */
     val learn: Boolean = false,
     val recommend: Boolean = false,
+    /** Units that call a generation model, still waiting. In contained mode, what the closed gate holds back. */
+    @SerialName("waiting_generation") val waitingGeneration: Int = 0,
     val held: Held = Held(),
     @SerialName("last_kept") val lastKept: LastKept? = null,
     val examples: Examples = Examples(),

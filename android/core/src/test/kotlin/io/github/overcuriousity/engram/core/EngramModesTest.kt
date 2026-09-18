@@ -201,4 +201,27 @@ class EngramModesTest {
         install(Role.ask)
         assertFalse(e.askWantsAModel)
     }
+
+    @Test fun aPassIsWantedOnlyWhereAnEndpointWouldDoTheWork() = runTest {
+        assertFalse(engram().passWanted)
+        choose(Mode.contained)
+        val e = engram()
+        assertFalse(e.passWanted)
+        e.modes.ask = AskVia.endpoint
+        assertFalse("set to an endpoint that was never written down", e.passWanted)
+        e.askEndpoint = Endpoint("https://llm.example/v1", "m")
+        assertTrue(e.passWanted)
+        e.modes.ask = AskVia.device
+        assertFalse("the model on the phone answers questions and reads nothing", e.passWanted)
+    }
+
+    @Test fun whatWaitsIsReadFromTheCoresStatus() = runTest {
+        choose(Mode.contained)
+        val e = engram()
+        assertTrue(e.ready())
+        theCore.enqueue(MockResponse(code = 200, body = """{"waiting_generation": 7}"""))
+        assertEquals(7, e.waitingGeneration())
+        theCore.enqueue(MockResponse(code = 503))
+        assertNull(e.waitingGeneration())
+    }
 }

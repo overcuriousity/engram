@@ -18,6 +18,7 @@ import io.github.overcuriousity.engram.core.db.MomentRow
 import io.github.overcuriousity.engram.core.outbox.Drainer
 import io.github.overcuriousity.engram.core.outbox.Outbox
 import io.github.overcuriousity.engram.core.push.Push
+import io.github.overcuriousity.engram.core.read.Decode
 import io.github.overcuriousity.engram.core.read.Reader
 import io.github.overcuriousity.engram.core.read.ServerReader
 import io.github.overcuriousity.engram.core.sync.Sync
@@ -114,6 +115,14 @@ class Engram internal constructor(
     val askWantsAModel: Boolean get() = contained != null && modes.ask == AskVia.device && state.models().ask == null
 
     val metered: Boolean get() = app.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: false
+
+    /** Model work has somewhere to go: contained, ask set to an endpoint, and one written down. */
+    val passWanted: Boolean get() = contained != null && modes.ask == AskVia.endpoint && store.askEndpoint != null
+
+    /** How much model work waits in the core's queue. Null where it cannot be asked. */
+    suspend fun waitingGeneration(): Int? = runCatching {
+        transport()?.get("/api/v1/status")?.takeIf { it.status == 200 }?.let { Decode.status(it.body).waitingGeneration }
+    }.getOrNull()
 
     /** The end of this instance: the core stopped, the database closed. Nothing may use it afterwards. */
     suspend fun shutdown() { contained?.stop(); db.close() }
