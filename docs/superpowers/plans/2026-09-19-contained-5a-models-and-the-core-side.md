@@ -182,7 +182,7 @@ class ModelManifestTest {
         assertTrue(m.name, Regex("[0-9a-f]{64}").matches(m.sha256))
         assertTrue(m.name, m.bytes > 1_000_000)
         assertTrue(m.name, m.licence.isNotBlank())
-        assertTrue(m.name, Regex("[a-z0-9.-]+").matches(m.file))
+        assertTrue(m.name, Regex("[a-z0-9._-]+").matches(m.file))
     }
 
     @Test fun filesAndNamesAreDistinct() {
