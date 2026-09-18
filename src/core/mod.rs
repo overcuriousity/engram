@@ -488,6 +488,33 @@ impl Core {
     /// `main`, so the evaluation harness drives exactly the `Core` the binary
     /// does — a benchmark against a differently wired core measures the wrong
     /// program.
+    /// The same core with the named roles served by models in this process.
+    #[cfg(feature = "contained")]
+    pub fn with_local_models(
+        mut self,
+        cfg: &Config,
+        models: &crate::infer::local::LocalModels,
+    ) -> Core {
+        use crate::infer::local::{LocalCompleter, LocalEmbedder, LocalReranker};
+        if let Some(path) = &models.embed {
+            self.embedder = Arc::new(LocalEmbedder::new(path.clone(), &cfg.infer.embed));
+        }
+        if let Some(path) = &models.rerank {
+            // A pair is a query and one passage; 512 holds both with room.
+            self.reranker = Some(Arc::new(LocalReranker::new(path.clone(), 512)));
+            if self.rerank_apply.is_empty() {
+                self.rerank_apply = vec![
+                    crate::config::RerankApply::Ask,
+                    crate::config::RerankApply::Search,
+                ];
+            }
+        }
+        if let (Some(path), Some(role)) = (&models.ask, cfg.infer.ask.as_ref()) {
+            self.completer = Some(Arc::new(LocalCompleter::new(path.clone(), role)));
+        }
+        self
+    }
+
     pub fn from_config(cfg: &Config, vectors: Arc<dyn VectorStore>, store: Store) -> Core {
         Core::from_config_with(cfg, vectors, store, Working::default())
     }
@@ -1365,6 +1392,61 @@ mod contained_tests {
         assert_eq!(
             again.count().await.unwrap(),
             core.vectors.count().await.unwrap()
+        );
+    }
+
+    /// Part 1's test with the fake embedder gone: real vectors from a real
+    /// model, into a file, found by a query in another language.
+    #[tokio::test]
+    async fn a_german_capture_is_found_by_an_english_question_with_no_endpoint_anywhere() {
+        let Some(dir) = std::env::var_os("ENGRAM_TEST_MODELS").map(std::path::PathBuf::from) else {
+            eprintln!("skipped: ENGRAM_TEST_MODELS is not set");
+            return;
+        };
+        let mut cfg = crate::config::Config::test_default();
+        cfg.infer.embed.dim = 768;
+        cfg.infer.embed.max_input_tokens = 512;
+        let models = crate::infer::local::LocalModels {
+            embed: Some(dir.join("embed.gguf")),
+            rerank: None,
+            ask: None,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = crate::tenants::SqliteFactory {
+            path: tmp.path().join("engram.db"),
+            scoring: crate::vector::sqlite::Scoring::off(),
+        };
+        let mut core = test_core().await.with_local_models(&cfg, &models);
+        core.vectors = factory.open("ignored", 768).await.unwrap();
+
+        let out = core
+            .ingest(
+                "Die Rechnung für den Steuerberater liegt im blauen Ordner.",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        core.ingest("Brot braucht Mehl, Wasser, Salz und Zeit.", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+
+        let q = crate::core::search::SearchQuery {
+            q: "where did I put the invoice for the tax adviser".into(),
+            limit: 5,
+            tags: vec![],
+            category: None,
+            mark: true,
+            rerank: false,
+            explain: false,
+            include_deprecated: false,
+            include_superseded: false,
+        };
+        let hits = core.search(&q, Door::Cli).await.unwrap();
+        assert_eq!(
+            hits[0].corpus_id, out.id,
+            "no word is shared; only the meaning is"
         );
     }
 }

@@ -65,6 +65,10 @@ trait Job: Send + 'static {
     fn fail(self, role: &'static str, detail: &str);
 }
 
+/// What a model's thread runs: build the context, then answer jobs until
+/// `next` says there are no more. The context never leaves that thread.
+type Serve<J> = dyn Fn(&LlamaModel, &mut dyn FnMut() -> Option<J>) -> Result<()> + Send + Sync;
+
 /// One model, on one thread, for as long as it is being used.
 ///
 /// `tx` is `Some` while a thread is serving. The thread clears it under the
@@ -77,7 +81,7 @@ struct Worker<J: Job> {
     tx: Arc<Mutex<Option<mpsc::Sender<J>>>>,
     /// Builds the context and answers jobs until `next` says there are no
     /// more. Runs on the model's thread; the context never leaves it.
-    serve: Arc<dyn Fn(&LlamaModel, &mut dyn FnMut() -> Option<J>) -> Result<()> + Send + Sync>,
+    serve: Arc<Serve<J>>,
 }
 
 impl<J: Job> Worker<J> {
@@ -96,6 +100,7 @@ impl<J: Job> Worker<J> {
         }
     }
 
+    #[cfg(test)]
     fn is_loaded(&self) -> bool {
         self.tx.lock().unwrap().is_some()
     }
@@ -530,9 +535,9 @@ fn generate(
     ]);
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut text = String::new();
-    let mut pos = tokens.len() as i32;
     let mut truncated = true;
-    for _ in 0..job.ceiling {
+    for step in 0..job.ceiling {
+        let pos = (tokens.len() + step) as i32;
         let token = sampler.sample(ctx, batch.n_tokens() - 1);
         sampler.accept(token);
         if model.is_eog_token(token) {
@@ -554,7 +559,6 @@ fn generate(
         batch
             .add(token, pos, &[0], true)
             .map_err(|e| failed("ask", e))?;
-        pos += 1;
         ctx.decode(&mut batch).map_err(|e| failed("ask", e))?;
     }
     Ok(Completion { text, truncated })
