@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -50,10 +51,12 @@ class HomeTest {
         compose.onNodeWithText("Ask, search, or paste to keep…").assertExists()
         compose.onNodeWithText("Ask").assertIsNotEnabled()
         compose.onNodeWithText("Capture").assertIsNotEnabled()
-        // The doors the phone has that the browser does not.
+        // The doors the phone has that the browser does not, and the one it
+        // shares with it: a microphone that is held, not a Record verb.
         compose.onNodeWithText("Attach").assertExists()
         compose.onNodeWithText("Photo").assertExists()
-        compose.onNodeWithText("Record").assertExists()
+        compose.onNodeWithText("Record").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Hold to dictate").assertExists()
 
         compose.onNodeWithText("Ask, search, or paste to keep…").performTextInput("qdrant filters")
         compose.onNodeWithText("Ask").assertIsEnabled()
@@ -71,5 +74,17 @@ class HomeTest {
         compose.onNodeWithText("Title · note").performClick()
         compose.onNodeWithText("Title").assertExists()
         compose.onNodeWithText("Note").assertExists()
+    }
+
+    /** Where the server has no speech model there is no button to hold — the web's rule. */
+    @Test fun noSpeechModelNoMicrophone() {
+        compose.setContent { EngramTheme { HomeBox(text = "", onText = {}, mic = null) } }
+        compose.onNodeWithContentDescription("Hold to dictate").assertDoesNotExist()
+    }
+
+    /** What the microphone says stands under the box, and only while it has something to say. */
+    @Test fun theMicrophoneSaysWhereItStands() {
+        compose.setContent { EngramTheme { HomeBox(text = "", onText = {}, mic = MicState(busy = true, said = "Transcribing…")) } }
+        compose.onNodeWithText("Transcribing…").assertExists()
     }
 }

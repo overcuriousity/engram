@@ -37,16 +37,9 @@ struct Args {
     /// --recompute-coverage: there is no longer one base for them to mean.
     #[arg(long, value_name = "SUBJECT")]
     user: Option<String>,
-    /// List the users this instance knows, with their slug and judge grant.
+    /// List the users this instance knows, with their slug and email.
     #[arg(long)]
     list_users: bool,
-    /// Let SUBJECT apply tuning recommendations on /ui/insights — the only
-    /// route that writes config.toml.
-    #[arg(long, value_name = "SUBJECT")]
-    grant_judge: Option<String>,
-    /// Take that grant back.
-    #[arg(long, value_name = "SUBJECT")]
-    revoke_judge: Option<String>,
     /// Remove SUBJECT: the row, the database file, and the Qdrant alias. The
     /// queue rows go with the row, through ON DELETE CASCADE; the sessions and
     /// API tokens go with it too, or a token nobody revoked would provision the
@@ -263,35 +256,12 @@ async fn run_account_command(
         }
         for u in users {
             println!(
-                "{}  {}  {}{}",
+                "{}  {}  {}",
                 u.subject,
                 u.slug,
                 u.email.as_deref().unwrap_or("-"),
-                if u.can_judge { "  judge" } else { "" }
             );
         }
-        return Ok(true);
-    }
-    if let Some(subject) = &args.grant_judge {
-        if !control.set_can_judge(subject, true).await? {
-            return Err(Error::Validation(format!("no such user: {subject}")));
-        }
-        // No restart, and no wait for a cache to turn over: the judge gate
-        // reads this column on every request rather than the copy of the row
-        // the registry is holding. See `web::tenant::CanJudge`.
-        println!(
-            "{subject} may now apply tuning recommendations, and write config.toml \
-             through /ui/insights"
-        );
-        return Ok(true);
-    }
-    if let Some(subject) = &args.revoke_judge {
-        if !control.set_can_judge(subject, false).await? {
-            return Err(Error::Validation(format!("no such user: {subject}")));
-        }
-        // Takes effect on their next request, for the reason above: the gate
-        // reads the column and not the registry's copy of it.
-        println!("{subject} may no longer judge");
         return Ok(true);
     }
     if let Some(subject) = &args.delete_user {
@@ -379,8 +349,6 @@ async fn main() -> anyhow::Result<()> {
         || args.reindex
         || args.recompute_coverage
         || args.list_users
-        || args.grant_judge.is_some()
-        || args.revoke_judge.is_some()
         || args.delete_user.is_some()
         || args.user.is_some();
     use std::io::IsTerminal;
@@ -496,13 +464,6 @@ async fn main() -> anyhow::Result<()> {
             pending: engram::auth::oidc::PendingStore::new(),
             secure_cookies,
         }),
-        // The path `Config::load` was given, or the name it looks for when it
-        // was given none.
-        config_path: Arc::new(
-            args.config
-                .clone()
-                .unwrap_or_else(|| std::path::PathBuf::from("config.toml")),
-        ),
         ask_handoff: Default::default(),
     };
 

@@ -1,0 +1,21 @@
+{
+  "corpus_id": "01a0b400-741e-7322-9a3d-c6232d2aa831",
+  "label": "lines 1–2",
+  "lines": [
+    {
+      "number": 1,
+      "text": "Filters narrow a search.",
+      "in_span": true
+    },
+    {
+      "number": 2,
+      "text": "Payload indexes make them fast.",
+      "in_span": true
+    },
+    {
+      "number": 3,
+      "text": "Third line.",
+      "in_span": false
+    }
+  ]
+}

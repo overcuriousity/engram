@@ -110,10 +110,8 @@ web-push-native = { version = "0.5.0", default-features = false }
 # `ecdsa` feature is what signs it. Already here through openidconnect; named
 # so the feature is this crate's to keep, not borrowed from another's defaults.
 p256 = { version = "0.13.2", features = ["ecdsa"] }
-# Rewriting config.toml in place when a tuning recommendation is applied.
-# `config` reads the file and cannot write it; a serialize-and-overwrite would
-# return the operator's commented file as a machine's, so the edit is made to
-# the parsed document and every byte around it is kept.
+# The client's endpoint file, read as a document so a hand-edited file comes
+# back with its comments; two keys do not justify a parser of their own.
 toml_edit = "0.25.13"
 schemars = "1.2.2"
 # Decoding, orientation and the downscaled preview of a captured image. Only

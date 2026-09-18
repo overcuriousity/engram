@@ -1,0 +1,51 @@
+{
+  "sources": [
+    [
+      "raw",
+      5
+    ]
+  ],
+  "jobs": [
+    [
+      "pending",
+      2
+    ]
+  ],
+  "failed": [],
+  "oldest_pending_secs": 0,
+  "chunks": 6,
+  "vectors": 2,
+  "learning": {
+    "pursuits_open": 1,
+    "pursuits_unsatisfied": 0,
+    "from_pursuits": 0,
+    "gaps_open": 1
+  },
+  "reap": {
+    "judged": 0,
+    "reaped": 0,
+    "rescued": 0,
+    "retired_waiting": 1
+  },
+  "transcribe": false,
+  "asks": true,
+  "vision": true,
+  "learn": true,
+  "recommend": false,
+  "held": {
+    "corpora": 5,
+    "artifacts": 5
+  },
+  "last_kept": {
+    "id": "01a0b430-ba92-7028-9c02-903a4b886223",
+    "label": "Older",
+    "named": true,
+    "at": 1789729487
+  },
+  "examples": {
+    "lang": "en",
+    "remind": "remind me to send the invoice on friday",
+    "journal": "today i finally got the migration working"
+  },
+  "teach": false
+}

@@ -24,7 +24,7 @@ import androidx.compose.ui.unit.dp
 
 /** One result. Past the rule it is drawn back: it placed, and it is not claimed as an answer. */
 @Composable
-fun HitRow(row: RailItem.Row, onOpen: (String) -> Unit) {
+fun HitRow(row: RailItem.Row, onOpen: (String) -> Unit, items: List<RailItem> = emptyList()) {
     val h = row.hit
     val (name, named) = nameOf(h)
     Column(
@@ -47,10 +47,16 @@ fun HitRow(row: RailItem.Row, onOpen: (String) -> Unit) {
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        sectionOf(h)?.let { Text("in $it", Modifier.padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = muted()) }
         val words = wordsOf(h)
         if (words.isNotEmpty()) {
             Text(words.joinToString(" · "), Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelSmall, color = if (h.dueIn != null) due() else muted())
         }
+        val allLoose = items.any { it == RailItem.NothingClose }
+        whyOf(h, allLoose)?.let { Text(it, Modifier.padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = muted()) }
+        // Its own line, under the ones that say why this row is here: what
+        // the document does next is something else.
+        continuesWords(h, items)?.let { Text(it, Modifier.padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
     }
 }
 
@@ -86,7 +92,7 @@ fun Rail(items: List<RailItem>, onOpen: (String) -> Unit) {
     Column {
         items.forEach { item ->
             when (item) {
-                is RailItem.Row -> HitRow(item, onOpen)
+                is RailItem.Row -> HitRow(item, onOpen, items)
                 RailItem.Cliff -> CliffRule()
                 RailItem.NothingClose -> NothingClose()
             }

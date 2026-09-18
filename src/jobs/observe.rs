@@ -160,9 +160,9 @@ pub async fn run(core: &Core) -> Result<usize> {
                 // The generation that drew the list, not the one live now.
                 // This runs a window after the search at the earliest and
                 // hours after it on a quiet base; charged to whatever was live
-                // by then, an Apply or a restated file in between handed the
-                // new generation negatives for lists it never drew, and the
-                // watch reverted it on them.
+                // by then, an adoption or a restated file in between handed
+                // the new generation negatives for lists it never drew, and
+                // the watch reverted it on them.
                 generation_id: r.get("generation_id"),
                 query: r.get("query"),
                 query_vec: crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
@@ -483,7 +483,8 @@ mod tests {
     }
 
     /// Charged to the generation that drew the list. The sweep reads a search
-    /// a window after it at the earliest, and an Apply in between is ordinary.
+    /// a window after it at the earliest, and an adoption in between is
+    /// ordinary.
     #[tokio::test]
     async fn a_give_up_is_charged_to_the_generation_that_served_the_search() {
         let (core, served) = base().await;

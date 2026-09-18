@@ -1,29 +1,27 @@
 //! The idle pass: a quiet base moves its own ranking, and takes the move back.
 //!
-//! Not a new engine. The verdict-paid sweep already gathers pairs, ranks them
-//! under other settings, gates the candidates and picks a winner; this is that
-//! body with three changes. The candidates are drawn a step at a time rather
-//! than enumerated, the pairs are the positive observations use left behind
-//! rather than verdicts, and the winner becomes the live generation instead of
-//! a recommendation waiting for a press. The `eval_runs` row is still written
-//! — it is the journal, and the generation names it.
+//! The only tuning there is. `eval::sweep` gathers the pairs, ranks them under
+//! neighbouring settings, gates the candidates and picks a winner; the winner
+//! becomes the live generation, is watched while it serves, and is taken back
+//! when it does not hold. Nothing waits for a press and nothing is written to
+//! the file. The `eval_runs` row is the journal, and the generation names it.
 //!
 //! Two halves, on two kinds of evidence. Adoption is counterfactual and reads
-//! positives only: an excerpt that was used can be re-ranked under other
-//! settings to ask where they would have put it. A negative cannot — a give-up
-//! says this list did not answer, and whether another list would have is
-//! unknowable, because it was never shown. So the watch reads what happened
-//! instead: what the adopted generation earned while it was serving, against
-//! what its predecessor earned, and the predecessor comes back when the new
-//! one does not hold.
+//! positives only: an answer a person confirmed on the bar, and an excerpt use
+//! drew on, can each be re-ranked under other settings to ask where they
+//! would have put it. A negative cannot — a give-up says this list did not
+//! answer, and whether another list would have is unknowable, because it was
+//! never shown. So the watch reads what happened instead: what the adopted
+//! generation earned while it was serving, against what its predecessor
+//! earned, and the predecessor comes back when the new one does not hold.
 //!
-//! The pass spends inference in exactly one case. Every observation keeps the
-//! vector its query was searched with, so the replay embeds nothing; the
-//! ladder replays with the reranker off, so it calls nothing; and its searches
-//! take the background lane, behind whoever is actually waiting. The one case
-//! is the rerank flip on a base whose live generation runs without a
-//! configured reranker: one call per observation, to ask what the reranker
-//! would have changed, spent because the operator configured it.
+//! The pass spends inference in exactly one case. Every pair keeps the vector
+//! its query was searched with, so the replay embeds nothing; the ladder
+//! replays with the reranker off, so it calls nothing; and its searches take
+//! the background lane, behind whoever is actually waiting. The one case is
+//! the rerank flip on a base whose live generation runs without a configured
+//! reranker: one call per pair, to ask what the reranker would have changed,
+//! spent because the operator configured it.
 //!
 //! Four kinds of move. The ladder is counterfactual: a replay under every
 //! neighbouring rung of five knobs. The rerank flip is counterfactual with its
@@ -193,12 +191,6 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         // from, and nothing for an adoption to be a child of.
         return Ok(Pass::default());
     };
-    // The verdict-paid sweep and this pass share one claim: two replays over
-    // one base at once would each measure a baseline the other is about to
-    // change.
-    let Some(_claim) = sweep::Sweeping::claim(core) else {
-        return Ok(Pass::default());
-    };
     // The one safeguard everything else leans on, on two sides. Human
     // verdicts, where any judged search has an observation beside it, can
     // suspend: when the self-generated evidence has stopped agreeing with
@@ -223,7 +215,7 @@ pub async fn pass(core: &Core) -> Result<Pass> {
 
     // Before anything measures or acts, not just before the adoption at the
     // end. The generation says one thing and the running parameters another;
-    // boot and the apply button both keep them in step, and where something
+    // boot keeps them in step, and where something
     // has not, every number this pass produces is stamped with `live.id` while
     // being measured under settings that generation does not describe —
     // probe results the watch will read back, and corpus actions the rules
@@ -451,9 +443,9 @@ async fn revert(
     old: &crate::eval::lived::Lived,
 ) -> Result<Pass> {
     let Some(back) = core.store.revert_generation(&live.id).await? else {
-        // Nowhere to go back to, or not live any more: a person's Apply made
-        // another generation live while this pass was measuring the one it
-        // was about to take back. Either way the base stays where it is.
+        // Nowhere to go back to, or not live any more: a reopen restating the
+        // file made another generation live while this pass was measuring the
+        // one it was about to take back. Either way the base stays where it is.
         return Ok(Pass::default());
     };
     swap_ranking(core, live.params.into(), back.params.into());
@@ -472,7 +464,8 @@ async fn revert(
     })
 }
 
-/// Rank the positive observations under the neighbouring settings, and adopt
+/// Rank the evidence — the answers people confirmed and the positive
+/// observations use left behind — under the neighbouring settings, and adopt
 /// the one that clears the gate, if any does.
 async fn propose(
     core: &Core,
@@ -481,14 +474,15 @@ async fn propose(
     probes: &[crate::store::rehearsals::Rehearsal],
 ) -> Result<Pass> {
     let started = crate::store::now();
-    let (pairs, skipped) = sweep::observation_pairs(core, &live.id).await?;
+    let (pairs, skipped) = sweep::evidence_pairs(core, &live.id).await?;
     let tried = core
         .store
         .tried_candidates(&live.embed_recipe, &live.chat_model)
         .await?;
     if pairs.is_empty() {
-        // No observations under this generation, so the ladder and the flip
-        // have nothing to score — both rank the positives and there are none.
+        // No verdicts and no observations under this generation, so the
+        // ladder and the flip have nothing to score — both rank the positives
+        // and there are none.
         //
         // The two rules below do not read observations at all. `spread_step`
         // reads what the appended band earned while serving (`band_use`, off
@@ -542,15 +536,14 @@ async fn propose(
                 run.base_recall = flip.served_recall;
                 run.best_mrr = flip.mrr;
                 run.best_recall = flip.recall;
-                run.recommended = true;
                 Some((flip.params, flip.predicted))
             }
             _ => None,
         },
     };
 
-    // Same guard as the sweep, for the same reason: an apply landing while
-    // this ran means the baseline it measured against is no longer running.
+    // A reopen restating the file while this ran means the baseline it
+    // measured against is no longer running.
     if *core.ranking.read().expect("ranking lock") != current {
         tracing::info!("ranking changed while the idle pass ran; its results were discarded");
         return Ok(Pass::default());
@@ -604,13 +597,8 @@ async fn propose(
                         predicted,
                     )
                     .await?;
-                // The run was journalled before this gate, carrying the
-                // recommendation that got the candidate here. Nothing will
-                // ever stamp it applied — it was refused — so left standing it
-                // is the newest open recommendation, and Insights offers the
-                // refused parameters under an Apply button that writes them
-                // into the file. The numbers stay; the offer goes.
-                core.store.withdraw_eval_run(&run_id).await?;
+                // The run stays journalled with the numbers that got the
+                // candidate here; the refusal is the generation row.
                 tracing::info!(
                     generation = %id,
                     live = ?l,
@@ -624,10 +612,9 @@ async fn propose(
             }
             (Some(_), Some(_)) => {}
             _ => {
-                // Same reasoning as the refusal above: the candidate was never
-                // measured against the probes, so the run must not stand as
-                // the base's open recommendation.
-                core.store.withdraw_eval_run(&run_id).await?;
+                // Somebody came back before the probes were read: the
+                // candidate was never measured against them, so nothing is
+                // adopted on it.
                 return Ok(Pass {
                     stopped: "activity",
                     ..Default::default()
@@ -641,10 +628,10 @@ async fn propose(
 /// Serve under `to`, if the base is still serving under `from`.
 ///
 /// The generation writes beside every call are conditional in the store; this
-/// is the same condition on the running parameters, which an Apply swaps
-/// before it journals. The guard in `propose` reads them long before the write,
-/// so an Apply landing after that read and before this one had its parameters
-/// replaced by the loop's.
+/// is the same condition on the running parameters, which a reopen restating
+/// the file swaps. The guard in `propose` reads them long before the write, so
+/// a restatement landing after that read and before this one had its
+/// parameters replaced by the loop's.
 fn swap_ranking(
     core: &Core,
     from: crate::core::ranking::RankingParams,
@@ -912,10 +899,8 @@ async fn adopt(
         )
         .await?
     else {
-        // An Apply landed after the guard in `propose` and before this write.
-        // The run's baseline is no longer what runs, so it does not stand as
-        // the open recommendation either.
-        core.store.withdraw_eval_run(run_id).await?;
+        // A reopen restated the file after the guard in `propose` and before
+        // this write. The run's baseline is no longer what runs.
         tracing::info!(
             generation = %live.id,
             "the live generation changed while the idle pass ran; its candidate was discarded"
@@ -923,9 +908,6 @@ async fn adopt(
         return Ok(Pass::default());
     };
     swap_ranking(core, current, winner);
-    // Stamped, or the insights page would offer an Apply button for settings
-    // that are already running.
-    core.store.mark_eval_run_applied(run_id).await?;
     tracing::info!(
         generation = %id,
         recency_weight = winner.recency_weight,
@@ -1109,15 +1091,9 @@ mod tests {
         assert!(p.adopted.is_none());
         let g = core.store.generation(&refused).await.unwrap().unwrap();
         assert_eq!(g.state, "refused");
-        // The run that chose it is journalled — the sweep happened — but it is
-        // not an offer. Nothing stamps a refused run applied, so a run left
-        // recommended would put the refused parameters under Insights' Apply
-        // button, where pressing it writes settings the base has measured and
-        // rejected and `tried_candidates` guarantees are never re-measured.
-        assert!(
-            core.store.open_recommendation().await.unwrap().is_none(),
-            "a refused candidate is not offered under Apply"
-        );
+        // The run that chose it is journalled — the replay happened — and
+        // the refusal is the generation row: `tried_candidates` guarantees
+        // the settings are never re-measured.
         assert!(
             core.store.latest_eval_run().await.unwrap().is_some(),
             "the run itself stays in the journal"
@@ -1199,7 +1175,7 @@ mod tests {
     pub(crate) async fn seeded_with_observations() -> (Core, String) {
         let (core, order) = seeded().await;
         let generation = generation_for(&core).await;
-        // Ten, because `sweep::MIN_PAIRS` is what a recommendation needs
+        // Ten, because `sweep::MIN_PAIRS` is what a candidate needs
         // behind it and two opens are two opens. Nine of the first excerpt
         // and one of the second, rather than five each: `jobs::retract`'s
         // pass-level tests supersede whatever stands third *after* this base
@@ -1254,7 +1230,6 @@ mod tests {
         assert!(!core.ranking.read().unwrap().rerank, "serving follows");
         let run = core.store.latest_eval_run().await.unwrap().unwrap();
         assert_eq!(live.run_id.as_deref(), Some(run.id.as_str()));
-        assert!(run.recommended);
         assert!(!run.best_params.rerank);
     }
 
@@ -1849,10 +1824,9 @@ mod tests {
         );
         let run = core.store.latest_eval_run().await.unwrap().unwrap();
         assert_eq!(live.run_id.as_deref(), Some(run.id.as_str()));
-        assert!(run.recommended);
-        assert!(
-            run.applied_at.is_some(),
-            "a run the base already took must not be offered as an open recommendation"
+        assert_eq!(
+            run.best_params, live.params,
+            "the journal names the settings the base took"
         );
     }
 
@@ -1866,7 +1840,10 @@ mod tests {
             before
         );
         let run = core.store.latest_eval_run().await.unwrap().unwrap();
-        assert!(!run.recommended, "the quiet pass is still journaled");
+        assert_eq!(
+            run.base_params, run.best_params,
+            "the quiet pass is still journaled"
+        );
     }
 
     /// A base that has just adopted a generation, with the one it replaced.
@@ -1905,10 +1882,11 @@ mod tests {
             .unwrap()
     }
 
-    /// An Apply pressed while the pass was measuring is not written over by
-    /// what the pass decided from that measurement.
+    /// A file restated while the pass was measuring — a tenant reopened after
+    /// an edit to `config.toml` — is not written over by what the pass decided
+    /// from that measurement.
     #[tokio::test]
-    async fn an_apply_that_lands_while_the_pass_measures_is_not_written_over() {
+    async fn a_restatement_that_lands_while_the_pass_measures_is_not_written_over() {
         let (core, parent) = adopted_and_watching().await;
         observe_badly_under_live(&core, 16).await;
         let watched = core.store.live_generation().await.unwrap().unwrap();
@@ -1919,8 +1897,8 @@ mod tests {
             "a generation the pass would take back"
         );
 
-        // The Apply, the way `insights::tune_apply` makes it: the running
-        // parameters first, then the journal.
+        // The restatement, the way a reopen makes it: the journal, then the
+        // running parameters — in either order, both land under the pass.
         let was: crate::core::ranking::RankingParams = watched.params.into();
         let applied_params = crate::core::ranking::RankingParams {
             recency_weight: was.recency_weight + 0.3,
@@ -1965,7 +1943,7 @@ mod tests {
         let running = *core.ranking.read().unwrap();
         assert_eq!(
             running, applied_params,
-            "the Apply's parameters were replaced"
+            "the restated parameters were replaced"
         );
     }
 
@@ -2278,10 +2256,47 @@ mod tests {
         let generation = generation_for(&core).await;
         observe(&core, &generation, "art-1", 4).await;
         observe(&core, &generation, "art-2", 5).await;
+        // A verdict too: its search recorded the vector, so it costs the
+        // pass nothing either.
+        crate::eval::sweep::test_support::judge(&core, "art-1").await;
         let before = embedder.calls();
 
         run(&core).await.unwrap();
         assert_eq!(embedder.calls(), before, "the pass embedded a query");
+    }
+
+    /// The bar is evidence the pass reads. A base with nothing under its live
+    /// generation but the answers people confirmed still moves on them.
+    #[tokio::test]
+    async fn judged_answers_alone_can_move_the_base() {
+        let (mut core, order) = seeded().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let generation = generation_for(&core).await;
+        // The second source's first two chunks, buried behind the leading
+        // source uncapped: the same improvement the observations find, said
+        // out loud on the bar, five times each — the gate wants `MIN_PAIRS`.
+        for _ in 0..5 {
+            crate::eval::sweep::test_support::judge(&core, &order[3]).await;
+            crate::eval::sweep::test_support::judge(&core, &order[4]).await;
+        }
+
+        let adopted = run(&core)
+            .await
+            .unwrap()
+            .expect("the verdicts cleared the gate");
+        let live = core.store.live_generation().await.unwrap().unwrap();
+        assert_eq!(live.id, adopted);
+        assert_eq!(live.parent_id.as_deref(), Some(generation.as_str()));
+        assert!(
+            live.params.per_source_cap.is_some(),
+            "the improvement here is a cap, and the generation must carry it"
+        );
+        let run = core.store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!(run.pairs_used, 10);
+        assert_eq!(
+            run.judged_count, 10,
+            "the journal says what the base was judged on"
+        );
     }
 
     #[test]
@@ -2292,10 +2307,7 @@ mod tests {
         // form that fails the moment somebody hands it one.
         let source = include_str!("tune.rs");
         let body = source.split("#[cfg(test)]").next().unwrap();
-        assert!(
-            !body.contains("write_ranking"),
-            "the pass writes config.toml"
-        );
+        assert!(!body.contains("std::fs"), "the pass writes a file");
         assert!(
             !body.contains("config_path"),
             "the pass knows where config.toml is"

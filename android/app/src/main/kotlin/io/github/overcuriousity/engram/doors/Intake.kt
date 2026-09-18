@@ -10,8 +10,8 @@ import java.io.IOException
 
 /** Every door lands here. Copies first, answers at once, kicks the worker. */
 object Intake {
-    suspend fun text(engram: Engram, text: String, title: String? = null, note: String? = null): String {
-        val id = engram.outbox.enqueueText(text, title, note)
+    suspend fun text(engram: Engram, text: String, title: String? = null, note: String? = null, fromAsk: String? = null): String {
+        val id = engram.outbox.enqueueText(text, title, note, fromAsk)
         Sync.kick(engram.app)
         return id
     }

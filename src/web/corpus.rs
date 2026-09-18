@@ -126,7 +126,7 @@ struct LineRange {
 /// and `failed` are in the list on purpose — they are where a real loss lives,
 /// and gating on `ready` alone would hide the section from exactly the captures
 /// that have something to show it.
-fn coverage_final(status: &CorpusStatus) -> bool {
+pub(crate) fn coverage_final(status: &CorpusStatus) -> bool {
     matches!(
         status,
         CorpusStatus::Ready | CorpusStatus::Partial | CorpusStatus::Failed
@@ -153,37 +153,27 @@ struct RereadForm {
 /// added, and anything it repeats is folded by the dedupe sweep like any other
 /// near duplicate.
 ///
-/// The range is what the band said, not what it is: the form carries no token,
-/// and taking `from`/`to` at their word let one POST of `from=1&to=999999` —
-/// hand-edited, replayed, or arriving from another page in the operator's
-/// session — reset and re-enqueue every window of the capture, one paid model
-/// call each. So the bands are cut again here, and only a window holding a
-/// passage that really is a loss, and really is inside the band pressed, is
-/// queued.
-async fn reread_uncovered_ui(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-    Form(f): Form<RereadForm>,
-) -> UiResult<Response> {
-    // Back to the band the button was in. On a nine-hundred-line document,
-    // returning to the top after pressing something two thirds of the way down
-    // loses the reader's place for no reason.
-    let back = Redirect::to(&format!("/ui/corpora/{cid}#L{}", f.from)).into_response();
-
+/// True where a read was queued. False for every reason there was nothing to
+/// re-read — a capture still being read, a restored placeholder, artifacts
+/// with no spans, or a band that is not a loss — so the phone can say so.
+pub(crate) async fn reread(
+    tenant: &Tenant,
+    cid: &str,
+    from: i64,
+    to: i64,
+) -> crate::error::Result<bool> {
     // A page left open while the capture was still being read would otherwise
     // offer to re-read lines that are merely not written yet.
-    let s = tenant.core.store.get_corpus(&cid).await?;
+    let s = tenant.core.store.get_corpus(cid).await?;
     if !coverage_final(&s.status) {
-        return Ok(back);
+        return Ok(false);
     }
-
     // The same cut the page renders, from the same inputs — and the same two
     // reasons it renders nothing red: a restored placeholder's text is its own
-    // artifacts, and an artifact naming no lines may have come from exactly the
-    // lines about to be re-read.
-    let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
+    // artifacts, and an artifact with no span may have come from anywhere.
+    let chunks = tenant.core.store.artifacts_for_corpus(cid).await?;
     if s.restored_at.is_some() || chunks.iter().any(|c| c.corpus_span.is_none()) {
-        return Ok(back);
+        return Ok(false);
     }
     let spans: Vec<(String, crate::store::artifacts::CorpusSpan)> = chunks
         .iter()
@@ -191,50 +181,55 @@ async fn reread_uncovered_ui(
         .collect();
     let lost: Vec<(i64, i64)> = crate::web::corpus_view::bands(&s.raw_text, &spans, None)
         .into_iter()
-        .filter(|b| b.gap() && b.from <= f.to && f.from <= b.to)
+        .filter(|b| b.gap() && b.from <= to && from <= b.to)
         .map(|b| (b.from, b.to))
         .collect();
     if lost.is_empty() {
-        return Ok(back);
+        return Ok(false);
     }
 
-    let segments = tenant.core.store.segments_for_corpus(&cid).await?;
+    let segments = tenant.core.store.segments_for_corpus(cid).await?;
+    let mut queued = false;
     for w in segments.iter().filter(|w| {
         lost.iter()
             .any(|(a, z)| w.start_line <= *z && *a <= w.end_line)
     }) {
-        // A window something is already going to read is left alone. `enqueue`
-        // re-arms a conflicting row whatever state it is in, running included,
-        // so pressing this twice handed the same window to a second worker: two
-        // paid model calls and two sets of artifacts for one passage, then the
-        // dedupe sweep to clean up after them.
         if tenant
             .core
             .store
             .live_job(
                 crate::store::jobs::Stage::SegmentWindow,
-                &crate::jobs::window::unit_target(&cid, w.idx),
+                &crate::jobs::window::unit_target(cid, w.idx),
             )
             .await?
         {
             continue;
         }
-        // `true`: this window was read correctly and missed lines, so it is
-        // being added to rather than replaced. Deleting what it already wrote
-        // would throw away artifacts that may have been edited, tagged or
-        // verified since, for lines that were never the problem.
-        tenant.core.store.reset_segment(&cid, w.idx, true).await?;
+        tenant.core.store.reset_segment(cid, w.idx, true).await?;
         tenant
             .core
             .store
             .enqueue(
                 crate::store::jobs::Stage::SegmentWindow,
                 "segment",
-                &crate::jobs::window::unit_target(&cid, w.idx),
+                &crate::jobs::window::unit_target(cid, w.idx),
             )
             .await?;
+        queued = true;
     }
-    Ok(back)
+    Ok(queued)
+}
+
+async fn reread_uncovered_ui(
+    tenant: Tenant,
+    Path(cid): Path<String>,
+    Form(f): Form<RereadForm>,
+) -> UiResult<Response> {
+    reread(&tenant, &cid, f.from, f.to).await?;
+    // Back to the band the button was in. On a nine-hundred-line document,
+    // returning to the top after pressing something two thirds of the way down
+    // loses the reader's place for no reason.
+    Ok(Redirect::to(&format!("/ui/corpora/{cid}#L{}", f.from)).into_response())
 }
 
 /// Undo a promotion: the window's passages back in results, what the
@@ -411,23 +406,7 @@ async fn corpus_detail(
         .filter(|c| c.in_results())
         .map(artifact_view)
         .collect();
-    // A promoted window: `done`, and owning at least one superseded passage.
-    let promoted: Vec<PromotedWindow> = segments
-        .iter()
-        .filter(|w| w.state == crate::store::segments::SegmentState::Done)
-        .filter(|w| {
-            chunks.iter().any(|c| {
-                c.segment_idx == Some(w.idx)
-                    && c.provenance == crate::store::artifacts::Provenance::Passage
-                    && c.superseded_by.is_some()
-            })
-        })
-        .map(|w| PromotedWindow {
-            idx: w.idx,
-            from: w.start_line,
-            to: w.end_line,
-        })
-        .collect();
+    let promoted = promoted_windows(&segments, &chunks);
     Ok(HtmlTemplate(CorpusTemplate {
         id: s.id,
         badge: status_badge(&s.status),
@@ -456,7 +435,7 @@ async fn corpus_detail(
 /// their own rows; this is the rest of what the camera wrote, in a block that
 /// starts folded — the original file is not kept, so the page is the only place
 /// left to read it, and it is still nothing anyone opened the page to see.
-fn exif_tag_rows(m: &serde_json::Value) -> Vec<(String, String)> {
+pub(crate) fn exif_tag_rows(m: &serde_json::Value) -> Vec<(String, String)> {
     let Some(tags) = m["exif"]["tags"].as_object() else {
         return Vec::new();
     };
@@ -470,7 +449,7 @@ fn exif_tag_rows(m: &serde_json::Value) -> Vec<(String, String)> {
 
 /// The metadata worth a row on the corpus page, in reading order. Everything
 /// else the file carried is under `exif.tags`, folded away below.
-fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
+pub(crate) fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     let exif = &m["exif"];
     if let Some(t) = exif["taken_at"].as_str() {
@@ -523,6 +502,31 @@ async fn reprocess_ui(
     };
     tenant.core.reprocess(&cid, stage).await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
+}
+
+/// A promoted window: `done`, and owning at least one superseded passage.
+/// The one reading of "promoted" — the browser's page and the phone's door
+/// both take it from here, so an Undo is offered in exactly one shape.
+pub fn promoted_windows(
+    segments: &[crate::store::segments::Segment],
+    chunks: &[crate::store::artifacts::Chunk],
+) -> Vec<PromotedWindow> {
+    segments
+        .iter()
+        .filter(|w| w.state == crate::store::segments::SegmentState::Done)
+        .filter(|w| {
+            chunks.iter().any(|c| {
+                c.segment_idx == Some(w.idx)
+                    && c.provenance == crate::store::artifacts::Provenance::Passage
+                    && c.superseded_by.is_some()
+            })
+        })
+        .map(|w| PromotedWindow {
+            idx: w.idx,
+            from: w.start_line,
+            to: w.end_line,
+        })
+        .collect()
 }
 
 /// A window a promotion has synthesized, for the corpus page's undo list.

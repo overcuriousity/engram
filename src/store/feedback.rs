@@ -41,6 +41,11 @@ pub enum Door {
     /// reason: its right answer is a synthesis across several artifacts, so
     /// "which one was it" has no well-defined meaning to judge.
     Ask,
+    /// A search or a question from the phone app. Recorded like `Ui`: a
+    /// device token is paired to one person, who reads the answer where they
+    /// asked, and the app draws the same verdict bars the web does — so its
+    /// searches wait for their id the way the web's do, and its opens count.
+    App,
 }
 
 impl Door {
@@ -53,23 +58,25 @@ impl Door {
             Door::Cli => "cli",
             Door::Judge => "judge",
             Door::Ask => "ask",
+            Door::App => "app",
         }
     }
 
     pub fn captured(&self) -> bool {
         matches!(
             self,
-            Door::Ui | Door::Api | Door::Mcp | Door::Extension | Door::Cli
+            Door::Ui | Door::Api | Door::Mcp | Door::Extension | Door::Cli | Door::App
         )
     }
 
     /// Every door, so a rule about a subset can be written against the enum
     /// instead of a list of strings somewhere else.
-    pub const ALL: [Door; 7] = [
+    pub const ALL: [Door; 8] = [
         Door::Ui,
         Door::Api,
         Door::Mcp,
         Door::Judge,
+        Door::App,
         Door::Extension,
         Door::Cli,
         Door::Ask,
@@ -110,7 +117,7 @@ impl Door {
     /// minute later would have made a weak negative out of a person simply
     /// asking twice.
     pub fn records_opens(&self) -> bool {
-        matches!(self, Door::Ui)
+        matches!(self, Door::Ui | Door::App)
     }
 
     /// The door a client is allowed to claim for itself.
@@ -124,6 +131,7 @@ impl Door {
         match raw {
             "extension" => Door::Extension,
             "cli" => Door::Cli,
+            "app" => Door::App,
             _ => Door::Api,
         }
     }
@@ -375,7 +383,7 @@ impl Store {
                 // The first search of a page, which has nothing to fold into.
                 None => None,
             },
-            Door::Extension => {
+            Door::Extension | Door::App => {
                 sqlx::query(
                     "SELECT id, created_at,
                             (SELECT COUNT(*) FROM search_candidates
@@ -724,11 +732,24 @@ pub struct Stats {
     pub mrr: f64,
 }
 
-/// A query and the artifact a person said answered it.
+/// A query and the artifact a person said answered it, with what the search
+/// recorded on the way: the vector the query was embedded with, so the idle
+/// pass replays it without embedding, and where the answer stood in the pool
+/// it was served from.
 #[derive(Debug, Clone)]
 pub struct JudgedPair {
+    pub event_id: String,
     pub query: String,
     pub expect: String,
+    pub query_vec: Vec<f32>,
+    pub embed_model: String,
+    /// The pool position the answer was served at, 1-based, on the convention
+    /// `observations.rank` uses: `search_candidates.rank` counts from zero and
+    /// is converted here. Charged to where the ranking put it rather than to a
+    /// row an exploring search lent it, as an open is. `None` where the answer
+    /// was never in the pool — the verdict worth the most, since no ordering
+    /// of what was shown could have produced it.
+    pub served_rank: Option<i64>,
 }
 
 impl Store {
@@ -1183,23 +1204,42 @@ impl Store {
         Ok(s)
     }
 
-    /// Every judgement that names an answer: the dataset a tuning sweep
-    /// replays, and the same rows `--export-eval` freezes into `pairs.json`.
+    /// Every judgement under `generation_id` that names an answer, newest
+    /// verdict first, at most `limit`: what the idle pass replays beside the
+    /// positive observations, and the same rows `--export-eval` freezes into
+    /// `pairs.json`.
     ///
     /// Gaps and discards are verdicts but not pairs — neither names an
     /// artifact, so replaying one would be a query the ranking can only fail.
-    pub async fn judged_pairs(&self) -> Result<Vec<JudgedPair>> {
+    ///
+    /// Scoped to one generation for the reason observations are: a verdict
+    /// given while a different embedding or chat model was configured belongs
+    /// to another era, and its vector is not one the live index can be read
+    /// with. A search from before generations existed carries no
+    /// `generation_id` and is left out on the same rule.
+    pub async fn judged_pairs(&self, generation_id: &str, limit: usize) -> Result<Vec<JudgedPair>> {
         Ok(sqlx::query(
-            "SELECT query, expect_id FROM search_events
-             WHERE verdict = 'hit' AND expect_id IS NOT NULL
-             ORDER BY created_at, id",
+            "SELECT e.id, e.query, e.expect_id, e.query_vec, e.embed_model,
+                    (SELECT MIN(COALESCE(c.explored_from, c.rank)) + 1
+                       FROM search_candidates c
+                      WHERE c.event_id = e.id AND c.artifact_id = e.expect_id) AS served_rank
+               FROM search_events e
+              WHERE e.verdict = 'hit' AND e.expect_id IS NOT NULL AND e.generation_id = ?
+              ORDER BY e.judged_at DESC, e.id DESC
+              LIMIT ?",
         )
+        .bind(generation_id)
+        .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?
         .iter()
         .map(|r| JudgedPair {
+            event_id: r.get("id"),
             query: r.get("query"),
             expect: r.get("expect_id"),
+            query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+            embed_model: r.get("embed_model"),
+            served_rank: r.get("served_rank"),
         })
         .collect())
     }
@@ -2848,12 +2888,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_judged_pairs_are_the_answers_and_only_the_answers() {
-        // What a sweep replays. A gap and a discard are verdicts, and they
-        // count towards the judgement floor, but neither names an artifact:
+        // What the idle pass replays. A gap and a discard are verdicts, and
+        // they count towards the day's judging, but neither names an artifact:
         // replayed as a pair, one would be a query the ranking can only fail.
-        let store = Store::memory().await.unwrap();
+        let (store, generation) = observed_base().await;
         let hit = seed(&store, "the image will not mount", &["a", "b"]).await;
-        store.judge_hit(&hit, "a", Labeller::Deck).await.unwrap();
+        store.judge_hit(&hit, "b", Labeller::Deck).await.unwrap();
         let gap = seed(&store, "nothing about this", &["c"]).await;
         store
             .judge(&gap, Verdict::Gap, Labeller::Deck)
@@ -2866,10 +2906,28 @@ mod tests {
             .unwrap();
         seed(&store, "still waiting", &["e"]).await;
 
-        let pairs = store.judged_pairs().await.unwrap();
+        let pairs = store.judged_pairs(&generation, 100).await.unwrap();
         assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].event_id, hit);
         assert_eq!(pairs[0].query, "the image will not mount");
-        assert_eq!(pairs[0].expect, "a");
+        assert_eq!(pairs[0].expect, "b");
+        assert!(
+            !pairs[0].query_vec.is_empty(),
+            "a judged pair carries the vector its search was made with"
+        );
+        assert_eq!(
+            pairs[0].served_rank,
+            Some(2),
+            "the pool position, counted from one as an observation's is"
+        );
+        assert!(
+            store
+                .judged_pairs("some-other-generation", 100)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a verdict belongs to the generation it was given under"
+        );
 
         // The day's counter reads verdicts, not pairs: judging is the work
         // being paced, and a gap is judging.
@@ -2878,6 +2936,23 @@ mod tests {
             store.judged_since(crate::store::now() + 60).await.unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn an_answer_the_pool_never_held_is_a_pair_with_no_served_rank() {
+        // "None of these": the artifact the ranking never returned. The pair
+        // still replays — it is the one worth the most — and its served rank
+        // is the honest `None`, since no position in the list was its.
+        let (store, generation) = observed_base().await;
+        let hit = seed(&store, "the image will not mount", &["a", "b"]).await;
+        store
+            .judge_hit(&hit, "elsewhere", Labeller::Deck)
+            .await
+            .unwrap();
+        let pairs = store.judged_pairs(&generation, 100).await.unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].expect, "elsewhere");
+        assert_eq!(pairs[0].served_rank, None);
     }
 
     #[tokio::test]

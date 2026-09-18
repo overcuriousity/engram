@@ -9,7 +9,8 @@
       "tags": [],
       "score": 0.8999999761581421,
       "status": "active",
-      "retired": false
+      "retired": false,
+      "continues_to": "art-loose"
     },
     {
       "artifact_id": "art-loose",
@@ -25,5 +26,6 @@
       "retired": false
     }
   ],
-  "next": null
+  "next": null,
+  "event": "ev-search"
 }

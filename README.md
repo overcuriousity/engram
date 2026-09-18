@@ -51,9 +51,9 @@ score.
   in a pipe. See [The client](#the-client).
 - **Judge** — a result you read, or answer *Was this what you were looking
   for?* under, is a labelled pair; Insights reads recall@10 and MRR off those
-  verdicts, and a background sweep turns them into tuning recommendations you
-  apply with one press. It all stays on your machine, and one button forgets
-  it.
+  verdicts, and the idle pass replays them, beside what use left behind, to
+  move the ranking on its own. It all stays on your machine, and one button
+  forgets it.
 - **Duplicates** — near-duplicates parked at capture, close pairs queued for a
   person. Nothing deleted. No merge drops a number, a command or a path. Undo on
   everything.
@@ -328,9 +328,7 @@ so with `open_registration = true`.
 ### Accounts
 
 ```bash
-engram --list-users                      # subject, slug, email, judge grant
-engram --grant-judge  sub-abc123
-engram --revoke-judge sub-abc123
+engram --list-users                      # subject, slug, email
 engram --delete-user  sub-abc123         # row, credentials, file and alias, behind a typed yes
 ```
 
@@ -341,15 +339,8 @@ in, the surviving alias is adopted and the deleted account comes back with every
 vector it had. Nothing is deleted when it stops that way, so the fix is to bring
 Qdrant back and run it again.
 
-The judge grant gates applying a tuning recommendation on `/ui/insights` —
-the only route in the tree that writes `config.toml`, since applying one moves
-the instance's ranking parameters. There is no admin role; the flag is granted
-out of band, per user, and takes effect on the next request rather than on a
-restart. The raw form works too:
-
-```bash
-sqlite3 engram-control.db "UPDATE users SET can_judge = 1 WHERE subject = '…'"
-```
+There is no admin role. Nothing in the tree writes `config.toml`: the ranking
+tunes itself under `[evolve]`, and the file is the operator's starting point.
 
 ### Backup
 

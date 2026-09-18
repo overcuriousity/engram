@@ -11,6 +11,9 @@ import io.github.overcuriousity.engram.core.push.Push
 import io.github.overcuriousity.engram.core.read.Reader
 import io.github.overcuriousity.engram.core.read.ServerReader
 import io.github.overcuriousity.engram.core.sync.Sync
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.File
@@ -31,6 +34,14 @@ class Engram private constructor(val app: Context, versionName: String) {
     val counters = ViewCounters(prefs)
     val situation = Situation(AndroidSituationSource(app, counters), Stable.of(app))
 
+    /**
+     * Fire-and-forget telling that must outlive the screen that started it:
+     * a dwell reported as the pane closes, where the composable's own scope
+     * is already cancelled and the launch would never run. Process-lifetime
+     * on purpose, and only for what nothing on screen waits for.
+     */
+    val telling = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     val refused = MutableStateFlow(false)
     val pinMismatch = MutableStateFlow<PinMismatch?>(null)
     val pushFailure = MutableStateFlow<String?>(null)
@@ -38,6 +49,13 @@ class Engram private constructor(val app: Context, versionName: String) {
     var placeOn: Boolean
         get() = prefs.getBoolean("place", false)
         set(v) = prefs.edit().putBoolean("place", v).apply()
+
+    /** The theme chosen on this phone: `system`, `light` or `dark`. A word, so the screens own the enum. */
+    val theme = MutableStateFlow(prefs.getString("theme", "system") ?: "system")
+    fun setTheme(word: String) {
+        prefs.edit().putString("theme", word).apply()
+        theme.value = word
+    }
 
     internal fun transport(): Transport? = store.current.value?.let { Transport(it, userAgent) }
 
@@ -64,6 +82,10 @@ class Engram private constructor(val app: Context, versionName: String) {
         transport()?.let { Drainer(outbox, it, { ZoneId.systemDefault().id }, System::currentTimeMillis) }
 
     suspend fun vapid(): String = transport()?.vapid() ?: throw IllegalStateException("unpaired")
+
+    /** A captured photo's preview, as bytes. Null where there is none, or the server cannot be reached. */
+    suspend fun picture(corpusId: String): ByteArray? =
+        runCatching { transport()?.bytes("/api/v1/corpora/$corpusId/image") }.getOrNull()
 
     suspend fun pair(uri: PairUri) {
         val c = Pairing.claim(uri, deviceName, userAgent)

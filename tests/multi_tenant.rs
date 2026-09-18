@@ -97,7 +97,6 @@ async fn two_tenant_app() -> (axum::Router, Signed, Signed, tempfile::TempDir) {
             pending: engram::auth::oidc::PendingStore::new(),
             secure_cookies: false,
         }),
-        config_path: Arc::new(dir.path().join("config.toml")),
         ask_handoff: Default::default(),
     };
     (engram::web::router(state), a, b, dir)

@@ -61,8 +61,27 @@ interface Reader {
      * A question whose answer belongs to the moment it was asked in — the
      * offer for this situation. Asked of the source every time and never kept.
      */
-    suspend fun <T> ask(path: String, json: String, decode: (String) -> T): Read<T>
+    suspend fun <T> ask(path: String, json: String, decode: (String) -> T): Read<T> = call("POST", path, json, decode)
+
+    /**
+     * A write pressed where the source is, answered in words: a verdict, a
+     * kept answer, a saved setting. Not an owed write — the outbox is for
+     * those — because the answer is what the screen shows next, and a press
+     * with no server to answer it is said to be one. A `204` decodes an
+     * empty body.
+     */
+    suspend fun <T> call(method: String, path: String, json: String?, decode: (String) -> T): Read<T>
 
     /** Something the source is told and nothing waits on. Failure is silent. */
     suspend fun tell(path: String, json: String)
+
+    /**
+     * A recording in, the words in it back. Belongs to the moment like [ask]
+     * does and is never kept. Where the source has no speech model the answer
+     * is an error, not a value; `Api.status()` says so in advance.
+     *
+     * On the seam rather than beside it because a self-contained app hears on
+     * the device, and the screen holding the microphone must not know which.
+     */
+    suspend fun hear(audio: ByteArray, mime: String): Read<String>
 }

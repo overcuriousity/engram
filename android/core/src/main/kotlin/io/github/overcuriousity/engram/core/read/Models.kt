@@ -44,6 +44,23 @@ data class Hit(
     /** Recalled beside another hit rather than ranked: it competed for nothing and has no rank. */
     val via: String? = null,
     val reason: String? = null,
+    /** The ranking's own answer, in the server's words. Only with `explain`. */
+    @SerialName("why_ranked") val whyRanked: String? = null,
+    /** The next passage of the same document, where this one's goes on. */
+    @SerialName("continues_to") val continuesTo: String? = null,
+)
+
+/**
+ * A result list as the app's door answers it: the rows, the search they were
+ * recorded under, and whether the reranker confirmed the order.
+ */
+@Serializable
+data class SearchPage(
+    val items: List<Hit> = emptyList(),
+    val next: String? = null,
+    /** What an open, a verdict and a gap name. Absent where searches are not recorded. */
+    val event: String? = null,
+    val reranked: Boolean = false,
 )
 
 @Serializable
@@ -76,6 +93,11 @@ data class Chunk(
     @SerialName("corpus_span") val span: Span? = null,
     @SerialName("created_at") val createdAt: Long = 0,
     @SerialName("last_verified_at") val lastVerifiedAt: Long? = null,
+    /** For a synthesized artifact: the questions it was written for. */
+    val cues: List<String> = emptyList(),
+    /** Verification failures. Empty means every check passed. */
+    val flags: List<String> = emptyList(),
+    @SerialName("flag_detail") val flagDetail: String? = null,
 ) {
     /** What the server's `names_its_own_text` decides: a passage and a note carry a heading that is not theirs. */
     val named: Boolean get() = !title.isNullOrBlank() && provenance != "passage" && provenance != "note"
@@ -96,14 +118,269 @@ data class CorpusDetail(
 @Serializable
 data class SourceRef(val id: String, val title: String? = null, val origin: String = "", @SerialName("source_url") val sourceUrl: String? = null)
 
-/** The server flattens the chunk into the top level and sets `source` beside it; read twice, once for each. */
-data class ArtifactDetail(val chunk: Chunk, val source: SourceRef?)
+/**
+ * A neighbour, or something this artifact has been needed alongside. [why]
+ * and [corpusTitle] are only on a `seen_together` row: a neighbour is near by
+ * resemblance and needs no explaining.
+ */
+@Serializable
+data class RelatedRow(
+    val id: String,
+    val label: String = "",
+    val named: Boolean = false,
+    val snippet: String = "",
+    val why: String? = null,
+    @SerialName("corpus_title") val corpusTitle: String? = null,
+)
+
+/**
+ * What the web pane lists beside an artifact, and where it continues. Two
+ * lists and not one, because they answer different questions: what this
+ * resembles, and what it has been reached for together with.
+ */
+@Serializable
+data class Related(
+    val related: List<RelatedRow> = emptyList(),
+    @SerialName("seen_together") val seenTogether: List<RelatedRow> = emptyList(),
+    /** The next passage of the same document, where this one stops mid-sentence. */
+    @SerialName("continues_at") val continuesAt: String? = null,
+) {
+    val isEmpty: Boolean get() = related.isEmpty() && seenTogether.isEmpty() && continuesAt == null
+}
+
+/** One line of the source beside an artifact. [inSpan] is a line the artifact was drawn from, not context. */
+@Serializable
+data class SourceLine(val number: Long, val text: String = "", @SerialName("in_span") val inSpan: Boolean = false)
+
+/**
+ * The lines an artifact was drawn from, with a little context either side —
+ * the source column of the web pane. [corpusId] is null for a merge, which
+ * belongs to no document, and where the document is gone.
+ */
+@Serializable
+data class SourceSlice(
+    @SerialName("corpus_id") val corpusId: String? = null,
+    val label: String = "",
+    val lines: List<SourceLine> = emptyList(),
+)
 
 @Serializable
-private data class SourceOnly(val source: SourceRef? = null)
+data class LastKept(val id: String, val label: String = "", val named: Boolean = false, val at: Long = 0)
 
-fun decodeArtifact(body: String): ArtifactDetail =
-    ArtifactDetail(ApiJson.decodeFromString(Chunk.serializer(), body), ApiJson.decodeFromString(SourceOnly.serializer(), body).source)
+@Serializable
+data class Examples(val lang: String = "en", val remind: String = "", val journal: String = "")
+
+/** What the base says about itself: which doors are open, and the idle line's facts. */
+@Serializable
+data class Status(
+    /** Whether `POST /transcribe` is open: a speech model is configured. The mic is drawn only where it is. */
+    val transcribe: Boolean = false,
+    val asks: Boolean = false,
+    val vision: Boolean = false,
+    /** Searches and questions are recorded: the verdict bars and the gap button are drawn only then. */
+    val learn: Boolean = false,
+    val recommend: Boolean = false,
+    val held: Held = Held(),
+    @SerialName("last_kept") val lastKept: LastKept? = null,
+    val examples: Examples = Examples(),
+    /** The base is young: the idle column still teaches what a paste becomes. */
+    val teach: Boolean = false,
+)
+
+/**
+ * The server flattens the chunk into the top level and sets `source` beside
+ * it; read twice, once for each. [searchEvent] is the search this open was
+ * attributed to, where the read named one: the verdict bar is drawn only then.
+ */
+data class ArtifactDetail(val chunk: Chunk, val source: SourceRef?, val searchEvent: String? = null)
+
+@Serializable
+private data class ArtifactBeside(val source: SourceRef? = null, @SerialName("search_event") val searchEvent: String? = null)
+
+fun decodeArtifact(body: String): ArtifactDetail {
+    val b = ApiJson.decodeFromString(ArtifactBeside.serializer(), body)
+    return ArtifactDetail(ApiJson.decodeFromString(Chunk.serializer(), body), b.source, b.searchEvent)
+}
+
+/** The lines of the pane that are about the artifact rather than of it. */
+@Serializable
+data class About(
+    val tag: String? = null,
+    val probes: List<String> = emptyList(),
+    /** The open condensation's action id, where the live text is a condensed one. */
+    val condensed: String? = null,
+    @SerialName("due_in") val dueIn: String? = null,
+)
+
+/** One band of a source: a stretch of lines beside what was written from them, or a red one saying nothing was. */
+@Serializable
+data class Band(
+    val from: Long,
+    val to: Long,
+    val gap: Boolean = false,
+    /** `reads lines 118–141`, where a re-read is offered. */
+    val reread: String? = null,
+    val lines: List<SourceLine> = emptyList(),
+    @SerialName("artifact_ids") val artifactIds: List<String> = emptyList(),
+    /** Artifacts carded in an earlier band that also span this one. */
+    val echoes: List<String> = emptyList(),
+)
+
+@Serializable
+data class Promoted(val idx: Long, val from: Long, val to: Long)
+
+/** The corpus page as data: what stands above the bands, and the bands. */
+@Serializable
+data class CorpusPage(
+    val image: Boolean = false,
+    val pdf: Boolean = false,
+    val unread: Boolean = false,
+    val restored: Boolean = false,
+    val note: String? = null,
+    val coverage: String? = null,
+    val meta: List<List<String>> = emptyList(),
+    val exif: List<List<String>> = emptyList(),
+    val promoted: List<Promoted> = emptyList(),
+    val bands: List<Band> = emptyList(),
+    val unplaced: List<String> = emptyList(),
+    @SerialName("written_from") val writtenFrom: List<String> = emptyList(),
+)
+
+/** What capture will do with the box, said before it is pressed. Empty [kind] for an empty box. */
+@Serializable
+data class Echo(val kind: String = "", val detail: String = "")
+
+@Serializable
+data class FacetCount(val value: String, val count: Long = 0)
+
+@Serializable
+data class Facets(val categories: List<FacetCount> = emptyList())
+
+@Serializable
+data class Recorded(val captured: Long = 0, val pending: Long = 0, val judged: Long = 0)
+
+@Serializable
+data class AskedRecorded(val asked: Long = 0, val judged: Long = 0)
+
+/** What is being recorded. Both null while `[learn]` is off. */
+@Serializable
+data class Feedback(val searches: Recorded? = null, val asks: AskedRecorded? = null)
+
+@Serializable
+data class LangRow(val value: String, val label: String)
+
+@Serializable
+data class LangSetting(val chosen: String = "", val langs: List<LangRow> = emptyList())
+
+@Serializable
+data class NotifySetting(
+    @SerialName("gotify_url") val gotifyUrl: String = "",
+    @SerialName("gotify_token_set") val gotifyTokenSet: Boolean = false,
+    @SerialName("up_endpoint") val upEndpoint: String = "",
+    @SerialName("up_device") val upDevice: String? = null,
+    @SerialName("up_legacy") val upLegacy: Boolean = false,
+)
+
+@Serializable
+data class LinkCounts(val total: Long = 0, val related: Long = 0, @SerialName("judge_queue") val judgeQueue: Long = 0)
+
+@Serializable
+data class SweepCount(val n: Long = 0, val what: String = "")
+
+@Serializable
+data class SweepRun(
+    val `when`: String = "",
+    val stage: String = "",
+    @SerialName("stage_id") val stageId: String = "",
+    val error: String = "",
+    val took: String = "",
+    val counts: List<SweepCount> = emptyList(),
+)
+
+@Serializable
+data class OfferRate(val rung: String = "", val shown: Long = 0, val opened: Long = 0)
+
+@Serializable
+data class Retrying(
+    val stage: String = "",
+    @SerialName("target_id") val targetId: String = "",
+    val attempts: Long = 0,
+    val due: String = "",
+    @SerialName("last_error") val lastError: String = "",
+)
+
+/** What the machine is doing: the disclosure at the foot of Insights. */
+@Serializable
+data class Machine(
+    val artifacts: Long = 0,
+    val vectors: Long = 0,
+    /** `[["pending", 2], …]`: a job state and its count. */
+    val jobs: List<List<kotlinx.serialization.json.JsonPrimitive>> = emptyList(),
+    @SerialName("oldest_pending_secs") val oldestPendingSecs: Long? = null,
+    val links: LinkCounts? = null,
+    @SerialName("last_day") val lastDay: List<SweepCount> = emptyList(),
+    @SerialName("last_day_failures") val lastDayFailures: Long = 0,
+    @SerialName("sweep_history") val sweepHistory: List<SweepRun> = emptyList(),
+    @SerialName("offer_rates") val offerRates: List<OfferRate> = emptyList(),
+    val retrying: List<Retrying> = emptyList(),
+)
+
+@Serializable
+data class Sleep(
+    val runs: List<String> = emptyList(),
+    @SerialName("idle_mins") val idleMins: Long = 0,
+    @SerialName("unrehearsed_count") val unrehearsedCount: Long = 0,
+    /** `[[id, title], …]`. */
+    val unrehearsed: List<List<String>> = emptyList(),
+)
+
+@Serializable
+data class Evolve(
+    val suspended: String? = null,
+    val mode: String = "",
+    val live: String = "",
+    val params: String = "",
+    val standing: String = "",
+    val rehearsed: String = "",
+    val history: List<String> = emptyList(),
+    val actions: List<String> = emptyList(),
+    val rules: String? = null,
+)
+
+/** What the base did on its own, in the sentences Insights says. */
+@Serializable
+data class Report(
+    val sleep: Sleep? = null,
+    val evolve: Evolve? = null,
+    /** `[recent, unsatisfied]`, or null while `[learn]` is off. */
+    val pursuits: List<Long>? = null,
+    @SerialName("more_pairs") val morePairs: Long = 0,
+)
+
+/** What the web's `_ask_kept.html` says became of a kept answer. */
+@Serializable
+data class Kept(val id: String, val duplicate: Boolean = false, val parked: Boolean = false, @SerialName("near_dupe_percent") val nearDupePercent: Long = 0)
+
+@Serializable
+data class VerdictAnswer(val state: String = "", val already: Boolean = false)
+
+@Serializable
+data class GapAnswer(val recorded: Boolean = false)
+
+@Serializable
+data class AskVerdictAnswer(val verdict: String? = null)
+
+@Serializable
+data class CarriedAnswer(val carried: Boolean = false, val verdict: String? = null)
+
+@Serializable
+data class NotAReminderAnswer(val undo: String? = null)
+
+@Serializable
+data class NotifyTested(val sent: Boolean = false, val error: String? = null)
+
+@Serializable
+data class DayEntryAnswer(val id: String)
 
 @Serializable
 data class NodeSource(
@@ -192,6 +469,10 @@ data class Moment(
     val at: Long? = null,
     val rule: String? = null,
     @SerialName("snoozed_until") val snoozedUntil: Long? = null,
+    /** `set` by a person, or read out of the note by the stage. */
+    val source: String = "set",
+    val kind: String = "due",
+    val span: String? = null,
 )
 
 @Serializable
@@ -228,6 +509,8 @@ data class AskAnswer(
     /** Literals in the answer that no excerpt carries: the model's own, not the base's. */
     val unsupported: List<String> = emptyList(),
     @SerialName("retired_only") val retiredOnly: Boolean = false,
+    /** The question as recorded, where it was: what a verdict, a carried excerpt and a keep name. */
+    @SerialName("event_id") val eventId: String? = null,
 )
 
 // ── Judging ──────────────────────────────────────────────────────────────────
@@ -404,6 +687,27 @@ object Decode {
         { ApiJson.decodeFromString(Page.serializer(item), it) }
 
     val hits = page(Hit.serializer())
+    val search: (String) -> SearchPage = { ApiJson.decodeFromString(SearchPage.serializer(), it) }
+    val about: (String) -> About = { ApiJson.decodeFromString(About.serializer(), it) }
+    val bands: (String) -> CorpusPage = { ApiJson.decodeFromString(CorpusPage.serializer(), it) }
+    val facets: (String) -> Facets = { ApiJson.decodeFromString(Facets.serializer(), it) }
+    val echo: (String) -> Echo = { ApiJson.decodeFromString(Echo.serializer(), it) }
+    val feedback: (String) -> Feedback = { ApiJson.decodeFromString(Feedback.serializer(), it) }
+    val lang: (String) -> LangSetting = { ApiJson.decodeFromString(LangSetting.serializer(), it) }
+    val notify: (String) -> NotifySetting = { ApiJson.decodeFromString(NotifySetting.serializer(), it) }
+    val machine: (String) -> Machine = { ApiJson.decodeFromString(Machine.serializer(), it) }
+    val report: (String) -> Report = { ApiJson.decodeFromString(Report.serializer(), it) }
+    val kept: (String) -> Kept = { ApiJson.decodeFromString(Kept.serializer(), it) }
+    val verdict: (String) -> VerdictAnswer = { ApiJson.decodeFromString(VerdictAnswer.serializer(), it) }
+    val gap: (String) -> GapAnswer = { ApiJson.decodeFromString(GapAnswer.serializer(), it) }
+    val askVerdict: (String) -> AskVerdictAnswer = { ApiJson.decodeFromString(AskVerdictAnswer.serializer(), it) }
+    val carried: (String) -> CarriedAnswer = { ApiJson.decodeFromString(CarriedAnswer.serializer(), it) }
+    val notAReminder: (String) -> NotAReminderAnswer = { ApiJson.decodeFromString(NotAReminderAnswer.serializer(), it) }
+    val notifyTested: (String) -> NotifyTested = { ApiJson.decodeFromString(NotifyTested.serializer(), it) }
+    val dayEntry: (String) -> DayEntryAnswer = { ApiJson.decodeFromString(DayEntryAnswer.serializer(), it) }
+    /** For a write that answers `204`, or whose body is not worth reading. */
+    val nothing: (String) -> Unit = { }
+    val moments = page(Moment.serializer())
     val corpora = page(CorpusRow.serializer())
     val versions = page(Version.serializer())
     val due = page(DueRow.serializer())
@@ -412,6 +716,9 @@ object Decode {
     val day: (String) -> Day = { ApiJson.decodeFromString(Day.serializer(), it) }
     val offer: (String) -> OfferAnswer = { ApiJson.decodeFromString(OfferAnswer.serializer(), it) }
     val artifact: (String) -> ArtifactDetail = ::decodeArtifact
+    val related: (String) -> Related = { ApiJson.decodeFromString(Related.serializer(), it) }
+    val source: (String) -> SourceSlice = { ApiJson.decodeFromString(SourceSlice.serializer(), it) }
+    val status: (String) -> Status = { ApiJson.decodeFromString(Status.serializer(), it) }
     val pairs: (String) -> PairQueue = { ApiJson.decodeFromString(PairQueue.serializer(), it) }
     val gaps = page(GapCluster.serializer())
     val insights: (String) -> Insights = { ApiJson.decodeFromString(Insights.serializer(), it) }
@@ -420,14 +727,44 @@ object Decode {
 
 /** The reads, by name. One place knows a path; a screen knows what it wants. */
 object Api {
-    fun search(q: String) = Request("/api/v1/search", mapOf("q" to q))
+    /**
+     * A search from the app's door: recorded under the person, like the web's,
+     * and answered with the event it was recorded under. The first pass is a
+     * typing pass, at vector-order speed; [refine] is the second, reranked
+     * one the web makes once the typing has settled, and it explains itself.
+     */
+    fun search(q: String, category: String? = null, refine: Boolean = false) = Request(
+        "/api/v1/search",
+        mapOf(
+            "q" to q,
+            "door" to "app",
+            "category" to category?.takeIf { it.isNotEmpty() },
+            "rerank" to if (refine) "true" else null,
+            "explain" to if (refine) "1" else null,
+        ),
+    )
+    fun facets() = Request("/api/v1/facets")
+    fun echo(q: String) = Request("/api/v1/echo", mapOf("q" to q))
+    fun about(id: String) = Request("/api/v1/artifacts/$id/about")
+    fun bands(id: String) = Request("/api/v1/corpora/$id/bands")
+    fun feedback() = Request("/api/v1/feedback")
+    fun lang() = Request("/api/v1/settings/lang")
+    fun notify() = Request("/api/v1/settings/notify")
+    fun machine() = Request("/api/v1/insights/machine")
+    fun report() = Request("/api/v1/insights/report")
+    /** Dates that refer to a window: what is coming up. */
+    fun events(from: Long, to: Long) = Request("/api/v1/moments", mapOf("kind" to "event", "from" to from.toString(), "to" to to.toString()))
     fun resurface() = Request("/api/v1/resurface", mapOf("limit" to "5"))
     fun due() = Request("/api/v1/moments", mapOf("kind" to "due"))
     fun corpora(after: String?) = Request("/api/v1/corpora", mapOf("limit" to "50", "after" to after))
     fun corpus(id: String) = Request("/api/v1/corpora/$id")
-    fun artifact(id: String) = Request("/api/v1/artifacts/$id")
+    /** [event] is the search that listed it, so the open is attributed to that search and the bar is drawn. */
+    fun artifact(id: String, event: String? = null) = Request("/api/v1/artifacts/$id", mapOf("event" to event))
     fun lineage(id: String) = Request("/api/v1/artifacts/$id/lineage")
     fun versions(id: String) = Request("/api/v1/artifacts/$id/versions")
+    fun related(id: String) = Request("/api/v1/artifacts/$id/related")
+    fun source(id: String) = Request("/api/v1/artifacts/$id/source")
+    fun status() = Request("/api/v1/status")
     fun day(date: String, tz: String) = Request("/api/v1/days/$date", mapOf("tz" to tz))
     fun pairs() = Request("/api/v1/pairs")
     fun gaps() = Request("/api/v1/gaps")
@@ -436,6 +773,46 @@ object Api {
 
     const val CONTEXT = "/api/v1/context"
     const val SEEN = "/api/v1/context/seen"
+
+    // The immediate writes: pressed where the server is, answered in words.
+    fun searchVerdict(event: String) = "/api/v1/search/$event/verdict"
+    fun searchGap(event: String) = "/api/v1/search/$event/gap"
+    fun askVerdict(event: String) = "/api/v1/asks/$event/verdict"
+    fun askCarried(event: String) = "/api/v1/asks/$event/carried"
+    fun askKeep(event: String) = "/api/v1/asks/$event/keep"
+    fun notAReminder(momentId: String) = "/api/v1/moments/$momentId/not-a-reminder"
+    fun dayEntry(date: String) = "/api/v1/days/$date/entry"
+    const val FEEDBACK = "/api/v1/feedback"
+    const val LANG = "/api/v1/settings/lang"
+    const val NOTIFY = "/api/v1/settings/notify"
+    const val NOTIFY_TEST = "/api/v1/settings/notify/test"
+    fun artifactEdit(id: String) = "/api/v1/artifacts/$id"
+    fun dwell(id: String) = "/api/v1/artifacts/$id/dwell"
+
+    // The owed writes: outbox rows, delivered when the server can be reached.
+    fun momentDate(id: String) = "/api/v1/moments/$id/date"
+    fun momentUndone(id: String) = "/api/v1/moments/$id/undone"
+    fun momentUnsnooze(id: String) = "/api/v1/moments/$id/unsnooze"
+    fun isAReminder(artifactId: String) = "/api/v1/artifacts/$artifactId/is-a-reminder"
+    fun reviewed(id: String) = "/api/v1/artifacts/$id/reviewed"
+    fun dismissLink(id: String, other: String) = "/api/v1/artifacts/$id/links/$other/dismiss"
+    fun condensationUndo(action: String) = "/api/v1/condensations/$action/undo"
+    fun corpusDelete(id: String) = "/api/v1/corpora/$id"
+    fun corpusReprocess(id: String) = "/api/v1/corpora/$id/reprocess"
+    fun corpusReread(id: String) = "/api/v1/corpora/$id/reread"
+    fun corpusEntry(id: String) = "/api/v1/corpora/$id/entry"
+    fun unpromote(id: String, idx: Long) = "/api/v1/corpora/$id/segments/$idx/unpromote"
+
+    fun json(vararg pairs: kotlin.Pair<String, Any?>): String = JsonObject(
+        pairs.filter { it.second != null }.associate { (k, v) ->
+            k to when (v) {
+                is String -> kotlinx.serialization.json.JsonPrimitive(v)
+                is Boolean -> kotlinx.serialization.json.JsonPrimitive(v)
+                is Number -> kotlinx.serialization.json.JsonPrimitive(v)
+                else -> kotlinx.serialization.json.JsonPrimitive(v.toString())
+            }
+        },
+    ).toString()
     fun seen(o: Offer): String = JsonObject(
         buildMap {
             put("artifact_id", kotlinx.serialization.json.JsonPrimitive(o.artifactId))

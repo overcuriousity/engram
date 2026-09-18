@@ -37,8 +37,9 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
     private val dao = db.outboxDao()
     val rows: Flow<List<OutboxRow>> = dao.all()
 
-    suspend fun enqueueText(text: String, title: String?, note: String?): String =
-        insert(Kind.capture_text, buildJsonObject { put("text", text); put("title", title); put("note", note) })
+    /** [fromAsk] is the question this text answers, where the box was filled from an answer: the web's *edit first*. */
+    suspend fun enqueueText(text: String, title: String?, note: String?, fromAsk: String? = null): String =
+        insert(Kind.capture_text, buildJsonObject { put("text", text); put("title", title); put("note", note); if (fromAsk != null) put("from_ask", fromAsk) })
 
     suspend fun enqueueFiles(files: List<Incoming>, title: String?, note: String?): String {
         val id = UUID.randomUUID().toString()
@@ -99,6 +100,22 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
 
     suspend fun enqueueArtifactOp(artifactId: String, op: ArtifactOp) =
         insert(Kind.artifact_op, buildJsonObject { put("artifact", artifactId); put("op", op.name) })
+
+    /**
+     * Delete for good. Not an [ArtifactOp]: those four are answers with an
+     * undo, and this is the one that has none — which is why the screen asks
+     * before it is enqueued, and why the queue is the last place it can be
+     * taken back from.
+     */
+    suspend fun enqueueArtifactDelete(artifactId: String) =
+        insert(Kind.artifact_delete, buildJsonObject { put("artifact", artifactId) })
+
+    /**
+     * Any other owed write, by its route. [label] is what the queue screen
+     * says about it; [body] is JSON or null for a bare POST/DELETE.
+     */
+    suspend fun enqueueCall(label: String, method: String, path: String, body: String? = null) =
+        insert(Kind.call, buildJsonObject { put("label", label); put("method", method); put("path", path); put("body", body) })
 
     suspend fun enqueueMergeUndo(mergeId: String) =
         insert(Kind.merge_undo, buildJsonObject { put("merge", mergeId) })

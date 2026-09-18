@@ -71,7 +71,7 @@ internal class Drainer(
         fun need(k: String) = s(k) ?: throw Malformed("the row carries no $k")
         fun pair() = p["pair"]?.jsonPrimitive?.longOrNull ?: throw Malformed("the row carries no pair")
         when (row.kind) {
-            Kind.capture_text -> settle(row, transport.captureText(s("text") ?: "", s("title"), s("note"), tz()))
+            Kind.capture_text -> settle(row, transport.captureText(s("text") ?: "", s("title"), s("note"), tz(), s("from_ask")))
             Kind.capture_files -> {
                 val files = outbox.filesOf(row.id).map { OutFile(it.path, it.name, it.mime) }
                 settle(row, transport.captureFiles(files, s("title"), s("note"), tz()))
@@ -101,6 +101,11 @@ internal class Drainer(
                 transport.artifactOp(need("artifact"), need("op")),
                 goneIsSettled = true,
             )
+            // Deleted on the web while this phone was offline is deleted.
+            Kind.artifact_delete -> settle(row, transport.artifactDelete(need("artifact")), goneIsSettled = true)
+            // A subject the server no longer has is settled for the reason
+            // every judging answer's is.
+            Kind.call -> settle(row, transport.call(need("method"), need("path"), s("body")), goneIsSettled = true)
             Kind.merge_undo -> settle(row, transport.mergeUndo(need("merge")), goneIsSettled = true)
             Kind.corpus_resolve -> settle(
                 row,

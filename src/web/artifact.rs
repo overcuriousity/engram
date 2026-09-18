@@ -270,37 +270,18 @@ fn neighbour_title(p: &crate::vector::VectorPayload) -> String {
     }
 }
 
-pub(crate) async fn build_artifact_detail(
-    core: &crate::core::Core,
-    artifact_id: &str,
-    terms: &str,
-) -> Result<ArtifactDetail> {
-    let c = core.store.get_artifact(artifact_id).await?;
-    let html = artifact_html(&c);
-    // A merged artifact belongs to no corpus, so there are no lines to show
-    // beside it and no span to highlight. Task 15 fills that half of the pane
-    // with the artifacts it was written from; until then it renders without a
-    // source block rather than claiming a document it did not come from.
-    let src = match &c.corpus_id {
-        Some(id) => Some(core.store.get_corpus(id).await?),
-        None => None,
-    };
-    // The lines the passage was drawn from, with a little context either
-    // side: the source column is the claim about where the text on screen came
-    // from, and what is on screen is this one artifact.
-    let slice = match &src {
-        Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
-        None => crate::web::corpus_view::CorpusSlice::default(),
-    };
-    // A missing lineage is not a missing pane, for the same reason a missing
-    // neighbour list is not: it is a layer over the artifact, and the artifact
-    // beside its source is what the page is for.
-    let lineage = crate::web::lineage_view::build(&core.store, artifact_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(artifact_id, error = %e, "no lineage for this pane");
-            Default::default()
-        });
+/// What the pane lists beside an artifact, and where it continues: the two
+/// lists a reader pivots through, and the way onward. One function for the
+/// pane and for `GET /api/v1/artifacts/{id}/related`, so a phone and a
+/// browser are shown the same neighbours for the same reasons.
+pub(crate) struct Pivots {
+    pub related: Vec<RelatedArtifact>,
+    pub seen_together: Vec<SeenTogether>,
+    pub continues_at: Option<String>,
+}
+
+pub(crate) async fn pivots(core: &crate::core::Core, c: &crate::store::artifacts::Chunk) -> Pivots {
+    let artifact_id = c.id.as_str();
     // A missing neighbour list is not a missing pane. The vector store may be
     // down, or this artifact may simply not be embedded yet, and neither is a
     // reason to refuse to show the artifact beside its source.
@@ -381,20 +362,6 @@ pub(crate) async fn build_artifact_detail(
             id: other.id,
         });
     }
-    // Built before the struct consumes `c`. The fragment is what makes the
-    // browser scroll to the span; the query parameters are what make the page
-    // highlight it.
-    // Empty for a merged artifact: there is no document to link to, and the
-    // template hides the whole source block rather than offering a dead link.
-    let source_at_lines = match (&c.corpus_id, c.corpus_span.as_ref()) {
-        (Some(cid), Some(sp)) => format!(
-            "/ui/corpora/{cid}?from={}&to={}#L{}",
-            sp.start_line, sp.end_line, sp.start_line
-        ),
-        (Some(cid), None) => format!("/ui/corpora/{cid}"),
-        (None, _) => String::new(),
-    };
-    let orphaned_source = c.flags.iter().any(|f| f == "orphaned_source");
     // Only asked when the passage actually stops mid-sentence: the query is a
     // second lookup per pane, and most passages end where a sentence does.
     let continues_at = match (&c.corpus_id, ends_mid_sentence(&c.text)) {
@@ -408,13 +375,30 @@ pub(crate) async fn build_artifact_detail(
             .map(|n| n.id),
         _ => None,
     };
-    // The same rule as `artifact_title`, and for the same reason: an ordinal in
-    // the ingest is not a name. Taken before the struct, which moves `c`.
-    let title = artifact_title(&c);
-    let tab = crate::web::ui::row_label(&c).text;
-    // A missing due moment is not a missing pane: most artifacts carry none.
-    // Undated reminders are left out, the same as `due_for` leaves them out of
-    // the list badge — there is no "in 2 h" to say about one.
+    Pivots {
+        related,
+        seen_together,
+        continues_at,
+    }
+}
+
+/// The lines of the pane that are about the artifact rather than of it: what
+/// the base found when it arrived, what has asked for it, the wordings it has
+/// had, and whether a reminder on it is due. One function for the pane and
+/// for `GET /api/v1/artifacts/{id}/about`.
+pub(crate) struct About {
+    pub tag: Option<String>,
+    pub probes: Vec<String>,
+    pub versions: Vec<(i64, String, String)>,
+    pub condensed: Option<String>,
+    pub due_in: Option<String>,
+}
+
+pub(crate) async fn about(
+    core: &crate::core::Core,
+    c: &crate::store::artifacts::Chunk,
+) -> Result<About> {
+    let artifact_id = c.id.as_str();
     let due_in = core
         .store
         .open_due_for_artifact(artifact_id)
@@ -482,6 +466,79 @@ pub(crate) async fn build_artifact_detail(
         .open_action_on(&c.id, crate::store::actions::Kind::Condense)
         .await?
         .map(|a| a.id);
+    Ok(About {
+        tag,
+        probes,
+        versions,
+        condensed,
+        due_in,
+    })
+}
+
+pub(crate) async fn build_artifact_detail(
+    core: &crate::core::Core,
+    artifact_id: &str,
+    terms: &str,
+) -> Result<ArtifactDetail> {
+    let c = core.store.get_artifact(artifact_id).await?;
+    let html = artifact_html(&c);
+    // A merged artifact belongs to no corpus, so there are no lines to show
+    // beside it and no span to highlight. Task 15 fills that half of the pane
+    // with the artifacts it was written from; until then it renders without a
+    // source block rather than claiming a document it did not come from.
+    let src = match &c.corpus_id {
+        Some(id) => Some(core.store.get_corpus(id).await?),
+        None => None,
+    };
+    // The lines the passage was drawn from, with a little context either
+    // side: the source column is the claim about where the text on screen came
+    // from, and what is on screen is this one artifact.
+    let slice = match &src {
+        Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
+        None => crate::web::corpus_view::CorpusSlice::default(),
+    };
+    // A missing lineage is not a missing pane, for the same reason a missing
+    // neighbour list is not: it is a layer over the artifact, and the artifact
+    // beside its source is what the page is for.
+    let lineage = crate::web::lineage_view::build(&core.store, artifact_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(artifact_id, error = %e, "no lineage for this pane");
+            Default::default()
+        });
+    // Built before the struct consumes `c`. The fragment is what makes the
+    // browser scroll to the span; the query parameters are what make the page
+    // highlight it.
+    // Empty for a merged artifact: there is no document to link to, and the
+    // template hides the whole source block rather than offering a dead link.
+    let source_at_lines = match (&c.corpus_id, c.corpus_span.as_ref()) {
+        (Some(cid), Some(sp)) => format!(
+            "/ui/corpora/{cid}?from={}&to={}#L{}",
+            sp.start_line, sp.end_line, sp.start_line
+        ),
+        (Some(cid), None) => format!("/ui/corpora/{cid}"),
+        (None, _) => String::new(),
+    };
+    let orphaned_source = c.flags.iter().any(|f| f == "orphaned_source");
+    let Pivots {
+        related,
+        seen_together,
+        continues_at,
+    } = pivots(core, &c).await;
+    // The same rule as `artifact_title`, and for the same reason: an ordinal in
+    // the ingest is not a name. Taken before the struct, which moves `c`.
+    let title = artifact_title(&c);
+    let tab = crate::web::ui::row_label(&c).text;
+    // A missing due moment is not a missing pane: most artifacts carry none.
+    // Undated reminders are left out, the same as `due_for` leaves them out of
+    // the list badge — there is no "in 2 h" to say about one.
+    let About {
+        tag,
+        probes,
+        versions,
+        condensed,
+        due_in,
+    } = about(core, &c).await?;
     Ok(ArtifactDetail {
         tag,
         probes,

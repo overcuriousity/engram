@@ -321,10 +321,9 @@ pub trait VectorStore: Send + Sync {
     /// when the store was connected.
     ///
     /// The default ignores them and delegates: only a store that applies
-    /// recency at all has anything to vary, and the tuning sweep and the idle
-    /// pass are the callers that need to — they rank the same pairs under
-    /// several settings in one pass, so the knobs cannot live in the
-    /// connection.
+    /// recency at all has anything to vary, and the idle pass is the caller
+    /// that needs to — it ranks the same pairs under several settings in one
+    /// pass, so the knobs cannot live in the connection.
     async fn search_weighted(
         &self,
         vector: &[f32],

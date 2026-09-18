@@ -1,0 +1,21 @@
+{
+  "related": [
+    {
+      "id": "01a0b400-7420-708c-930a-8f8b932ef942",
+      "label": "Payload filters 1",
+      "named": true,
+      "snippet": "artifact 1 about payload filters"
+    }
+  ],
+  "seen_together": [
+    {
+      "id": "01a0b400-7420-708c-930a-8f8b932ef942",
+      "label": "Payload filters 1",
+      "named": true,
+      "snippet": "artifact 1 about payload filters",
+      "why": "when asking: payload filter",
+      "corpus_title": "Qdrant notes"
+    }
+  ],
+  "continues_at": "01a0b400-7420-708c-930a-8f8b932ef942"
+}

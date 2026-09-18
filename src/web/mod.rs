@@ -5,6 +5,7 @@ pub mod app;
 pub mod artifact;
 pub mod assets;
 pub mod auth_routes;
+pub mod client;
 pub mod corpus;
 pub mod corpus_view;
 pub mod day;

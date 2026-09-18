@@ -112,8 +112,8 @@ pub struct Generation {
     pub embed_recipe: String,
     pub chat_model: String,
     pub parent_id: Option<String>,
-    /// The idle pass that proposed it. `None` for one minted at boot or by a
-    /// person pressing Apply.
+    /// The idle pass that proposed it. `None` for one minted at boot, or
+    /// restated from a `config.toml` a person edited.
     pub run_id: Option<String>,
     /// What the pass said it would gain, as an MRR delta over the replay. A
     /// generation with a parent and a prediction is one the base is watching.
@@ -167,8 +167,9 @@ impl Store {
     /// Only on top of the generation it was measured against. `None`, and
     /// nothing written, where `g.parent_id` is no longer the live one: the pass
     /// reads the live generation when it starts and adopts when it ends, and a
-    /// person's Apply in between has made another one live. Superseding that
-    /// unread put the loop's candidate back over the person's choice.
+    /// reopen restating the file in between has made another one live.
+    /// Superseding that unread put the loop's candidate back over the
+    /// person's choice.
     pub async fn adopt_generation(
         &self,
         g: &NewGeneration,
@@ -259,11 +260,11 @@ impl Store {
     /// Cheap and complete because a generation is a row. Nothing in the corpus
     /// was touched by adopting it, so nothing has to be untouched here.
     ///
-    /// The second `None` is a person's Apply landing while the idle pass was
-    /// measuring the generation it now takes back. Unchecked, the parent was
-    /// made live beside the generation the Apply had just minted — two live
-    /// rows — and every later pass stopped at the check that the live
-    /// generation describes the running parameters, until a restart.
+    /// The second `None` is a reopen restating the file while the idle pass
+    /// was measuring the generation it now takes back. Unchecked, the parent
+    /// was made live beside the generation the restatement had just minted —
+    /// two live rows — and every later pass stopped at the check that the
+    /// live generation describes the running parameters, until a restart.
     pub async fn revert_generation(&self, id: &str) -> Result<Option<Generation>> {
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         let parent: Option<String> =
@@ -434,20 +435,20 @@ const FILE_PARAMS_SEEN: &str = "evolve.file_params";
 ///   intent changed and the loop's move is the newer fact.
 ///
 /// "The loop adopted it" is `run_id`, and that qualifier is load-bearing: a
-/// generation a *person* applied carries none, and reverting one on the
-/// autonomy switch reverted the operator rather than the loop. The way in is
-/// the ordinary one. `insights::tune_apply` writes `config.toml`, swaps
-/// `core.ranking` and restates the generation, but the process-wide `Config`
-/// it was built from is loaded once at boot and never reloaded — so the next
-/// time this base is evicted and reopened, `generation_check` hands us the
-/// *stale* file params, and under `learn.mode = "learning"` (which resolves to
-/// `autonomous = "off"`) the old unconditional `!autonomous` undid the Apply in
-/// both the journal and the serving core.
+/// generation a *person* set carries none, and reverting one on the autonomy
+/// switch reverted the operator rather than the loop. The way in is the
+/// ordinary one: an edit to `config.toml` is restated as a generation at the
+/// next boot, but the process-wide `Config` a core is rebuilt from is loaded
+/// once and never reloaded — so a base evicted and reopened later can be
+/// handed *stale* file params by `generation_check`, and under
+/// `learn.mode = "learning"` (which resolves to `autonomous = "off"`) the old
+/// unconditional `!autonomous` undid the edit in both the journal and the
+/// serving core.
 ///
 /// The caller serves under whatever comes back. Without this a restart would
 /// quietly return the ranking to the file while every observation kept being
 /// written under a generation that no longer described it.
-/// Whether the loop chose this generation, as opposed to a person applying it.
+/// Whether the loop chose this generation, as opposed to a person setting it.
 ///
 /// Two ways in, and `run_id` is only the first. The replay sweep names the
 /// `eval_runs` row that argued for its candidate, so `run_id` is set — but
@@ -456,10 +457,10 @@ const FILE_PARAMS_SEEN: &str = "evolve.file_params";
 /// `run_id = NULL`. There is no run to name; the evidence is the observations
 /// themselves.
 ///
-/// What separates that from a person's Apply is `predicted`. `restate_generation`
-/// — the one path a hand reaches, from a `config.toml` edit or the Apply button
-/// — leaves both empty, and says so: "nothing proposed this and nothing is
-/// watching it". A lived adoption always carries the rate that argued for it.
+/// What separates that from a person's edit is `predicted`. `restate_generation`
+/// — the one path a hand reaches, from a `config.toml` edit — leaves both
+/// empty, and says so: "nothing proposed this and nothing is watching it". A
+/// lived adoption always carries the rate that argued for it.
 ///
 /// So: a run, or a parent and a prediction. `web::insights` already sorts the
 /// history by exactly this and renders the middle case as "adopted by the base
@@ -472,7 +473,7 @@ const FILE_PARAMS_SEEN: &str = "evolve.file_params";
 /// live one. A model change mints a generation that copies its parent's
 /// parameters and names neither a run nor a prediction — nothing proposed it
 /// and nothing watches it — so read where it stands it looked like a person's
-/// Apply, and switching autonomy off after an embedder change kept every knob
+/// edit, and switching autonomy off after an embedder change kept every knob
 /// the loop had moved. A generation whose models changed and whose parameters
 /// did not moved nothing, so the question passes to its parent.
 async fn loop_moved(store: &Store, g: &Generation) -> Result<bool> {
@@ -514,8 +515,8 @@ pub async fn boot_generation(
     Ok(live)
 }
 
-/// Journal parameters a person set — by editing the file or pressing Apply —
-/// as a generation of the same era, child of the one that was live.
+/// Journal parameters a person set by editing the file, as a generation of
+/// the same era, child of the one that was live.
 ///
 /// Every ranking change is a named generation, or the numbers gathered after
 /// it have nothing to be about. `run_id` and `predicted` stay empty: nothing
@@ -966,16 +967,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_autonomy_off_does_not_revert_what_a_person_applied() {
+    async fn switching_autonomy_off_does_not_revert_what_a_person_set() {
         // The loop's adoptions go back to the file when autonomy is switched
-        // off; a person's Apply must not, and `run_id` is what tells them
-        // apart. The way in is ordinary and had nothing to do with autonomy:
-        // `insights::tune_apply` writes `config.toml`, but the process-wide
-        // `Config` a core is rebuilt from is loaded once at boot, so the next
-        // open hands us the *stale* file params — and under
-        // `learn.mode = "learning"`, which resolves to `autonomous = "off"`,
-        // the old unconditional `!autonomous` undid the operator in both the
-        // journal and the serving core.
+        // off; a person's restated settings must not, and `run_id` is what
+        // tells them apart. The process-wide `Config` a core is rebuilt from
+        // is loaded once at boot, so a reopen can hand us *stale* file params
+        // — and under `learn.mode = "learning"`, which resolves to
+        // `autonomous = "off"`, the old unconditional `!autonomous` undid the
+        // operator in both the journal and the serving core.
         let store = Store::memory().await.unwrap();
         let file = p(0.05, Some(3));
         let first = boot_generation(&store, file, "recipe-a", "qwen", false)
@@ -993,7 +992,7 @@ mod tests {
         let g = boot_generation(&store, file, "recipe-a", "qwen", false)
             .await
             .unwrap();
-        assert_eq!(g.id, applied.id, "the Apply survives the reopen");
+        assert_eq!(g.id, applied.id, "the restatement survives the reopen");
         assert_eq!(g.params, p(0.25, Some(3)), "and is what the base serves");
     }
 
@@ -1036,9 +1035,9 @@ mod tests {
         );
     }
 
-    /// And a person's Apply carried across a model change is still theirs.
+    /// And a person's setting carried across a model change is still theirs.
     #[tokio::test]
-    async fn a_persons_apply_carried_across_a_model_change_survives_autonomy_off() {
+    async fn a_persons_setting_carried_across_a_model_change_survives_autonomy_off() {
         let store = Store::memory().await.unwrap();
         let file = p(0.05, Some(3));
         let first = boot_generation(&store, file, "recipe-a", "qwen", false)
@@ -1055,7 +1054,7 @@ mod tests {
     }
 
     /// The idle pass reads the live generation when it starts and writes when
-    /// it ends. A person's Apply in between is the newer fact, and neither a
+    /// it ends. A restatement in between is the newer fact, and neither a
     /// revert nor an adoption measured against the generation it replaced may
     /// write over it.
     #[tokio::test]
@@ -1068,7 +1067,7 @@ mod tests {
 
         assert!(
             store.revert_generation(&adopted).await.unwrap().is_none(),
-            "a generation the Apply superseded was taken back over it"
+            "a generation the restatement superseded was taken back over it"
         );
         let mut child = sample();
         child.parent_id = Some(adopted.clone());

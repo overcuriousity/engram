@@ -15,16 +15,14 @@
 use crate::tenants::Tenant;
 use askama::Template;
 use axum::Router;
-use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 
 use crate::error::Result;
 use crate::fmt::{ago, fmt_duration, fmt_elapsed, fmt_time};
 use crate::web::auth_routes::HtmlTemplate;
 use crate::web::markdown;
 use crate::web::state::AppState;
-use crate::web::tenant::CanJudge;
 use crate::web::ui::{SourceRow, row_label, row_subtitle, source_rows, sweep_label, tally_sweep};
 use crate::web::ui_error::UiResult;
 
@@ -76,11 +74,11 @@ const DEPRECATED_CAP: i64 = 50;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ui/insights", get(page))
-        .route("/ui/insights/tune/{run_id}/apply", post(tune_apply))
         .route("/ui/ops", get(moved))
 }
 
 /// Work that hit something and is waiting to try again by itself.
+#[derive(serde::Serialize)]
 pub struct RetryingRow {
     pub stage: String,
     pub target_id: String,
@@ -155,12 +153,14 @@ pub struct StaleRow {
 }
 
 /// One phrase of the last day: "412 links forgotten".
+#[derive(serde::Serialize)]
 pub(crate) struct SweepCount {
     n: i64,
     what: String,
 }
 
 /// One recorded run, as the history renders it.
+#[derive(serde::Serialize)]
 pub(crate) struct SweepRunRow {
     when: String,
     /// The stage in words. The identifier it was worded from is on the cell as
@@ -197,11 +197,6 @@ struct InsightsTemplate {
     /// with an em dash where nothing is being recorded — an empty measure is
     /// worse than no measure, because a zero reads as a score.
     retrieval: Retrieval,
-    /// What the sweeps have to say, rendered beside the retrieval figures the
-    /// sweep replays. `None` for a user who could not press its button: the
-    /// apply route is behind `CanJudge`, and a block offering what a press
-    /// would refuse is a lie.
-    tune: Option<TuneView>,
     /// What the base did while nobody was there. `None` before a generation
     /// exists, like `evolve`.
     sleep: Option<SleepView>,
@@ -769,6 +764,152 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
     Ok((set_aside, set_aside_capped))
 }
 
+/// The disclosure at the foot of Insights, as data: what the machine is
+/// doing, for the phone.
+#[derive(serde::Serialize)]
+pub(crate) struct Machine {
+    pub artifacts: i64,
+    pub vectors: u64,
+    pub jobs: Vec<(String, i64)>,
+    pub oldest_pending_secs: Option<i64>,
+    pub links: Option<crate::store::links::LinkCounts>,
+    pub last_day: Vec<SweepCount>,
+    pub last_day_failures: usize,
+    pub sweep_history: Vec<SweepRunRow>,
+    pub offer_rates: Vec<crate::store::pursuits::OfferRate>,
+    pub retrying: Vec<RetryingRow>,
+}
+
+pub(crate) async fn machine(tenant: &Tenant) -> Result<Machine> {
+    use sqlx::Row;
+    let artifacts: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+        .fetch_one(&tenant.core.store.pool)
+        .await?
+        .get("n");
+    let retrying: Vec<RetryingRow> = tenant
+        .core
+        .store
+        .retrying_jobs(50)
+        .await?
+        .into_iter()
+        .map(|j| RetryingRow {
+            stage: j.stage,
+            target_id: j.target_id,
+            attempts: j.attempts,
+            due: fmt_duration(j.next_attempt_secs),
+            last_error: j.last_error.unwrap_or_else(|| "—".into()),
+        })
+        .collect();
+    let day = tenant
+        .core
+        .store
+        .sweep_runs_since(crate::store::now() - 86_400, 500)
+        .await
+        .unwrap_or_default();
+    let last_day_failures = day.iter().filter(|r| r.outcome == "failed").count();
+    let mut totals: Vec<(String, i64)> = Vec::new();
+    for r in &day {
+        tally_sweep(&r.stage, &r.detail, &mut totals);
+    }
+    let last_day: Vec<SweepCount> = totals
+        .into_iter()
+        .map(|(what, n)| SweepCount { n, what })
+        .collect();
+    let sweep_history: Vec<SweepRunRow> = tenant
+        .core
+        .store
+        .sweep_history(TABLE_CAP)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let mut counts = Vec::new();
+            tally_sweep(&r.stage, &r.detail, &mut counts);
+            SweepRunRow {
+                when: fmt_time(r.started_at),
+                error: match r.outcome == "failed" {
+                    true => serde_json::from_str::<serde_json::Value>(&r.detail)
+                        .ok()
+                        .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
+                        .unwrap_or_else(|| "it failed".into()),
+                    false => String::new(),
+                },
+                took: fmt_elapsed(r.ended_at - r.started_at),
+                stage: sweep_label(&r.stage).to_string(),
+                stage_id: r.stage,
+                counts: counts
+                    .into_iter()
+                    .map(|(what, n)| SweepCount { n, what })
+                    .collect(),
+            }
+        })
+        .collect();
+    Ok(Machine {
+        artifacts,
+        vectors: tenant.core.vectors.count().await.unwrap_or(0),
+        jobs: tenant.core.store.job_counts().await?,
+        oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,
+        links: match tenant.core.associating() {
+            true => Some(tenant.core.store.link_counts().await?),
+            false => None,
+        },
+        last_day,
+        last_day_failures,
+        sweep_history,
+        offer_rates: match tenant.core.recommends() {
+            true => tenant
+                .core
+                .store
+                .offer_rates(crate::store::now() - 30 * 86_400)
+                .await
+                .unwrap_or_default(),
+            false => Vec::new(),
+        },
+        retrying,
+    })
+}
+
+/// What the base did on its own, in the sentences Insights says: last night,
+/// the ranking, and the pursuits line. Disclosure, not control — the tuning
+/// offer stays on the web, where the person who may apply it is at a keyboard.
+#[derive(serde::Serialize)]
+pub(crate) struct Report {
+    pub sleep: Option<SleepView>,
+    pub evolve: Option<EvolveView>,
+    /// Runs of searches that went quiet, and how many are on the gap list.
+    /// Null while `[learn]` is off.
+    pub pursuits: Option<(usize, usize)>,
+    /// How many pairs are waiting beyond the ones `GET /pairs` lists.
+    pub more_pairs: i64,
+}
+
+pub(crate) async fn report(tenant: &Tenant) -> Result<Report> {
+    let (_, more_pairs) = crate::web::ops::pair_rows(tenant).await?;
+    let pursuits = match tenant.core.learn.enabled {
+        true => {
+            let recent = tenant.core.store.recent_pursuits(50).await?;
+            let on_the_gap_list = tenant
+                .core
+                .store
+                .open_pursuit_gap_ids(tenant.core.embedder.model())
+                .await
+                .unwrap_or_default();
+            let unsatisfied = recent
+                .iter()
+                .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
+                .count();
+            Some((recent.len(), unsatisfied))
+        }
+        false => None,
+    };
+    Ok(Report {
+        sleep: sleep_view(&tenant.core).await?,
+        evolve: evolve_view(&tenant.core).await?,
+        pursuits,
+        more_pairs,
+    })
+}
+
 async fn page(tenant: Tenant) -> UiResult<Response> {
     use sqlx::Row;
 
@@ -901,16 +1042,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         })
         .collect();
 
-    // The column, read live rather than off the tenant snapshot, for the
-    // reason `web::tenant::CanJudge` gives at length: an open tenant outlives
-    // a grant, and the block and the gate on its button must agree.
-    let tune = match tenant.core.store.control.user(&tenant.user.subject).await {
-        Ok(Some(u)) if u.can_judge => Some(tune_view(&tenant, "").await?),
-        _ => None,
-    };
-
     Ok(HtmlTemplate(InsightsTemplate {
-        tune,
         sleep: sleep_view(&tenant.core).await?,
         evolve: evolve_view(&tenant.core).await?,
         held: tenant.core.store.held().await?,
@@ -998,197 +1130,16 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
     .into_response())
 }
 
-// ── What the sweeps have to say ─────────────────────────────────────────────
-
-/// A recommendation, ready to read and to take.
-pub struct Rec {
-    pub id: String,
-    /// What would change and what it buys, in one line.
-    pub line: String,
-    /// The pairs that move under it. Mandatory, never folded away: an
-    /// aggregate says something moved, and only this says what.
-    pub diff: Vec<String>,
-}
-
-pub struct TuneView {
-    pub rec: Option<Rec>,
-    /// Why there is nothing to offer, when a sweep has run and found nothing.
-    /// Empty before the first sweep, where the honest answer is silence.
-    pub quiet: String,
-    pub applied: Vec<String>,
-    /// What the press just before this one did.
-    pub flash: String,
-}
-
-#[derive(Template)]
-#[template(path = "_tune.html")]
-struct TuneTemplate {
-    tune: Option<TuneView>,
-}
-
 fn cap_str(c: Option<usize>) -> String {
     c.map_or("none".to_string(), |n| n.to_string())
-}
-
-/// One line naming what changes and what it is worth.
-///
-/// Every figure is read off the run rather than recomputed: a number and the
-/// settings that produced it travel together, which is the whole of what the
-/// `eval_runs` row is for.
-///
-/// "Replayed over N pairs" leads the figures rather than trailing them. They
-/// used to end the line, which put `MRR 0.50 → 0.60` immediately under the
-/// Retrieval measure's own MRR with nothing between them — two numbers of one
-/// name, one read from the ranks the searches actually gave and one from a
-/// replay of those searches through a door that skips priming. Neither is
-/// wrong; they are not the same quantity, and side by side they invited being
-/// read as one.
-fn describe(run: &crate::store::eval_runs::EvalRun) -> String {
-    let moved = moved_knobs(&run.base_params, &run.best_params);
-    let moved = match moved.is_empty() {
-        // Nothing in the params differs. Not reachable from a recommendation —
-        // the ladder does not offer a candidate equal to its base — but a row
-        // can be read back from an older base, and "· replayed over 120 pairs"
-        // with nothing before it is not a line.
-        true => params_str(&run.best_params),
-        false => moved.join(", "),
-    };
-    format!(
-        "{moved} · replayed over {} pairs: MRR {:.2} → {:.2}, recall@10 {:.2} → {:.2}",
-        run.pairs_used, run.base_mrr, run.best_mrr, run.base_recall, run.best_recall,
-    )
-}
-
-/// Every swept knob whose value differs, as `name before → after`.
-///
-/// All nine, and that is the fix: this line used to name four of them, chosen
-/// when four was all the sweep moved. `sitting_prime`, `prime_lift`,
-/// `spread_max`, `rerank` and `review_min` joined the ladder afterwards and
-/// nothing here learned about them, so an adopted sitting flip rendered as
-/// "recency 0.05 → 0.05, cap 3 → 3, pool ×3 → ×3, half-life 180d → 180d" — a
-/// change with no visible change, on the one line whose whole job is to say
-/// what moved.
-///
-/// Only what moved, rather than all nine both sides. On a sweep that turns one
-/// knob — which is what the ladder does — eight ninths of the full line is the
-/// same number twice, and the reader has to find the pair that differs. That
-/// is the same work the old line failed at, done by hand.
-///
-/// `params_str` below prints the full state and stays the place for that; it
-/// is what the generation history renders, where there is no "before" to
-/// compare against.
-fn moved_knobs(
-    a: &crate::store::generations::GenerationParams,
-    b: &crate::store::generations::GenerationParams,
-) -> Vec<String> {
-    let on = |v: bool| if v { "on" } else { "off" };
-    let mut out = Vec::new();
-    if a.recency_weight != b.recency_weight {
-        out.push(format!(
-            "recency {:.2} → {:.2}",
-            a.recency_weight, b.recency_weight
-        ));
-    }
-    if a.per_source_cap != b.per_source_cap {
-        out.push(format!(
-            "cap {} → {}",
-            cap_str(a.per_source_cap),
-            cap_str(b.per_source_cap)
-        ));
-    }
-    if a.candidate_multiplier != b.candidate_multiplier {
-        out.push(format!(
-            "pool ×{} → ×{}",
-            a.candidate_multiplier, b.candidate_multiplier
-        ));
-    }
-    if a.recency_half_life_days != b.recency_half_life_days {
-        out.push(format!(
-            "half-life {}d → {}d",
-            a.recency_half_life_days, b.recency_half_life_days
-        ));
-    }
-    if a.prime_lift != b.prime_lift {
-        out.push(format!("lift {} → {}", a.prime_lift, b.prime_lift));
-    }
-    if a.sitting_prime != b.sitting_prime {
-        out.push(format!(
-            "sitting {} → {}",
-            on(a.sitting_prime),
-            on(b.sitting_prime)
-        ));
-    }
-    if a.spread_max != b.spread_max {
-        out.push(format!("spread {} → {}", a.spread_max, b.spread_max));
-    }
-    if a.rerank != b.rerank {
-        out.push(format!("rerank {} → {}", on(a.rerank), on(b.rerank)));
-    }
-    if a.review_min != b.review_min {
-        out.push(format!("review {:.2} → {:.2}", a.review_min, b.review_min));
-    }
-    out
-}
-
-fn rank_str(r: Option<usize>) -> String {
-    r.map_or("not in the first ten".to_string(), |i| {
-        format!("position {}", i + 1)
-    })
-}
-
-async fn tune_view(tenant: &Tenant, flash: &str) -> Result<TuneView> {
-    let rec = tenant
-        .core
-        .store
-        .open_recommendation()
-        .await?
-        .map(|run| Rec {
-            line: describe(&run),
-            diff: run
-                .diff
-                .iter()
-                .map(|d| format!("{} — {} → {}", d.query, rank_str(d.base), rank_str(d.new)))
-                .collect(),
-            id: run.id,
-        });
-    // Only where a sweep has actually run and come back empty. Before the
-    // first one there is nothing to explain, and a line explaining nothing is
-    // one more thing on a page that has enough.
-    let quiet = match (&rec, tenant.core.store.latest_eval_run().await?) {
-        (None, Some(last)) if !last.recommended => format!(
-            "last sweep {}: no improvement found over {} pairs.",
-            ago(last.created_at),
-            last.pairs_used
-        ),
-        _ => String::new(),
-    };
-    let applied = tenant
-        .core
-        .store
-        .applied_eval_runs(10)
-        .await?
-        .iter()
-        .map(|r| {
-            format!(
-                "{} — {}",
-                ago(r.applied_at.unwrap_or(r.created_at)),
-                describe(r)
-            )
-        })
-        .collect();
-    Ok(TuneView {
-        rec,
-        quiet,
-        applied,
-        flash: flash.to_string(),
-    })
 }
 
 // ── Last night ──────────────────────────────────────────────────────────────
 
 /// The `_sleep.html` block: what the base did while nobody was there, in
 /// words, and what nothing has ever asked for.
-struct SleepView {
+#[derive(serde::Serialize)]
+pub(crate) struct SleepView {
     /// One sentence chain per sleep, newest first.
     runs: Vec<String>,
     /// How long a base has to be quiet before it sleeps, for the empty state.
@@ -1266,7 +1217,7 @@ fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
     s
 }
 
-async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
+pub(crate) async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
     if core.store.live_generation().await?.is_none() {
         return Ok(None);
     }
@@ -1295,7 +1246,8 @@ async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
 // ── What the base did on its own ────────────────────────────────────────────
 
 /// The `_evolve.html` block: the state of the self-tuning loop, in words.
-struct EvolveView {
+#[derive(serde::Serialize)]
+pub(crate) struct EvolveView {
     /// Why the loop is not moving, when it is not. Said before anything else.
     suspended: Option<String>,
     /// Which mode the base is in, in every mode. `standing` below says it only
@@ -1400,7 +1352,7 @@ pub(crate) fn short(id: &str) -> &str {
     &id[id.len().saturating_sub(8)..]
 }
 
-async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
+pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
     let Some(live) = core.store.live_generation().await? else {
         return Ok(None);
     };
@@ -1534,186 +1486,9 @@ async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
     }))
 }
 
-// ── Taking a recommendation live ────────────────────────────────────────────
-
-/// The tuning block, redrawn, with a line about what just happened.
-async fn tune_fragment(tenant: &Tenant, line: &str) -> UiResult<Response> {
-    Ok(HtmlTemplate(TuneTemplate {
-        tune: Some(tune_view(tenant, line).await?),
-    })
-    .into_response())
-}
-
-/// What an Apply writes: the running parameters, with every knob the run moved
-/// set to what it recommends.
-///
-/// Not the run's `best_params` whole. A run stores the knobs that existed when
-/// it was written, and a row from before a knob joined the ladder reads that
-/// knob back as the shipped default — on both sides, which is how it says the
-/// knob did not move. Applied whole, those defaults went into `config.toml`
-/// over whatever the operator had set, for knobs the line above the button
-/// never named. Moved is decided the way `moved_knobs` decides it for that
-/// line, and the fields are destructured so a knob added later has to be
-/// answered for here.
-fn applied_over(
-    current: crate::core::ranking::RankingParams,
-    run: &crate::store::eval_runs::EvalRun,
-) -> crate::core::ranking::RankingParams {
-    let base = run.base_params;
-    let crate::store::generations::GenerationParams {
-        recency_weight,
-        per_source_cap,
-        candidate_multiplier,
-        recency_half_life_days,
-        prime_lift,
-        spread_max,
-        rerank,
-        review_min,
-        sitting_prime,
-    } = run.best_params;
-    let mut p = current;
-    if base.recency_weight != recency_weight {
-        p.recency_weight = recency_weight;
-    }
-    if base.per_source_cap != per_source_cap {
-        p.per_source_cap = per_source_cap;
-    }
-    if base.candidate_multiplier != candidate_multiplier {
-        p.candidate_multiplier = candidate_multiplier;
-    }
-    if base.recency_half_life_days != recency_half_life_days {
-        p.recency_half_life_days = recency_half_life_days;
-    }
-    if base.prime_lift != prime_lift {
-        p.prime_lift = prime_lift;
-    }
-    if base.spread_max != spread_max {
-        p.spread_max = spread_max;
-    }
-    if base.rerank != rerank {
-        p.rerank = rerank;
-    }
-    if base.review_min != review_min {
-        p.review_min = review_min;
-    }
-    if base.sitting_prime != sitting_prime {
-        p.sitting_prime = sitting_prime;
-    }
-    p
-}
-
-/// Apply the open recommendation: the file first, then the running parameters,
-/// then the stamp.
-///
-/// The order is the guarantee. A hot swap the file does not carry would vanish
-/// on the next restart, leaving the tuning history claiming a change that is no
-/// longer in force — and the file is the one place an operator can read what
-/// their server is doing.
-async fn tune_apply(
-    State(st): State<AppState>,
-    CanJudge(tenant): CanJudge,
-    Path(run_id): Path<String>,
-) -> UiResult<Response> {
-    let Some(run) = tenant.core.store.eval_run(&run_id).await? else {
-        return Err(crate::error::Error::NotFound.into());
-    };
-    // A recommendation that was already taken, a run that never was one, or
-    // one a later sweep has since spoken over: all three arrive from a page
-    // left open, and none is a reason to write anything. Asked of the store
-    // rather than of this row, so what the button may take is exactly what the
-    // page may offer.
-    let open = tenant.core.store.open_recommendation().await?;
-    if open.as_ref().is_none_or(|o| o.id != run.id) {
-        return tune_fragment(
-            &tenant,
-            "that sweep is not an open recommendation — nothing was changed.",
-        )
-        .await;
-    }
-
-    let current = *tenant.core.ranking.read().expect("ranking lock");
-    let params = applied_over(current, &run);
-    if let Err(e) = crate::config::write_ranking(&st.config_path, &params) {
-        // Said here rather than raised: a read-only config file is an ordinary
-        // thing to find out about, and the operator is looking at the button
-        // they just pressed. Nothing was swapped and nothing was stamped, so
-        // the recommendation stays open and can be applied once the file can
-        // be written.
-        tracing::warn!(error = %e, path = %st.config_path.display(), "config.toml not written");
-        return tune_fragment(
-            &tenant,
-            "config.toml could not be written, so nothing was applied. \
-             The recommendation is still here.",
-        )
-        .await;
-    }
-    *tenant.core.ranking.write().expect("ranking lock") = params;
-    // Every ranking change is a named generation, or the observations written
-    // after it are evidence about settings that are not running. Logged and
-    // carried past on failure: the file and the parameters are already
-    // changed, and the journal missing a row is the smaller wrong.
-    match tenant.core.store.live_generation().await {
-        Ok(Some(live)) => {
-            if let Err(e) = crate::store::generations::restate_generation(
-                &tenant.core.store,
-                &live,
-                params.into(),
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "applied settings were not journaled as a generation");
-            }
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!(error = %e, "could not read the live generation"),
-    }
-    // The stamp is what closes the recommendation, so its answer is the one
-    // thing here that must not be dropped. `false` is the second press of the
-    // same button arriving while the first was still in flight: same run, same
-    // parameters, so the file and the running settings say what this press
-    // would have written anyway — but only one press gets to report a change.
-    // An error is worse than either, and raising it would have answered a 500
-    // to a request that did change the file and the parameters: the operator
-    // would have read "nothing happened" about a server that is now running
-    // settings its history does not mention.
-    match tenant.core.store.mark_eval_run_applied(&run_id).await {
-        // The environment is layered over the file, so where one of these keys
-        // is set the write is real and the restart undoes it. Said now, beside
-        // the button, rather than discovered months later as a history claiming
-        // settings the server stopped running at its last boot.
-        Ok(true) => {
-            let line = match crate::config::ranking_keys_in_env().as_slice() {
-                [] => "applied — the next search runs with these settings.".to_string(),
-                keys => format!(
-                    "applied — the next search runs with these settings, but {} is set in the \
-                     environment and will overrule the file at the next restart.",
-                    keys.join(" and ")
-                ),
-            };
-            tune_fragment(&tenant, &line).await
-        }
-        Ok(false) => {
-            tune_fragment(
-                &tenant,
-                "that sweep had already been applied — nothing changed.",
-            )
-            .await
-        }
-        Err(e) => {
-            tracing::error!(error = %e, run = %run_id, "applied run not stamped");
-            tune_fragment(
-                &tenant,
-                "these settings are live and written to config.toml, but the run could not be \
-                 recorded as applied — it may be offered again.",
-            )
-            .await
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::web::test_support::{app_with_cookie, app_with_cookie_ungranted, body_of};
+    use crate::web::test_support::{app_with_cookie, body_of};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -1737,73 +1512,6 @@ mod tests {
             super::params_str(&off).contains("sitting off"),
             "{}",
             super::params_str(&off)
-        );
-    }
-
-    /// The recommendation line has to name the knob that moved.
-    ///
-    /// It used to print four of the nine the sweep turns, chosen when four was
-    /// all it turned. `sitting_prime`, `prime_lift`, `spread_max`, `rerank` and
-    /// `review_min` joined the ladder afterwards, so an adopted sitting flip
-    /// rendered as "recency 0.05 → 0.05, cap 3 → 3, pool ×3 → ×3, half-life
-    /// 180d → 180d" — a change with no visible change, on the one line whose
-    /// whole job is to say what changed.
-    #[test]
-    fn the_recommendation_line_names_every_knob_that_moved() {
-        use crate::store::generations::GenerationParams;
-        let base = GenerationParams::default();
-
-        let flip = GenerationParams {
-            sitting_prime: !base.sitting_prime,
-            ..base
-        };
-        let line = super::moved_knobs(&base, &flip).join(", ");
-        assert!(line.contains("sitting"), "{line}");
-        assert_eq!(
-            super::moved_knobs(&base, &flip).len(),
-            1,
-            "and names nothing that stood still: {line}"
-        );
-
-        // The other four latecomers, each on its own.
-        let cases: Vec<(GenerationParams, &str)> = vec![
-            (
-                GenerationParams {
-                    rerank: !base.rerank,
-                    ..base
-                },
-                "rerank",
-            ),
-            (
-                GenerationParams {
-                    spread_max: base.spread_max + 1,
-                    ..base
-                },
-                "spread",
-            ),
-            (
-                GenerationParams {
-                    prime_lift: base.prime_lift + 1,
-                    ..base
-                },
-                "lift",
-            ),
-            (
-                GenerationParams {
-                    review_min: base.review_min + 0.1,
-                    ..base
-                },
-                "review",
-            ),
-        ];
-        for (candidate, name) in cases {
-            let line = super::moved_knobs(&base, &candidate).join(", ");
-            assert!(line.contains(name), "{name} is not named in {line:?}");
-        }
-
-        assert!(
-            super::moved_knobs(&base, &base).is_empty(),
-            "nothing moved, nothing named"
         );
     }
 
@@ -2073,21 +1781,6 @@ mod tests {
         assert_eq!(embedder.calls(), before, "the page embeds something");
     }
 
-    async fn post(app: &axum::Router, uri: &str, cookie: &str) -> axum::http::Response<Body> {
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .method("POST")
-                    .header("cookie", cookie)
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    }
-
     /// The deck is gone: pairs are made at the moment of the search — a result
     /// read, a bar answered, a gap pressed on the rail — and its page answers
     /// like any other path nobody routed.
@@ -2109,224 +1802,6 @@ mod tests {
                 .unwrap();
             assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
         }
-    }
-
-    /// An app whose store already holds one recommendation, plus the path to
-    /// the configuration file that app would rewrite.
-    async fn tune_app(
-        recommended: bool,
-    ) -> (
-        axum::Router,
-        String,
-        crate::core::Core,
-        String,
-        std::path::PathBuf,
-    ) {
-        let core = crate::core::test_support::test_core().await;
-        // Something held: the measures — and the tune block beside them —
-        // render only over a base with anything in it.
-        core.ingest("raw for tuning", "web", None).await.unwrap();
-        let base = crate::store::eval_runs::RunParams {
-            recency_weight: 0.05,
-            per_source_cap: Some(3),
-            ..Default::default()
-        };
-        let best = if recommended {
-            crate::store::eval_runs::RunParams {
-                recency_weight: 0.1,
-                per_source_cap: None,
-                ..Default::default()
-            }
-        } else {
-            base
-        };
-        let run = core
-            .store
-            .record_eval_run(&crate::store::eval_runs::NewEvalRun {
-                judged_count: 50,
-                pairs_used: 12,
-                pairs_skipped: 0,
-                base,
-                base_recall: 0.70,
-                base_mrr: 0.50,
-                best,
-                best_recall: 0.80,
-                best_mrr: 0.60,
-                diff: vec![crate::store::eval_runs::DiffRow {
-                    query: "the image will not mount".into(),
-                    base: Some(5),
-                    new: Some(1),
-                }],
-                recommended,
-            })
-            .await
-            .unwrap();
-        let handle = core.clone();
-        let (app, cookie, state) = crate::web::test_support::app_with_state(core).await;
-        let path = state.config_path.as_ref().clone();
-        (app, cookie, handle, run, path)
-    }
-
-    /// The gate, from the outside: a signed-in user without the grant is
-    /// refused at the one route that writes `config.toml`, and is shown no
-    /// block whose button that refusal would answer.
-    #[tokio::test]
-    async fn an_ungranted_user_gets_neither_the_button_nor_the_door() {
-        let core = crate::core::test_support::test_core().await;
-        core.ingest("raw for tuning", "web", None).await.unwrap();
-        let run = core
-            .store
-            .record_eval_run(&crate::store::eval_runs::NewEvalRun {
-                judged_count: 50,
-                pairs_used: 12,
-                pairs_skipped: 0,
-                base: crate::store::eval_runs::RunParams {
-                    recency_weight: 0.05,
-                    per_source_cap: Some(3),
-                    ..Default::default()
-                },
-                base_recall: 0.70,
-                base_mrr: 0.50,
-                best: crate::store::eval_runs::RunParams {
-                    recency_weight: 0.1,
-                    per_source_cap: None,
-                    ..Default::default()
-                },
-                best_recall: 0.80,
-                best_mrr: 0.60,
-                diff: vec![],
-                recommended: true,
-            })
-            .await
-            .unwrap();
-        let (app, cookie) = app_with_cookie_ungranted(core).await;
-
-        let res = post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
-
-        let page = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/ui/insights")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(page.status(), StatusCode::OK);
-        let html = body_of(page).await;
-        assert!(
-            !html.contains("/ui/insights/tune/"),
-            "the page offers a button its own gate refuses: {html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_open_recommendation_is_offered_with_the_pairs_that_moved() {
-        let (app, cookie, _core, run, _) = tune_app(true).await;
-        let body = insights_of(&app, &cookie).await;
-        assert!(body.contains(&format!("/ui/insights/tune/{run}/apply")));
-        assert!(body.contains("recency"), "the line must name what changes");
-        assert!(body.contains("cap"), "both knobs are named");
-        assert!(body.contains("MRR 0.50 → 0.60"), "{body}");
-        assert!(
-            body.contains("what changes"),
-            "the diff is the part that decides it, not an extra"
-        );
-        assert!(
-            body.contains("the image will not mount"),
-            "the moved pair is named by its own query"
-        );
-        assert!(
-            body.contains("replayed over 12 pairs"),
-            "the sweep's figures are named as a replay: {body}"
-        );
-    }
-
-    async fn insights_of(app: &axum::Router, cookie: &str) -> String {
-        let res = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/ui/insights")
-                    .header("cookie", cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        body_of(res).await
-    }
-
-    #[tokio::test]
-    async fn applying_writes_the_file_swaps_the_parameters_and_stamps_the_run() {
-        // All three or none: a swap the file does not carry vanishes on
-        // restart, and a stamp without either is a history of things that did
-        // not happen.
-        let (app, cookie, core, run, path) = tune_app(true).await;
-        let res = post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-        assert_eq!(res.status(), StatusCode::OK);
-
-        let live = *core.ranking.read().unwrap();
-        assert_eq!(live.recency_weight, 0.1);
-        assert_eq!(live.per_source_cap, None);
-
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains("recency_weight = 0.1"), "{written}");
-        assert!(written.contains("per_source_cap = 0"), "{written}");
-        assert!(
-            written.contains("# a comment the apply path must not eat"),
-            "the operator's file came back as a machine's: {written}"
-        );
-
-        assert!(
-            core.store
-                .eval_run(&run)
-                .await
-                .unwrap()
-                .unwrap()
-                .applied_at
-                .is_some()
-        );
-        assert!(core.store.open_recommendation().await.unwrap().is_none());
-    }
-
-    /// A run from before a knob joined the ladder reads that knob back as the
-    /// shipped default on both sides. Applying it moves what it moved, and
-    /// leaves what an operator set by hand where they set it.
-    #[tokio::test]
-    async fn applying_an_older_run_leaves_the_knobs_it_never_measured_alone() {
-        let (app, cookie, core, run, path) = tune_app(true).await;
-        // The row as a sweep that knew two knobs wrote it.
-        sqlx::query("UPDATE eval_runs SET base_params = ?, best_params = ? WHERE id = ?")
-            .bind(r#"{"recency_weight":0.05,"per_source_cap":3}"#)
-            .bind(r#"{"recency_weight":0.1,"per_source_cap":null}"#)
-            .bind(&run)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        {
-            let mut r = core.ranking.write().unwrap();
-            r.review_min = 0.84;
-            r.spread_max = 5;
-        }
-
-        let res = post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-        assert_eq!(res.status(), StatusCode::OK);
-
-        let live = *core.ranking.read().unwrap();
-        assert_eq!(live.recency_weight, 0.1);
-        assert_eq!(live.per_source_cap, None);
-        assert_eq!(
-            live.review_min, 0.84,
-            "a knob the run never measured was reset to its default"
-        );
-        assert_eq!(live.spread_max, 5);
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains("review_min = 0.84"), "{written}");
     }
 
     #[tokio::test]
@@ -2552,154 +2027,5 @@ mod tests {
         let body = insights(core).await;
         assert!(body.contains("Autonomy is off"), "{body}");
         assert!(!body.contains("under watch"), "{body}");
-    }
-
-    #[tokio::test]
-    async fn applying_journals_the_change_as_a_generation() {
-        // Every ranking change is a named generation, or the observations
-        // written after it are evidence about settings that are not running.
-        let (app, cookie, core, run, _) = tune_app(true).await;
-        let params = *core.ranking.read().unwrap();
-        let before = core
-            .store
-            .record_generation(&crate::store::generations::NewGeneration {
-                params: params.into(),
-                embed_recipe: "recipe-a".into(),
-                chat_model: "qwen".into(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-
-        let live = core.store.live_generation().await.unwrap().unwrap();
-        assert_ne!(live.id, before);
-        assert_eq!(live.parent_id.as_deref(), Some(before.as_str()));
-        assert_eq!(
-            crate::core::ranking::RankingParams::from(live.params),
-            *core.ranking.read().unwrap(),
-            "the generation says what is running"
-        );
-        assert!(
-            live.predicted.is_none(),
-            "a hand-applied change is not watched"
-        );
-    }
-
-    #[tokio::test]
-    async fn applying_answers_with_the_block_it_replaces() {
-        // htmx swaps `#judge-tune` by id: a reply that is not that block would
-        // leave the recommendation on screen after it was taken.
-        let (app, cookie, _core, run, _) = tune_app(true).await;
-        let res = post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-        let body = body_of(res).await;
-        assert!(body.contains(r#"id="judge-tune""#), "{body}");
-        assert!(body.contains("applied"), "{body}");
-        assert!(!body.contains("/apply"), "it is still offering itself");
-    }
-
-    #[tokio::test]
-    async fn a_run_that_is_not_an_open_recommendation_changes_nothing() {
-        // Both arrive from a page left open: one was never a recommendation,
-        // the other has already been taken.
-        for second_press in [false, true] {
-            let (app, cookie, core, run, path) = tune_app(second_press).await;
-            let before = std::fs::read_to_string(&path).unwrap();
-            if second_press {
-                assert_eq!(
-                    post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie)
-                        .await
-                        .status(),
-                    StatusCode::OK
-                );
-            }
-            let live_before = *core.ranking.read().unwrap();
-
-            let res = post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-            assert_eq!(
-                res.status(),
-                StatusCode::OK,
-                "a stale press is an answer, not a 500"
-            );
-            assert_eq!(*core.ranking.read().unwrap(), live_before);
-            if !second_press {
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn a_run_that_does_not_exist_is_a_404() {
-        let (app, cookie, _core, _, _) = tune_app(true).await;
-        assert_eq!(
-            post(&app, "/ui/insights/tune/no-such-run/apply", &cookie)
-                .await
-                .status(),
-            StatusCode::NOT_FOUND
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unwritable_config_leaves_the_running_parameters_alone() {
-        // The whole apply or none of it. The recommendation stays open, so it
-        // can be taken once the file can be written.
-        let (app, cookie, core, run, path) = tune_app(true).await;
-        std::fs::remove_file(&path).unwrap();
-        let before = *core.ranking.read().unwrap();
-
-        let res = post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-        assert_eq!(
-            res.status(),
-            StatusCode::OK,
-            "the operator is told, not 500'd"
-        );
-
-        assert_eq!(*core.ranking.read().unwrap(), before, "swapped anyway");
-        assert!(
-            core.store
-                .eval_run(&run)
-                .await
-                .unwrap()
-                .unwrap()
-                .applied_at
-                .is_none(),
-            "stamped a change that was never made"
-        );
-        assert!(core.store.open_recommendation().await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn a_sweep_that_found_nothing_says_so_rather_than_going_quiet() {
-        // Silence reads as "no sweep has ever run", which is a different fact
-        // and the wrong one.
-        let (app, cookie, _core, _, _) = tune_app(false).await;
-        let body = insights_of(&app, &cookie).await;
-        assert!(body.contains("no improvement found"), "{body}");
-        assert!(!body.contains("/apply"), "nothing to apply was offered");
-    }
-
-    #[tokio::test]
-    async fn before_any_sweep_the_block_says_nothing_at_all() {
-        let core = crate::core::test_support::test_core().await;
-        core.ingest("raw for tuning", "web", None).await.unwrap();
-        let (app, cookie) = app_with_cookie(core).await;
-        let body = insights_of(&app, &cookie).await;
-        assert!(!body.contains("no improvement found"));
-        assert!(!body.contains("/apply"));
-        assert!(!body.contains("tuning history"));
-    }
-
-    #[tokio::test]
-    async fn an_applied_change_stands_in_the_history_with_its_numbers() {
-        // The provenance rule, made structural: a number without the settings
-        // that produced it cannot be compared against anything.
-        let (app, cookie, _core, run, _) = tune_app(true).await;
-        post(&app, &format!("/ui/insights/tune/{run}/apply"), &cookie).await;
-
-        let body = insights_of(&app, &cookie).await;
-        assert!(body.contains("tuning history"), "{body}");
-        assert!(body.contains("MRR 0.50 → 0.60"), "{body}");
-        assert!(body.contains("cap 3 → none"), "{body}");
     }
 }

@@ -130,6 +130,21 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         .await
         .unwrap();
     let ids: Vec<String> = arts.iter().map(|a| a.id.clone()).collect();
+    // Embedded, so the related route has a neighbour to list; and linked, so
+    // it has something seen together to list beside it.
+    crate::jobs::embed::run_corpus(&core, &doc.id)
+        .await
+        .unwrap();
+    s.bump_link(
+        &ids[0],
+        &ids[1],
+        5.0,
+        Some("payload filter"),
+        30.0,
+        crate::store::now(),
+    )
+    .await
+    .unwrap();
     // A merge of the two, and an earlier wording of it.
     let merged = s
         .insert_merged_artifact(
@@ -279,6 +294,36 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         &get(format!("/api/v1/artifacts/{}/lineage", merged.id)).await,
     );
     check(
+        "related.json",
+        &get(format!("/api/v1/artifacts/{}/related", ids[0])).await,
+    );
+    check(
+        "source.json",
+        &get(format!("/api/v1/artifacts/{}/source", ids[0])).await,
+    );
+    check("status.json", &get("/api/v1/status".into()).await);
+    check(
+        "about.json",
+        &get(format!("/api/v1/artifacts/{}/about", ids[0])).await,
+    );
+    check(
+        "bands.json",
+        &get(format!("/api/v1/corpora/{}/bands", doc.id)).await,
+    );
+    check("facets.json", &get("/api/v1/facets".into()).await);
+    check(
+        "echo.json",
+        &get("/api/v1/echo?q=a%20short%20note".into()).await,
+    );
+    check("feedback.json", &get("/api/v1/feedback".into()).await);
+    check("lang.json", &get("/api/v1/settings/lang".into()).await);
+    check("notify.json", &get("/api/v1/settings/notify".into()).await);
+    check(
+        "machine.json",
+        &get("/api/v1/insights/machine".into()).await,
+    );
+    check("report.json", &get("/api/v1/insights/report".into()).await);
+    check(
         "versions.json",
         &get(format!("/api/v1/artifacts/{}/versions", merged.id)).await,
     );
@@ -305,10 +350,12 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         crate::cli::search::fixture::hit("sure", 0.9, false, false),
         crate::cli::search::fixture::hit("loose", 0.2, true, true),
     ];
-    check(
-        "search.json",
-        &crate::web::api::search_body(&hits, None).unwrap(),
-    );
+    // As the app's door answers it: the event the list was recorded under
+    // beside the rows, which is what an open, a verdict and a gap name.
+    let mut search = crate::web::api::search_body(&hits, None).unwrap();
+    search["event"] = serde_json::Value::String("ev-search".into());
+    search["items"][0]["continues_to"] = serde_json::Value::String("art-loose".into());
+    check("search.json", &search);
     check(
         "offer.json",
         &serde_json::json!({ "offer": crate::web::api::OfferCard {

@@ -294,13 +294,10 @@ pub struct Core {
     /// `image::MAX_CONCURRENT_DECODES`; shared by every clone, because a
     /// per-clone permit would bound nothing.
     pub decodes: Arc<tokio::sync::Semaphore>,
-    /// The two scoring knobs a tuning sweep may move. Shared by every clone,
-    /// like the background queue: applying a recommendation has to change the
-    /// search the next request runs, not the one this handler holds.
+    /// The ranking knobs the idle pass may move. Shared by every clone, like
+    /// the background queue: an adoption has to change the search the next
+    /// request runs, not the one this handler holds.
     pub ranking: Arc<std::sync::RwLock<crate::core::ranking::RankingParams>>,
-    /// Whether a sweep is in flight, so a run of verdicts starts one and not
-    /// one each.
-    pub tuning: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What the idle pass has written to the corpus on its own in the last seven
@@ -593,7 +590,6 @@ impl Core {
                     cfg.infer.rerank.is_some(),
                 ),
             )),
-            tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             weak_floor: cfg.vector.weak_below,
             // From the subject's working memory, not a fresh atomic: see
             // `Working::line`. A core built for one pass and dropped after it
@@ -907,7 +903,6 @@ pub mod test_support {
                     ..Default::default()
                 },
             )),
-            tuning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // The fake embedder's vectors are not a semantic space, so a
             // realistic threshold would mark arbitrary results weak and every
             // search test would be asserting against noise. Tests that care

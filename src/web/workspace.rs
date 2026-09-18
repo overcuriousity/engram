@@ -652,9 +652,31 @@ struct AskForm {
 /// the button is not rendered where no speech model is configured. The answer
 /// is `text/plain` rather than a fragment because the destination is a
 /// textarea's value, not the DOM.
-async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> UiResult<Response> {
+async fn transcribe(tenant: Tenant, multipart: axum::extract::Multipart) -> UiResult<Response> {
+    let text = hear(&tenant, multipart).await?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response())
+}
+
+/// One recording in, the words in it back. The whole of what `/ui/transcribe`
+/// and `/api/v1/transcribe` do, so the phone's microphone and the browser's
+/// are one door with two addresses rather than two doors that drift.
+///
+/// A closed door is a 404. A recording of nothing is a press and a release,
+/// which happens by accident on every touch screen: answered as the empty
+/// transcript it is, without spending a call on it.
+pub(crate) async fn hear(
+    tenant: &Tenant,
+    mut multipart: axum::extract::Multipart,
+) -> Result<String> {
     let Some(model) = tenant.core.transcriber.clone() else {
-        return Err(Error::NotFound.into());
+        return Err(Error::NotFound);
     };
 
     let mut audio: Option<(Vec<u8>, String)> = None;
@@ -679,31 +701,12 @@ async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> 
         break;
     }
     let Some((bytes, mime)) = audio else {
-        return Err(Error::Validation("no audio part".into()).into());
+        return Err(Error::Validation("no audio part".into()));
     };
-    // A recording of nothing is a press and a release, which happens by
-    // accident on every touch screen. Answered as the empty transcript it is,
-    // without spending a call on it.
     if bytes.is_empty() {
-        return Ok((
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            String::new(),
-        )
-            .into_response());
+        return Ok(String::new());
     }
-
-    let text = model.transcribe(&bytes, &mime).await?;
-    Ok((
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
-        text,
-    )
-        .into_response())
+    model.transcribe(&bytes, &mime).await
 }
 
 async fn ask_submit(
@@ -894,7 +897,7 @@ fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
     .map_err(|e| Error::Internal(e.to_string()))
 }
 
-fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
+pub(crate) fn verdict_label(v: crate::store::asks::AskVerdict) -> String {
     use crate::store::asks::AskVerdict::*;
     match v {
         Right => "right",
@@ -967,24 +970,31 @@ fn already_judged() -> Response {
     .into_response()
 }
 
-/// The bar under an opened result. `none` is the undo; `no` is "not this
-/// one", which leaves the search a question for the deck.
-async fn search_verdict(
-    tenant: Tenant,
-    Path(id): Path<String>,
-    Form(f): Form<SearchVerdictForm>,
-) -> UiResult<Response> {
+/// The bar under an opened result, for both doors. `none` is the undo; `no`
+/// is "not this one", which leaves the search a question for the deck.
+///
+/// `Some(state)` is what the bar shows next — `hit`, `no`, `skip`, or empty
+/// after an undo. `None` is the one refusal that is not an error: the search
+/// was already judged, by another tab or another door, and the bar says so
+/// in words. Every guard reaches the person as that same sentence because
+/// from where they sit it is the same fact.
+pub(crate) async fn judge_search(
+    tenant: &Tenant,
+    id: &str,
+    verdict: &str,
+    artifact_id: &str,
+) -> Result<Option<&'static str>> {
     if !tenant.core.learn.enabled {
-        return Err(Error::NotFound.into());
+        return Err(Error::NotFound);
     }
     use crate::store::feedback::Labeller;
     let store = &tenant.core.store;
     // The id comes off the page, so it is whatever the caller sent. One check
     // for all four answers below — see `Store::event_is_mine`.
-    if !store.event_is_mine(&id, &tenant.user.subject).await? {
-        return Err(Error::NotFound.into());
+    if !store.event_is_mine(id, &tenant.user.subject).await? {
+        return Err(Error::NotFound);
     }
-    let state = match f.verdict.as_str() {
+    let state = match verdict {
         "hit" => {
             // A pair naming an artifact search will not return is one no
             // replay can satisfy, so recording it here would raise the recall
@@ -992,24 +1002,20 @@ async fn search_verdict(
             // not drawn over such an artifact at all — see
             // `ui::artifact_detail` — so this is the write refusing what the
             // page already refuses to offer.
-            if !store.get_artifact(&f.artifact_id).await?.in_results() {
+            if !store.get_artifact(artifact_id).await?.in_results() {
                 return Err(Error::Validation(
                     "that one is deprecated or superseded, so the benchmark can't hold it".into(),
-                )
-                .into());
+                ));
             }
             // `NotFound` here is the store's guard, not a missing route:
             // another tab can answer this search while the one holding this
             // bar is open, and `judge_hit` refuses to write over a verdict
             // rather than replace it. The same line "no" gets, for the same
             // reason.
-            match store
-                .judge_hit(&id, &f.artifact_id, Labeller::Confirm)
-                .await
-            {
+            match store.judge_hit(id, artifact_id, Labeller::Confirm).await {
                 Ok(()) => "hit",
-                Err(Error::NotFound) => return Ok(already_judged()),
-                Err(e) => return Err(e.into()),
+                Err(Error::NotFound) => return Ok(None),
+                Err(e) => return Err(e),
             }
         }
         "no" => {
@@ -1018,8 +1024,8 @@ async fn search_verdict(
             // judge this search while the one holding this bar is open. Refused
             // rather than applied, and said in the same words the rail's gap
             // button uses for the same situation.
-            if !store.decline(&id).await? {
-                return Ok(already_judged());
+            if !store.decline(id).await? {
+                return Ok(None);
             }
             "no"
         }
@@ -1029,39 +1035,36 @@ async fn search_verdict(
         // retention purge. Somebody unsure whether the result in front of them
         // was the one has not said any of that. Skip is what the label
         // promises: the search stays a question.
-        "skip" => {
-            // Not a verdict, so nothing can have got here first, and a search
-            // already gone was refused by the ownership check above. What is
-            // left is the window between that check and this write, which
-            // retention and an Ops purge can both fall into. `judged_one` calls
-            // it `NotFound`, and a 404 is the one answer htmx will not swap —
-            // the button would do nothing at all, silently, where the other
-            // three say so in words.
-            match store.skip_event(&id).await {
-                Ok(()) => "skip",
-                Err(Error::NotFound) => return Ok(already_judged()),
-                Err(e) => return Err(e.into()),
-            }
-        }
+        "skip" => match store.skip_event(id).await {
+            Ok(()) => "skip",
+            Err(Error::NotFound) => return Ok(None),
+            Err(e) => return Err(e),
+        },
         "none" => {
             // Only back over what this bar wrote — `Labeller::Confirm`. The
             // undo appears after "no", which leaves the search pending, so
             // another tab can record a hit on it while this one is still open;
             // unguarded, this button then erased a confirmed pair. The store
             // says so by matching nothing.
-            match store.unjudge(&id, Labeller::Confirm).await {
+            match store.unjudge(id, Labeller::Confirm).await {
                 Ok(()) => "",
-                Err(Error::NotFound) => return Ok(already_judged()),
-                Err(e) => return Err(e.into()),
+                Err(Error::NotFound) => return Ok(None),
+                Err(e) => return Err(e),
             }
         }
-        v => return Err(Error::Validation(format!("unknown verdict {v}")).into()),
+        v => return Err(Error::Validation(format!("unknown verdict {v}"))),
     };
-    // A verdict is what buys the next measurement. The deck used to spawn the
-    // sweep after each of its verdicts; the bar and the rail are the labellers
-    // now, so the check rides here — off the request path, and cheap when the
-    // thresholds say no.
-    crate::eval::sweep::maybe_spawn(&tenant.core);
+    Ok(Some(state))
+}
+
+async fn search_verdict(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<SearchVerdictForm>,
+) -> UiResult<Response> {
+    let Some(state) = judge_search(&tenant, &id, &f.verdict, &f.artifact_id).await? else {
+        return Ok(already_judged());
+    };
     Ok(HtmlTemplate(SearchVerdictTemplate {
         event_id: id,
         artifact_id: f.artifact_id,
@@ -1083,29 +1086,34 @@ struct GapParams {
     q: String,
 }
 
-async fn search_gap(
-    tenant: Tenant,
-    Path(id): Path<String>,
-    axum::extract::Query(p): axum::extract::Query<GapParams>,
-) -> UiResult<Response> {
+/// The gap, for both doors: true where it was recorded, false where the
+/// search was already judged and there is nothing to record.
+pub(crate) async fn gap_search(tenant: &Tenant, id: &str, q: &str) -> Result<bool> {
     if !tenant.core.learn.enabled {
-        return Err(Error::NotFound.into());
+        return Err(Error::NotFound);
     }
     // Only against the caller's own search — see `Store::event_is_mine`.
     if !tenant
         .core
         .store
-        .event_is_mine(&id, &tenant.user.subject)
+        .event_is_mine(id, &tenant.user.subject)
         .await?
     {
-        return Err(Error::NotFound.into());
+        return Err(Error::NotFound);
     }
-    let line = match tenant.core.store.gap_event(&id, p.q.trim()).await? {
+    let recorded = tenant.core.store.gap_event(id, q.trim()).await?;
+    Ok(recorded)
+}
+
+async fn search_gap(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    axum::extract::Query(p): axum::extract::Query<GapParams>,
+) -> UiResult<Response> {
+    let line = match gap_search(&tenant, &id, &p.q).await? {
         true => "recorded as a gap: your base doesn't know this yet.",
         false => "nothing to record — that search was already judged.",
     };
-    // A gap is a verdict too, and counts towards the sweep's floor.
-    crate::eval::sweep::maybe_spawn(&tenant.core);
     Ok(axum::response::Html(format!(r#"<span class="muted">{line}</span>"#)).into_response())
 }
 
