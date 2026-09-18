@@ -1,0 +1,26 @@
+[package]
+name = "engram-android"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+engram = { path = "../..", features = ["contained"] }
+# Named again only to choose how the C++ runtime is linked on Android: into
+# the library, so the APK ships one `.so` and no `libc++_shared.so` beside it.
+llama-cpp-2 = { version = "=0.1.156", default-features = false, features = ["android-static-stdcxx"] }
+jni = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+panic = "unwind"
+
+[workspace]

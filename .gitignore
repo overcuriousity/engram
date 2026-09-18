@@ -46,3 +46,7 @@ android/.kotlin/
 # android/README.md — and this is the backstop for the day it is not.
 *.jks
 *.keystore
+
+# The Rust core built for the phone, and the crate that builds it.
+android/core/src/main/jniLibs/
+android/native/target/
