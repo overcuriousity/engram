@@ -26,7 +26,16 @@ import io.github.overcuriousity.engram.core.contained.Core
 import io.github.overcuriousity.engram.core.contained.Endpoint
 import io.github.overcuriousity.engram.core.contained.ModelManifest
 import io.github.overcuriousity.engram.core.contained.Role
+import io.github.overcuriousity.engram.core.read.Api
+import io.github.overcuriousity.engram.core.read.Decode
 import kotlinx.coroutines.launch
+
+/** What waits for a model, and what it waits for. One line, and only in Settings: no banner, no badge. */
+fun backgroundWords(waiting: Int, passWanted: Boolean): String = when {
+    waiting <= 0 -> "Background · nothing waiting"
+    !passWanted -> "Background · $waiting waiting · no endpoint"
+    else -> "Background · $waiting waiting · charging and idle"
+}
 
 /**
  * Where this app's engram lives, and the switch. What was the "Server"
@@ -42,6 +51,9 @@ fun ModeSection(engram: Engram) {
         if (engram.mode == Mode.contained) {
             SettingsLine("On this phone")
             OutlinedButton(onClick = { asking = Mode.server }) { Text("Switch to a server") }
+            // The one place that says what model work is waiting, and why.
+            val status = rememberRead(engram, Api.status(), Decode.status)
+            status.read.value?.let { SettingsLine(backgroundWords(it.waitingGeneration, engram.passWanted), muted = true) }
         } else {
             SettingsLine(paired?.origin ?: "—")
             SettingsLine("version ${paired?.serverVersion ?: "—"}", muted = true)

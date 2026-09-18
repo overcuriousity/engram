@@ -205,6 +205,8 @@ class Engram internal constructor(
         runCatching { transport()?.bytes("/api/v1/corpora/$corpusId/image") }.getOrNull()
 
     suspend fun pair(uri: PairUri) {
+        // Pairing is a server's. A contained instance is switched away from first: see Nav.
+        check(contained == null) { "contained" }
         val c = Pairing.claim(uri, deviceName, userAgent)
         store.set(c)
         refused.value = false

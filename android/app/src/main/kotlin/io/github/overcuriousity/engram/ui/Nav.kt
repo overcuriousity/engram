@@ -149,6 +149,13 @@ fun EngramApp(
         )
         return
     }
+    // A pairing code reaching a phone that is its own engram means "use that
+    // server". The mode changes first; the next instance is handed the same
+    // code and pairs with it.
+    if (engram.loopback && pairText != null) {
+        LaunchedEffect(pairText) { Engram.switch(ctx, Mode.server) }
+        return
+    }
     if (engram.loopback) {
         var missing by remember { mutableStateOf(engram.requiredMissing()) }
         if (missing.isNotEmpty()) {

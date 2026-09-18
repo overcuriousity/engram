@@ -250,4 +250,12 @@ class EngramModesTest {
         assertNull(io.github.overcuriousity.engram.core.reminders.LocalReminders.sync(engram().also { it.store.set(paired()) }))
         assertEquals(0, theServer.requestCount)
     }
+
+    @Test fun aContainedInstanceDoesNotPair() = runTest {
+        choose(Mode.contained)
+        val e = engram()
+        val refused = runCatching { e.pair(PairUri.parse("engram://pair?o=https%3A%2F%2Fx.test&c=abc&v=0.1.0")!!) }.exceptionOrNull()
+        assertTrue(refused is IllegalStateException)
+        assertNull(e.store.current.value)
+    }
 }
