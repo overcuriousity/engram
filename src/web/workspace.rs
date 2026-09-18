@@ -1054,11 +1054,6 @@ pub(crate) async fn judge_search(
         }
         v => return Err(Error::Validation(format!("unknown verdict {v}"))),
     };
-    // A verdict is what buys the next measurement. The deck used to spawn the
-    // sweep after each of its verdicts; the bar and the rail are the labellers
-    // now, so the check rides here — off the request path, and cheap when the
-    // thresholds say no.
-    crate::eval::sweep::maybe_spawn(&tenant.core);
     Ok(Some(state))
 }
 
@@ -1107,8 +1102,6 @@ pub(crate) async fn gap_search(tenant: &Tenant, id: &str, q: &str) -> Result<boo
         return Err(Error::NotFound);
     }
     let recorded = tenant.core.store.gap_event(id, q.trim()).await?;
-    // A gap is a verdict too, and counts towards the sweep's floor.
-    crate::eval::sweep::maybe_spawn(&tenant.core);
     Ok(recorded)
 }
 

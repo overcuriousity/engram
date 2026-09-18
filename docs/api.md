@@ -137,16 +137,13 @@ verification is a `generated` row and an `unverified` one, and the two ask for
 different answers. A row's identity is `kind` and `subject_id` together, never
 `subject_id` alone. Under one `kind` a subject appears once.
 
-**`GET /insights` has no tuning in it at all.** Applying a tuning
-recommendation writes `config.toml`, and that press stays on the web where the
-person who may make it is at a keyboard. `retrieval` is `null` where no
-searches are recorded — never `0.00`, which would read as a score rather than
-as an absence.
+**`GET /insights` is disclosure, not control.** The base tunes itself; the
+page says what it did. `retrieval` is `null` where no searches are recorded —
+never `0.00`, which would read as a score rather than as an absence.
 
 ## What does not cross
 
-API token management, the browser-extension offer, instance configuration and
-`--grant-judge`, and applying a tuning recommendation stay on the web
-interface. A credential that can mint its successors is a credential whose
-revocation means less than it says, and the rest is an operator's work at a
-keyboard.
+API token management, the browser-extension offer and instance configuration
+stay on the web interface. A credential that can mint its successors is a
+credential whose revocation means less than it says, and the rest is an
+operator's work at a keyboard.

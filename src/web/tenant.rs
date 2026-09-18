@@ -26,53 +26,6 @@ impl FromRequestParts<AppState> for Tenant {
     }
 }
 
-/// A tenant whose user may apply a tuning recommendation — the only door in
-/// the tree that writes `config.toml`.
-pub struct CanJudge(pub Tenant);
-
-impl FromRequestParts<AppState> for CanJudge {
-    type Rejection = Error;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let t = Tenant::from_request_parts(parts, state).await?;
-        // The column, not the copy of it the registry is holding.
-        //
-        // `Tenant.user` is the row as it read at open time, and an open tenant
-        // outlives a grant: `engram --revoke-judge` is a second process writing
-        // the control database, with nothing to tell this one. Left on the
-        // snapshot, a revoked user kept the grant — and with it the only route
-        // in the tree that writes `config.toml` — until their core happened to
-        // fall out of the LRU, which on an instance under its cap is never.
-        //
-        // One indexed read on the control database, and only on this door. The
-        // hot paths keep the snapshot, which is what the cache is for.
-        //
-        // What this gate covers, and what it does not: the tuning apply on
-        // Insights, the only route in the tree that writes `config.toml`. It
-        // is deliberately not on the verdict bar or the rail's gap button in
-        // `workspace.rs` — those answer the caller's own search, at the moment
-        // of it, the way the ask bar does, and `event_is_mine` is what stands
-        // there instead. So `--revoke-judge` means "no tuning", not "cannot
-        // label a pair": a revoked user can still say yes, no or gap about a
-        // search they just ran, and those rows do reach `feedback_stats`
-        // and the sweep. Taking that away as well means taking
-        // the bar off their own results.
-        let live = state
-            .tenants
-            .control()
-            .user(&t.user.subject)
-            .await?
-            .ok_or(Error::Forbidden)?;
-        if !live.can_judge {
-            return Err(Error::Forbidden);
-        }
-        Ok(CanJudge(t))
-    }
-}
-
 /// `Option<Tenant>` for the one page that renders without a session: the 404,
 /// which has to say "not found" to a signed-out browser rather than bounce it
 /// to a login it cannot come back from. Only "no credentials" becomes `None`;

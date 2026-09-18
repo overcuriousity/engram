@@ -5,10 +5,6 @@
 //! call its `/ui/ops` sibling uses, so the two doors cannot answer one press
 //! differently.
 //!
-//! What does not cross, and is not an oversight: applying a tuning
-//! recommendation, which is the one route that writes `config.toml`. Insights
-//! says here what the sweep recommends; the press that adopts it stays on the
-//! web, where the person who has `can_judge` already is.
 
 use crate::error::Result;
 use crate::tenants::Tenant;
@@ -297,10 +293,8 @@ async fn set_aside(tenant: Tenant) -> Result<Json<serde_json::Value>> {
 
 /// What the base is like, read-only.
 ///
-/// Read-only by the programme: Insights says what the tuning sweep
-/// recommends, and the press that adopts it stays on the web, because it
-/// writes `config.toml` and the person who may do that is at a keyboard.
-/// Nothing about tuning is in this answer at all.
+/// Read-only by the programme: the base tunes itself, and Insights says what
+/// it did. There is nothing on this page to press.
 async fn insights(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     let held = tenant.core.store.held().await?;
     let used = tenant

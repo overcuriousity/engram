@@ -1,22 +1,24 @@
-//! What a tuning sweep found, kept.
+//! What an idle pass found, kept.
 //!
-//! The judge page's recall and MRR are read from the ranks the searches
+//! The insights page's recall and MRR are read from the ranks the searches
 //! actually gave, which is the measurement of the ranking that produced them.
-//! A sweep asks the other question — what *these* pairs would score under
+//! A pass asks the other question — what *these* pairs would score under
 //! other settings — and the answer is only worth anything beside the settings
-//! that produced it. Hence a row per sweep rather than a number on a page.
+//! that produced it. Hence a row per pass rather than a number on a page. A
+//! generation the pass adopted or refused names its row, which is the whole
+//! of what the row is for: the journal behind a move, never an offer.
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
 
-/// The knobs a sweep ran under, as stored.
+/// The knobs a pass ran under, as stored.
 ///
-/// The same eight values a generation holds, serialised the same way, so it is
-/// the same type and not a copy of it: a knob added to one is a knob the other
-/// has to store or the two records stop being comparable, which is the whole
-/// point of writing them down beside a recall figure. Named here because a
-/// sweep is what this module is about, and `run.base_params` reads better than
+/// The same values a generation holds, serialised the same way, so it is the
+/// same type and not a copy of it: a knob added to one is a knob the other has
+/// to store or the two records stop being comparable, which is the whole point
+/// of writing them down beside a recall figure. Named here because a run is
+/// what this module is about, and `run.base_params` reads better than
 /// `run.base_generation_params` at every call site.
 pub type RunParams = super::generations::GenerationParams;
 
@@ -41,7 +43,6 @@ pub struct NewEvalRun {
     pub best_recall: f64,
     pub best_mrr: f64,
     pub diff: Vec<DiffRow>,
-    pub recommended: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -58,8 +59,6 @@ pub struct EvalRun {
     pub best_recall: f64,
     pub best_mrr: f64,
     pub diff: Vec<DiffRow>,
-    pub recommended: bool,
-    pub applied_at: Option<i64>,
 }
 
 impl Store {
@@ -70,8 +69,8 @@ impl Store {
                (id, created_at, judged_count, pairs_used, pairs_skipped,
                 base_params, base_recall, base_mrr,
                 best_params, best_recall, best_mrr,
-                diff, recommended)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                diff)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(now())
@@ -85,96 +84,22 @@ impl Store {
         .bind(run.best_recall)
         .bind(run.best_mrr)
         .bind(json(&run.diff)?)
-        .bind(run.recommended as i64)
         .execute(&self.pool)
         .await?;
         Ok(id)
     }
 
-    /// The most recent sweep, recommended or not. What paces the next one.
+    /// The most recent pass, quiet or not.
     pub async fn latest_eval_run(&self) -> Result<Option<EvalRun>> {
         let row = sqlx::query("SELECT * FROM eval_runs ORDER BY created_at DESC, id DESC LIMIT 1")
             .fetch_optional(&self.pool)
             .await?;
         row.map(hydrate).transpose()
     }
-
-    /// The recommendation waiting for an answer, if there is one.
-    ///
-    /// The latest run, and only if that run is itself an open recommendation.
-    /// Selecting the newest *recommended* row instead left every older one
-    /// alive behind it: a sweep recommends X, a later sweep over more evidence
-    /// recommends Y, the operator applies Y — and X, measured against a
-    /// baseline that is no longer in force and already refused by the newer
-    /// evidence, was offered again on the next render. A sweep is the last
-    /// word on what these pairs say, including when what it says is nothing.
-    pub async fn open_recommendation(&self) -> Result<Option<EvalRun>> {
-        Ok(self
-            .latest_eval_run()
-            .await?
-            .filter(|r| r.recommended && r.applied_at.is_none()))
-    }
-
-    /// Take back a run's recommendation, leaving the run itself alone.
-    ///
-    /// The idle pass writes the run before its last gate: the ladder picks a
-    /// candidate, the run is journalled with the numbers that picked it, and
-    /// only then is the candidate replayed on the base's own probes. A
-    /// candidate refused there is never applied, so nothing stamps
-    /// `applied_at` — and `open_recommendation` would go on offering the
-    /// refused parameters under an Apply button for as long as that run stayed
-    /// the latest. Pressing it wrote settings the base had already measured and
-    /// rejected, and `tried_candidates` then made sure they were never
-    /// re-measured.
-    ///
-    /// The row stays, with its pairs, its diff and its numbers: the sweep
-    /// happened and the journal should say so. Only the offer is withdrawn.
-    pub async fn withdraw_eval_run(&self, id: &str) -> Result<bool> {
-        let res = sqlx::query("UPDATE eval_runs SET recommended = 0 WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(res.rows_affected() == 1)
-    }
-
-    pub async fn eval_run(&self, id: &str) -> Result<Option<EvalRun>> {
-        let row = sqlx::query("SELECT * FROM eval_runs WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(hydrate).transpose()
-    }
-
-    /// Stamp a run as applied. `false` if it was already, which is how a
-    /// double-submitted apply is refused rather than counted twice.
-    pub async fn mark_eval_run_applied(&self, id: &str) -> Result<bool> {
-        let res =
-            sqlx::query("UPDATE eval_runs SET applied_at = ? WHERE id = ? AND applied_at IS NULL")
-                .bind(now())
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
-        Ok(res.rows_affected() == 1)
-    }
-
-    /// What has actually been changed, newest first. The provenance a commit
-    /// message used to carry.
-    pub async fn applied_eval_runs(&self, limit: i64) -> Result<Vec<EvalRun>> {
-        sqlx::query(
-            "SELECT * FROM eval_runs WHERE applied_at IS NOT NULL
-             ORDER BY applied_at DESC, id DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(hydrate)
-        .collect()
-    }
 }
 
-/// A row this binary cannot read is a broken row, not an empty one: a sweep
-/// silently rehydrated with default settings would recommend against a
+/// A row this binary cannot read is a broken row, not an empty one: a pass
+/// silently rehydrated with default settings would be measured against a
 /// baseline nobody ever ran.
 fn parse<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     serde_json::from_str(raw).map_err(|e| Error::Store(format!("eval_runs: {e}")))
@@ -198,8 +123,6 @@ fn hydrate(row: sqlx::sqlite::SqliteRow) -> Result<EvalRun> {
         best_recall: row.get("best_recall"),
         best_mrr: row.get("best_mrr"),
         diff: parse(row.get("diff"))?,
-        recommended: row.get::<i64, _>("recommended") == 1,
-        applied_at: row.get("applied_at"),
     })
 }
 
@@ -214,13 +137,13 @@ mod tests {
         assert_eq!(p.recency_half_life_days, 180);
     }
 
-    fn sample(recommended: bool) -> NewEvalRun {
+    fn sample(moved: bool) -> NewEvalRun {
         let base = RunParams {
             recency_weight: 0.05,
             per_source_cap: Some(3),
             ..Default::default()
         };
-        let best = if recommended {
+        let best = if moved {
             RunParams {
                 recency_weight: 0.1,
                 per_source_cap: None,
@@ -237,87 +160,42 @@ mod tests {
             base_recall: 0.70,
             base_mrr: 0.50,
             best,
-            best_recall: if recommended { 0.80 } else { 0.70 },
-            best_mrr: if recommended { 0.60 } else { 0.50 },
+            best_recall: if moved { 0.80 } else { 0.70 },
+            best_mrr: if moved { 0.60 } else { 0.50 },
             diff: vec![DiffRow {
                 query: "the image will not mount".into(),
                 base: None,
                 new: Some(2),
             }],
-            recommended,
         }
     }
 
     #[tokio::test]
-    async fn a_recommendation_is_open_until_applied_and_applies_once() {
+    async fn the_latest_run_is_the_last_word() {
+        // A pass over more evidence says whatever it says last, including
+        // when what it says is nothing; the rows before it stay as written.
         let store = Store::memory().await.unwrap();
-        let id = store.record_eval_run(&sample(true)).await.unwrap();
-        assert_eq!(
-            store.open_recommendation().await.unwrap().map(|r| r.id),
-            Some(id.clone())
-        );
-
-        assert!(store.mark_eval_run_applied(&id).await.unwrap());
-        assert!(
-            store.open_recommendation().await.unwrap().is_none(),
-            "an applied recommendation must stop being offered"
-        );
-        assert!(
-            !store.mark_eval_run_applied(&id).await.unwrap(),
-            "a replayed apply must be refused rather than stamped twice"
-        );
-
-        let applied = store.applied_eval_runs(10).await.unwrap();
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].best_params.per_source_cap, None);
-        assert_eq!(applied[0].diff.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_later_sweep_retires_the_recommendation_before_it() {
-        // The stale one used to outlive the fresh one. A sweep recommends X,
-        // more judgements arrive, a second sweep recommends Y, the operator
-        // takes Y — and X came back on the next render, measured against a
-        // baseline no longer in force and already refused by the newer
-        // evidence. Applying it would have walked the ranking backwards.
-        let store = Store::memory().await.unwrap();
+        assert!(store.latest_eval_run().await.unwrap().is_none());
         let old = store.record_eval_run(&sample(true)).await.unwrap();
-        let new = store.record_eval_run(&sample(true)).await.unwrap();
-        assert_eq!(
-            store.open_recommendation().await.unwrap().map(|r| r.id),
-            Some(new.clone())
-        );
-
-        assert!(store.mark_eval_run_applied(&new).await.unwrap());
-        assert!(
-            store.open_recommendation().await.unwrap().is_none(),
-            "the sweep before the applied one was offered again"
-        );
-        // The row is not rewritten — it recorded what it found, and that stays
-        // true. It is simply no longer the last word.
-        let old = store.eval_run(&old).await.unwrap().unwrap();
-        assert!(old.recommended && old.applied_at.is_none());
-
-        // A sweep that found nothing is just as much the last word: it looked
-        // at the same pairs, over more of them, and refused what the one before
-        // it had offered.
-        let quiet = Store::memory().await.unwrap();
-        quiet.record_eval_run(&sample(true)).await.unwrap();
-        quiet.record_eval_run(&sample(false)).await.unwrap();
-        assert!(quiet.open_recommendation().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn a_quiet_sweep_is_recorded_but_never_recommended() {
-        // The silence has to be explainable: without the row, a page can only
-        // say nothing at all, which reads as "no sweep has ever run".
-        let store = Store::memory().await.unwrap();
-        store.record_eval_run(&sample(false)).await.unwrap();
-        assert!(store.open_recommendation().await.unwrap().is_none());
-
+        let new = store.record_eval_run(&sample(false)).await.unwrap();
         let latest = store.latest_eval_run().await.unwrap().unwrap();
-        assert!(!latest.recommended);
+        assert_eq!(latest.id, new);
+        assert_ne!(latest.id, old);
         assert_eq!(latest.base_params, latest.best_params);
         assert_eq!(latest.pairs_skipped, 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_reads_back_with_the_settings_and_the_pairs_that_moved() {
+        // The provenance rule, made structural: a number without the settings
+        // that produced it cannot be compared against anything.
+        let store = Store::memory().await.unwrap();
+        store.record_eval_run(&sample(true)).await.unwrap();
+        let run = store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!(run.base_params.per_source_cap, Some(3));
+        assert_eq!(run.best_params.per_source_cap, None);
+        assert!(run.best_mrr > run.base_mrr);
+        assert_eq!(run.diff.len(), 1);
+        assert_eq!(run.diff[0].new, Some(2));
     }
 }

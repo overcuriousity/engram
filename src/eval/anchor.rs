@@ -4,10 +4,12 @@
 //! What the idle pass optimises is *the generator and the operator could use
 //! what retrieval gave them*, which is one step removed from *the person got
 //! their answer*. Human verdicts are the sparse, honest sample that checks the
-//! two have not come apart. They are never used for volume; they are the
-//! anchor, and this is the one safeguard the rest of the loop leans on.
-//! Everything else is recoverable by a revert. This is the thing that notices
-//! the score itself has gone bad.
+//! two have not come apart. The pass does replay them as pairs beside the
+//! observations — a confirmed answer is the best pair there is — but that is
+//! not what this reads. Here they are the anchor: whether the observations
+//! made on the same searches say what the people said. It is the one
+//! safeguard the rest of the loop leans on. Everything else is recoverable by
+//! a revert. This is the thing that notices the score itself has gone bad.
 //!
 //! Agreement is read over searches carrying both a verdict and an observation
 //! about the same query. A search judged a hit agrees when a positive

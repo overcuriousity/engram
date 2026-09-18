@@ -58,16 +58,16 @@ actually gave, by the person who made it. Position bias remains: a person is
 likelier to confirm what came first, so recall@10 and MRR read off these
 verdicts lean slightly towards the ranker.
 
-With `evolve.feed_sweep`, the sweep may also read what use left behind: an
-excerpt an answer actually drew on, and a result somebody opened. Both are the
-same claim a verdict makes, arrived at without anybody being asked, and there
-are far more of them. Only positive observations enter, and only under the live
-generation: evidence gathered while a different embedding or chat model was
-configured belongs to another era and stops counting. It ships off, because
-widening what the sweep reads changes what it recommends.
+The idle pass replays those verdicts beside what use left behind: an excerpt
+an answer actually drew on, and a result somebody opened. All three are the
+same claim — this query was answered by that artifact — and a verdict that
+confirms the very open it was given under is counted once. Only positive
+evidence enters, and only under the live generation: evidence gathered while
+a different embedding or chat model was configured belongs to another era and
+stops counting.
 
-With `evolve.autonomous` on, the same observations feed an idle pass that
-adopts settings rather than recommending them. It walks the ladders in
+With `evolve.autonomous` on, that evidence feeds an idle pass that adopts
+settings on its own. It walks the ladders in
 `src/core/ranking.rs` — recency weight, per-source cap, candidate pool depth,
 recency half-life, the priming lift, and the sitting flip above a non-zero lift
 — one knob at a time, replays only stored query vectors through the live index,
@@ -114,47 +114,42 @@ by the idle pass; the rest move by hand, on an argument the commit states.
 
 ## 4. Tuning at runtime
 
-The two cheap knobs tune themselves. Once fifty judgements exist
-(`feedback.tune.min_judgements`), every tenth further verdict
-(`feedback.tune.resweep_after`) re-runs a background sweep of recency weight ×
-per-source cap over every judged pair, against the live index. It needs no
-export, no frozen corpus and no re-embedding: both knobs only reorder what
-retrieval already returned, so a whole grid is seconds of vector reads. It
-reads and never records — `Door::Judge`, `mark: false`.
-It asks the whole grid about one query before moving to the next, so each query
-is embedded once however many pairs there are, and it takes the background lane
-rather than the interactive one: nobody is waiting on a replay of questions
-that were already answered, and thousands of searches on the fast lane would
-hold every worker off for the length of the run.
+The ranking tunes itself, and nothing else tunes it. Once the base has been
+quiet for `evolve.idle_secs`, the idle pass replays the live generation's
+evidence — every answer confirmed on the bar and every positive observation
+use left behind, up to five hundred of each — under the neighbouring rungs of
+every ladder, against the live index. It needs no export, no frozen corpus and
+no re-embedding: every pair carries the vector its query was searched with, so
+a whole ladder is seconds of vector reads. It reads and never records —
+`Door::Judge`, `mark: false` — and it takes the background lane rather than
+the interactive one, stopping between pairs the moment anybody comes back.
 
-Its two figures are a **replay**, not the page's. The Retrieval measure on
+Its figures are a **replay**, not the page's. The Retrieval measure on
 `/ui/insights` is recall@10 and MRR over the positions the searches actually
-gave; a sweep's are those searches run again, now, under each setting, through
-a door that leaves priming out. Both are honest and neither substitutes for
-the other — read `MRR 0.50 → 0.60` against itself, never against the measure
-beside it.
+gave; a pass's are those searches run again, now, under each setting, through
+a door that leaves priming out except where the search recorded it. Both are
+honest and neither substitutes for the other.
 
-A candidate is offered only when **at least two pairs are net better and
-neither aggregate is worse**. That floor is the whole safety of running it
-automatically: on fifty pairs a single flipped pair is two points of recall,
-and an aggregate delta alone cannot tell one from a real improvement. Ties keep
-the current values.
+A candidate is adopted only when **at least two pairs are net better, neither
+aggregate is worse, and at least ten pairs were replayed**. That floor is the
+whole safety of running it automatically: on fifty pairs a single flipped pair
+is two points of recall, and an aggregate delta alone cannot tell one from a
+real improvement. Ties keep the current values. What clears the gate is then
+replayed on the base's own probes and refused if it loses there; what is
+adopted is watched while it serves and reverted when it does not hold.
 
-The recommendation appears on `/ui/insights` with the pairs that moved, and
-applying it rewrites `config.toml` — beside the file and renamed over it, so a
-crash mid-write leaves the operator's file as it was — and swaps the running
-parameters in one step. Only the newest sweep's recommendation stands: a later
-sweep looked at the same pairs over more evidence, so whatever it says, it says
-last, including when what it says is nothing. Every sweep is recorded in
-`eval_runs` with the settings that produced it, recommended or not, which is
-the rule at the top of this file about never writing a number without its configuration, made
-structural rather than asked for.
+Every pass is recorded in `eval_runs` with the settings that produced it and
+the pairs that moved, quiet or not, and the generation it adopted or refused
+names that row. That is the rule at the top of this file about never writing
+a number without its configuration, made structural rather than asked for.
+`config.toml` is never written: the file is the operator's starting point, and
+`/ui/insights` says which generation is live.
 
 What this does **not** cover: the embedding model and its templates — they
-change the vector geometry rather than the order over it, and no runtime sweep
-can reach them — pinning, and the ask side. Those are measured by nothing. Say
-so in a commit that moves one rather than implying a number that was never
-taken.
+change the vector geometry rather than the order over it, and no runtime
+replay can reach them — pinning, and the ask side. Those are measured by
+nothing. Say so in a commit that moves one rather than implying a number that
+was never taken.
 
 ---
 
@@ -190,11 +185,11 @@ to run *something* and call the question answered.
 | Path | What |
 |---|---|
 | `src/eval/metrics.rs` | `recall_at` and `mrr`. |
-| `src/eval/sweep.rs` | The grid, the gate, the candidate chooser, and the job a verdict starts. See 4. |
+| `src/eval/sweep.rs` | The pairs, the gate and the candidate chooser the idle pass replays with. See 4. |
 | `src/core/ranking.rs` | The ladders the idle pass may walk, priming among them. |
 | `src/eval/lived.rs` | What a generation earned while it was serving, against the one it replaced. No replay. |
 | `src/eval/rehearsed.rs` | A candidate scored on the base's own probes. Refuses and reverts; never adopts. |
 | `src/eval/anchor.rs` | Whether the self-generated evidence still agrees with human verdicts. Suspends the loop when it stops. |
 | `src/store/generations.rs` | The named settings a base retrieves under, and what it adopted, reverted or refused. |
-| `src/store/eval_runs.rs` | Every sweep, with the settings that produced it and whether it was applied. |
-| `/ui/insights` | Where a sweep reports and its recommendation is applied. The Retrieval measure is not a stand-in for the measurement — it *is* recall@10 and MRR over the positions those searches actually gave. The pairs themselves come from the verdict bars under results. |
+| `src/store/eval_runs.rs` | Every pass, with the settings that produced it and the pairs that moved. |
+| `/ui/insights` | Where the base says which generation is live and what it adopted, reverted or refused. The Retrieval measure is not a stand-in for the measurement — it *is* recall@10 and MRR over the positions those searches actually gave. The pairs themselves come from the verdict bars under results and from use. |

@@ -2206,7 +2206,7 @@ mod tests {
         app_holding_something, app_recommending, app_session_and_core,
         app_session_and_core_with_feedback, app_with_cookie, app_with_embedded_corpus,
         app_with_session, artifacts, ask_over_sse, body_of, done_html, drain, flat, form, get_body,
-        get_stream, hold_something, post_ask, pulled, searched_app, searched_app_tuned, trigger_of,
+        get_stream, hold_something, post_ask, pulled, searched_app, trigger_of,
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -7238,49 +7238,6 @@ mod tests {
     }
 
     // ── Judging at the moment of search ──────────────────────────────────────
-
-    #[tokio::test]
-    async fn a_verdict_on_the_bar_past_the_floor_pays_for_a_sweep() {
-        // The loop the whole feature is: a verdict is what buys the next
-        // measurement, so the check rides on the verdict rather than a timer.
-        // It used to ride the deck's verdicts; the bar is the labeller now.
-        let (app, cookie, handle, a, event) = searched_app_tuned(Some(1)).await;
-        let res = app
-            .clone()
-            .oneshot(form(
-                &format!("/ui/search/{event}/verdict"),
-                &cookie,
-                &format!("verdict=hit&artifact_id={a}"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        handle.background.wait_idle().await;
-
-        let run = handle.store.latest_eval_run().await.unwrap();
-        assert!(run.is_some(), "the floor was crossed and no sweep ran");
-        assert_eq!(run.unwrap().pairs_used, 1);
-    }
-
-    #[tokio::test]
-    async fn under_the_floor_a_verdict_buys_nothing() {
-        // Below it a sweep would recommend the quirks of a handful of queries
-        // as confidently as a real improvement.
-        let (app, cookie, handle, a, event) = searched_app_tuned(Some(50)).await;
-        let res = app
-            .clone()
-            .oneshot(form(
-                &format!("/ui/search/{event}/verdict"),
-                &cookie,
-                &format!("verdict=hit&artifact_id={a}"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        handle.background.wait_idle().await;
-
-        assert!(handle.store.latest_eval_run().await.unwrap().is_none());
-    }
 
     /// The search just recorded, read off the table rather than off the deck.
     /// A search that returned nothing is not a card the deck deals — see

@@ -387,20 +387,21 @@ CREATE TABLE IF NOT EXISTS search_context (
   context   TEXT NOT NULL
 );
 
--- ── Tuning sweeps ────────────────────────────────────────────────────────────
--- One row per background sweep over the judged pairs: what the running
--- configuration scored, the best the grid found, and whether the gate let that
--- become a recommendation. A number recorded without the configuration that
--- produced it cannot be compared against anything, so the settings are stored
--- beside the figures rather than left to a commit message to remember.
+-- ── Idle passes ──────────────────────────────────────────────────────────────
+-- One row per idle pass over the evidence: what the running configuration
+-- scored, the best the ladder found, and the pairs that moved between them.
+-- The generation the pass adopted or refused names this row. A number recorded
+-- without the configuration that produced it cannot be compared against
+-- anything, so the settings are stored beside the figures rather than left to
+-- a commit message to remember.
 --
 -- `diff` holds query prefixes and ranks. No artifact text is written here, for
 -- the same reason the harness never prints any.
 CREATE TABLE IF NOT EXISTS eval_runs (
   id            TEXT PRIMARY KEY,
   created_at    INTEGER NOT NULL,
-  -- Verdicts given when this ran: what the next sweep measures its distance
-  -- from, so a re-sweep is paced by new judgements rather than by the clock.
+  -- Verdicts given when this ran: how much of what the pass replayed a person
+  -- had said out loud.
   judged_count  INTEGER NOT NULL,
   pairs_used    INTEGER NOT NULL,
   -- Pairs whose artifact is gone. Housekeeping, not a ranking result, and
@@ -414,12 +415,8 @@ CREATE TABLE IF NOT EXISTS eval_runs (
   best_params   TEXT NOT NULL,
   best_recall   REAL NOT NULL,
   best_mrr      REAL NOT NULL,
-  diff          TEXT NOT NULL,
-  recommended   INTEGER NOT NULL,
-  applied_at    INTEGER
+  diff          TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_eval_runs_open
-  ON eval_runs(recommended, applied_at, created_at DESC);
 
 -- ── Ask feedback ─────────────────────────────────────────────────────────────
 -- A question asked on the page, the answer it got and the excerpts the model

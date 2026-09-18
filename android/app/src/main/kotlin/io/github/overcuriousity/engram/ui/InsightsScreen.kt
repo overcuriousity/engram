@@ -25,8 +25,8 @@ import io.github.overcuriousity.engram.core.read.Machine
  * What this memory is like, and what the base did on its own: the web's
  * Insights, behind Settings for the reason judging is. The measures are
  * aggregates over tables that exist; nothing here embeds or calls a model.
- * The tuning offer stays on the web, where the person who may apply it is at
- * a keyboard — that is the one thing on this page that is not disclosure.
+ * Disclosure and nothing else: the base tunes itself, and this page says
+ * what it did.
  */
 @Composable
 fun InsightsScreen(

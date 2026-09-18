@@ -803,8 +803,8 @@ pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
     )
     .await?;
     // Serve under it. Shared by every clone of this core, so the requests
-    // already being answered move with it — the same swap the apply button
-    // makes, arrived at from the other side.
+    // already being answered move with it — the same swap an adoption makes,
+    // arrived at from the other side.
     *core.ranking.write().expect("ranking lock") = live.params.into();
     Ok(())
 }

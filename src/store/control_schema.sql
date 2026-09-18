@@ -15,11 +15,6 @@ CREATE TABLE IF NOT EXISTS users (
   -- an email can change, and the mapping has to survive a later change to how
   -- the derivation works.
   slug         TEXT NOT NULL UNIQUE,
-  -- Whether this user may apply tuning recommendations on /ui/insights — the
-  -- only route in the tree that writes config.toml. Granted out of band with
-  -- `engram --grant-judge`; there is no role model behind it and no page that
-  -- sets it.
-  can_judge    INTEGER NOT NULL DEFAULT 0,
   -- Where a due reminder is pushed, namespaced JSON: {"gotify": {"url",
   -- "token"}, "unifiedpush": {"endpoint", "p256dh", "auth", "device",
   -- "registered_at"}}. '{}' means nowhere, and the Remind unit is never

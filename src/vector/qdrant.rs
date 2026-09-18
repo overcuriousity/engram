@@ -1600,7 +1600,7 @@ impl VectorStore for QdrantVectors {
     }
 
     /// Under the weight this store was connected with, which is the configured
-    /// one until a tuning sweep applies another.
+    /// one until the idle pass adopts another.
     async fn search(
         &self,
         vector: &[f32],

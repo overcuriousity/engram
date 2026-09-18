@@ -14,12 +14,8 @@ use tower::ServiceExt as _;
 /// point: if tenancy needed edits scattered across the web tests, the
 /// extractor boundary would be in the wrong place, and this is where that
 /// would show.
-///
-/// The user it registers holds the judge grant. A router alone cannot express
-/// the ungranted case, because the gate is only reachable by someone signed
-/// in — see `app_with_cookie_ungranted`, which carries a session.
 pub async fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
-    let user = granted_user(&core, true).await;
+    let user = registered_user(&core).await;
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
     let tenants = std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user));
     crate::web::router(crate::web::state::AppState {
@@ -32,29 +28,19 @@ pub async fn router(core: Core, local: Option<crate::config::LocalConfig>) -> ax
             pending: crate::auth::oidc::PendingStore::new(),
             secure_cookies: false,
         }),
-        config_path: std::sync::Arc::new(scratch_config()),
         ask_handoff: Default::default(),
     })
 }
 
-/// The registered user, with the grant written where the judge gate reads it.
-///
-/// Both places: the `User` the registry hands to a handler, and the row in the
-/// control database the gate consults on every judge request. They have to
-/// agree, and the row is the one that decides — see `web::tenant::CanJudge`.
-async fn granted_user(core: &Core, can_judge: bool) -> crate::store::control::User {
+/// The registered user: the `User` the registry hands to a handler, with its
+/// row provisioned in the control database.
+async fn registered_user(core: &Core) -> crate::store::control::User {
     let subject = crate::store::TEST_SUBJECT;
     core.store.control.provision(subject, None).await.ok();
-    core.store
-        .control
-        .set_can_judge(subject, can_judge)
-        .await
-        .expect("write the judge grant");
     crate::store::control::User {
         subject: subject.into(),
         email: None,
         slug: crate::store::control::slug_for(subject),
-        can_judge,
         created_at: 0,
     }
 }
@@ -63,7 +49,7 @@ async fn granted_user(core: &Core, can_judge: bool) -> crate::store::control::Us
 /// the state rather than only the router.
 pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web::state::AppState {
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
-    let user = granted_user(&core, true).await;
+    let user = registered_user(&core).await;
     crate::web::state::AppState {
         tenants: std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user)),
         config: cfg,
@@ -74,56 +60,12 @@ pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web
             pending: crate::auth::oidc::PendingStore::new(),
             secure_cookies: mode == crate::config::AuthMode::Oidc,
         }),
-        config_path: std::sync::Arc::new(scratch_config()),
         ask_handoff: Default::default(),
     }
 }
 
-/// A `config.toml` of its own per app under test.
-///
-/// The apply path writes the file the server was started with, so two tests
-/// sharing one would be asserting against whichever ran last. One directory
-/// for the whole test binary, one file per app in it.
-pub(crate) fn scratch_config() -> std::path::PathBuf {
-    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    let dir = DIR.get_or_init(|| tempfile::tempdir().expect("scratch config dir"));
-    let path = dir.path().join(format!("{}.toml", crate::store::new_id()));
-    std::fs::write(
-        &path,
-        "# a comment the apply path must not eat\n\
-         [vector]\n\
-         recency_weight = 0.05\n\
-         per_source_cap = 3\n",
-    )
-    .expect("scratch config");
-    path
-}
-
 /// A router over `core` plus a browser session cookie for `user-1`.
 pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
-    let (app, cookie, _) = app_with_state(core).await;
-    (app, cookie)
-}
-
-/// The same, for a signed-in user who has not been granted the judge. The
-/// session is real; only the grant is missing, which is the only thing the
-/// gate is allowed to be answering.
-pub async fn app_with_cookie_ungranted(core: Core) -> (axum::Router, String) {
-    let (app, cookie, _) = app_with_state_as(core, false).await;
-    (app, cookie)
-}
-
-/// `app_with_cookie`, plus the state behind it — what a test needs when it has
-/// to read something a handler wrote outside the database, such as the
-/// configuration file the apply path rewrites.
-pub async fn app_with_state(core: Core) -> (axum::Router, String, crate::web::state::AppState) {
-    app_with_state_as(core, true).await
-}
-
-async fn app_with_state_as(
-    core: Core,
-    can_judge: bool,
-) -> (axum::Router, String, crate::web::state::AppState) {
     let cid = crate::store::new_id();
     core.store
         .control
@@ -131,7 +73,7 @@ async fn app_with_state_as(
         .await
         .unwrap();
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
-    let user = granted_user(&core, can_judge).await;
+    let user = registered_user(&core).await;
     let state = crate::web::state::AppState {
         tenants: std::sync::Arc::new(crate::tenants::Tenants::single(cfg.clone(), core, user)),
         config: cfg,
@@ -142,13 +84,11 @@ async fn app_with_state_as(
             pending: crate::auth::oidc::PendingStore::new(),
             secure_cookies: false,
         }),
-        config_path: std::sync::Arc::new(scratch_config()),
         ask_handoff: Default::default(),
     };
     (
         crate::web::router(state.clone()),
         format!("engram_session={cid}"),
-        state,
     )
 }
 
@@ -478,20 +418,8 @@ pub(crate) fn form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
 /// A recording session, one artifact, and one captured search of this
 /// user's whose pool holds it.
 pub(crate) async fn searched_app() -> (axum::Router, String, crate::core::Core, String, String) {
-    searched_app_tuned(None).await
-}
-
-/// `searched_app`, with the judgement floor low enough that a verdict on
-/// the bar can cross it — the bar is the labeller now, so the bar is what
-/// pays for a sweep.
-pub(crate) async fn searched_app_tuned(
-    floor: Option<i64>,
-) -> (axum::Router, String, crate::core::Core, String, String) {
     let mut core = crate::core::test_support::test_core().await;
     core.learn.enabled = true;
-    if let Some(n) = floor {
-        core.feedback.tune.min_judgements = n;
-    }
     let handle = core.clone();
     let (app, cookie) = app_with_cookie(core).await;
     let src = handle

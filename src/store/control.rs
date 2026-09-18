@@ -30,7 +30,6 @@ pub struct User {
     pub subject: String,
     pub email: Option<String>,
     pub slug: String,
-    pub can_judge: bool,
     pub created_at: i64,
 }
 
@@ -40,7 +39,6 @@ impl User {
             subject: r.get("subject"),
             email: r.get("email"),
             slug: r.get("slug"),
-            can_judge: r.get::<i64, _>("can_judge") != 0,
             created_at: r.get("created_at"),
         }
     }
@@ -191,7 +189,9 @@ impl Control {
         // Only for a column nothing reads. `users.last_seen_at` was written by
         // `provision` and by a `touch` no production path ever called, listed
         // by nothing and read by nothing, so what this drops is a column whose
-        // every value was the row's own `created_at`.
+        // every value was the row's own `created_at`. `users.can_judge` gated
+        // a button that let a person apply a tuning result by hand; the base
+        // tunes itself, and nothing reads the grant.
         //
         // After the refusal and not before it, which is the whole reason this
         // sits down here rather than beside `ADDITIVE`. A drop is the one step
@@ -202,28 +202,19 @@ impl Control {
         // base the old binary's `provision` still names, which strands them on
         // both sides. `ADDITIVE` may run before the refusal because adding a
         // column with a default is invisible to a binary that does not know it.
-        const REMOVED: [(&str, &str, &str); 1] = [(
-            "users",
-            "last_seen_at",
-            "ALTER TABLE users DROP COLUMN last_seen_at",
-        )];
-        for (table, column, ddl) in REMOVED {
-            let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
-                .bind(table)
-                .fetch_all(&self.pool)
-                .await?
-                .iter()
-                .map(|r| r.get::<String, _>("name"))
-                .collect();
-            if !have.iter().any(|h| h.eq_ignore_ascii_case(column)) {
-                continue;
-            }
-            sqlx::raw_sql(ddl)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| crate::error::Error::Store(e.to_string()))?;
-            tracing::info!(column = %format!("{table}.{column}"), "dropped a column the control schema no longer has");
-        }
+        const REMOVED: [(&str, &str, &str); 2] = [
+            (
+                "users",
+                "last_seen_at",
+                "ALTER TABLE users DROP COLUMN last_seen_at",
+            ),
+            (
+                "users",
+                "can_judge",
+                "ALTER TABLE users DROP COLUMN can_judge",
+            ),
+        ];
+        super::drop_removed(&self.pool, &REMOVED).await?;
 
         sqlx::raw_sql(SCHEMA)
             .execute(&self.pool)
@@ -277,8 +268,8 @@ impl Control {
     pub async fn provision(&self, subject: &str, email: Option<&str>) -> Result<User> {
         let now = super::now();
         sqlx::query(
-            "INSERT OR IGNORE INTO users (subject, email, slug, can_judge, created_at)
-             VALUES (?, ?, ?, 0, ?)",
+            "INSERT OR IGNORE INTO users (subject, email, slug, created_at)
+             VALUES (?, ?, ?, ?)",
         )
         .bind(subject)
         .bind(email)
@@ -355,20 +346,6 @@ impl Control {
             .execute(&self.pool)
             .await?;
         Ok(())
-    }
-
-    /// `false` when there is no such subject, so the grant CLI can say so
-    /// rather than report success on a typo nobody will ever log in as.
-    pub async fn set_can_judge(&self, subject: &str, on: bool) -> Result<bool> {
-        Ok(
-            sqlx::query("UPDATE users SET can_judge = ? WHERE subject = ?")
-                .bind(i64::from(on))
-                .bind(subject)
-                .execute(&self.pool)
-                .await?
-                .rows_affected()
-                > 0,
-        )
     }
 
     /// Remove a user and everything in the control plane that speaks for them:
@@ -511,11 +488,10 @@ mod tests {
             .await
             .unwrap();
         // An older `users`: it still has `last_seen_at`, which this schema
-        // drops, and it does not yet have `can_judge`, which this schema
-        // refuses over.
+        // drops, and it does not have `slug`, which this schema refuses over.
         sqlx::raw_sql(
             "CREATE TABLE users (
-               subject TEXT PRIMARY KEY, email TEXT, slug TEXT NOT NULL UNIQUE,
+               subject TEXT PRIMARY KEY, email TEXT,
                created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL);",
         )
         .execute(&pool)
@@ -525,7 +501,7 @@ mod tests {
 
         let err = control.migrate().await.unwrap_err().to_string();
         assert!(
-            err.contains("older than the schema") && err.contains("users.can_judge"),
+            err.contains("older than the schema") && err.contains("users.slug"),
             "the operator has to be told which column is missing: {err}"
         );
 
@@ -591,29 +567,6 @@ mod tests {
         assert_eq!(first.slug, again.slug);
         assert_eq!(first.created_at, again.created_at);
         assert_eq!(c.users().await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_new_user_may_not_judge() {
-        let c = Control::memory().await.unwrap();
-        assert!(!c.provision("sub-1", None).await.unwrap().can_judge);
-    }
-
-    #[tokio::test]
-    async fn granting_and_revoking_judge_is_visible_immediately() {
-        let c = Control::memory().await.unwrap();
-        c.provision("sub-1", None).await.unwrap();
-        assert!(c.set_can_judge("sub-1", true).await.unwrap());
-        assert!(c.user("sub-1").await.unwrap().unwrap().can_judge);
-        assert!(c.set_can_judge("sub-1", false).await.unwrap());
-        assert!(!c.user("sub-1").await.unwrap().unwrap().can_judge);
-    }
-
-    #[tokio::test]
-    async fn granting_to_an_unknown_subject_says_so_rather_than_inventing_one() {
-        let c = Control::memory().await.unwrap();
-        assert!(!c.set_can_judge("nobody", true).await.unwrap());
-        assert!(c.users().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -697,10 +650,10 @@ mod tests {
     #[tokio::test]
     async fn a_control_database_older_than_the_schema_refuses_at_boot() {
         let pool = empty_pool().await;
-        // `users` from before the judge grant.
+        // `users` from before the slug was stored.
         sqlx::raw_sql(
             "CREATE TABLE users (
-               subject TEXT PRIMARY KEY, email TEXT, slug TEXT NOT NULL UNIQUE,
+               subject TEXT PRIMARY KEY, email TEXT,
                created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL)",
         )
         .execute(&pool)
@@ -708,7 +661,7 @@ mod tests {
         .unwrap();
 
         let e = Control { pool }.migrate().await.unwrap_err().to_string();
-        assert!(e.contains("users.can_judge"), "{e}");
+        assert!(e.contains("users.slug"), "{e}");
     }
 
     /// The exception, and the same one `Store::migrate` makes: a column added
@@ -772,13 +725,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_control_database_still_holding_last_seen_at_loses_it() {
+    async fn a_control_database_still_holding_the_dropped_columns_loses_them() {
         let pool = empty_pool().await;
         sqlx::raw_sql(
             "CREATE TABLE users (
                subject TEXT PRIMARY KEY, email TEXT, slug TEXT NOT NULL UNIQUE,
                can_judge INTEGER NOT NULL DEFAULT 0,
-               created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL)",
+               created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL);
+             INSERT INTO users (subject, slug, can_judge, created_at, last_seen_at)
+                  VALUES ('sub-0', 'slug0', 1, 1, 1)",
         )
         .execute(&pool)
         .await
@@ -788,7 +743,7 @@ mod tests {
         control
             .migrate()
             .await
-            .expect("the stale column is dropped");
+            .expect("the stale columns are dropped");
         control
             .provision("sub-1", None)
             .await
@@ -801,6 +756,12 @@ mod tests {
             .map(|r| r.get::<String, _>("name"))
             .collect();
         assert!(!cols.iter().any(|c| c == "last_seen_at"), "{cols:?}");
+        assert!(!cols.iter().any(|c| c == "can_judge"), "{cols:?}");
+        assert_eq!(
+            control.users().await.unwrap().len(),
+            2,
+            "the rows outlive their columns"
+        );
     }
 
     #[tokio::test]

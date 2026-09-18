@@ -281,6 +281,35 @@ impl Store {
             )));
         }
 
+        // The mirror of `ADDITIVE`: columns this schema used to have and no
+        // longer does. `eval_runs.recommended` and `applied_at` said whether a
+        // pass's result was waiting for a person to take it, and nothing waits
+        // for that any more — the pass adopts what clears its gate. The
+        // `NOT NULL` one is not inert: it fails every `INSERT` that stopped
+        // naming it, which is the one `record_eval_run` makes, so the first
+        // idle pass on an upgraded base would fail at the journal.
+        //
+        // After the refusal and not before it, for the reason the control
+        // plane gives: a drop is the one step here that cannot be undone, and
+        // a base refused for some other column has to come out exactly as it
+        // went in, so the previous binary can be put back. The index over
+        // the two columns has to go first or SQLite refuses the drop.
+        const REMOVED: [(&str, &str, &str); 2] = [
+            (
+                "eval_runs",
+                "recommended",
+                "DROP INDEX IF EXISTS idx_eval_runs_open;
+                 ALTER TABLE eval_runs DROP COLUMN recommended",
+            ),
+            (
+                "eval_runs",
+                "applied_at",
+                "DROP INDEX IF EXISTS idx_eval_runs_open;
+                 ALTER TABLE eval_runs DROP COLUMN applied_at",
+            ),
+        ];
+        drop_removed(&self.pool, &REMOVED).await?;
+
         sqlx::raw_sql(SCHEMA)
             .execute(&self.pool)
             .await
@@ -386,6 +415,37 @@ pub(crate) async fn apply_additive(
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
         tracing::info!(column = %key, "added a column the schema expects");
         missing.remove(i);
+    }
+    Ok(())
+}
+
+/// Drop the columns a schema no longer has, where the base still has them.
+///
+/// Each entry is a table, the column, and the DDL that takes it away — the
+/// DDL rather than a generated `ALTER`, because a column under an index has
+/// to lose the index first, and only the caller knows which. Skipped where
+/// the column is already gone, so this runs on every connect like everything
+/// else here.
+pub(crate) async fn drop_removed(
+    pool: &sqlx::SqlitePool,
+    removed: &[(&'static str, &'static str, &'static str)],
+) -> Result<()> {
+    for &(table, column, ddl) in removed {
+        let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
+            .bind(table)
+            .fetch_all(pool)
+            .await?
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        if !have.iter().any(|h| h.eq_ignore_ascii_case(column)) {
+            continue;
+        }
+        sqlx::raw_sql(ddl)
+            .execute(pool)
+            .await
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        tracing::info!(column = %format!("{table}.{column}"), "dropped a column the schema no longer has");
     }
     Ok(())
 }
@@ -526,6 +586,62 @@ mod tests {
                 .unwrap();
         assert_eq!(text, "hours", "the row was rewritten");
         assert_eq!(stamp, 0, "a stamp nobody has set is not a claim about when");
+        // And again, because migrate runs on every connect.
+        store.migrate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_journal_from_before_autonomy_loses_the_columns_that_waited_for_a_press() {
+        // `recommended` was `NOT NULL` with no default, so left in place it
+        // failed the first idle pass's journal write on an upgraded base. The
+        // rows stay: what a pass found is still what it found.
+        let store = Store::memory().await.unwrap();
+        sqlx::raw_sql(
+            "ALTER TABLE eval_runs ADD COLUMN recommended INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE eval_runs ADD COLUMN applied_at INTEGER;
+             CREATE INDEX IF NOT EXISTS idx_eval_runs_open
+               ON eval_runs(recommended, applied_at, created_at DESC);
+             INSERT INTO eval_runs (id, created_at, judged_count, pairs_used, pairs_skipped,
+                                    base_params, base_recall, base_mrr,
+                                    best_params, best_recall, best_mrr, diff,
+                                    recommended, applied_at)
+                  VALUES ('r', 1, 50, 12, 0,
+                          '{\"recency_weight\":0.05,\"per_source_cap\":3}', 0.7, 0.5,
+                          '{\"recency_weight\":0.1,\"per_source_cap\":null}', 0.8, 0.6,
+                          '[]', 1, NULL);",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        store.migrate().await.unwrap();
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('eval_runs')")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert!(!cols.iter().any(|c| c == "recommended"), "{cols:?}");
+        assert!(!cols.iter().any(|c| c == "applied_at"), "{cols:?}");
+        let run = store.latest_eval_run().await.unwrap().unwrap();
+        assert_eq!(run.id, "r", "the journal row survived the drop");
+        // And the next pass can write its row.
+        store
+            .record_eval_run(&eval_runs::NewEvalRun {
+                judged_count: 0,
+                pairs_used: 0,
+                pairs_skipped: 0,
+                base: Default::default(),
+                base_recall: 0.0,
+                base_mrr: 0.0,
+                best: Default::default(),
+                best_recall: 0.0,
+                best_mrr: 0.0,
+                diff: vec![],
+            })
+            .await
+            .unwrap();
         // And again, because migrate runs on every connect.
         store.migrate().await.unwrap();
     }

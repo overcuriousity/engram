@@ -732,7 +732,7 @@ mod tests {
     #[tokio::test]
     async fn a_weighted_search_is_the_same_search_where_nothing_weighs_age() {
         // The default implementation ignores the weight, and this store is
-        // what the tuning sweep's tests rank through: a sweep that silently
+        // what the idle pass's tests rank through: a replay that silently
         // scored every candidate identically would still pass its own gate.
         let v = MemoryVectors::new();
         v.ensure_collection(3).await.unwrap();

@@ -110,10 +110,10 @@ pinned_boost = 0.15
 # Chunks one document may contribute to a result list, so a long document
 # cannot fill it. 0 lets one document supply every result. This, recency_weight,
 # recency_half_life_days and candidate_multiplier are the four knobs here the
-# tuning sweep and the idle pass may move — with `associate.prime_lift`,
-# `associate.spread_max` and whether the configured reranker runs, seven in
-# all; applying a recommendation rewrites the file-backed ones here — see
-# [feedback.tune] and [evolve].
+# idle pass may move — with `associate.prime_lift`, `associate.spread_max`,
+# `sitting.prime`, `consolidate.review_min` and whether the configured reranker
+# runs, nine in all. The file is never rewritten: what is live is a generation
+# in the base, and /ui/insights names it — see [evolve].
 per_source_cap = 3
 # How many times the answer size a search fetches when the cap or the reranker
 # will narrow the list. Wider gives the cap more to choose from and costs a
@@ -606,17 +606,6 @@ sweep_hours = 6
 # is no bandit and no model.
 explore = 0.1
 
-# What judged searches are spent on: a background sweep of recency_weight and
-# per_source_cap over every judged pair, which recommends a better setting when
-# it finds one worth the name. See docs/evaluation.md.
-[feedback.tune]
-# Judgements before the first sweep. A floor, not a target: with ten pairs
-# recall@10 moves in ten-point steps, and a sweep under that recommends the
-# quirks of ten queries as confidently as a real improvement.
-min_judgements = 50
-# Further verdicts before the sweep is run again.
-resweep_after = 10
-
 # Links learned from co-retrieval, and a decaying accessibility per artifact.
 # Both are learned from use and neither touches what is stored: the trace is
 # fixed, access is plastic. Runs behind [learn] — without recorded searches
@@ -987,22 +976,6 @@ cooldown_secs = 0
 #
 # 0 turns this one signal off and leaves the other three recording.
 give_up_window_secs = 300
-
-# Let the tuning sweep read positive observations as pairs, beside the ones you
-# judged by hand.
-#
-# This is the whole point of recording any of it, and it ships off — not as an
-# opinion about whether it works, but because widening the sweep's evidence
-# changes which settings it recommends, and a recommendation changes ranking.
-# Turn it on deliberately. What tells you what it did is the base itself:
-# /ui/insights journals every sweep with the settings that produced it, and the
-# probe anchor and the lived watch will take a move back that does not hold up.
-# (The cargo harness is deprecated and would not see this anyway — it ranks a
-# frozen corpus nobody has opened. See docs/evaluation.md.)
-#
-# Positive observations only. A weak negative is never enough to bring a change
-# about.
-feed_sweep = false
 
 # How much a quiet base may do on its own. Three stages:
 #

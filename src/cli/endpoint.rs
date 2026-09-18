@@ -59,8 +59,8 @@ pub fn default_path() -> Option<std::path::PathBuf> {
 /// `env` is a closure so the precedence is testable without mutating the
 /// process's own environment, which two tests running at once would race on.
 ///
-/// Read with `toml_edit` rather than a second TOML crate: the config writer
-/// already depends on it, and two keys do not justify a parser of their own.
+/// Read with `toml_edit` rather than the `config` crate: a hand-edited file
+/// keeps its comments, and two keys do not justify a parser of their own.
 pub fn resolve(
     env: &dyn Fn(&str) -> Option<String>,
     file: Option<&std::path::Path>,
