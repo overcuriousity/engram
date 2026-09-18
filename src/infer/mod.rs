@@ -10,6 +10,8 @@ pub mod prompt;
 pub mod retry;
 pub mod split;
 pub mod verify;
+#[cfg(feature = "contained")]
+pub mod whisper;
 
 use crate::error::Result;
 use async_trait::async_trait;

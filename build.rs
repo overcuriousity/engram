@@ -20,6 +20,8 @@ use std::path::Path;
 const SIGNED: &str = "extension/firefox-signed.xpi";
 
 fn main() {
+    #[cfg(feature = "contained")]
+    build_whisper();
     build_stylesheet();
 
     println!("cargo:rerun-if-changed=extension/shared");
@@ -165,4 +167,54 @@ fn pack(manifest_path: &str, out: &Path) {
         zip.write_all(&body).unwrap();
     }
     zip.finish().unwrap();
+}
+
+/// whisper.cpp, compiled over the ggml llama.cpp already built.
+///
+/// `llama-cpp-sys-2` installs its ggml and says where in
+/// `DEP_LLAMA_GGML_CMAKE_DIR`, for exactly this: a second crate that wants
+/// ggml uses that one, and there is one ggml in the program. Nothing here
+/// builds or links a ggml of its own — the libraries are already on the link
+/// line, put there by the crate that built them. What is compiled is three
+/// vendored files and a four-function shim; see `vendor/whisper.cpp/README.md`
+/// for why that release and why the two pins move together.
+#[cfg(feature = "contained")]
+fn build_whisper() {
+    let vendor = Path::new("vendor/whisper.cpp");
+    println!("cargo:rerun-if-changed={}", vendor.display());
+
+    let cmake_dir = std::env::var("DEP_LLAMA_GGML_CMAKE_DIR").unwrap_or_else(|_| {
+        panic!(
+            "llama-cpp-sys-2 did not say where its ggml is (DEP_LLAMA_GGML_CMAKE_DIR). \
+             whisper.cpp is compiled against that ggml and no other."
+        )
+    });
+    // <out>/lib/cmake or <out>/lib64/cmake; the headers are installed beside.
+    let ggml_include = Path::new(&cmake_dir).join("../../include");
+    assert!(
+        ggml_include.join("ggml.h").is_file(),
+        "no ggml.h under {}: the layout llama-cpp-sys-2 installs has changed",
+        ggml_include.display()
+    );
+
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .std("c++17")
+        .include(vendor.join("include"))
+        .include(vendor.join("src"))
+        .include(vendor)
+        .include(&ggml_include)
+        .define("WHISPER_VERSION", "\"1.9.2\"")
+        // Vendored and unmodified: its warnings are its authors' to read.
+        .warnings(false)
+        .file(vendor.join("src/whisper.cpp"))
+        .file(vendor.join("engram_whisper.cpp"));
+    // On Android the C++ runtime is linked once, statically, by the llama
+    // build (`android-static-stdcxx`). Asking for it again here would put
+    // libc++_shared.so on the link line and a second .so in the APK.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        build.cpp_link_stdlib(None);
+    }
+    build.compile("engram_whisper");
 }

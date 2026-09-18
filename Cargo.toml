@@ -145,6 +145,14 @@ libsqlite3-sys = { version = "0.37", optional = true }
 # Android does not ship, and no GPU backend. Pinned exactly — the C++ under it
 # moves fast, and an upgrade is a decision.
 llama-cpp-2 = { version = "=0.1.156", default-features = false, optional = true }
+# Named beside the binding, at the same pin, for one reason: Cargo hands a
+# `links` crate's DEP_* variables to its direct dependents only, and build.rs
+# needs DEP_LLAMA_GGML_CMAKE_DIR to compile whisper.cpp over the ggml this
+# already built. See vendor/whisper.cpp/README.md — the two pins move together.
+llama-cpp-sys-2 = { version = "=0.1.156", default-features = false, optional = true }
+# A recording, read and brought to the rate Whisper hears at.
+hound = { version = "3.5", optional = true }
+rubato = { version = "5", optional = true }
 
 [dev-dependencies]
 # `test-util` is not part of tokio's `full`. It carries the pausable clock the
@@ -161,8 +169,18 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "r
 # runtime one: the zip is a build artifact, not something the server assembles
 # per request.
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# Compiles the vendored whisper.cpp. Only with `contained`.
+cc = { version = "1.2", features = ["parallel"], optional = true }
 
 [features]
 default = []
 pdf-ml = ["docling/pdf"]
-contained = ["dep:sqlite-vec", "dep:libsqlite3-sys", "dep:llama-cpp-2"]
+contained = [
+    "dep:sqlite-vec",
+    "dep:libsqlite3-sys",
+    "dep:llama-cpp-2",
+    "dep:llama-cpp-sys-2",
+    "dep:hound",
+    "dep:rubato",
+    "dep:cc",
+]
