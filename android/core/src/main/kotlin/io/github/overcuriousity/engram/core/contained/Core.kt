@@ -11,6 +11,21 @@ data class Started(val port: Int, val token: String)
 @Serializable
 data class Models(val embed: String? = null, val rerank: String? = null, val ask: String? = null)
 
+/** An OpenAI-compatible endpoint of the person's choosing, for ask where the phone carries no model for it. */
+@Serializable
+data class Endpoint(val baseUrl: String, val model: String, val apiKey: String? = null)
+
+/** What a launch is given: the models on the device, and where to ask when there is no file for that. */
+@Serializable
+data class Setup(
+    val embed: String? = null,
+    val rerank: String? = null,
+    val ask: String? = null,
+    val askEndpoint: Endpoint? = null,
+) {
+    constructor(models: Models, askEndpoint: Endpoint? = null) : this(models.embed, models.rerank, models.ask, askEndpoint)
+}
+
 class CoreFailed(message: String) : Exception(message)
 
 /**
@@ -32,10 +47,24 @@ object Core {
      */
     val available: Boolean by lazy { runCatching { System.loadLibrary("engram_android") }.isSuccess }
 
-    /** Starts the core over [dataDir], or answers the one already running. Blocks; call off the main thread. */
-    fun start(dataDir: String, models: Models): Started {
+    private val initialised = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Gives the core's certificate verifier the app's Context, once. The core
+     * asks Android whether a server's chain is trusted, and without this its
+     * first HTTPS request — a shared link, an ask endpoint — panics.
+     */
+    fun init(context: android.content.Context) {
         if (!available) throw CoreFailed("not built for this device")
-        val a = json.decodeFromString<Answer>(start(dataDir, json.encodeToString(Models.serializer(), models)))
+        if (!initialised.compareAndSet(false, true)) return
+        val a = json.decodeFromString<Answer>(init(context.applicationContext as Any))
+        if (a.error != null) { initialised.set(false); throw CoreFailed(a.error) }
+    }
+
+    /** Starts the core over [dataDir], or answers the one already running. Blocks; call off the main thread. */
+    fun start(dataDir: String, setup: Setup): Started {
+        if (!available) throw CoreFailed("not built for this device")
+        val a = json.decodeFromString<Answer>(start(dataDir, json.encodeToString(Setup.serializer(), setup)))
         if (a.error != null || a.port == null || a.token == null) throw CoreFailed(a.error ?: "the core answered nothing")
         return Started(a.port, a.token)
     }
@@ -45,7 +74,9 @@ object Core {
         if (available) stop()
     }
 
-    @JvmStatic private external fun start(dataDir: String, models: String): String
+    @JvmStatic private external fun init(context: Any): String
+
+    @JvmStatic private external fun start(dataDir: String, setup: String): String
 
     @JvmStatic private external fun stop(): String
 }

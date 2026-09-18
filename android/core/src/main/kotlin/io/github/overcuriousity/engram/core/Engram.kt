@@ -6,7 +6,7 @@ import io.github.overcuriousity.engram.core.ask.Ask
 import io.github.overcuriousity.engram.core.contained.Contained
 import io.github.overcuriousity.engram.core.contained.Core
 import io.github.overcuriousity.engram.core.contained.CoreState
-import io.github.overcuriousity.engram.core.contained.Models
+import io.github.overcuriousity.engram.core.contained.Setup
 import io.github.overcuriousity.engram.core.contained.Started
 import io.github.overcuriousity.engram.core.db.Db
 import io.github.overcuriousity.engram.core.db.MomentRow
@@ -30,7 +30,7 @@ class Engram internal constructor(
     val app: Context,
     versionName: String,
     box: SecretBox = KeystoreBox(),
-    boot: (String, Models) -> Started = Core::start,
+    boot: ((String, Setup) -> Started)? = null,
 ) {
     val userAgent = userAgent(versionName, Build.MODEL)
     val deviceName = "engram for Android $versionName · ${Build.MODEL}"
@@ -49,7 +49,11 @@ class Engram internal constructor(
     val mode: Mode = modes.chosen ?: Mode.server
     private val state = ModeState.of(mode, app.filesDir)
     private val contained: Contained? =
-        if (mode == Mode.contained) Contained(state.core!!, state::models, deviceName, boot) else null
+        if (mode == Mode.contained) Contained(
+            state.core!!, { Setup(state.models()) }, deviceName,
+            // The verifier wants its Context before the core's first HTTPS call.
+            boot ?: { dir, setup -> Core.init(app); Core.start(dir, setup) },
+        ) else null
 
     val db = Db.open(app, state.dbName)
     val outbox = Outbox(db, state.outbox)

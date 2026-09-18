@@ -12,7 +12,9 @@ engram = { path = "../..", features = ["contained"] }
 # Named again only to choose how the C++ runtime is linked on Android: into
 # the library, so the APK ships one `.so` and no `libc++_shared.so` beside it.
 llama-cpp-2 = { version = "=0.1.156", default-features = false, features = ["android-static-stdcxx"] }
-jni = "0.21"
+jni = "0.22"
+# The verifier reqwest already uses, named so that it can be given its Context.
+rustls-platform-verifier = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

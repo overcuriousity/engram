@@ -11,6 +11,7 @@ android {
     defaultConfig {
         minSdk = 29
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles("consumer-rules.pro")
     }
     // Every launch-time crash this app had was an API newer than minSdk, which
     // the compiler cannot see and only lint does. Fatal, and run in CI.
@@ -50,6 +51,12 @@ val buildNative by tasks.registering(Exec::class) {
 }
 if (providers.gradleProperty("engram.native").isPresent) {
     tasks.named("preBuild") { dependsOn(buildNative) }
+}
+
+// What the core's certificate verifier calls into over JNI. With the .so or
+// not at all; the repository it comes from is in settings.gradle.kts.
+if (providers.gradleProperty("engram.native").isPresent) {
+    dependencies { implementation("rustls:rustls-platform-verifier:0.1.1") }
 }
 
 room { schemaDirectory("$projectDir/schemas") }

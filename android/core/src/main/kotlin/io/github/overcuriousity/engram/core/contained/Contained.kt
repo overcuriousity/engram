@@ -25,9 +25,10 @@ sealed interface CoreState {
  */
 class Contained(
     private val dataDir: File,
-    private val models: () -> Models,
+    private val setup: () -> Setup,
     private val deviceName: String,
-    private val boot: (String, Models) -> Started = Core::start,
+    private val boot: (String, Setup) -> Started = Core::start,
+    private val halt: () -> Unit = Core::shutdown,
 ) {
     private val gate = Mutex()
     private val _state = MutableStateFlow<CoreState>(CoreState.Idle)
@@ -36,12 +37,26 @@ class Contained(
     val connected: StateFlow<Connection?> get() = _connected
 
     /** The connection, starting the core if it is not running. Null where it cannot be; [state] says why. */
-    suspend fun ensure(): Connection? = gate.withLock {
+    suspend fun ensure(): Connection? = gate.withLock { started() }
+
+    /**
+     * Stop the core and start it over what is on the device now. A core that
+     * is running answers a second start with itself, so a model that arrived
+     * since, or an endpoint that was set, is only seen by a new one.
+     */
+    suspend fun restart(): Connection? = gate.withLock {
+        _connected.value = null
+        _state.value = CoreState.Idle
+        withContext(Dispatchers.IO) { runCatching { halt() } }
+        started()
+    }
+
+    private suspend fun started(): Connection? {
         _connected.value?.let { return it }
         _state.value = CoreState.Starting
         // Throwable, not Exception: a library that does not link is an Error.
-        val started = withContext(Dispatchers.IO) { runCatching { boot(dataDir.path, models()) } }
-        started.fold(
+        val started = withContext(Dispatchers.IO) { runCatching { boot(dataDir.path, setup()) } }
+        return started.fold(
             onSuccess = {
                 val c = Connection("http://127.0.0.1:${it.port}", it.token, pin = null, serverVersion = "", deviceName = deviceName)
                 _connected.value = c
