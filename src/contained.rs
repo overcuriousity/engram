@@ -39,6 +39,10 @@ pub struct Setup {
 }
 
 pub struct Running {
+    /// The queue's gate on generating stages, and whether anything could do
+    /// that work if it were opened.
+    generation: Arc<std::sync::atomic::AtomicBool>,
+    can_generate: bool,
     shutdown: tokio::sync::watch::Sender<bool>,
     server: tokio::task::JoinHandle<()>,
     workers: Vec<tokio::task::JoinHandle<()>>,
@@ -93,6 +97,11 @@ fn local_hash(data_dir: &Path) -> Result<String> {
 /// going to be there. A role that *has* a model never reads its endpoint —
 /// see `Core::with_local_models`.
 ///
+/// An endpoint, where the person set one, serves both generating roles: it is
+/// one OpenAI-compatible server, and somebody who pointed ask at it expects
+/// their captures read by it too. The model on the phone is another matter —
+/// it is swapped in for ask alone, in `Core::with_local_models`.
+///
 /// Two tiers, because the two windows mean different things. The
 /// synthesizer's is a planning budget: its instructions alone are some three
 /// thousand tokens, and a window too small to plan in fails the capture
@@ -124,9 +133,9 @@ url = "http://127.0.0.1:9"
 collection = "artifacts"
 
 [infer.tiers.device-synthesize]
-base_url = "http://127.0.0.1:9/v1"
-model = "device"
-context_tokens = 32768
+base_url = {ask_url}
+model = {ask_model}
+{ask_key}context_tokens = 32768
 max_output_tokens = 4096
 
 [infer.tiers.device-ask]
@@ -199,6 +208,12 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
         )
         .with_local_models(setup.models),
     );
+    // Shut from the first moment: nothing here may generate until the app
+    // says the phone can afford it, and never where there is nothing to
+    // generate with. See `Running::allow_generation`.
+    let generation = tenants.generation();
+    generation.store(false, std::sync::atomic::Ordering::Relaxed);
+    let can_generate = setup.ask.is_some();
     tenants.get_or_provision(SUBJECT, None).await?;
 
     for old in control.list_tokens(SUBJECT).await? {
@@ -247,6 +262,8 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
     Ok((
         Started { port, token },
         Running {
+            generation,
+            can_generate,
             shutdown,
             server,
             workers,
@@ -255,6 +272,18 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
 }
 
 impl Running {
+    /// Open or shut the queue's gate on the stages that call a generation
+    /// model, and say what it now is. It opens only where an endpoint was
+    /// given: the model on the phone answers questions and does not read
+    /// captures, so without an endpoint that work has nobody to do it and
+    /// stays held however the app asks.
+    pub fn allow_generation(&self, allow: bool) -> bool {
+        let open = allow && self.can_generate;
+        self.generation
+            .store(open, std::sync::atomic::Ordering::Relaxed);
+        open
+    }
+
     /// Stop listening, then let a job in flight finish: a `running` row left
     /// behind is a job the next launch has to find and repair.
     pub async fn stop(self) {
@@ -292,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn an_endpoint_is_asks_and_nobody_elses() {
+    fn an_endpoint_is_written_as_it_was_typed() {
         let e = Endpoint {
             base_url: "https://llm.example/v1".into(),
             model: "some \"quoted\" model".into(),
@@ -303,7 +332,93 @@ mod tests {
         assert_eq!(ask.base_url, "https://llm.example/v1");
         assert_eq!(ask.model, "some \"quoted\" model");
         assert_eq!(ask.api_key.as_deref(), Some("sk-\\odd"));
-        assert_eq!(cfg.infer.synthesize.base_url, "http://127.0.0.1:9/v1");
+    }
+
+    #[test]
+    fn an_endpoint_serves_synthesis_too() {
+        let e = Endpoint {
+            base_url: "https://llm.example/v1".into(),
+            model: "m".into(),
+            api_key: Some("k".into()),
+        };
+        let cfg = parsed(Some(&e));
+        assert_eq!(cfg.infer.synthesize.base_url, "https://llm.example/v1");
+        assert_eq!(cfg.infer.synthesize.api_key.as_deref(), Some("k"));
+        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
+    }
+
+    async fn status_json(started: &Started) -> serde_json::Value {
+        reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{}/api/v1/status", started.port))
+            .bearer_auth(&started.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_no_endpoint_the_gate_never_opens_and_nothing_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (started, running) = start(dir.path(), Default::default()).await.unwrap();
+        assert!(!running.allow_generation(true));
+        let made = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/api/v1/corpora", started.port))
+            .bearer_auth(&started.token)
+            .json(&serde_json::json!({ "text": "the key hangs behind the kitchen door", "source": "web" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(made.status(), 201);
+        // The small capture's one synthesis call is armed by the `synthesize`
+        // unit. With no embedder here the embed fails, which is not this
+        // test's business; the generating unit must simply wait.
+        let mut waiting = 0;
+        for _ in 0..50 {
+            waiting = status_json(&started).await["waiting_generation"]
+                .as_i64()
+                .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(waiting, 1);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let status = status_json(&started).await;
+        assert_eq!(status["waiting_generation"], 1, "it was claimed after all");
+        let failed_generating = status["failed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["stage"] == "segment_window")
+            .count();
+        assert_eq!(failed_generating, 0);
+        running.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_an_endpoint_the_app_decides() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup = Setup {
+            models: Default::default(),
+            ask: Some(Endpoint {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "m".into(),
+                api_key: None,
+            }),
+        };
+        let (_, running) = start_with(dir.path(), setup).await.unwrap();
+        assert!(
+            !running
+                .generation
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(running.allow_generation(true));
+        assert!(!running.allow_generation(false));
+        running.stop().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
