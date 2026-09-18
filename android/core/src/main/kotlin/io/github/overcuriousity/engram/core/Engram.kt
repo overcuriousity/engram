@@ -3,6 +3,11 @@ package io.github.overcuriousity.engram.core
 import android.content.Context
 import android.os.Build
 import io.github.overcuriousity.engram.core.ask.Ask
+import io.github.overcuriousity.engram.core.contained.Contained
+import io.github.overcuriousity.engram.core.contained.Core
+import io.github.overcuriousity.engram.core.contained.CoreState
+import io.github.overcuriousity.engram.core.contained.Models
+import io.github.overcuriousity.engram.core.contained.Started
 import io.github.overcuriousity.engram.core.db.Db
 import io.github.overcuriousity.engram.core.db.MomentRow
 import io.github.overcuriousity.engram.core.outbox.Drainer
@@ -16,21 +21,60 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 import java.time.ZoneId
 
 /** Everything the app and its receivers are allowed to touch, built once. */
-class Engram private constructor(val app: Context, versionName: String) {
+class Engram internal constructor(
+    val app: Context,
+    versionName: String,
+    box: SecretBox = KeystoreBox(),
+    boot: (String, Models) -> Started = Core::start,
+) {
     val userAgent = userAgent(versionName, Build.MODEL)
     val deviceName = "engram for Android $versionName · ${Build.MODEL}"
-    val store = ConnectionStore(File(app.filesDir, "connection"), KeystoreBox())
-    val db = Db.open(app)
-    val outbox = Outbox(db, File(app.filesDir, "outbox"))
+    private val prefs = app.getSharedPreferences("engram", Context.MODE_PRIVATE)
+    val store = ConnectionStore(File(app.filesDir, "connection"), box)
+
+    /**
+     * Where this app's engram lives, read once: everything below is built for
+     * one mode, and changing it is a new process. Nothing chosen is `server`,
+     * so a phone that was paired before there was a choice carries on as it was.
+     *
+     * This and [transport] are the only places that know. Above here there is
+     * a connection or there is not.
+     */
+    val modes = ModeStore(prefs)
+    val mode: Mode = modes.chosen ?: Mode.server
+    private val state = ModeState.of(mode, app.filesDir)
+    private val contained: Contained? =
+        if (mode == Mode.contained) Contained(state.core!!, state::models, deviceName, boot) else null
+
+    val db = Db.open(app, state.dbName)
+    val outbox = Outbox(db, state.outbox)
     val push = Push(store, { transport() }, db)
+
+    /** What the app is talking to, if anything. A pairing in server mode; the running core in contained. */
+    val connection: StateFlow<Connection?> = contained?.connected ?: store.current
+
+    /** The core's own story, for the screen that waits on it. Null in server mode. */
+    val core: StateFlow<CoreState>? = contained?.state
+
+    /** True where the source is this process: nothing it is owed waits for a network. */
+    val loopback: Boolean get() = contained != null
+
+    /**
+     * Whether there is something to talk to, starting the core if that is what
+     * it takes. The worker asks before draining and the first screen asks
+     * before drawing; whoever is first pays for the start.
+     */
+    suspend fun ready(): Boolean = (contained?.ensure() ?: store.current.value) != null
+
+    internal fun close() = db.close()
 
     /** The last reminder a push carried. Room stays inside this module; the screens read this. */
     val latestMoment: Flow<MomentRow?> get() = db.momentsDao().latest()
-    private val prefs = app.getSharedPreferences("engram", Context.MODE_PRIVATE)
     val counters = ViewCounters(prefs)
     val situation = Situation(AndroidSituationSource(app, counters), Stable.of(app))
 
@@ -57,7 +101,10 @@ class Engram private constructor(val app: Context, versionName: String) {
         theme.value = word
     }
 
-    internal fun transport(): Transport? = store.current.value?.let { Transport(it, userAgent) }
+    internal fun transport(): Transport? = when (contained) {
+        null -> store.current.value?.let { Transport(it, userAgent) }
+        else -> contained.connected.value?.let { Transport(it, userAgent, source = "contained") }
+    }
 
     private val server = ServerReader(
         transport = { transport() },

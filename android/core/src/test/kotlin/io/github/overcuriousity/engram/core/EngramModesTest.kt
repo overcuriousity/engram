@@ -1,0 +1,117 @@
+package io.github.overcuriousity.engram.core
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import io.github.overcuriousity.engram.core.contained.CoreFailed
+import io.github.overcuriousity.engram.core.contained.CoreState
+import io.github.overcuriousity.engram.core.contained.Started
+import io.github.overcuriousity.engram.core.db.State
+import io.github.overcuriousity.engram.core.outbox.Drainer
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import org.junit.After
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.io.File
+import java.net.InetAddress
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
+class EngramModesTest {
+    private val app = ApplicationProvider.getApplicationContext<Context>()
+    private val theServer = MockWebServer().apply { start(InetAddress.getByName("127.0.0.1"), 0) }
+    private val theCore = MockWebServer().apply { start(InetAddress.getByName("127.0.0.1"), 0) }
+    private val open = mutableListOf<Engram>()
+
+    private fun engram(boot: () -> Started = { Started(theCore.port, "launch") }) =
+        Engram(app, "0", PlainBox()) { _, _ -> boot() }.also { open += it }
+    private fun choose(m: Mode?) { ModeStore(app.getSharedPreferences("engram", Context.MODE_PRIVATE)).chosen = m }
+    private fun paired() = Connection(theServer.url("/").toString().trimEnd('/'), "tok", null, "1", "d")
+
+    @After fun down() { open.forEach { it.close() }; theServer.close(); theCore.close() }
+
+    @Test fun anInstallThatNeverChoseIsAServersClient() = runTest {
+        val e = engram { fail("the core was started"); Started(0, "") }
+        assertEquals(Mode.server, e.mode)
+        assertNull(e.core)
+        assertFalse(e.loopback)
+        assertFalse(e.ready())
+        e.store.set(paired())
+        assertTrue(e.ready())
+        assertEquals(paired(), e.connection.value)
+    }
+
+    @Test fun containedIsALoopbackConnectionThatIsNeverWrittenDown() = runTest {
+        choose(Mode.contained)
+        val e = engram()
+        assertNull(e.connection.value)
+        assertTrue(e.ready())
+        assertEquals("http://127.0.0.1:${theCore.port}", e.connection.value!!.origin)
+        assertTrue(e.loopback)
+        assertNull(e.store.current.value)
+        assertFalse(File(app.filesDir, "connection").exists())
+        assertEquals("contained", e.transport()!!.source)
+    }
+
+    @Test fun aCoreThatCannotStartLeavesTheAppStandingAndSaysWhy() = runTest {
+        choose(Mode.contained)
+        val e = engram { throw CoreFailed("not built for this device") }
+        assertFalse(e.ready())
+        assertNull(e.transport())
+        assertNull(e.drainer())
+        assertEquals(CoreState.Unavailable("not built for this device"), e.core!!.value)
+    }
+
+    @Test fun aStoredPairingDoesNotLeakIntoContainedMode() = runTest {
+        engram().also { it.store.set(paired()) }.close()
+        choose(Mode.contained)
+        val e = engram()
+        assertTrue(e.ready())
+        assertEquals("http://127.0.0.1:${theCore.port}", e.transport()!!.connection.origin)
+        // Still stored, for the day the phone goes back.
+        assertEquals(paired(), e.store.current.value)
+    }
+
+    @Test fun oneModesOutboxIsNeverDrainedIntoTheOther() = runTest {
+        // Owed to the server, and not delivered before the mode changes.
+        val s = engram().also { it.store.set(paired()) }
+        s.outbox.enqueueText("for the server", null, null)
+        s.close()
+
+        choose(Mode.contained)
+        val c = engram()
+        assertTrue(c.ready())
+        assertTrue(c.outbox.rows.first().isEmpty())
+        assertEquals(Drainer.Outcome.Done, c.drainer()!!.drainOnce())
+        assertEquals(0, theCore.requestCount)
+        theCore.enqueue(MockResponse(code = 202, body = "{}"))
+        c.outbox.enqueueText("for the phone", null, null)
+        c.drainer()!!.drainOnce()
+        assertEquals(1, theCore.requestCount)
+        assertEquals(0, theServer.requestCount)
+        c.close()
+
+        // Back again: what was owed is still owed, to the one it was owed to.
+        choose(Mode.server)
+        val back = engram()
+        val owed = back.outbox.rows.first().single()
+        assertEquals(State.queued, owed.state)
+        theServer.enqueue(MockResponse(code = 202, body = "{}"))
+        back.drainer()!!.drainOnce()
+        assertTrue(theServer.takeRequest().body!!.utf8().contains("for the server"))
+        assertEquals(1, theCore.requestCount)
+    }
+
+    @Test fun eachModesFilesAreItsOwn() = runTest {
+        engram().also { it.outbox.enqueueText("x", null, null) }.close()
+        choose(Mode.contained)
+        engram().also { it.outbox.enqueueText("y", null, null) }.close()
+        assertTrue(app.getDatabasePath("engram.db").exists())
+        assertTrue(app.getDatabasePath("contained.db").exists())
+    }
+}
