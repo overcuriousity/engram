@@ -6,6 +6,8 @@ pub mod lang;
 #[cfg(feature = "contained")]
 pub mod local;
 pub mod openai;
+#[cfg(feature = "contained")]
+pub mod pcm;
 pub mod prompt;
 pub mod retry;
 pub mod split;
