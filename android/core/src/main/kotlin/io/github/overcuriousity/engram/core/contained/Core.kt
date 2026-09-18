@@ -24,12 +24,17 @@ object Core {
     @Serializable
     private data class Answer(val port: Int? = null, val token: String? = null, val error: String? = null)
 
-    init {
-        System.loadLibrary("engram_android")
-    }
+    /**
+     * Whether this build carries the core for this device. The library is
+     * built for arm64-v8a alone, so on anything else — an x86_64 emulator, a
+     * checkout built without Rust — contained mode is absent rather than
+     * broken. Asked once; a load that failed is not going to succeed later.
+     */
+    val available: Boolean by lazy { runCatching { System.loadLibrary("engram_android") }.isSuccess }
 
     /** Starts the core over [dataDir], or answers the one already running. Blocks; call off the main thread. */
     fun start(dataDir: String, models: Models): Started {
+        if (!available) throw CoreFailed("not built for this device")
         val a = json.decodeFromString<Answer>(start(dataDir, json.encodeToString(Models.serializer(), models)))
         if (a.error != null || a.port == null || a.token == null) throw CoreFailed(a.error ?: "the core answered nothing")
         return Started(a.port, a.token)
@@ -37,7 +42,7 @@ object Core {
 
     /** Stops it and waits for a job in flight. Safe to call when nothing runs. */
     fun shutdown() {
-        stop()
+        if (available) stop()
     }
 
     @JvmStatic private external fun start(dataDir: String, models: String): String
