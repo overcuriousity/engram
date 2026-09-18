@@ -51,6 +51,14 @@ class Contained(
         started()
     }
 
+    /** The end of it: nothing listens afterwards, and a job in flight was waited for. */
+    suspend fun stop() = gate.withLock {
+        _connected.value = null
+        _state.value = CoreState.Idle
+        withContext(Dispatchers.IO) { runCatching { halt() } }
+        Unit
+    }
+
     private suspend fun started(): Connection? {
         _connected.value?.let { return it }
         _state.value = CoreState.Starting

@@ -33,8 +33,9 @@ class EngramModesTest {
     private val open = mutableListOf<Engram>()
 
     private var given: Setup? = null
+    private var halted = 0
     private fun engram(boot: () -> Started = { Started(theCore.port, "launch") }) =
-        Engram(app, "0", PlainBox()) { _, setup -> given = setup; boot() }.also { open += it }
+        Engram(app, "0", PlainBox(), { _, setup -> given = setup; boot() }, { halted++ }).also { open += it }
     private fun choose(m: Mode?) { ModeStore(app.getSharedPreferences("engram", Context.MODE_PRIVATE)).chosen = m }
     private fun paired() = Connection(theServer.url("/").toString().trimEnd('/'), "tok", null, "1", "d")
 
@@ -161,5 +162,43 @@ class EngramModesTest {
     @Test fun serverModeHasNothingToDownloadInto() = runTest {
         assertNull(engram().downloader)
         assertFalse(engram().installed(ModelManifest.required.single()))
+    }
+
+    @Test fun shuttingAnInstanceStopsItsCoreAndLeavesBothBasesWhereTheyWere() = runTest {
+        choose(Mode.contained)
+        val c = engram()
+        assertTrue(c.ready())
+        c.outbox.enqueueText("kept on the phone", null, null)
+        c.shutdown()
+        assertEquals(1, halted)
+        assertNull(c.connection.value)
+
+        choose(Mode.server)
+        engram().also { assertTrue(it.outbox.rows.first().isEmpty()) }.shutdown()
+        assertEquals("a server instance has no core to stop", 1, halted)
+
+        choose(Mode.contained)
+        assertEquals(1, engram().outbox.rows.first().size)
+    }
+
+    @Test fun whatContainedModeCannotOpenWithoutIsTheEmbedder() = runTest {
+        assertTrue(engram().requiredMissing().isEmpty())
+        choose(Mode.contained)
+        val e = engram()
+        assertEquals(ModelManifest.required, e.requiredMissing())
+        install(Role.embed)
+        assertTrue(e.requiredMissing().isEmpty())
+    }
+
+    @Test fun askWantsAModelOnlyWhereOneWouldBeUsed() = runTest {
+        assertFalse(engram().askWantsAModel)
+        choose(Mode.contained)
+        val e = engram()
+        assertTrue(e.askWantsAModel)
+        e.modes.ask = AskVia.endpoint; assertFalse(e.askWantsAModel)
+        e.modes.ask = AskVia.off; assertFalse(e.askWantsAModel)
+        e.modes.ask = AskVia.device
+        install(Role.ask)
+        assertFalse(e.askWantsAModel)
     }
 }

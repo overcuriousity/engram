@@ -1,6 +1,7 @@
 package io.github.overcuriousity.engram.core
 
 import android.content.Context
+import android.net.ConnectivityManager
 import android.os.Build
 import io.github.overcuriousity.engram.core.ask.Ask
 import io.github.overcuriousity.engram.core.contained.Contained
@@ -9,6 +10,7 @@ import io.github.overcuriousity.engram.core.contained.CoreState
 import io.github.overcuriousity.engram.core.contained.Downloader
 import io.github.overcuriousity.engram.core.contained.Endpoint
 import io.github.overcuriousity.engram.core.contained.Model
+import io.github.overcuriousity.engram.core.contained.ModelManifest
 import io.github.overcuriousity.engram.core.contained.Setup
 import io.github.overcuriousity.engram.core.contained.Started
 import io.github.overcuriousity.engram.core.db.Db
@@ -36,6 +38,7 @@ class Engram internal constructor(
     versionName: String,
     box: SecretBox = KeystoreBox(),
     boot: ((String, Setup) -> Started)? = null,
+    halt: (() -> Unit)? = null,
 ) {
     val userAgent = userAgent(versionName, Build.MODEL)
     val deviceName = "engram for Android $versionName · ${Build.MODEL}"
@@ -58,6 +61,7 @@ class Engram internal constructor(
             state.core!!, ::setup, deviceName,
             // The verifier wants its Context before the core's first HTTPS call.
             boot ?: { dir, setup -> Core.init(app); Core.start(dir, setup) },
+            halt ?: Core::shutdown,
         ) else null
 
     /** What the core is started with: the models that are here, and ask as the person set it. */
@@ -102,6 +106,17 @@ class Engram internal constructor(
     suspend fun ready(): Boolean = (contained?.ensure() ?: store.current.value) != null
 
     internal fun close() = db.close()
+
+    /** What contained mode cannot open without, and does not have. Empty in server mode. */
+    fun requiredMissing(): List<Model> = if (contained == null) emptyList() else ModelManifest.required.filterNot(::installed)
+
+    /** Ask is set to the phone and the phone has nothing to answer with: the moment for the offer. */
+    val askWantsAModel: Boolean get() = contained != null && modes.ask == AskVia.device && state.models().ask == null
+
+    val metered: Boolean get() = app.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: false
+
+    /** The end of this instance: the core stopped, the database closed. Nothing may use it afterwards. */
+    suspend fun shutdown() { contained?.stop(); db.close() }
 
     /** The last reminder a push carried. Room stays inside this module; the screens read this. */
     val latestMoment: Flow<MomentRow?> get() = db.momentsDao().latest()
@@ -190,13 +205,32 @@ class Engram internal constructor(
 
     companion object {
         @Volatile private var instance: Engram? = null
+        private val _current = MutableStateFlow<Engram?>(null)
+
+        /** The instance in use. It changes when the mode does, and whatever draws from one re-draws from the next. */
+        val current: StateFlow<Engram?> get() = _current
+
+        private fun build(ctx: Context): Engram {
+            val v = ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "0"
+            return Engram(ctx, v)
+        }
 
         fun get(context: Context): Engram = instance ?: synchronized(this) {
-            instance ?: run {
-                val ctx = context.applicationContext
-                val v = ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "0"
-                Engram(ctx, v).also { instance = it }
-            }
+            instance ?: build(context.applicationContext).also { instance = it; _current.value = it }
+        }
+
+        /**
+         * Store the mode and become an engram built for it. The two modes share
+         * nothing, so there is nothing to carry over: the old instance is shut
+         * and a new one reads the new mode, as a fresh process would.
+         */
+        suspend fun switch(context: Context, mode: Mode): Engram {
+            val old = get(context)
+            if (old.mode == mode && old.modes.chosen == mode) return old
+            Sync.cancel(context)
+            old.modes.chosen = mode
+            old.shutdown()
+            return synchronized(this) { build(context.applicationContext).also { instance = it; _current.value = it } }
         }
     }
 }
