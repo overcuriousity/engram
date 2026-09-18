@@ -29,7 +29,7 @@ These are the places where the spec, or the brief, did not match the tree. Task 
 1. **The port changes every launch, and the cache is keyed by origin.** `contained::start` binds `127.0.0.1:0`. `CacheRow` and `AskedRow` are keyed by `connection.origin`, so in contained mode every held read and every kept answer would be orphaned at each start. `Transport` gains a `source` that the cache keys by: the origin for a server, the constant `contained` for the core.
 2. **The drainer's worker demands a network.** `Sync` constrains its work to `NetworkType.CONNECTED`. A contained phone in aeroplane mode would never deliver a capture to its own process. The constraint becomes the mode's.
 3. **A share arrives with no activity in front.** The spec starts the core "when the app comes to the foreground", but `ShareActivity` enqueues and finishes, and `SyncWorker` then runs with no core. The core is started on demand by whoever needs it first, the worker included. When it stops is the lifecycle question and stays with part 6.
-4. **Server mode keeps its paths.** The spec gives each mode "its own directory". Moving an existing install's outbox to honour that would move the one thing on the phone that exists nowhere else. Server mode stays where it is; contained mode gets `files/contained/` and a Room file of its own, `contained.db`. The core's base is under `files/contained/core/` (`bases/phone.db`, `control.db`), not `contained/engram.db`.
+4. **Server mode keeps its paths.** The spec gives each mode "its own directory". Moving an existing install's outbox to honour that would move the one thing on the phone that exists nowhere else. Server mode stays where it is; contained mode gets `files/contained/` and a Room file of its own, `contained.db`. The core's base is under `files/contained/core/` (`control.db`, and the base under `bases/` in a file named for the tenant), not `contained/engram.db`.
 5. **`Core`'s `init` block makes a failed load expensive to tell apart.** The first touch throws `ExceptionInInitializerError`, every later one `NoClassDefFoundError`. The load moves into a lazy `available`, and `start` throws `CoreFailed` when it is false.
 6. **Models.** There is no downloader until part 5, so this part looks for `files/contained/models/{embed,rerank,ask}.gguf` and passes what exists. Part 5 replaces the lookup with the manifest.
 
@@ -63,7 +63,7 @@ Each mode keeps its own state. Server mode's stays where it has always been
 is the one thing on the phone that exists nowhere else, and it is not moved to
 tidy a directory. Contained mode has `files/contained/`: its outbox, its
 models, and the core's own directory, `core/`, holding `control.db` and the
-base at `bases/phone.db`. Its read cache and its outbox rows are a Room file of
+base under `bases/`, in a file named for the tenant. Its read cache and its outbox rows are a Room file of
 their own, `contained.db`. An owed write in one mode's outbox is never drained
 into the other source. Switching back finds everything where it was left.
 

@@ -58,7 +58,7 @@ Each mode keeps its own state. Server mode's stays where it has always been
 is the one thing on the phone that exists nowhere else, and it is not moved to
 tidy a directory. Contained mode has `files/contained/`: its outbox, its
 models, and the core's own directory, `core/`, holding `control.db` and the
-base at `bases/phone.db`. Its read cache and its outbox rows are a Room file of
+base under `bases/`, in a file named for the tenant. Its read cache and its outbox rows are a Room file of
 their own, `contained.db`. An owed write in one mode's outbox is never drained
 into the other source. Switching back finds everything where it was left.
 
