@@ -126,6 +126,10 @@ manifest change.
 | Ask | Qwen3.5-2B Q4; Qwen3.5-4B as an explicit larger choice | ~1.3 GB; ~2.5 GB | Apache 2.0 | first visit to Ask |
 | Speech | Whisper small, multilingual, Q5 | ~180 MB | MIT | first use of the microphone |
 
+No reranker is listed until the device pass has chosen one. Every URL is
+pinned to a revision, so a publisher's later upload cannot turn a good hash
+into a failed download.
+
 Gemma 4 E2B (Apache 2.0) is the alternative the ask default is measured
 against, and takes the slot if Qwen3.5's Gated DeltaNet layers prove slow in
 llama.cpp's ARM kernels.
@@ -192,7 +196,9 @@ in server mode. An update does not change what a working phone does.
 
 The first visit to Ask in contained mode without a model offers three things
 in place: download the ask model, set an endpoint, or leave ask off. The
-first use of the microphone offers the speech model the same way. Until then
+first use of the microphone offers the speech model the same way once the
+device can transcribe (step 2b); until then the microphone is absent in
+contained mode, as it is against a server with no speech model. Until then
 each door behaves as it does against a server that lacks the capability.
 
 ### Settings
@@ -263,7 +269,10 @@ Each step merges on its own.
 3. The `cdylib`, `Core.start`/`Core.stop`, the Gradle and NDK build.
 4. The app: mode storage, the loopback connection, per-mode state, the choice
    in `Engram.kt`.
-5. The manifest, the downloader, the first-start chooser, Settings "Mode".
+5a. The manifest, the downloader and its worker, an ask endpoint the core can
+    be given, the platform certificate verifier.
+5b. The first-start chooser, the download screen, Settings "Mode", the offer
+    on the first visit to Ask.
 6. The background pass and local reminders.
 7. The device pass; reranker and ask defaults set from what it measures.
 
