@@ -6,6 +6,8 @@
 pub mod auth;
 pub mod cli;
 pub mod config;
+#[cfg(feature = "contained")]
+pub mod contained;
 pub mod core;
 pub mod error;
 pub mod eval;
