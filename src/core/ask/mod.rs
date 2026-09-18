@@ -984,7 +984,7 @@ impl Core {
         // stays true: recorded and unjudged is a coherent state. The sweep
         // learns what was needed; the judge still grades only answers somebody
         // saw somewhere they could grade them.
-        if !(self.learn.enabled && matches!(origin.door, Door::Ui | Door::Cli)) {
+        if !(self.learn.enabled && matches!(origin.door, Door::Ui | Door::Cli | Door::App)) {
             return Ok(response);
         }
         let ask = NewAsk {

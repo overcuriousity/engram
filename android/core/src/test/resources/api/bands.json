@@ -1,0 +1,55 @@
+{
+  "image": false,
+  "pdf": false,
+  "unread": false,
+  "restored": false,
+  "note": null,
+  "coverage": null,
+  "meta": [],
+  "exif": [],
+  "promoted": [],
+  "bands": [
+    {
+      "from": 1,
+      "to": 2,
+      "gap": false,
+      "reread": null,
+      "lines": [
+        {
+          "number": 1,
+          "text": "Filters narrow a search.",
+          "in_span": false
+        },
+        {
+          "number": 2,
+          "text": "Payload indexes make them fast.",
+          "in_span": false
+        }
+      ],
+      "artifact_ids": [
+        "01a0b430-ba84-7190-8e76-79153d885c6f",
+        "01a0b430-ba85-77f5-8d6b-6b3fda9e2fd3"
+      ],
+      "echoes": []
+    },
+    {
+      "from": 3,
+      "to": 3,
+      "gap": false,
+      "reread": null,
+      "lines": [
+        {
+          "number": 3,
+          "text": "Third line.",
+          "in_span": false
+        }
+      ],
+      "artifact_ids": [],
+      "echoes": []
+    }
+  ],
+  "unplaced": [],
+  "written_from": [
+    "01a0b430-ba8d-7396-9059-5443168797e5"
+  ]
+}

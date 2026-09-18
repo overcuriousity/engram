@@ -182,6 +182,45 @@ pub struct StatusResponse {
     /// web draws its microphone only where this is true, and a client that
     /// draws one should read this rather than find out with a 404.
     pub transcribe: bool,
+    /// The other doors a client draws or hides on the same rule: `POST /ask`
+    /// (an ask model), the image door (a vision model), the verdict bars and
+    /// gaps (`[learn]`), and the offer card (`[recommend]`).
+    pub asks: bool,
+    pub vision: bool,
+    pub learn: bool,
+    pub recommend: bool,
+    /// What the base holds, for the idle line: sources and live artifacts.
+    pub held: HeldBrief,
+    /// The last capture, for the idle line. Null on an empty base.
+    pub last_kept: Option<LastKept>,
+    /// The two phrasings the box hint offers, in the language `Accept-Language`
+    /// asked for — the classifier's own prototypes, so nothing here is a
+    /// second copy of what the base recognises.
+    pub examples: Examples,
+    /// Whether the base is young enough that the idle column still teaches
+    /// what a paste becomes.
+    pub teach: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct HeldBrief {
+    pub corpora: i64,
+    pub artifacts: i64,
+}
+
+#[derive(serde::Serialize)]
+pub struct LastKept {
+    pub id: String,
+    pub label: String,
+    pub named: bool,
+    pub at: i64,
+}
+
+#[derive(serde::Serialize)]
+pub struct Examples {
+    pub lang: &'static str,
+    pub remind: &'static str,
+    pub journal: &'static str,
 }
 
 /// The reap line: the last run's counts, and how many retired rows still
@@ -321,6 +360,12 @@ pub struct CaptureQuery {
     /// `remind` to skip the classifier and date the note as a reminder.
     #[serde(default)]
     pub intent: Option<String>,
+    /// The question this text is an answer to — the ask event's id — where
+    /// the box was filled from an answer. What gets stored then records the
+    /// question and the artifacts the answer was written from, however much
+    /// was edited before saving.
+    #[serde(default)]
+    pub from_ask: Option<String>,
 }
 
 /// What the time features take from a capture request: the zone, the origin
@@ -535,18 +580,21 @@ async fn capture(
                 tenant.core.ingest_url(&u, q.title, q.note, lang).await?
             }
             None => {
-                tenant
-                    .core
-                    .ingest_capture(
-                        crate::core::ingest::Capture::new(text, time.origin)
-                            .from_channel(time.channel)
-                            .with_lang(lang)
-                            .with_title(q.title)
-                            .with_note(q.note)
-                            .with_tz(time.tz)
-                            .with_intent(time.intent),
-                    )
-                    .await?
+                let mut c = crate::core::ingest::Capture::new(text, time.origin)
+                    .from_channel(time.channel)
+                    .with_lang(lang)
+                    .with_title(q.title)
+                    .with_note(q.note)
+                    .with_tz(time.tz)
+                    .with_intent(time.intent);
+                // Kept from an answer: the question and the artifacts ride
+                // along, as they do from the web's `edit first` door.
+                if let Some(ask) = q.from_ask.as_deref().filter(|a| !a.is_empty())
+                    && let Some(ev) = tenant.core.store.ask_event(ask).await?
+                {
+                    c = c.with_ask(&ev.id, &ev.question, &ev.citations);
+                }
+                tenant.core.ingest_capture(c).await?
             }
         };
         return Ok((code_for(&out), Json(out)).into_response());
@@ -1291,7 +1339,9 @@ fn search_request(
     // those artifacts from the stale list. `src/web/ui.rs` opts out for this
     // reason; the panel has to as well. What an operator actually read is
     // stamped when they open the artifact, not while they are still typing.
-    let typing = matches!(door, Door::Extension);
+    // The app's box is one too: it asks when the typing settles, so a query
+    // arrives as a short run of its own spellings.
+    let typing = matches!(door, Door::Extension | Door::App);
     let explain = q.explain.unwrap_or(false);
     let query = SearchQuery {
         q: q.q,
@@ -1335,7 +1385,7 @@ fn search_request(
     // and two agents sharing one would fold into each other's queries. The same
     // reason `sitting.rs` keeps no sitting for them.
     let origin: crate::store::feedback::Origin = match door {
-        Door::Extension | Door::Cli => door.by(tenant.user.subject.clone()),
+        Door::Extension | Door::Cli | Door::App => door.by(tenant.user.subject.clone()),
         _ => door.into(),
     };
     (query, origin, explain)
@@ -1356,10 +1406,14 @@ async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<se
     let cap = search_cap(&tenant);
     let (query, origin, explain) = search_request(&tenant, q);
     let (results, outcome) = tenant.core.search_with(&query, cap, origin).await?;
-    Ok(Json(search_body(
-        &results,
-        explain.then_some(&outcome.explanation),
-    )?))
+    let mut body = search_body(&results, explain.then_some(&outcome.explanation))?;
+    // The search this list was recorded under, where the door waited for it:
+    // what an open, a verdict and a gap name. The web's rail carries it on
+    // every row; here it is beside the list, once.
+    if let Some(ev) = outcome.event {
+        body["event"] = serde_json::Value::String(ev);
+    }
+    Ok(Json(body))
 }
 
 /// What the search door answers: the list envelope, and the pool beside it
@@ -1381,6 +1435,17 @@ pub(crate) fn search_body(
     if let Some(e) = explanation {
         body["explanation"] = serde_json::to_value(e)
             .map_err(|e| Error::Internal(format!("serialising the explanation: {e}")))?;
+        // The ranking's own answer, in the words the web's rail says — the
+        // sentence is the server's, so every door says the same one. Beside
+        // each row, only where it has something to say.
+        body["reranked"] = serde_json::Value::Bool(e.reranked);
+        if let Some(items) = body["items"].as_array_mut() {
+            for (item, r) in items.iter_mut().zip(results) {
+                if let Some(why) = r.explanation.as_ref().and_then(crate::web::ui::why_ranked) {
+                    item["why_ranked"] = serde_json::Value::String(why);
+                }
+            }
+        }
     }
     Ok(body)
 }
@@ -1439,7 +1504,7 @@ fn ask_origin(
     use crate::store::feedback::Door;
     let door = q.door.as_deref().map(Door::from_client).unwrap_or(default);
     match door {
-        Door::Extension | Door::Cli => door.by(tenant.user.subject.clone()),
+        Door::Extension | Door::Cli | Door::App => door.by(tenant.user.subject.clone()),
         _ => door.into(),
     }
 }
@@ -1483,10 +1548,41 @@ pub struct ArtifactDetail {
     #[serde(flatten)]
     pub artifact: crate::store::artifacts::Chunk,
     pub source: Option<SourceRef>,
+    /// The search this open was attributed to, where `?event=` named one the
+    /// caller's own and the artifact is in results: what the verdict bar
+    /// under the text reports against. Null otherwise, and then there is no
+    /// bar — the only way a verdict can be given at all.
+    pub search_event: Option<String>,
 }
 
-async fn get_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<ArtifactDetail>> {
+#[derive(serde::Deserialize)]
+pub struct OpenParams {
+    /// The search that listed this artifact, off `GET /search`'s `event`.
+    pub event: Option<String>,
+}
+
+async fn get_artifact(
+    tenant: Tenant,
+    Path(cid): Path<String>,
+    Query(p): Query<OpenParams>,
+) -> Result<Json<ArtifactDetail>> {
     let chunk = tenant.core.store.get_artifact(&cid).await?;
+    // Opened from a list that named the search it came from: attributed to
+    // that search and no other, under the same three guards the web pane
+    // applies — see `artifact::artifact_detail`.
+    let mut search_event = None;
+    if tenant.core.learn.enabled
+        && chunk.in_results()
+        && let Some(event) = p.event.as_deref()
+        && tenant
+            .core
+            .store
+            .event_is_mine(event, &tenant.user.subject)
+            .await?
+        && tenant.core.store.open_event(event, &cid).await?
+    {
+        search_event = Some(event.to_string());
+    }
     // A reading is not refused because the document behind it is gone: the
     // artifact is the thing that was asked for and it is still here.
     let source = match &chunk.corpus_id {
@@ -1517,6 +1613,7 @@ async fn get_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<Ar
     Ok(Json(ArtifactDetail {
         artifact: chunk,
         source,
+        search_event,
     }))
 }
 
@@ -1891,8 +1988,23 @@ async fn delete_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<Stat
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
+async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<StatusResponse>> {
     use sqlx::Row;
+    let (held_corpora, held_artifacts) = tenant.core.store.held_brief().await?;
+    let last_kept = tenant
+        .core
+        .store
+        .recent_captures(1)
+        .await?
+        .into_iter()
+        .next()
+        .map(|(id, title_hint, origin, created_at, opening)| LastKept {
+            named: title_hint.is_some(),
+            label: crate::web::ui::corpus_label(title_hint, &opening, &origin),
+            id,
+            at: created_at,
+        });
+    let (example_remind, example_journal, example_lang) = crate::web::workspace::examples(&headers);
     let corpus_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
         .fetch_all(&tenant.core.store.pool)
         .await?;
@@ -1955,6 +2067,21 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
         learning,
         reap,
         transcribe: tenant.core.transcriber.is_some(),
+        asks: tenant.core.asks(),
+        vision: tenant.core.describer.is_some(),
+        learn: tenant.core.learn.enabled,
+        recommend: tenant.core.recommends(),
+        held: HeldBrief {
+            corpora: held_corpora,
+            artifacts: held_artifacts,
+        },
+        last_kept,
+        examples: Examples {
+            lang: example_lang,
+            remind: example_remind,
+            journal: example_journal,
+        },
+        teach: held_corpora < crate::web::ui::TEACH_UNTIL_SOURCES,
         sources: corpus_rows
             .iter()
             .map(|r| (r.get("status"), r.get("n")))
@@ -2205,6 +2332,7 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/moments/{id}/unsnooze", post(moment_unsnooze))
         .route("/artifacts/{id}/moments", post(set_moment))
         .merge(crate::web::judge::routes())
+        .merge(crate::web::client::routes())
         .merge(crate::web::push::routes())
         .merge(crate::web::app::routes())
         // Over every route above and every one added later: a read that

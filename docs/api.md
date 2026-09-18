@@ -50,13 +50,14 @@ server broke. There are no error codes; the status is the vocabulary.
 
 | Route | Answers |
 |---|---|
-| `GET /search?q=&limit=&tags=&category=&explain=` | List of hits. Each may carry `weak` (a loose match) and `past_cliff` (it sits below the point where relevance falls off). Absent means false. A client that draws a result list draws both: the divider goes above the first `past_cliff` row. |
+| `GET /search?q=&limit=&tags=&category=&explain=&door=` | List of hits. Each may carry `weak` (a loose match) and `past_cliff` (it sits below the point where relevance falls off). Absent means false. A client that draws a result list draws both: the divider goes above the first `past_cliff` row. `door=app` says a person is typing in the phone app: the search is recorded under them like the web's, waits for its id, and answers `event` beside `items` — what an open, a verdict and a gap name. With `explain`, `reranked` and a per-row `why_ranked` sentence come too. |
 | `GET /search/stream`, `POST /ask/stream` | Server-sent events. `POST /ask` is the same answer in one piece. |
 | `GET /resurface?limit=` | List of hits worth seeing again. |
 | `GET /corpora?limit=&after=` | Paged list of corpus summaries, newest first. |
 | `GET /corpora/{id}` | One corpus with its text and its artifacts. |
 | `GET /corpora/{id}/file`, `…/image?original=1` | The bytes as captured; the preview by default for an image. |
-| `GET /artifacts/{id}` | One artifact and the document it came from. Records an open. |
+| `GET /artifacts/{id}?event=` | One artifact and the document it came from. Records an open — attributed to the search named by `event` where it is the caller's own, and then `search_event` in the answer says so; the verdict bar is drawn only then. |
+| `GET /artifacts/{id}/about` | `{ tag, probes, condensed, due_in }`: what the base found when it arrived, what has asked for it, the open condensation's action id where the live text is condensed, and whether a reminder on it is due. |
 | `GET /artifacts/{id}/lineage` | `{ roots, also_replaced, truncated }`: what it was written from, nested by generation; what it replaced without being written from it; and whether the walk stopped early. A node's `source` is `{ corpus_id, label, start_line, end_line }` or `null` for a merge; `missing: true` is a source deleted since. |
 | `GET /artifacts/{id}/versions` | List of earlier wordings, oldest first. |
 | `GET /artifacts/{id}/related` | `{ related, seen_together, continues_at }`: the nearest artifacts by stored vector, what this one has been reached for alongside (empty while `[learn]` is off), and the next passage of the same document where this one stops mid-sentence. Each row is `{ id, label, named, snippet }`; a `seen_together` row also carries `why` and `corpus_title`. Does not record an open. |
@@ -65,8 +66,17 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /moments?kind=due\|event&from=&to=` | List of reminders, or of dates that refer to the window. |
 | `POST /context` | Body: the situation bundle. Answers `{ "offer": {…} \| null }`. Records the situation either way. |
 | `POST /context/seen` | Body `{ artifact_id, rung, slot }`, sent when the card is actually on screen. Always `204`. |
-| `GET /status`, `GET /consolidation` | The state of the base and of the review queue. `status.transcribe` says whether the door below is open. |
+| `GET /status`, `GET /consolidation` | The state of the base and of the review queue. `status` also says which doors are open — `transcribe`, `asks`, `vision`, `learn`, `recommend` — and carries the idle line's facts: `held`, `last_kept`, the box hint's `examples` (in the `Accept-Language` asked for), and `teach`. |
+| `GET /corpora/{id}/bands` | The corpus page as data: `image`, `pdf`, `unread`, `restored`, `note`, `coverage`, `meta`, `exif`, `promoted`, `unplaced`, `written_from`, and `bands` — each `{ from, to, gap, reread, lines, artifact_ids, echoes }`. |
+| `GET /facets` | `{ categories: [{ value, count }] }`: what the box's chips narrow by. |
+| `GET /feedback` | What is being recorded: `{ searches: { captured, pending, judged }, asks: { asked, judged } }`, both null while `[learn]` is off. `DELETE` forgets it all and answers `{ dropped }`. |
+| `GET /settings/lang`, `PUT` | `{ chosen, langs }`; `PUT { lang }` with a tag from `langs`, or empty for automatic. |
+| `GET /settings/notify`, `PUT`, `POST …/test` | The channels: `{ gotify_url, gotify_token_set, up_endpoint, up_device, up_legacy }`. `PUT { gotify_url, gotify_token, up_endpoint }`; an empty field switches that channel off. `POST /settings/notify/test { channel }` answers `{ sent, error }`. |
+| `GET /insights/machine`, `GET /insights/report` | What the machine is doing, and what the base did on its own — last night, the ranking, the pursuits line — in the sentences Insights says. Disclosure, not control. |
 | `POST /transcribe` | Multipart, one part named `audio`: the recording. Answers the words in it as `text/plain`. Nothing is stored — dictation is typing, not capture. `404` where no speech model is configured. |
+| `POST /ask?door=app`, `POST /ask/stream?door=app` | As above, and the question is recorded under the person: the answer's `event_id` is what the three routes below name. |
+| `POST /capture?from_ask=` | As the capture door, and what is stored records the question and the artifacts its answer was written from — the web's *edit first*. |
+| `POST /days/{date}/entry` | Body `{ text, tz }`: an entry into that day. Answers `{ id }`. |
 
 ## Judging
 
@@ -90,6 +100,17 @@ the undo is on this list too.
 | `POST /merges/{id}/undo` | Take a merge back: its sources return, the merge is retired. `204`. |
 | `POST /condensations/{id}/undo` | Put the version a condensation retired back. Answers `{ "artifact_id" }`, which the path does not carry. |
 | `POST /corpora/{id}/resolve` | The three-way answer to a parked capture. Already existed. |
+| `POST /search/{id}/verdict` | Body `{ verdict, artifact_id }` — `hit`, `no`, `skip`, or `none` to take it back. Answers `{ state, already }`; `already` is another door having judged the search first, which is a sentence and not an error. |
+| `POST /search/{id}/gap` | Body `{ q }`: *nothing here has it*. Answers `{ recorded }`. |
+| `POST /asks/{id}/verdict` | Body `{ verdict }` — `right`, `wrong`, `nothing_here`, or `none`. Answers `{ verdict }` as the bar words it. |
+| `POST /asks/{id}/carried` | Body `{ n }`: this excerpt carried the answer. A toggle; answers `{ carried, verdict }`. |
+| `POST /asks/{id}/keep` | Store the answer as a source. Answers `{ id, duplicate, parked, near_dupe_percent }`. |
+| `POST /moments/{id}/date` | Body `{ at, tz }`: move a reminder, or date an undated one. `204`. |
+| `POST /moments/{id}/not-a-reminder` · `POST /artifacts/{id}/is-a-reminder` | Retract the stage's reading, and put it back. The first answers `{ undo }`: the artifact the second would restore it on, or null. |
+| `POST /artifacts/{id}/reviewed` | Clear the verification flags. `204`. |
+| `POST /artifacts/{id}/links/{other}/dismiss` | *Not related.* Final for that pair. `204`. |
+| `POST /artifacts/{id}/dwell` | Body `{ secs }`. `204`. |
+| `POST /corpora/{id}/reread` · `/entry` · `/segments/{idx}/unpromote` | Read a lost passage again (`{ from, to }`; `202` queued, `204` nothing to re-read); file a capture as the day's entry or not (`{ on }`); put a promoted window's verbatim text back. |
 
 Three things these shapes say that are easy to miss:
 

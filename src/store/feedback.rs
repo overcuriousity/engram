@@ -41,6 +41,11 @@ pub enum Door {
     /// reason: its right answer is a synthesis across several artifacts, so
     /// "which one was it" has no well-defined meaning to judge.
     Ask,
+    /// A search or a question from the phone app. Recorded like `Ui`: a
+    /// device token is paired to one person, who reads the answer where they
+    /// asked, and the app draws the same verdict bars the web does — so its
+    /// searches wait for their id the way the web's do, and its opens count.
+    App,
 }
 
 impl Door {
@@ -53,23 +58,25 @@ impl Door {
             Door::Cli => "cli",
             Door::Judge => "judge",
             Door::Ask => "ask",
+            Door::App => "app",
         }
     }
 
     pub fn captured(&self) -> bool {
         matches!(
             self,
-            Door::Ui | Door::Api | Door::Mcp | Door::Extension | Door::Cli
+            Door::Ui | Door::Api | Door::Mcp | Door::Extension | Door::Cli | Door::App
         )
     }
 
     /// Every door, so a rule about a subset can be written against the enum
     /// instead of a list of strings somewhere else.
-    pub const ALL: [Door; 7] = [
+    pub const ALL: [Door; 8] = [
         Door::Ui,
         Door::Api,
         Door::Mcp,
         Door::Judge,
+        Door::App,
         Door::Extension,
         Door::Cli,
         Door::Ask,
@@ -110,7 +117,7 @@ impl Door {
     /// minute later would have made a weak negative out of a person simply
     /// asking twice.
     pub fn records_opens(&self) -> bool {
-        matches!(self, Door::Ui)
+        matches!(self, Door::Ui | Door::App)
     }
 
     /// The door a client is allowed to claim for itself.
@@ -124,6 +131,7 @@ impl Door {
         match raw {
             "extension" => Door::Extension,
             "cli" => Door::Cli,
+            "app" => Door::App,
             _ => Door::Api,
         }
     }
@@ -375,7 +383,7 @@ impl Store {
                 // The first search of a page, which has nothing to fold into.
                 None => None,
             },
-            Door::Extension => {
+            Door::Extension | Door::App => {
                 sqlx::query(
                     "SELECT id, created_at,
                             (SELECT COUNT(*) FROM search_candidates

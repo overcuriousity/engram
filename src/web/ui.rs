@@ -573,7 +573,7 @@ pub(crate) fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &
 
 /// Below this many sources the idle column lists what a paste becomes. A
 /// person's first few captures are when that is not yet known.
-const TEACH_UNTIL_SOURCES: i64 = 5;
+pub(crate) const TEACH_UNTIL_SOURCES: i64 = 5;
 
 impl IdleFootTemplate {
     /// Whether the base is young enough for the list of what a paste becomes.
@@ -1426,7 +1426,7 @@ fn ranked_titles(
 /// Deliberately not the MCP form. An agent reads a list of stages; a person
 /// reads why this row is above the one below it, and a stage that changed
 /// nothing is not part of that answer.
-fn why_ranked(e: &crate::core::explain::HitExplanation) -> Option<String> {
+pub(crate) fn why_ranked(e: &crate::core::explain::HitExplanation) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(s) = &e.rerank
         && s.from > s.to

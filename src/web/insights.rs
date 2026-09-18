@@ -81,6 +81,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Work that hit something and is waiting to try again by itself.
+#[derive(serde::Serialize)]
 pub struct RetryingRow {
     pub stage: String,
     pub target_id: String,
@@ -155,12 +156,14 @@ pub struct StaleRow {
 }
 
 /// One phrase of the last day: "412 links forgotten".
+#[derive(serde::Serialize)]
 pub(crate) struct SweepCount {
     n: i64,
     what: String,
 }
 
 /// One recorded run, as the history renders it.
+#[derive(serde::Serialize)]
 pub(crate) struct SweepRunRow {
     when: String,
     /// The stage in words. The identifier it was worded from is on the cell as
@@ -769,6 +772,152 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
     Ok((set_aside, set_aside_capped))
 }
 
+/// The disclosure at the foot of Insights, as data: what the machine is
+/// doing, for the phone.
+#[derive(serde::Serialize)]
+pub(crate) struct Machine {
+    pub artifacts: i64,
+    pub vectors: u64,
+    pub jobs: Vec<(String, i64)>,
+    pub oldest_pending_secs: Option<i64>,
+    pub links: Option<crate::store::links::LinkCounts>,
+    pub last_day: Vec<SweepCount>,
+    pub last_day_failures: usize,
+    pub sweep_history: Vec<SweepRunRow>,
+    pub offer_rates: Vec<crate::store::pursuits::OfferRate>,
+    pub retrying: Vec<RetryingRow>,
+}
+
+pub(crate) async fn machine(tenant: &Tenant) -> Result<Machine> {
+    use sqlx::Row;
+    let artifacts: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+        .fetch_one(&tenant.core.store.pool)
+        .await?
+        .get("n");
+    let retrying: Vec<RetryingRow> = tenant
+        .core
+        .store
+        .retrying_jobs(50)
+        .await?
+        .into_iter()
+        .map(|j| RetryingRow {
+            stage: j.stage,
+            target_id: j.target_id,
+            attempts: j.attempts,
+            due: fmt_duration(j.next_attempt_secs),
+            last_error: j.last_error.unwrap_or_else(|| "—".into()),
+        })
+        .collect();
+    let day = tenant
+        .core
+        .store
+        .sweep_runs_since(crate::store::now() - 86_400, 500)
+        .await
+        .unwrap_or_default();
+    let last_day_failures = day.iter().filter(|r| r.outcome == "failed").count();
+    let mut totals: Vec<(String, i64)> = Vec::new();
+    for r in &day {
+        tally_sweep(&r.stage, &r.detail, &mut totals);
+    }
+    let last_day: Vec<SweepCount> = totals
+        .into_iter()
+        .map(|(what, n)| SweepCount { n, what })
+        .collect();
+    let sweep_history: Vec<SweepRunRow> = tenant
+        .core
+        .store
+        .sweep_history(TABLE_CAP)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let mut counts = Vec::new();
+            tally_sweep(&r.stage, &r.detail, &mut counts);
+            SweepRunRow {
+                when: fmt_time(r.started_at),
+                error: match r.outcome == "failed" {
+                    true => serde_json::from_str::<serde_json::Value>(&r.detail)
+                        .ok()
+                        .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
+                        .unwrap_or_else(|| "it failed".into()),
+                    false => String::new(),
+                },
+                took: fmt_elapsed(r.ended_at - r.started_at),
+                stage: sweep_label(&r.stage).to_string(),
+                stage_id: r.stage,
+                counts: counts
+                    .into_iter()
+                    .map(|(what, n)| SweepCount { n, what })
+                    .collect(),
+            }
+        })
+        .collect();
+    Ok(Machine {
+        artifacts,
+        vectors: tenant.core.vectors.count().await.unwrap_or(0),
+        jobs: tenant.core.store.job_counts().await?,
+        oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,
+        links: match tenant.core.associating() {
+            true => Some(tenant.core.store.link_counts().await?),
+            false => None,
+        },
+        last_day,
+        last_day_failures,
+        sweep_history,
+        offer_rates: match tenant.core.recommends() {
+            true => tenant
+                .core
+                .store
+                .offer_rates(crate::store::now() - 30 * 86_400)
+                .await
+                .unwrap_or_default(),
+            false => Vec::new(),
+        },
+        retrying,
+    })
+}
+
+/// What the base did on its own, in the sentences Insights says: last night,
+/// the ranking, and the pursuits line. Disclosure, not control — the tuning
+/// offer stays on the web, where the person who may apply it is at a keyboard.
+#[derive(serde::Serialize)]
+pub(crate) struct Report {
+    pub sleep: Option<SleepView>,
+    pub evolve: Option<EvolveView>,
+    /// Runs of searches that went quiet, and how many are on the gap list.
+    /// Null while `[learn]` is off.
+    pub pursuits: Option<(usize, usize)>,
+    /// How many pairs are waiting beyond the ones `GET /pairs` lists.
+    pub more_pairs: i64,
+}
+
+pub(crate) async fn report(tenant: &Tenant) -> Result<Report> {
+    let (_, more_pairs) = crate::web::ops::pair_rows(tenant).await?;
+    let pursuits = match tenant.core.learn.enabled {
+        true => {
+            let recent = tenant.core.store.recent_pursuits(50).await?;
+            let on_the_gap_list = tenant
+                .core
+                .store
+                .open_pursuit_gap_ids(tenant.core.embedder.model())
+                .await
+                .unwrap_or_default();
+            let unsatisfied = recent
+                .iter()
+                .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
+                .count();
+            Some((recent.len(), unsatisfied))
+        }
+        false => None,
+    };
+    Ok(Report {
+        sleep: sleep_view(&tenant.core).await?,
+        evolve: evolve_view(&tenant.core).await?,
+        pursuits,
+        more_pairs,
+    })
+}
+
 async fn page(tenant: Tenant) -> UiResult<Response> {
     use sqlx::Row;
 
@@ -1188,7 +1337,8 @@ async fn tune_view(tenant: &Tenant, flash: &str) -> Result<TuneView> {
 
 /// The `_sleep.html` block: what the base did while nobody was there, in
 /// words, and what nothing has ever asked for.
-struct SleepView {
+#[derive(serde::Serialize)]
+pub(crate) struct SleepView {
     /// One sentence chain per sleep, newest first.
     runs: Vec<String>,
     /// How long a base has to be quiet before it sleeps, for the empty state.
@@ -1266,7 +1416,7 @@ fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
     s
 }
 
-async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
+pub(crate) async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
     if core.store.live_generation().await?.is_none() {
         return Ok(None);
     }
@@ -1295,7 +1445,8 @@ async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepView>> {
 // ── What the base did on its own ────────────────────────────────────────────
 
 /// The `_evolve.html` block: the state of the self-tuning loop, in words.
-struct EvolveView {
+#[derive(serde::Serialize)]
+pub(crate) struct EvolveView {
     /// Why the loop is not moving, when it is not. Said before anything else.
     suspended: Option<String>,
     /// Which mode the base is in, in every mode. `standing` below says it only
@@ -1400,7 +1551,7 @@ pub(crate) fn short(id: &str) -> &str {
     &id[id.len().saturating_sub(8)..]
 }
 
-async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
+pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<EvolveView>> {
     let Some(live) = core.store.live_generation().await? else {
         return Ok(None);
     };

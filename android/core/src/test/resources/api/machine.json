@@ -1,0 +1,21 @@
+{
+  "artifacts": 6,
+  "vectors": 2,
+  "jobs": [
+    [
+      "pending",
+      2
+    ]
+  ],
+  "oldest_pending_secs": 0,
+  "links": {
+    "total": 1,
+    "related": 0,
+    "judge_queue": 0
+  },
+  "last_day": [],
+  "last_day_failures": 0,
+  "sweep_history": [],
+  "offer_rates": [],
+  "retrying": []
+}

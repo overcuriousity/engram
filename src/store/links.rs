@@ -321,7 +321,7 @@ pub struct LinkedTo {
     pub cross_corpus: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct LinkCounts {
     pub total: i64,
     pub related: i64,

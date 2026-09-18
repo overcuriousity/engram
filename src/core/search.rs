@@ -2012,7 +2012,7 @@ impl Core {
                 // behind an embedding call and a vector search the person is
                 // already waiting on, and its failure is logged and dropped:
                 // the results go out either way, without the bar.
-                Door::Ui => match self.store.record_search(event, window).await {
+                Door::Ui | Door::App => match self.store.record_search(event, window).await {
                     Ok(id) => captured_event = Some(id),
                     Err(e) => tracing::warn!(error = %e, "could not record the search"),
                 },

@@ -354,14 +354,70 @@ async fn save_lang(tenant: Tenant, Form(f): Form<LangForm>) -> UiResult<Response
     Ok(Redirect::to("/ui/settings").into_response())
 }
 
-async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> UiResult<Response> {
+/// The notification channels as the settings page shows them.
+#[derive(serde::Serialize)]
+pub(crate) struct NotifySetting {
+    pub gotify_url: String,
+    /// The token is never read back; this says whether one is stored.
+    pub gotify_token_set: bool,
+    pub up_endpoint: String,
+    /// The device that registered the UnifiedPush endpoint with its keys,
+    /// where one did.
+    pub up_device: Option<String>,
+    /// A pasted endpoint with no keys: plaintext.
+    pub up_legacy: bool,
+}
+
+pub(crate) async fn notify_setting(tenant: &Tenant) -> Result<NotifySetting> {
+    let notify = tenant
+        .core
+        .store
+        .control
+        .notify(&tenant.user.subject)
+        .await?;
+    Ok(NotifySetting {
+        gotify_url: notify["gotify"]["url"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        gotify_token_set: notify["gotify"]["token"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        up_endpoint: notify["unifiedpush"]["endpoint"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        up_device: notify["unifiedpush"]["device"]
+            .as_str()
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
+        up_legacy: crate::jobs::remind::notify_targets(&notify)
+            .iter()
+            .any(|t| {
+                matches!(
+                    t,
+                    crate::jobs::remind::Target::UnifiedPush { keys: None, .. }
+                )
+            }),
+    })
+}
+
+/// Save the channels. An empty field switches that channel off; an empty
+/// token keeps the stored one; an endpoint the app registered keeps its keys
+/// as long as the URL is the same.
+pub(crate) async fn set_notify(
+    tenant: &Tenant,
+    gotify_url: &str,
+    gotify_token: &str,
+    up_endpoint: &str,
+) -> Result<()> {
     let control = &tenant.core.store.control;
     let stored = control.notify(&tenant.user.subject).await?;
     let mut notify = serde_json::json!({});
-    let url = f.gotify_url.trim();
+    let url = gotify_url.trim();
     if !url.is_empty() {
         push_url("gotify_url", url)?;
-        let token = match f.gotify_token.trim() {
+        let token = match gotify_token.trim() {
             "" => stored["gotify"]["token"]
                 .as_str()
                 .unwrap_or_default()
@@ -370,12 +426,9 @@ async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> UiResult<Resp
         };
         notify["gotify"] = serde_json::json!({ "url": url, "token": token });
     }
-    let endpoint = f.up_endpoint.trim();
+    let endpoint = up_endpoint.trim();
     if !endpoint.is_empty() {
         push_url("up_endpoint", endpoint)?;
-        // The field shows the endpoint the app registered, so saving the
-        // form with it untouched must not turn that registration into a
-        // keyless one. A different endpoint is a person's, and has no keys.
         notify["unifiedpush"] = match stored["unifiedpush"]["endpoint"].as_str() == Some(endpoint) {
             true => stored["unifiedpush"].clone(),
             false => serde_json::json!({ "endpoint": endpoint }),
@@ -383,16 +436,20 @@ async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> UiResult<Resp
     }
     control.set_notify(&tenant.user.subject, &notify).await?;
     tenant.core.store.rearm_remind().await?;
+    Ok(())
+}
+
+async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> UiResult<Response> {
+    set_notify(&tenant, &f.gotify_url, &f.gotify_token, &f.up_endpoint).await?;
     Ok(Redirect::to("/ui/settings").into_response())
 }
 
-#[derive(serde::Deserialize)]
-struct NotifyTestForm {
-    channel: String,
-}
-
-/// One test message down the named channel, answered as a fragment.
-async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<Response> {
+/// Send one test message down a channel. `Ok(Err(why))` is a channel that is
+/// not configured or did not take the message, in the words the page says.
+pub(crate) async fn test_channel(
+    tenant: &Tenant,
+    channel: &str,
+) -> Result<std::result::Result<(), String>> {
     let notify = tenant
         .core
         .store
@@ -402,18 +459,12 @@ async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<
     let target = crate::jobs::remind::notify_targets(&notify)
         .into_iter()
         .find(|t| match t {
-            crate::jobs::remind::Target::Gotify { .. } => f.channel == "gotify",
-            crate::jobs::remind::Target::UnifiedPush { .. } => f.channel == "unifiedpush",
+            crate::jobs::remind::Target::Gotify { .. } => channel == "gotify",
+            crate::jobs::remind::Target::UnifiedPush { .. } => channel == "unifiedpush",
         });
     let Some(target) = target else {
-        return Ok(axum::response::Html(
-            "<p class=\"muted\">That channel is not configured — save it first.</p>",
-        )
-        .into_response());
+        return Ok(Err("That channel is not configured — save it first.".into()));
     };
-    // `Policy::none()`, for the reason `jobs::remind::http_client` gives at
-    // length: this button's answer is two-valued and server-side, so a
-    // followed redirect turns it into a loopback port oracle.
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(15))
@@ -425,23 +476,31 @@ async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<
         tenant.core.clock.now(),
     );
     let sender = crate::jobs::remind::Sender::load(&tenant.core).await?;
-    Ok(match crate::jobs::remind::push(&http, &target, &msg, &sender).await {
-        Ok(()) => axum::response::Html("<p class=\"muted\">Sent.</p>".to_string()),
-        // The transport detail goes to the server log, never the page: this
-        // is a server-side POST to whatever URL the user saved, and in a
-        // multi-tenant registry the difference between "connection refused",
-        // a timeout and an HTTP status is a port-scan of the server's own
-        // network, read back through the button.
-        Err(e) => {
-            tracing::warn!(error = %e, channel = %f.channel, "the test push could not be delivered");
-            axum::response::Html(
-                "<p class=\"muted\">Could not send — the endpoint did not take it. \
-                 The server log has the transport detail.</p>"
-                    .to_string(),
-            )
-        }
-    }
-    .into_response())
+    Ok(
+        match crate::jobs::remind::push(&http, &target, &msg, &sender).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::warn!(error = %e, channel, "the test push could not be delivered");
+                Err("Could not send — the endpoint did not take it. The server log has the transport detail.".into())
+            }
+        },
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct NotifyTestForm {
+    channel: String,
+}
+
+/// One test message down the named channel, answered as a fragment.
+async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<Response> {
+    Ok(
+        axum::response::Html(match test_channel(&tenant, &f.channel).await? {
+            Ok(()) => "<p class=\"muted\">Sent.</p>".to_string(),
+            Err(why) => format!("<p class=\"muted\">{why}</p>"),
+        })
+        .into_response(),
+    )
 }
 
 async fn mint_token(

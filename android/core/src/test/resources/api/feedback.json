@@ -1,0 +1,11 @@
+{
+  "searches": {
+    "captured": 0,
+    "pending": 0,
+    "judged": 0
+  },
+  "asks": {
+    "asked": 1,
+    "judged": 1
+  }
+}
