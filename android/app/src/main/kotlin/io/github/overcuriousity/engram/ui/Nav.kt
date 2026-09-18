@@ -44,6 +44,8 @@ import androidx.navigation.navArgument
 import io.github.overcuriousity.engram.R
 import io.github.overcuriousity.engram.core.Engram
 import io.github.overcuriousity.engram.core.PinMismatch
+import io.github.overcuriousity.engram.core.contained.CoreState
+import kotlinx.coroutines.flow.StateFlow
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -115,7 +117,7 @@ fun EngramApp(
     focusBox: Boolean = false,
     onUnpair: () -> Unit,
 ) {
-    val connection by engram.store.current.collectAsStateWithLifecycle()
+    val connection by engram.connection.collectAsStateWithLifecycle()
     val refused by engram.refused.collectAsStateWithLifecycle()
     val pinned by engram.pinMismatch.collectAsStateWithLifecycle()
     val nav = rememberNavController()
@@ -125,7 +127,8 @@ fun EngramApp(
         return
     }
     if (connection == null) {
-        PairScreen(engram, initialText = pairText)
+        val core = engram.core
+        if (core == null) PairScreen(engram, initialText = pairText) else CoreStarting(engram, core)
         return
     }
 
@@ -256,6 +259,23 @@ fun RefusedBanner(onRescan: () -> Unit) {
         ) {
             Text("Unpaired on the server · queue holds", style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onRescan) { Text("Scan a new code") }
+        }
+    }
+}
+
+/** Contained mode before the core answers: a word while it starts, and the reason where it cannot. */
+@Composable
+fun CoreStarting(engram: Engram, core: StateFlow<CoreState>) {
+    val state by core.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { engram.ready() }
+    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
+        when (val s = state) {
+            is CoreState.Unavailable -> {
+                Text("On this phone · unavailable", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(12.dp))
+                Text(s.why, style = MaterialTheme.typography.labelMedium)
+            }
+            else -> Text("Starting", style = MaterialTheme.typography.titleLarge)
         }
     }
 }
