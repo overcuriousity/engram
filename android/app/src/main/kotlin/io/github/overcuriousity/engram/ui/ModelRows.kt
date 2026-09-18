@@ -65,7 +65,11 @@ fun ModelRow(
         }
         when (progress.state) {
             Progress.State.Running -> if (!installed) {
-                LinearProgressIndicator(progress = { progress.bytes.toFloat() / progress.of.coerceAtLeast(1) }, modifier = Modifier.fillMaxWidth())
+                LinearProgressIndicator(
+                    progress = { progress.bytes.toFloat() / progress.of.coerceAtLeast(1) }, modifier = Modifier.fillMaxWidth(),
+                    // The theme's own colours: Material's default track is a lavender this app has nowhere else.
+                    color = MaterialTheme.colorScheme.primary, trackColor = MaterialTheme.colorScheme.surfaceContainer, drawStopIndicator = {},
+                )
                 Text("${sizeWords(progress.bytes)} of ${sizeWords(progress.of)}", style = MaterialTheme.typography.bodySmall, color = muted())
             }
             Progress.State.Waiting -> if (!installed) Text("Waiting for Wi-Fi", style = MaterialTheme.typography.bodySmall, color = muted())

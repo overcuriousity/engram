@@ -35,7 +35,10 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.overcuriousity.engram.core.AskVia
 import io.github.overcuriousity.engram.core.Engram
+import io.github.overcuriousity.engram.core.contained.ModelManifest
+import io.github.overcuriousity.engram.core.contained.Role
 import io.github.overcuriousity.engram.core.ask.AskState
 import io.github.overcuriousity.engram.core.ask.Phase
 import io.github.overcuriousity.engram.core.read.Api
@@ -66,6 +69,7 @@ fun AskScreen(
     onArtifact: (String) -> Unit,
     onCorpus: (String) -> Unit,
     onEditFirst: (answer: String, event: String, question: String) -> Unit,
+    onSettings: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var text by rememberSaveable { mutableStateOf(initial) }
@@ -90,6 +94,25 @@ fun AskScreen(
     }
     fun ask() { asking = text.trim(); presses++; keyboard?.hide() }
     val working = state?.phase.let { it == Phase.Retrieving || it == Phase.Writing }
+
+    // On a phone that is its own engram, Ask may have nothing to answer with.
+    // The offer stands where the box would, once, and nowhere else.
+    var looked by remember { mutableIntStateOf(0) }
+    val off = remember(looked) { engram.loopback && engram.modes.ask == AskVia.off }
+    val wants = remember(looked) { engram.askWantsAModel }
+    if (off) { AskOffPane(onSettings); return }
+    if (wants) {
+        AskOfferPane(
+            models = {
+                ModelManifest.all.filter { it.role == Role.ask }.forEach { m ->
+                    ModelLine(engram, m, onChanged = { scope.launch { engram.restartCore(); looked++ } })
+                }
+            },
+            onEndpoint = onSettings,
+            onOff = { engram.modes.ask = AskVia.off; looked++ },
+        )
+        return
+    }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         OutlinedTextField(

@@ -27,6 +27,12 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ColorFilter
@@ -43,6 +49,10 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import io.github.overcuriousity.engram.R
 import io.github.overcuriousity.engram.core.Engram
+import io.github.overcuriousity.engram.core.Mode
+import io.github.overcuriousity.engram.core.contained.Core
+import io.github.overcuriousity.engram.core.contained.ModelManifest
+import kotlinx.coroutines.launch
 import io.github.overcuriousity.engram.core.PinMismatch
 import io.github.overcuriousity.engram.core.contained.CoreState
 import kotlinx.coroutines.flow.StateFlow
@@ -125,6 +135,29 @@ fun EngramApp(
     if (pinned != null) {
         PinMismatchScreen(pinned!!, onUnpair = onUnpair)
         return
+    }
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // A new install chooses where its engram lives. One that holds a
+    // connection never sees this, and a pairing code goes straight to pairing.
+    var pairing by rememberSaveable { mutableStateOf(false) }
+    if (connection == null && engram.modes.chosen == null && pairText == null && !pairing) {
+        ModeChooser(
+            Core.available, sizeWords(ModelManifest.required.sumOf { it.bytes }),
+            onPhone = { scope.launch { Engram.switch(ctx, Mode.contained) } },
+            onServer = { pairing = true },
+        )
+        return
+    }
+    if (engram.loopback) {
+        var missing by remember { mutableStateOf(engram.requiredMissing()) }
+        if (missing.isNotEmpty()) {
+            DownloadScreen(
+                engram, missing, onChanged = { missing = engram.requiredMissing() },
+                onServer = { scope.launch { Engram.switch(ctx, Mode.server) } },
+            )
+            return
+        }
     }
     if (connection == null) {
         val core = engram.core
@@ -220,6 +253,7 @@ fun EngramApp(
                     AskScreen(
                         engram, it.arguments?.getString("q").orEmpty(), onArtifact, onCorpus,
                         onEditFirst = { answer, event, q -> go(Routes.search(answer, event, q)) },
+                        onSettings = { go(Screen.Settings.route) },
                     )
                 }
                 composable(Routes.ARTIFACT, arguments = Routes.optional) { entry ->

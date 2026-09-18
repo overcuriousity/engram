@@ -8,6 +8,8 @@ import androidx.activity.enableEdgeToEdge
 import io.github.overcuriousity.engram.core.LightSample
 import io.github.overcuriousity.engram.ui.EngramApp
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import io.github.overcuriousity.engram.core.Engram
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.overcuriousity.engram.ui.EngramTheme
 import io.github.overcuriousity.engram.ui.Screen
@@ -31,9 +33,13 @@ class MainActivity : ComponentActivity() {
         // a shortcut pinned by an older build still says.
         val focusBox = asked == "capture" || asked == "compose"
         setContent {
-            val theme by app.engram.theme.collectAsStateWithLifecycle()
+            // Changing the mode replaces the engram. Keyed on the instance, the
+            // whole composition goes with the one it was remembered from.
+            val current by Engram.current.collectAsStateWithLifecycle()
+            val engram = current ?: app.engram
+            val theme by engram.theme.collectAsStateWithLifecycle()
             EngramTheme(mode = ThemeMode.entries.firstOrNull { it.name.equals(theme, ignoreCase = true) } ?: ThemeMode.System) {
-                EngramApp(app.engram, start, pairText, focusBox, onUnpair = app::unpairAsync)
+                key(engram) { EngramApp(engram, start, pairText, focusBox, onUnpair = app::unpairAsync) }
             }
         }
     }

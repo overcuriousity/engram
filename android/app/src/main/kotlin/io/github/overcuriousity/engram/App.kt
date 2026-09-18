@@ -10,11 +10,12 @@ import kotlinx.coroutines.launch
 
 class App : Application() {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    lateinit var engram: Engram
+    /** Whichever instance is in use. Asked for each time, because changing the mode replaces it. */
+    val engram: Engram get() = Engram.get(this)
 
     override fun onCreate() {
         super.onCreate()
-        engram = Engram.get(this)
+        Engram.get(this)
         Reminders.ensureChannel(this)
     }
 
