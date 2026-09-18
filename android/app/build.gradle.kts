@@ -108,6 +108,7 @@ dependencies {
     implementation(libs.camerax.view)
     implementation(libs.zxing)
     testImplementation(libs.junit)
+    testImplementation(libs.coroutines.test)
     // The screens, composed on the JVM: Robolectric lends the Android half and
     // the Compose test rule reads what was actually drawn. No emulator, so
     // this runs wherever the unit tests do.

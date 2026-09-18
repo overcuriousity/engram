@@ -10,8 +10,9 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -22,6 +23,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -38,7 +40,7 @@ import java.util.concurrent.Executors
 
 /** CameraX preview with ZXing on every frame. Calls back once per distinct text. */
 @Composable
-fun Scanner(onText: (String) -> Unit) {
+fun Scanner(modifier: Modifier = Modifier, onText: (String) -> Unit) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
     var granted by remember {
@@ -58,10 +60,22 @@ fun Scanner(onText: (String) -> Unit) {
     val executor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
 
+    // Framed, so it reads as something to point at. A preview with no edge of
+    // its own is a smear of whatever the camera happens to see, and the first
+    // person to hold this asked where the scanner was while looking at it.
     AndroidView(
-        modifier = Modifier.fillMaxWidth().height(320.dp),
+        modifier = modifier
+            .clip(MaterialTheme.shapes.medium)
+            .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outline), MaterialTheme.shapes.medium),
         factory = { ctx ->
             val view = PreviewView(ctx)
+            // COMPATIBLE, which draws through a TextureView. The default,
+            // PERFORMANCE, gives the preview a SurfaceView in a window layer
+            // of its own: it is not clipped to the slot Compose measured for
+            // it and it is drawn over everything else on the screen, which
+            // erased the wordmark, the heading and the line telling you where
+            // the code comes from.
+            view.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             val future = ProcessCameraProvider.getInstance(ctx)
             future.addListener({
                 val provider = future.get()

@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -58,13 +59,40 @@ fun <T> ReadFrame(
     modifier: Modifier = Modifier,
     content: @Composable (T) -> Unit,
 ) {
-    val r = state.read
     Column(modifier) {
-        if (r.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (r.reach == Reach.Unreachable) Unreachable(r.fetchedAt, state.retry)
-        r.error?.let { Text(it, Modifier.padding(16.dp, 8.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-        r.value?.let { content(it) }
+        Waiting(state)
+        state.read.value?.let { content(it) }
     }
+}
+
+/**
+ * What a read says about itself, apart from its value: that it is in flight,
+ * that the server could not be reached, and what went wrong. Drawn on its own
+ * where a screen holds its own value — a searching box does, so that the list
+ * on screen is not thrown away every time a letter is typed.
+ */
+@Composable
+fun <T> Waiting(state: ReadState<T>) {
+    val r = state.read
+    if (r.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+    if (r.reach == Reach.Unreachable) Unreachable(r.fetchedAt, state.retry)
+    r.error?.let { Text(it, Modifier.padding(16.dp, 8.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+}
+
+/**
+ * The last value this read had, kept across the reads that follow it. A
+ * `rememberRead` is keyed on its request and starts the next one empty, which
+ * is right for a screen that opened on something else and wrong for a box that
+ * asks again on every settled keystroke: there, an empty frame between one
+ * answer and the next is a list that flickers under the fingers. The web keeps
+ * its list until the new one arrives and swaps it then; this is that.
+ */
+@Composable
+fun <T> held(state: ReadState<T>): T? {
+    var last by remember { mutableStateOf<T?>(null) }
+    val v = state.read.value
+    SideEffect { if (v != null) last = v }
+    return if (v != null) v else last
 }
 
 @Composable

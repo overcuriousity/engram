@@ -16,15 +16,18 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val app = application as App
         val pairText = intent?.data?.toString()?.takeIf { it.startsWith("engram://pair") }
-        val start = when (intent?.getStringExtra("screen")) {
-            // The tile and the launcher shortcut. They reached the composer
-            // by default while it was home; Search is home now, so they say so.
-            "compose" -> Screen.Compose
+        val asked = intent?.getStringExtra("screen")
+        val start = when (asked) {
             "queue" -> Screen.Queue
             "settings" -> Screen.Settings
             else -> null
         }
-        setContent { EngramTheme { EngramApp(app.engram, start, pairText, onUnpair = app::unpairAsync) } }
+        // The tile and the launcher shortcut are a capture in one press. There
+        // is no capture screen to send them to any more, so they open home
+        // with the box focused and the keyboard already up. "compose" is what
+        // a shortcut pinned by an older build still says.
+        val focusBox = asked == "capture" || asked == "compose"
+        setContent { EngramTheme { EngramApp(app.engram, start, pairText, focusBox, onUnpair = app::unpairAsync) } }
     }
 
     override fun onNewIntent(intent: Intent) {

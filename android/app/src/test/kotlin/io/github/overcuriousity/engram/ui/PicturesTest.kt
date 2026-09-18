@@ -44,6 +44,18 @@ class PicturesTest {
         File(dir, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
+    /** Home's one box, with the verbs under it. */
+    @Test fun theBox() {
+        compose.setContent {
+            EngramTheme {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
+                    HomeBox(text = "", onText = {})
+                }
+            }
+        }
+        save("home-box")
+    }
+
     @Test fun aResultList() {
         val hits = listOf(
             Hit("a", title = "Qdrant payload filters", text = "Filters narrow a search before the vectors are compared, and a payload index is what makes that fast.", primed = true),
