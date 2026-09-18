@@ -53,10 +53,18 @@ the drainer, picture loading and the parity tests are untouched, because all
 of them already go through `transport()` and the contained core speaks the
 same API. The two modes cannot drift apart: they are the same code.
 
-Each mode has its own directory for all of its state: the read cache, the
-outbox and, for contained mode, the base at `contained/engram.db`. An owed
-write in one mode's outbox is never drained into the other source. Switching
-back finds everything where it was left.
+Each mode keeps its own state. Server mode's stays where it has always been
+(`engram.db`, `files/outbox`, `files/connection`): an existing install's outbox
+is the one thing on the phone that exists nowhere else, and it is not moved to
+tidy a directory. Contained mode has `files/contained/`: its outbox, its
+models, and the core's own directory, `core/`, holding `control.db` and the
+base at `bases/phone.db`. Its read cache and its outbox rows are a Room file of
+their own, `contained.db`. An owed write in one mode's outbox is never drained
+into the other source. Switching back finds everything where it was left.
+
+The core listens on a port of the kernel's choosing, so the origin differs at
+every launch. What the app keeps per source — held reads, kept answers — is
+keyed by the word `contained`, not by that origin.
 
 On the Rust side the core is a `cdylib` target of this crate for
 `aarch64-linux-android`, behind a Cargo feature `contained`. The feature is
@@ -138,8 +146,10 @@ resamples to 16 kHz; there is no codec to carry.
 
 ## 3. Background work and the lifecycle
 
-`Core.start` runs when the app comes to the foreground in contained mode.
-There is no permanent foreground service. Writes go to the outbox first, as
+`Core.start` runs when something first needs the core: the app coming to the
+foreground, or the drain worker after a share with no activity in front. There
+is no permanent foreground service. The drain worker asks for no network in
+contained mode, since loopback needs none. Writes go to the outbox first, as
 now, and the drainer posts them to the loopback core; the core's job table
 records unfinished jobs, which resume at the next start.
 
