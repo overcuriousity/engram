@@ -140,6 +140,53 @@ impl Stage {
             Stage::Condense => "condense",
         }
     }
+    /// The stages `calls_a_generator` says yes to, in `ALL`'s order: what a
+    /// claim passes over while a base has nothing to generate with.
+    pub const GENERATORS: [Stage; 7] = [
+        Stage::SegmentWindow,
+        Stage::Title,
+        Stage::Dedupe,
+        Stage::LinkJudge,
+        Stage::Generate,
+        Stage::Reap,
+        Stage::Condense,
+    ];
+
+    /// Does running this make a generation call?
+    ///
+    /// Asked at the claim, where a base with nothing to generate with passes
+    /// these over rather than failing them against an endpoint that is not
+    /// there: a phone with no model still captures, embeds and searches, and
+    /// what it could not do waits, unpenalised, for the day it can. `Describe`
+    /// is not here. It has a role of its own, and its absence is already a
+    /// wait.
+    ///
+    /// Exhaustive for the reason `class` is.
+    pub fn calls_a_generator(self) -> bool {
+        match self {
+            Stage::SegmentWindow
+            | Stage::Title
+            | Stage::Dedupe
+            | Stage::LinkJudge
+            | Stage::Generate
+            | Stage::Reap
+            | Stage::Condense => true,
+            Stage::Synthesize
+            | Stage::Embed
+            | Stage::Consolidate
+            | Stage::Relate
+            | Stage::Describe
+            | Stage::Extract
+            | Stage::Associate
+            | Stage::Pursuit
+            | Stage::Retention
+            | Stage::ArmDedupe
+            | Stage::Context
+            | Stage::Remind
+            | Stage::Probe => false,
+        }
+    }
+
     /// Is someone waiting on this? `0` foreground, `1` background.
     ///
     /// Foreground is the capture pipeline: the operator pasted something and is
@@ -925,20 +972,38 @@ impl Control {
     /// so across tenants it interleaves those too, and one user's ingest cannot
     /// drain ahead of another's without a scheduler being written to say so.
     pub async fn claim_job(&self) -> Result<Option<(String, Job)>> {
-        let row = sqlx::query(
+        self.claim_job_holding(&[]).await
+    }
+
+    /// `claim_job`, passing over the stages in `held`.
+    ///
+    /// A held unit is not touched: not claimed, not failed, its attempts and
+    /// its `run_after` as they were, its place in the order kept. Being held
+    /// is a wait and costs nothing, which is the whole difference from letting
+    /// the unit run into an endpoint that is not there.
+    pub async fn claim_job_holding(&self, held: &[Stage]) -> Result<Option<(String, Job)>> {
+        let except = if held.is_empty() {
+            String::new()
+        } else {
+            format!("AND stage NOT IN ({})", vec!["?"; held.len()].join(", "))
+        };
+        let sql = format!(
             "UPDATE jobs
                 SET state = 'running', claimed_at = ?, attempts = attempts + 1
               WHERE id = (
                 SELECT id FROM jobs
-                 WHERE state = 'pending' AND run_after <= ?
+                 WHERE state = 'pending' AND run_after <= ? {except}
                  ORDER BY class, attempts, seq, id LIMIT 1
               )
-              RETURNING id, subject, stage, target_kind, target_id, attempts",
-        )
-        .bind(now())
-        .bind(now())
-        .fetch_optional(&self.pool)
-        .await?;
+              RETURNING id, subject, stage, target_kind, target_id, attempts"
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(now())
+            .bind(now());
+        for stage in held {
+            q = q.bind(stage.as_str());
+        }
+        let row = q.fetch_optional(&self.pool).await?;
 
         Ok(row.map(|r| {
             (
@@ -953,6 +1018,23 @@ impl Control {
                 },
             )
         }))
+    }
+
+    /// How many of one person's units are waiting in these stages. What the
+    /// status line says is held back, and what a background pass runs down.
+    pub async fn waiting_on(&self, subject: &str, stages: &[Stage]) -> Result<i64> {
+        if stages.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "SELECT COUNT(*) FROM jobs WHERE subject = ? AND state = 'pending' AND stage IN ({})",
+            vec!["?"; stages.len()].join(", ")
+        );
+        let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql)).bind(subject);
+        for stage in stages {
+            q = q.bind(stage.as_str());
+        }
+        Ok(q.fetch_one(&self.pool).await?)
     }
 
     pub async fn complete_job(&self, id: i64) -> Result<()> {
@@ -2129,5 +2211,47 @@ mod tests {
     fn the_two_time_stages_round_trip_and_are_background() {
         assert_eq!(Stage::parse("remind"), Some(Stage::Remind));
         assert_eq!(Stage::Remind.class(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_held_stage_is_passed_over_and_not_penalised() {
+        let s = Store::memory().await.unwrap();
+        s.enqueue(Stage::SegmentWindow, "segment", "c#0")
+            .await
+            .unwrap();
+        s.enqueue(Stage::Embed, "corpus", "c").await.unwrap();
+        let (_, first) = s
+            .control
+            .claim_job_holding(&Stage::GENERATORS)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.stage, Stage::Embed);
+        assert!(
+            s.control
+                .claim_job_holding(&Stage::GENERATORS)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            s.control
+                .waiting_on(&s.subject, &Stage::GENERATORS)
+                .await
+                .unwrap(),
+            1
+        );
+        // The wait cost it nothing: this is its first attempt.
+        let (_, held) = s.control.claim_job().await.unwrap().unwrap();
+        assert_eq!((held.stage, held.attempts), (Stage::SegmentWindow, 1));
+    }
+
+    #[test]
+    fn the_stages_that_call_a_generator_are_the_seven() {
+        let named: Vec<_> = Stage::ALL
+            .into_iter()
+            .filter(|s| s.calls_a_generator())
+            .collect();
+        assert_eq!(named, Stage::GENERATORS);
     }
 }

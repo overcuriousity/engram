@@ -87,6 +87,7 @@ impl VectorFactory for SqliteFactory {
 }
 
 pub struct Tenants {
+    generation: Arc<std::sync::atomic::AtomicBool>,
     cfg: Arc<Config>,
     control: Control,
     vectors: Arc<dyn VectorFactory>,
@@ -164,7 +165,16 @@ impl Tenants {
             solo: false,
             #[cfg(feature = "contained")]
             local: None,
+            generation: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
+    }
+
+    /// Whether this instance has anything to generate with, right now. Open on
+    /// a server, always. An engram carried on a phone shuts it, and opens it
+    /// while a model is reachable and the phone can afford the work; the queue
+    /// passes the generating stages over for as long as it is shut.
+    pub fn generation(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.generation.clone()
     }
 
     pub fn control(&self) -> &Control {

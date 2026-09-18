@@ -62,7 +62,17 @@ pub(crate) async fn try_supersede(core: &Core, loser: &str, winner: &str, why: &
 /// so a worker never holds a tenant across two units — which is what makes
 /// this round-robin between users without a scheduler in it.
 pub async fn run_any(tenants: &crate::tenants::Tenants) -> Result<bool> {
-    let Some((subject, job)) = tenants.control().claim_job().await? else {
+    // Shut, the generating stages are passed over where they stand: see
+    // `Stage::calls_a_generator`. A server never shuts it.
+    let held: &[Stage] = if tenants
+        .generation()
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        &[]
+    } else {
+        &Stage::GENERATORS
+    };
+    let Some((subject, job)) = tenants.control().claim_job_holding(held).await? else {
         return Ok(false);
     };
     let core = match tenants.get(&subject).await {
