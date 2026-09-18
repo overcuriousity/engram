@@ -16,6 +16,9 @@ import java.util.concurrent.TimeUnit
 class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
         val engram = Engram.get(applicationContext)
+        // In contained mode this may be the first thing to need the core: a
+        // share is an outbox row and a kick, with no activity in front.
+        if (!engram.ready()) return Result.success()
         val drainer = engram.drainer() ?: return Result.success() // unpaired: nothing owed to anyone
         engram.outbox.sweepSent(olderThanMs = 7L * 24 * 3600 * 1000)
         return when (val out = drainer.drainOnce()) {
@@ -29,7 +32,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
 object Sync {
     private const val NAME = "engram-sync"
-    private val online = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+
+    /** A server is reached over a network. The core in this process is not, and must not wait for one. */
+    internal fun constraints(loopback: Boolean): Constraints =
+        Constraints.Builder().setRequiredNetworkType(if (loopback) NetworkType.NOT_REQUIRED else NetworkType.CONNECTED).build()
+
+    private fun constraints(context: Context) = constraints(Engram.get(context).loopback)
 
     /**
      * Something new is owed: run as soon as there is a network.
@@ -45,7 +53,7 @@ object Sync {
     fun kick(context: Context) {
         WorkManager.getInstance(context).enqueueUniqueWork(
             NAME, ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<SyncWorker>().setConstraints(online).build(),
+            OneTimeWorkRequestBuilder<SyncWorker>().setConstraints(constraints(context)).build(),
         )
     }
 
@@ -53,7 +61,7 @@ object Sync {
         val delay = (atMs - System.currentTimeMillis()).coerceAtLeast(0)
         WorkManager.getInstance(context).enqueueUniqueWork(
             NAME, ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<SyncWorker>().setConstraints(online)
+            OneTimeWorkRequestBuilder<SyncWorker>().setConstraints(constraints(context))
                 .setInitialDelay(delay, TimeUnit.MILLISECONDS).build(),
         )
     }
