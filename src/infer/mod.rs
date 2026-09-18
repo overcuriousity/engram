@@ -3,6 +3,8 @@ pub mod context;
 pub mod fake;
 pub mod gate;
 pub mod lang;
+#[cfg(feature = "contained")]
+pub mod local;
 pub mod openai;
 pub mod prompt;
 pub mod retry;

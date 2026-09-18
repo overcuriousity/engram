@@ -137,6 +137,10 @@ text-splitter = { version = "0.32", features = ["markdown"] }
 # that registers it, and must stay on the version sqlx resolves.
 sqlite-vec = { version = "=0.1.9", optional = true }
 libsqlite3-sys = { version = "0.37", optional = true }
+# llama.cpp in process, for the contained build. CPU only: no OpenMP, which
+# Android does not ship, and no GPU backend. Pinned exactly — the C++ under it
+# moves fast, and an upgrade is a decision.
+llama-cpp-2 = { version = "=0.1.156", default-features = false, optional = true }
 
 [dev-dependencies]
 # `test-util` is not part of tokio's `full`. It carries the pausable clock the
@@ -157,4 +161,4 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 [features]
 default = []
 pdf-ml = ["docling/pdf"]
-contained = ["dep:sqlite-vec", "dep:libsqlite3-sys"]
+contained = ["dep:sqlite-vec", "dep:libsqlite3-sys", "dep:llama-cpp-2"]
