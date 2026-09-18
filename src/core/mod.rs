@@ -1354,11 +1354,12 @@ mod contained_tests {
     async fn a_capture_is_found_again_with_only_a_file_for_a_vector_store() {
         let dir = tempfile::tempdir().unwrap();
         let factory = crate::tenants::SqliteFactory {
-            path: dir.path().join("engram.db"),
+            dir: dir.path().into(),
+            prefix: "artifacts".into(),
             scoring: crate::vector::sqlite::Scoring::off(),
         };
         let mut core = test_core().await;
-        core.vectors = factory.open("ignored", TEST_DIM).await.unwrap();
+        core.vectors = factory.open("artifacts_phone", TEST_DIM).await.unwrap();
 
         let out = core
             .ingest(
@@ -1387,7 +1388,7 @@ mod contained_tests {
             "the capture was not found"
         );
 
-        let again = factory.open("ignored", TEST_DIM).await.unwrap();
+        let again = factory.open("artifacts_phone", TEST_DIM).await.unwrap();
         assert!(again.count().await.unwrap() > 0);
         assert_eq!(
             again.count().await.unwrap(),
@@ -1413,11 +1414,12 @@ mod contained_tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let factory = crate::tenants::SqliteFactory {
-            path: tmp.path().join("engram.db"),
+            dir: tmp.path().into(),
+            prefix: "artifacts".into(),
             scoring: crate::vector::sqlite::Scoring::off(),
         };
         let mut core = test_core().await.with_local_models(&cfg, &models);
-        core.vectors = factory.open("ignored", 768).await.unwrap();
+        core.vectors = factory.open("artifacts_phone", 768).await.unwrap();
 
         let out = core
             .ingest(
