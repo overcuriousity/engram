@@ -2,6 +2,9 @@ pub mod memory;
 pub mod qdrant;
 pub mod sparse;
 
+#[cfg(test)]
+pub(crate) mod conformance;
+
 use crate::error::Result;
 use crate::store::artifacts::ArtifactStatus;
 use async_trait::async_trait;
