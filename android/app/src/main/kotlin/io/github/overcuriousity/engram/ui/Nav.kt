@@ -48,7 +48,6 @@ import java.time.ZoneId
 sealed class Screen(val route: String, val label: String) {
     object Pair : Screen("pair", "Pair")
     object Search : Screen("search", "Search")
-    object Compose : Screen("compose", "Capture")
     object Today : Screen("today", "Today")
     object Library : Screen("library", "Library")
     object Queue : Screen("queue", "Queue")
@@ -61,6 +60,13 @@ sealed class Screen(val route: String, val label: String) {
     object Gaps : Screen("judge/gaps", "Gaps")
     object Journal : Screen("judge/journal", "While you were away")
 }
+
+/**
+ * The places the bar holds. Home is the box, and the box is where capture
+ * happens too — there is no Capture place, because there is no second box to
+ * go to. The queue and the settings are looked at, not lived in, and sit above.
+ */
+internal val BAR = listOf(Screen.Search, Screen.Today, Screen.Library)
 
 /** Where a row leads. Ids and dates travel in the route; nothing else does. */
 private object Routes {
@@ -89,7 +95,13 @@ fun Wordmark() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EngramApp(engram: Engram, start: Screen? = null, pairText: String? = null, onUnpair: () -> Unit) {
+fun EngramApp(
+    engram: Engram,
+    start: Screen? = null,
+    pairText: String? = null,
+    focusBox: Boolean = false,
+    onUnpair: () -> Unit,
+) {
     val connection by engram.store.current.collectAsStateWithLifecycle()
     val refused by engram.refused.collectAsStateWithLifecycle()
     val pinned by engram.pinMismatch.collectAsStateWithLifecycle()
@@ -107,9 +119,7 @@ fun EngramApp(engram: Engram, start: Screen? = null, pairText: String? = null, o
     val owed by engram.outbox.rows.collectAsStateWithLifecycle(emptyList())
     LaunchedEffect(Unit) { engram.prune() }
 
-    // Search is home. Reading has four places and the bar holds them; the
-    // queue and the settings are looked at, not lived in, and sit above.
-    val bar = listOf(Screen.Search, Screen.Compose, Screen.Today, Screen.Library)
+    val bar = BAR
     fun go(route: String) = nav.navigate(route) { launchSingleTop = true }
 
     Scaffold(
@@ -151,8 +161,7 @@ fun EngramApp(engram: Engram, start: Screen? = null, pairText: String? = null, o
             val onArtifact: (String) -> Unit = { go(Routes.artifact(it)) }
             val onCorpus: (String) -> Unit = { go(Routes.corpus(it)) }
             NavHost(nav, startDestination = startAt.route) {
-                composable(Screen.Search.route) { SearchScreen(engram, onArtifact, onAsk = { go(Routes.ask(it)) }) }
-                composable(Screen.Compose.route) { ComposeScreen(engram) }
+                composable(Screen.Search.route) { SearchScreen(engram, onArtifact, onAsk = { go(Routes.ask(it)) }, focusBox = focusBox) }
                 composable(Screen.Today.route) {
                     DayScreen(engram, LocalDate.now(ZoneId.systemDefault()), onDay = { go(Routes.day(it)) }, onCorpus, onArtifact)
                 }

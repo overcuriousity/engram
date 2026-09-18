@@ -2,6 +2,7 @@ package io.github.overcuriousity.engram.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -69,7 +70,11 @@ fun PairScreen(engram: Engram, initialText: String?, knownOrigin: String? = null
             if (knownOrigin != null) "Open $knownOrigin/ui/app and press the button" else "Open Settings → Pair the app on your engram",
             style = MaterialTheme.typography.bodySmall, color = muted(),
         )
-        if (busy == null) Scanner(onText = ::take)
+        // The scanner takes what is left between the heading and the two ways
+        // in at the bottom: the screen is a viewfinder, and the paste field is
+        // the way through when the code is on something that cannot be held up
+        // to a camera.
+        if (busy == null) Scanner(Modifier.fillMaxWidth().weight(1f), onText = ::take) else Spacer(Modifier.weight(1f))
         OutlinedTextField(
             value = text, onValueChange = { text = it }, label = { Text("or paste the code") },
             modifier = Modifier.fillMaxWidth(),

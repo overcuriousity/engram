@@ -1,5 +1,9 @@
 package io.github.overcuriousity.engram.ui
 
+import android.Manifest
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -7,10 +11,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -27,61 +32,213 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import io.github.overcuriousity.engram.core.Engram
 import io.github.overcuriousity.engram.core.read.Api
 import io.github.overcuriousity.engram.core.read.Decode
 import io.github.overcuriousity.engram.core.read.DueRow
 import io.github.overcuriousity.engram.core.read.Offer
 import io.github.overcuriousity.engram.core.sync.Sync
+import io.github.overcuriousity.engram.doors.AudioNote
+import io.github.overcuriousity.engram.doors.Intake
 import kotlinx.coroutines.launch
+import java.io.File
 import java.time.ZoneId
 
 /**
- * Home. A box, and beneath an empty one what the base has to say unasked: the
- * offer for this situation, what is due, what is worth seeing again.
+ * Home, and the only surface there is: one box that searches while it is typed
+ * into and keeps what is put in it, exactly as the web and the PWA have it.
+ * Beneath an empty box, what the base has to say unasked — the offer for this
+ * situation, what is due, what is worth seeing again.
  *
- * A search runs when it is asked for — the button, or the keyboard's search
- * key — and not on every keystroke. The web searches as you type because its
- * embedding call is a loopback away; from a phone each keystroke would be an
- * embedding call across a VPN, racing the one before it.
+ * There used to be a second box on a Capture tab. Two boxes is one question
+ * the person has to answer before they can type: which of these did I mean.
+ * The verb is a button under the one box, and never a guess made from the text.
  */
 @Composable
-fun SearchScreen(engram: Engram, onArtifact: (String) -> Unit, onAsk: (String) -> Unit) {
+fun SearchScreen(
+    engram: Engram,
+    onArtifact: (String) -> Unit,
+    onAsk: (String) -> Unit,
+    focusBox: Boolean = false,
+) {
+    val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
     var text by rememberSaveable { mutableStateOf("") }
+    var title by rememberSaveable { mutableStateOf("") }
+    var note by rememberSaveable { mutableStateOf("") }
+    var files by remember { mutableStateOf(listOf<Uri>()) }
+    var queued by remember { mutableStateOf<String?>(null) }
+    var recording by remember { mutableStateOf(false) }
+    val audio = remember { AudioNote(ctx) }
+
+    // What the box has asked for. A keystroke does not ask; typing that has
+    // stood still for a moment does. See `Typing.kt`.
     var asked by rememberSaveable { mutableStateOf("") }
-    val keyboard = LocalSoftwareKeyboardController.current
-    fun search() { asked = text.trim(); keyboard?.hide() }
+    LaunchedEffect(Unit) { snapshotFlow { text }.queries().collect { asked = it } }
+
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { files = files + it }
+    // TakePicture writes the full-resolution image the camera actually took.
+    // TakePicturePreview, which this used, hands back the shutter thumbnail —
+    // a photo of a page or a whiteboard came through too small to read or OCR.
+    var pending by remember { mutableStateOf<File?>(null) }
+    val photo = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val f = pending
+        pending = null
+        if (ok && f != null && f.length() > 0) files = files + Uri.fromFile(f) else f?.delete()
+    }
+    fun shoot() {
+        val f = File.createTempFile("photo", ".jpg", engram.app.cacheDir)
+        pending = f
+        photo.launch(FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", f))
+    }
+    // An app that declares CAMERA must hold it before the camera app will
+    // answer ACTION_IMAGE_CAPTURE for it, the same as the microphone door.
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) shoot()
+    }
+    val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) { audio.start(); recording = true }
+    }
+
+    fun capture() {
+        val t = text.trim()
+        val ti = title.trim().ifEmpty { null }
+        val n = note.trim().ifEmpty { null }
+        val held = files
+        // The box is cleared here rather than when the intake returns, so the
+        // surface is ready for the next thing at once and a slow queue write
+        // cannot hand back a box that has been typed into since.
+        text = ""; title = ""; note = ""; files = emptyList(); asked = ""
+        scope.launch {
+            queued = if (held.isNotEmpty()) Intake.uris(engram, held, ti, n ?: t.ifEmpty { null })
+            else Intake.text(engram, t, ti, n)
+        }
+    }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it; if (it.isBlank()) asked = "" },
-            modifier = Modifier.fillMaxWidth().padding(16.dp, 8.dp),
-            placeholder = { Text("Search or ask") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { search() }),
+        HomeBox(
+            text = text,
+            onText = { text = it; if (it.isBlank()) { asked = ""; queued = null } },
+            files = files,
+            onDrop = { files = files - it },
+            title = title, onTitle = { title = it },
+            note = note, onNote = { note = it },
+            recording = recording,
+            focus = focusBox,
+            onAttach = { pick.launch("*/*") },
+            onPhoto = { camera.launch(Manifest.permission.CAMERA) },
+            onRecord = {
+                if (recording) {
+                    audio.stop()?.let { files = files + Uri.fromFile(it) }
+                    recording = false
+                } else {
+                    mic.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
+            onAsk = { onAsk(text.trim()) },
+            onCapture = ::capture,
         )
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-            OutlinedButton(onClick = { onAsk(text.trim()) }, enabled = text.isNotBlank()) { Text("Ask") }
-            Button(onClick = ::search, enabled = text.isNotBlank()) { Text("Search") }
+        if (queued != null && text.isBlank()) {
+            Text(
+                "Queued · see Queue",
+                Modifier.padding(16.dp, 4.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
         }
         if (asked.isEmpty()) Idle(engram, onArtifact) else Results(engram, asked, onArtifact)
     }
 }
 
+/**
+ * The box and the verbs under it. Nothing here knows about a server, which is
+ * what lets the whole surface be drawn in a test.
+ *
+ * The verb is always a press. A box that decided between searching, asking and
+ * keeping by reading what was typed into it would be wrong on the day somebody
+ * keeps a question, and there is no telling them it guessed.
+ */
+@Composable
+fun HomeBox(
+    text: String,
+    onText: (String) -> Unit,
+    files: List<Uri> = emptyList(),
+    onDrop: (Uri) -> Unit = {},
+    title: String = "",
+    onTitle: (String) -> Unit = {},
+    note: String = "",
+    onNote: (String) -> Unit = {},
+    recording: Boolean = false,
+    focus: Boolean = false,
+    onAttach: () -> Unit = {},
+    onPhoto: () -> Unit = {},
+    onRecord: () -> Unit = {},
+    onAsk: () -> Unit = {},
+    onCapture: () -> Unit = {},
+) {
+    var more by remember { mutableStateOf(false) }
+    val requester = remember { FocusRequester() }
+    // The tile and the launcher shortcut are a capture in one press; they open
+    // here, and the box they open is the one already waiting for the text.
+    LaunchedEffect(focus) { if (focus) runCatching { requester.requestFocus() } }
+
+    Column(Modifier.padding(16.dp, 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = onText,
+            modifier = Modifier.fillMaxWidth().focusRequester(requester),
+            placeholder = { Text("Ask, search, or paste to keep…") },
+            // A box from the first keystroke to the last: it grows to a
+            // ten-line cap and then scrolls inside itself, as the web's does,
+            // and it never changes shape under what is being written.
+            minLines = 3,
+            maxLines = 10,
+        )
+        if (files.isNotEmpty()) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(files) { u -> AssistChip(onClick = { onDrop(u) }, label = { Text(u.lastPathSegment ?: "file", maxLines = 1) }) }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = onAttach) { Text("Attach") }
+            TextButton(onClick = onPhoto) { Text("Photo") }
+            TextButton(onClick = onRecord) { Text(if (recording) "Stop" else "Record") }
+            TextButton(onClick = { more = !more }) { Text(if (more) "Less" else "Title · note") }
+        }
+        if (more) {
+            OutlinedTextField(value = title, onValueChange = onTitle, label = { Text("Title") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = note, onValueChange = onNote, label = { Text("Note") }, modifier = Modifier.fillMaxWidth())
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+            OutlinedButton(onClick = onAsk, enabled = text.isNotBlank()) { Text("Ask") }
+            Button(onClick = onCapture, enabled = !recording && (text.isNotBlank() || files.isNotEmpty())) { Text("Capture") }
+        }
+    }
+}
+
+/**
+ * The answer, and the answer before it while the next one is on its way. A
+ * read keyed on the query starts empty, so without holding the last one the
+ * rail blanked between a word and the word after it — on a box that asks on
+ * every settled keystroke, that is most of the time you are looking at it.
+ */
 @Composable
 private fun Results(engram: Engram, q: String, onArtifact: (String) -> Unit) {
     val state = rememberRead(engram, Api.search(q), Decode.hits)
-    ReadFrame(state) { page ->
-        if (page.items.isEmpty()) Text("Nothing", Modifier.padding(16.dp), color = muted())
-        Rail(railOf(page.items), onArtifact)
+    val page = held(state)
+    Column {
+        Waiting(state)
+        page?.let {
+            if (it.items.isEmpty()) Text("Nothing", Modifier.padding(16.dp), color = muted())
+            Rail(railOf(it.items), onArtifact)
+        }
     }
 }
 

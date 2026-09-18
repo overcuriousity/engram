@@ -580,6 +580,20 @@ mod tests {
         );
     }
 
+    /// `/ui/app` draws the pairing code, and the app's own screen says to
+    /// come to Settings for it. Nothing here linked it: the page was reachable
+    /// by typing its URL, or by finding the sentence about it on the
+    /// extension's install page.
+    #[tokio::test]
+    async fn settings_links_the_page_that_pairs_a_phone() {
+        let (app, cookie) = app_with_cookie(crate::core::test_support::test_core().await).await;
+        let settings = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(
+            settings.contains(r#"href="/ui/app""#),
+            "the app is paired from here: {settings}"
+        );
+    }
+
     #[tokio::test]
     async fn two_tokens_with_one_name_are_still_tellable_apart() {
         // The extension mints every token under the same name, so two rows
