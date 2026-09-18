@@ -37,7 +37,7 @@ object Core {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Serializable
-    private data class Answer(val port: Int? = null, val token: String? = null, val error: String? = null)
+    private data class Answer(val port: Int? = null, val token: String? = null, val error: String? = null, val open: Boolean? = null)
 
     /**
      * Whether this build carries the core for this device. The library is
@@ -73,6 +73,16 @@ object Core {
     fun shutdown() {
         if (available) stop()
     }
+
+    /**
+     * Says whether model work may run now, and answers whether it will: the
+     * core opens its queue to that work only where an endpoint exists to do
+     * it. False where nothing runs.
+     */
+    fun background(allow: Boolean): Boolean =
+        available && runCatching { json.decodeFromString<Answer>(background0(allow)).open }.getOrNull() == true
+
+    @JvmStatic @JvmName("background") private external fun background0(allow: Boolean): String
 
     @JvmStatic private external fun init(context: Any): String
 

@@ -1,4 +1,4 @@
-//! The three functions the app calls. Everything else is `engram::contained`.
+//! The four functions the app calls. Everything else is `engram::contained`.
 //!
 //! Both answer JSON in a string, errors included: an exception thrown across
 //! JNI from Rust is one more thing to get wrong, and the Kotlin side decodes
@@ -86,6 +86,14 @@ fn stop() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "stopped": true }))
 }
 
+fn background(allow: bool) -> Result<serde_json::Value, String> {
+    let live = LIVE
+        .lock()
+        .map_err(|_| "a previous call panicked".to_string())?;
+    let l = live.as_ref().ok_or("nothing is running")?;
+    Ok(serde_json::json!({ "open": l.running.allow_generation(allow) }))
+}
+
 fn body(value: Result<serde_json::Value, String>) -> String {
     match value {
         Ok(v) => v,
@@ -137,4 +145,19 @@ pub extern "system" fn Java_io_github_overcuriousity_engram_core_contained_Core_
 ) -> JString<'l> {
     env.with_env(|env| -> Result<_, jni::errors::Error> { JString::from_str(env, body(stop())) })
         .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Whether model work may run now. The app knows what the core cannot: that
+/// the phone is charging, idle and cool. Answers what the gate now is, which
+/// is shut however it was asked where there is no endpoint to do the work.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_overcuriousity_engram_core_contained_Core_background<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    allow: jni::sys::jboolean,
+) -> JString<'l> {
+    env.with_env(|env| -> Result<_, jni::errors::Error> {
+        JString::from_str(env, body(background(allow)))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
