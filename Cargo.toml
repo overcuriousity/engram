@@ -131,6 +131,13 @@ crossterm = "0.29.0"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 text-splitter = { version = "0.32", features = ["markdown"] }
 
+# The contained build's vector index: an extension compiled into the SQLite
+# sqlx already bundles, registered at startup and never loaded from storage.
+# Pre-1.0 and pinned exactly. `libsqlite3-sys` is named only for the symbol
+# that registers it, and must stay on the version sqlx resolves.
+sqlite-vec = { version = "=0.1.9", optional = true }
+libsqlite3-sys = { version = "0.37", optional = true }
+
 [dev-dependencies]
 # `test-util` is not part of tokio's `full`. It carries the pausable clock the
 # gate's tests run on, so a cooldown is asserted exactly rather than slept
@@ -150,3 +157,4 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 [features]
 default = []
 pdf-ml = ["docling/pdf"]
+contained = ["dep:sqlite-vec", "dep:libsqlite3-sys"]
