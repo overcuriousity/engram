@@ -140,6 +140,9 @@ interface OutboxDao {
 interface MomentsDao {
     @Upsert suspend fun upsert(rows: List<MomentRow>)
     @Query("SELECT * FROM moments ORDER BY at DESC LIMIT 1") fun latest(): Flow<MomentRow?>
+    @Query("SELECT * FROM moments ORDER BY at") suspend fun all(): List<MomentRow>
+    @Query("SELECT * FROM moments WHERE id = :id") suspend fun get(id: String): MomentRow?
+    @Query("DELETE FROM moments WHERE id NOT IN (:ids)") suspend fun deleteExcept(ids: List<String>)
 }
 
 class Converters {

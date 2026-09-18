@@ -2,6 +2,8 @@ package io.github.overcuriousity.engram
 
 import android.app.Application
 import io.github.overcuriousity.engram.core.Engram
+import io.github.overcuriousity.engram.core.reminders.LocalReminders
+import io.github.overcuriousity.engram.push.Alarms
 import io.github.overcuriousity.engram.push.Reminders
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +19,7 @@ class App : Application() {
         super.onCreate()
         Engram.get(this)
         Reminders.ensureChannel(this)
+        LocalReminders.ringer = Alarms::set
     }
 
     fun unpairAsync() {

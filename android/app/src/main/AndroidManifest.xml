@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <!-- A model download is foreground work: see DownloadWorker. -->
+    <!-- Alarms do not survive a reboot; a contained phone sets its reminders again. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
@@ -67,6 +69,12 @@
             </intent-filter>
         </service>
         <receiver android:name=".push.ActionReceiver" android:exported="false" />
+        <receiver android:name=".push.AlarmReceiver" android:exported="false" />
+        <receiver android:name=".push.BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
         <!-- WorkManager's own service, told what kind of foreground work it carries. -->
         <service android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync" tools:node="merge" />

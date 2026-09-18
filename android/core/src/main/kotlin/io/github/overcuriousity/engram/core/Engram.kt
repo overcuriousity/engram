@@ -20,6 +20,7 @@ import io.github.overcuriousity.engram.core.outbox.Outbox
 import io.github.overcuriousity.engram.core.push.Push
 import io.github.overcuriousity.engram.core.read.Decode
 import io.github.overcuriousity.engram.core.read.Reader
+import io.github.overcuriousity.engram.core.reminders.Ring
 import io.github.overcuriousity.engram.core.read.ServerReader
 import io.github.overcuriousity.engram.core.sync.Sync
 import kotlinx.coroutines.CoroutineScope
@@ -115,6 +116,21 @@ class Engram internal constructor(
     val askWantsAModel: Boolean get() = contained != null && modes.ask == AskVia.device && state.models().ask == null
 
     val metered: Boolean get() = app.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: false
+
+    /** Open reminders up to [to], overdue ones included, as the core lists them. Null where it cannot be asked. */
+    internal suspend fun dueUntil(to: Long) = runCatching {
+        transport()?.get("/api/v1/moments", mapOf("kind" to "due", "to" to to.toString()))
+            ?.takeIf { it.status == 200 }?.let { Decode.due(it.body).items }
+    }.getOrNull()
+
+    /** What was written down to ring, for the receivers: Room stays inside this module. */
+    suspend fun reminders(): List<Ring> = db.momentsDao().all().map { Ring(it.id, it.title, it.at) }
+    suspend fun reminder(id: String): Ring? = db.momentsDao().get(id)?.let { Ring(it.id, it.title, it.at) }
+
+    /** The reminders that have rung, so that a missed one rings once and not at every sync. */
+    var rung: Set<String>
+        get() = prefs.getStringSet("rung", emptySet()).orEmpty().toSet()
+        set(v) = prefs.edit().putStringSet("rung", v).apply()
 
     /** Model work has somewhere to go: contained, ask set to an endpoint, and one written down. */
     val passWanted: Boolean get() = contained != null && modes.ask == AskVia.endpoint && store.askEndpoint != null

@@ -224,4 +224,30 @@ class EngramModesTest {
         theCore.enqueue(MockResponse(code = 503))
         assertNull(e.waitingGeneration())
     }
+
+    @Test fun aContainedPhoneWritesDownWhatIsDueAndForgetsWhatNoLongerIs() = runTest {
+        choose(Mode.contained)
+        val e = engram()
+        assertTrue(e.ready())
+        val now = 2_000_000L
+        fun listing(vararg rows: String) = MockResponse(code = 200, body = """{"items":[${rows.joinToString(",")}],"next":null}""")
+        fun due(id: String, at: Long) = """{"moment":{"id":"$id","artifact_id":"x","at":$at},"title":"$id","named":true}"""
+        theCore.enqueue(listing(due("soon", now + 60), due("missed", now - 60)))
+        val rings = io.github.overcuriousity.engram.core.reminders.LocalReminders.sync(e, now)!!
+        assertEquals(listOf("missed", "soon"), rings.map { it.id })
+        assertTrue(theCore.takeRequest().target.startsWith("/api/v1/moments?kind=due&to="))
+        assertEquals(2, e.db.momentsDao().all().size)
+
+        e.rung = setOf("missed", "gone-long-ago")
+        theCore.enqueue(listing(due("missed", now - 60)))
+        val again = io.github.overcuriousity.engram.core.reminders.LocalReminders.sync(e, now)!!
+        assertTrue("a missed one that rang does not ring again", again.isEmpty())
+        assertTrue(e.db.momentsDao().all().isEmpty())
+        assertEquals(setOf("missed"), e.rung)
+    }
+
+    @Test fun aServersClientSetsNoAlarmsOfItsOwn() = runTest {
+        assertNull(io.github.overcuriousity.engram.core.reminders.LocalReminders.sync(engram().also { it.store.set(paired()) }))
+        assertEquals(0, theServer.requestCount)
+    }
 }
